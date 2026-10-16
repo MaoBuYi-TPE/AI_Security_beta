@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# 秘密與本機設定（只提交 .env.example）
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+
+# 掃描產物與實驗原始輸出（可能含敏感資料，不進版本控制）
+artifacts/
+runs/
+benchmarks/results/
+
+# IDE
+.vscode/
+.idea/
