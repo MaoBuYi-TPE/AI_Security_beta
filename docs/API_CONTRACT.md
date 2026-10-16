@@ -10,14 +10,34 @@ Prefix：`/api/v1`。平台使用 `Authorization: Bearer <platform_api_key>`。�
 
 UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project 授權過濾。不存在或無權存取的物件通常回 404，避免洩漏存在性；角色不足的已知操作回 403。無效 key 回 401。
 
-清單採 cursor pagination，default limit=25、max=100。日誌包含 request_id，但不包含憑證、完整 body 或 raw command。
+所有回應都使用統一的 envelope：
+
+```json
+{
+  "success": true,
+  "data": {},
+  "error": null,
+  "meta": {"page": 1, "limit": 25, "total": 0}
+}
+```
+
+- `meta` 只出現在清單回應。
+- 失敗時 `success=false`、`data=null`，`error` 的格式見 §12。
+- 以下各節的 JSON 範例，除非特別標示，都是 `data` 欄位的內容。
+
+分頁：
+
+- 清單採 page/limit 分頁，預設 limit=25、上限 100；`meta` 回傳 page、limit、total。
+- `/scans/{id}/events` 是例外，以 `after_sequence` cursor 輪詢。
+
+日誌包含 request_id，但不包含憑證、完整 body 或 raw command。
 
 ## 2. 端點總表
 
 | 方法 | 路徑 | 權限 | 回應與要點 |
 |---|---|---|---|
 | GET | /health/live | 可僅本機公開 | 200；僅程序存活，不含敏感依賴資訊 |
-| GET | /health/ready | 管理網 | 200/503；DB/broker/必要配置可用 |
+| GET | /health/ready | 管理網 | 200/503；DB、runner heartbeat、必要配置可用 |
 | POST | /api/v1/projects | platform_admin | 201 建立專案 |
 | GET | /api/v1/projects | 已授權 key | 200，只列可存取專案 |
 | POST | /api/v1/projects/{project_id}/keys | platform_admin | 201，建立 operator/viewer key，僅回傳一次完整值 |
@@ -34,16 +54,17 @@ UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project �
 | POST | /api/v1/targets/{target_id}/auth-profiles | operator/admin | 201；secret 只寫不讀 |
 | PATCH | /api/v1/auth-profiles/{profile_id} | operator/admin | 200；產生新版本，舊 scan 快照不修改 |
 | GET | /api/v1/scan-profiles | 同專案 | 200；只列當前 Runner 已驗證支援的 profile |
+| GET | /api/v1/scanners | 已授權 key | 200；各引擎的版本、映像 digest、可用 profile 與 capability probe 結果 |
 | POST | /api/v1/scans | operator/admin | 202 + scan_id；必須 Idempotency-Key |
 | GET | /api/v1/scans | 同專案 | 200；target/status/time filter |
 | GET | /api/v1/scans/{scan_id} | 同專案 | 200；引擎狀態、進度、coverage、停止理由 |
-| GET | /api/v1/scans/{scan_id}/events | 同專案 | 200；按 sequence 輪詢，不先做 WebSocket |
+| GET | /api/v1/scans/{scan_id}/events | 同專案 | 200；以 after_sequence 輪詢，不先做 WebSocket |
 | POST | /api/v1/scans/{scan_id}/cancel | operator/admin | 202/200；取消中/已終止，不代表已撤銷外部操作 |
 | GET | /api/v1/scans/{scan_id}/findings | 同專案 | 200；kind/severity/tool/triage filter |
 | GET | /api/v1/findings/{finding_id} | 同專案 | 200；來源 observations、遮罩證據與歷史 |
 | PATCH | /api/v1/findings/{finding_id}/triage | operator/admin | 200；需 reason；敏感變更留 audit |
 | POST | /api/v1/scan-comparisons | 同專案 | 200；只比較有權限且相同 target 的 scans |
-| POST | /api/v1/scans/{scan_id}/reports | operator/admin | 201；建立 JSON/Markdown 遮罩報告 artifact |
+| POST | /api/v1/scans/{scan_id}/reports | operator/admin | 201；建立 JSON/Markdown 遮罩報告 artifact（P1 加 SARIF） |
 | GET | /api/v1/artifacts/{artifact_id}/download | 同專案 | 200；P0 僅遮罩報告/證據；不提供 raw secret artifact |
 | GET | /api/v1/projects/{project_id}/audit-events | platform_admin | 200；遮罩且分頁 |
 
@@ -93,14 +114,13 @@ P0 支援 OpenAPI 3.0 JSON/YAML，單檔上限 5 MiB（規劃值），使用安�
 Operation 回應示例：
 
 ```json
-{
-  "items": [
-    {"operation_id": "getItem", "method": "GET", "path": "/api/items/{id}", "eligible": true},
-    {"operation_id": "deleteItem", "method": "DELETE", "path": "/api/items/{id}", "eligible": false, "reason": "METHOD_NOT_AUTHORIZED"}
-  ],
-  "next_cursor": null
-}
+[
+  {"operation_id": "getItem", "method": "GET", "path": "/api/items/{id}", "eligible": true},
+  {"operation_id": "deleteItem", "method": "DELETE", "path": "/api/items/{id}", "eligible": false, "reason": "METHOD_NOT_AUTHORIZED"}
+]
 ```
+
+分頁資訊放在 envelope 的 `meta`。
 
 被排除的操作不能刪到完全看不見；報告需顯示哪些操作未測及理由。
 
@@ -179,7 +199,7 @@ Engine/profile 只能從伺服器已驗證 allowlist 選擇。Budget 不可超�
 }
 ```
 
-以上是資料格式示意，數字不是實驗結果。`observed_operations` 代表有實際 request 流量對應到該 operation，**不代表所有漏洞種類已測試**。`authenticated_operations` 需該身分已驗證與適用證據，不靠單一 status code 推論。
+以上是資料格式示意，數字不是實驗結果。`budget_usage` 以 egress guard 的實際計數為準，不採用工具自報的數字。`observed_operations` 代表有實際 request 流量對應到該 operation，**不代表所有漏洞種類已測試**。`authenticated_operations` 需該身分已驗證與適用證據，不靠單一 status code 推論。
 
 如缺少可信 OpenAPI 或流量對應，coverage 欄位可 null、coverage_measured=false 並附 reason，不填 100%。coverage_measured 只表示有量測依據，並非安全覆蓋完整或系統安全的判定。
 
@@ -228,19 +248,24 @@ Compare request：baseline_scan_id、current_scan_id。回傳 comparability、�
 
 ## 11. 報告
 
-`POST /scans/{id}/reports` request：`{"format":"markdown"}` 或 json。已有可用結果即可產生報告，但必須標記部分/未完成。報告有版本、hash、生成時間與掃描時間；生成報告的時間不是漏洞發現時間。
+`POST /scans/{id}/reports` request：`{"format":"markdown"}` 或 `json`；P1 起支援 `sarif`。已有可用結果即可產生報告，但必須標記部分/未完成。報告有版本、hash、生成時間與掃描時間；生成報告的時間不是漏洞發現時間。
 
 Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 不提供 raw artifact 公開下載端點。下載使用安全 Content-Disposition 檔名、正確 media type，不執行檔案內指令、不自動載入外部資源。
 
 ## 12. 穩定錯誤格式
 
+完整的失敗回應（含 envelope）：
+
 ```json
 {
+  "success": false,
+  "data": null,
   "error": {
     "code": "SCOPE_NOT_APPROVED",
     "message": "此目標尚無有效的掃描範圍授權。",
     "request_id": "<server-generated-id>"
-  }
+  },
+  "meta": null
 }
 ```
 

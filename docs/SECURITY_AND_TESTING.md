@@ -16,8 +16,9 @@
 | 操作者跨專案猜 ID | 他人目標、secret、報告 | key/project/object-level 授權 |
 | 被測頁面或 API 回應 | Parser、報告、AI 開發流程 | 當資料處理、限制大小、編碼、不可當指令 |
 | 被修改或過度危險的模板 | 靶場狀態、Runner | 審查 allowlist、固定 hash、禁 code/OAST/未受控協定 |
-| Scanner 遭利用 | Runner 主機與控制平面 | 非 root、最小權限、無 socket、隔離網路與 VM |
-| Redis 重送/Runner 中斷 | 掃描可靠性、靶場資料 | DB claim/lease、container label、reconciler、避免盲目重掃 |
+| Scanner 遭利用 | Runner 與控制平面 | 非 root、唯讀 rootfs、無 socket、只接 scan_net（只能連 guard） |
+| 重複認領/Runner 中斷 | 掃描可靠性、靶場資料 | SKIP LOCKED 認領、lease、container label、reconciler、避免盲目重掃 |
+| runner 的 Docker API 權限被濫用 | 開發機上的容器與資料 | socket-proxy 只開容器 API；驗證 ExecutionPlan 的 digest、參數、掛載與網路；runner 不解析不可信資料；非 lab 用途移到獨立 VM |
 | 原始報告含 Token/個資 | 身分憑證與受測資料 | 加密受限存放、一般介面遮罩、留存刪除 |
 | 報告說法誤導 | 使用者判斷 | 分開零告警/失敗/未測；人工 triage；複掃可比性 |
 
@@ -32,7 +33,7 @@
 | SEC-03 | redirect 至禁止靶場 | 禁止靶場實際收到的請求為 0，不只 API 顯示 blocked |
 | SEC-04 | 測試 DNS 在驗證與連線間變更 | 未授權 IP 實際收包為 0，顯示 scope/IP 錯誤 |
 | SEC-05 | 使用 IPv4/IPv6、替代 host 表示、userinfo 等差異 | 嚴格解析或明確拒絕；不能繞過 allowlist |
-| SEC-06 | 連宿主/metadata/DB/Redis/Docker 控制端 | 應用層與網路層雙重阻擋；隔離接收端證明 |
+| SEC-06 | 連宿主/metadata/DB/docker-socket-proxy/Docker 控制端 | 應用層與網路層雙重阻擋；隔離接收端證明 |
 | SEC-07 | 掃描器不使用 proxy 嘗試直連 | 網路層拒絕；不能僅靠 HTTP_PROXY 環境變數 |
 | SEC-08 | 禁止 path/method、編碼路徑歧義 | 禁止端點實際收包為 0；無法可靠辨識時 fail closed |
 | SEC-09 | HTTPS CONNECT/authority/SNI 不相符 | 在上游連線前拒絕；未核准目標無 TLS sniffing 連線 |
@@ -47,14 +48,29 @@
 | SEC-18 | artifact path traversal/symlink/任意 storage key | 無法讀寫工作目錄以外內容 |
 | SEC-19 | scan cancel 後工具仍跑 | 先禁止新流量、後回收工具；不是只改 DB |
 | SEC-20 | 外部輸出內含提示要求讀 secret 或改安全設定 | 僅存為證據資料，不遵循；CI/開發流程不自動執行 |
+| SEC-21 | ExecutionPlan 含未核准的映像、host mount、privileged、其他網路，或 runner 呼叫 exec/volumes 等 API | plan 驗證拒絕；socket-proxy 對未開放的區段回 403；沒有產生容器 |
 
 SEC-03/04/05 等使用完全在本機測試網路的接收器與 mock DNS，不需要碰真實第三方資源。對所有已知測試通過只能代表測試集內有效，不是完備防禦的證明。
 
 ## 4. 一般工程測試
 
+所有功能都採 TDD：先寫會失敗的測試，再實作。覆蓋率門檻：
+
+- 整體 coverage ≥ 80%。
+- 核心安全模組（scope/policy、egress guard、狀態機、fingerprint、遮罩）branch coverage ≥ 90%。
+
+覆蓋率不是唯一的品質指標，安全負向測試必須全數通過。
+
 ### 4.1 Unit
 
-Target canonicalization、scope matching、policy budget、request hash、狀態轉移、版本可比性、severity mapping、fingerprint、secret redaction、artifact path validation。常見和邊界輸入都要測。
+測試項目：
+
+- Target canonicalization、scope matching、guard policy 比對、policy budget
+- request hash、狀態轉移、工作認領與 lease 轉移
+- 版本可比性、severity mapping、fingerprint
+- secret redaction、artifact path validation
+
+常見和邊界輸入都要測。fingerprint 與 URL 正規化用 Hypothesis 做 property test；unit 測試以 pytest-socket 禁止連網。
 
 ### 4.2 Contract / Parser
 
@@ -62,7 +78,16 @@ Target canonicalization、scope matching、policy budget、request hash、狀態
 
 ### 4.3 Integration
 
-以 PostgreSQL + broker + FakeRunner 驗證交易/outbox、重送、target 互斥、權限、migration、報告與比較。普通 CI 不啟動真實掃描器，不出網。
+以 PostgreSQL（testcontainers）+ FakeRunner 驗證：
+
+- 交易一致性
+- SKIP LOCKED 認領、重複認領、lease 過期
+- target 互斥
+- 權限
+- migration
+- 報告與比較
+
+普通 CI 不啟動真實掃描器，也不出網。
 
 ### 4.4 Live E2E
 
@@ -70,7 +95,14 @@ Target canonicalization、scope matching、policy budget、request hash、狀態
 
 ### 4.5 故障注入
 
-在 queued/preparing/running/collecting/normalizing 各階段中斷 API/worker；測 outbox 發送後未標記、重複 message、DB 暫時不可用、broker 暫時不可用、磁碟滿、容器 OOM、解析例外、Token 到期及手動取消。
+在 queued/preparing/running/collecting/collected/normalizing 各階段，分別中斷 api、runner 或 worker。另外要測：
+
+- 兩個 runner 同時認領同一個 run
+- lease 過期，但容器仍在執行
+- DB 暫時不可用
+- guard 不可用（必須 fail closed）
+- 磁碟滿、容器 OOM、解析例外
+- Token 到期、手動取消
 
 結果要求：無重複同 run 活躍容器；未證明舊 run 停止前不啟動新 run；partial evidence 不被刪除；狀態不能永久顯示 running；不將錯誤轉為「0 漏洞」。
 
@@ -82,11 +114,19 @@ Target canonicalization、scope matching、policy budget、request hash、狀態
 
 另建立 6 個 API 契約/健壯性正例與 6 個修補負例，獨立標記、不加入 security TP/FP。每個案例需記 case_id、target、method/path、auth role、弱點/檢查類別、預期行為、人工確認方式、修補差異與是否屬於測試支援範圍。
 
-以自製可切換弱點版本的 Web HTTP fixture、OpenAPI API fixture、以及自己部署的 Juice Shop 選定案例作為 3 類靶場；crAPI 是替代擴充，不增加必要工作量。[S16,S17] 自製 HTTP response 僅服務測試，不開發產品前端。
+三類靶場：
+
+1. 自己部署的 Juice Shop 選定案例（Web）[S16]。
+2. VAmPI：以 `vulnerable=1/0` 切換弱點版與安全版，安全版作為負控制組（API）[S26]。
+3. 自製可切換弱點版本的 fixture app：同時包含 Web 與 OpenAPI 案例，提供精確的 ground truth 與修補版。
+
+crAPI、DVWA 是替代擴充，不增加必要工作量 [S17]。fixture app 只放在 lab_net，只為測試服務，不是在開發產品前端。
 
 ### 5.2 Ground truth
 
-至少兩位組員獨立核對正/負例與對應規則，分歧需記錄與裁定。用程式單元測試/修補 diff 證明預期差異，不以「某掃描器報了」當作唯一真實標籤。
+由本人依修補 diff、重現步驟與程式測試標記正/負例，不以「某掃描器報了」當作唯一的真實標籤。
+
+接著請指導教授或同學抽樣複核至少 20% 的案例，分歧需記錄與裁定。單人標記可能造成的偏差，列為效度威脅。
 
 保留約 25% 案例作為 holdout，在 mapper/template/profile 調整階段不使用。模板與規則凍結後才跑 holdout。不為每個測試案例另寫一條 Nuclei 模板後宣稱泛化能力；自訂模板需分成獨立實驗組。
 
@@ -94,9 +134,16 @@ Target canonicalization、scope matching、policy budget、request hash、狀態
 
 P0 組別：A=ZAP、B=Nuclei、C=ZAP+Nuclei。P1 完成第三引擎才加入 D=Schemathesis、E=三引擎整合。契約/健壯性與安全分開評估。
 
-每組每類靶場至少 5 次重複，重置相同資料快照、相同認證/route/scope。P0 基本矩陣為 3 組 × 3 類靶場 × 5 次 = 45 次執行；若 P1 完成則為 5 × 3 × 5 = 75 次。這是計畫，不表示已完成。
+重複次數與執行矩陣：
 
-主要比較採每個 scan **相同總請求數與牆鐘時間上限**，不是每個工具各給完整預算後讓整合組多用 2–3 倍資源。組合組先分配子預算並凍結分配，總額與單工具組一致。額外可做累加預算情境，但需獨立展示耗費。
+- 每組每類靶場重複 5 次。時間不足時至少 3 次，並在報告中揭露。
+- 每次都重置為相同的資料快照，使用相同的認證、route 與 scope。
+- P0 基本矩陣：3 組 × 3 類靶場 × 5 次 = 45 次執行。
+- P1 完成後：5 組 × 3 類 × 5 次 = 75 次。沒有 OpenAPI 的靶場不適用 Schemathesis，該格記為 N/A。
+
+這是計畫，不表示已完成。
+
+主要比較採每個 scan **相同總請求數與牆鐘時間上限**（由 egress guard 強制執行），不是每個工具各給完整預算後讓整合組多用 2–3 倍資源。組合組先分配子預算並凍結分配，總額與單工具組一致。額外可做累加預算情境，但需獨立展示耗費。
 
 記錄各工具自身限速與 guard 合計計數。以實際上游送出請求為基準，不只看 CLI 的 requests count。執行順序隨機化；Schemathesis 保存 seed，仍需重複執行以觀察隨機性。
 
@@ -111,6 +158,8 @@ P0 組別：A=ZAP、B=Nuclei、C=ZAP+Nuclei。P1 完成第三引擎才加入 D=S
 `F1 = 2 × Precision × Recall / (Precision + Recall)`。分母為 0 時顯示 N/A，不填 100%。同一真實問題由兩工具命中，在整合組只算一個 TP；CWE 不同或位置不同不能任意對齊。
 
 可報每工具獨有 TP、聯集 TP、總請求量、牆鐘時間、CPU/RAM peak、完成率。使用中位數與範圍/IQR，重複樣本足夠時再附不確定性估計；小樣本不宣稱有普遍統計優勢。
+
+另外，把 finding 依「是否有 2 個以上引擎命中」分成兩組，比較兩組的 precision，作為 RQ1 的探索性分析。這個分組不作為合併 finding 或升級 severity 的規則。
 
 ### 7.2 去重品質
 
@@ -152,6 +201,6 @@ Gate C：取消/故障/重送/partial 狀態測試通過。
 
 Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。
 
-Gate E：同組員以乾淨環境重建 smoke test，版本/輸出可追溯。
+Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 
 未達 Gate 時，降低功能範圍或如實標記限制，不為準時展示而關閉保護或偽造數據。
