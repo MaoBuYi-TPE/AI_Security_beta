@@ -60,6 +60,15 @@ make dev          # 只綁 127.0.0.1:8000；/docs 只在 dev 開啟
 
 TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.py`，這樣不會檢查 coverage 門檻；提交前仍以 `make test` 為準。
 
+`make bootstrap` 建立的 `.venv` 是標準的 Python venv，也可以用一般的 venv 方式操作：
+
+```bash
+source .venv/bin/activate   # 啟用後可直接執行 python、pytest、mypy
+deactivate                  # 離開
+```
+
+依賴一律以 `uv add`／`uv remove` 修改，`uv.lock` 會同步更新。`.venv` 裡沒有 pip，請不要用 pip 直接安裝套件，否則環境會和 `uv.lock` 不一致。VS Code 請選用 `.venv/bin/python` 作為直譯器。
+
 ## 範圍界線
 
 - **掃描對象**：僅限自有或已獲明確授權的隔離靶場。預設 `LAB_ONLY`，不能因為輸入了一個 URL 或勾選聲明，就取得掃描該網站的授權。
