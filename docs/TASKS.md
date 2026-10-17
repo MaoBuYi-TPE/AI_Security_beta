@@ -15,18 +15,28 @@
     - 產出 `docs/REQUIREMENTS.md`，內容包括題目、與手動使用工具的比較表（每列附驗證方式）、P0/P1/不做、RQ1–RQ3，以及 H1–H5 與各自的驗證時點。題目已經指導教授確認。
     - DoD 檢查：以 `grep -n "前端"` 檢查所有文件，出現的地方都是排除項目、限制，或「日後若要做前端」的檢討條件（`DECISIONS.md` §2、§6），沒有任何前端任務。
     - 未執行：訪談（選做），不影響 P0；時間允許時再補。
-- [ ] T02 建立 Python 專案與品質命令。
+- [x] T02 建立 Python 專案與品質命令。
   - 產出：
     - pyproject.toml、uv.lock、.env.example
-    - Makefile：bootstrap、dev、test、lint、typecheck、lab-up
+    - Makefile：bootstrap、dev、test、lint、typecheck（`lab-up` 移到 T03，與 `compose.lab.yaml` 一起建立）
     - 最小的 `src/secscan/main.py` 與健康端點
     - 品質工具：pytest（含 coverage 門檻）、ruff、mypy、import-linter、pre-commit
   - DoD：在乾淨環境能啟動健康端點，並實際跑過 test、lint、typecheck；README 中的指令都有效。
+  - 交付（2026-10-17，done）：
+    - 檔案：`pyproject.toml`、`uv.lock`、`.python-version`、`.env.example`、`Makefile`、`.pre-commit-config.yaml`、`src/secscan/`（`main.py`、`core/`、`health/`）、`tests/`。依賴由 uv 實際解析，例如 Python 3.12.6、fastapi 0.143.3、pydantic 2.14.1、pytest 9.1.1、mypy 2.4.0、ruff 0.17.1；完整版本見 `uv.lock`。
+    - 實際執行：先寫測試並確認失敗（`ModuleNotFoundError`），實作後才通過。`make test` 35 passed、coverage 100%（含分支）；`make lint`、`make typecheck`、`pre-commit run --all-files` 都通過。
+    - 負向檢查：core import 功能模組，或新增未列入 layers 的模組時，import-linter 都會失敗；測試中建立 TCP socket 會被封鎖。
+    - 啟動與重建：`make dev` 只監聽 127.0.0.1:8000，`/health/live` 回傳 envelope。從分支重新 clone 後，bootstrap、test、lint、typecheck 全部通過。
+    - code-reviewer 結果是 APPROVE（0 CRITICAL、0 HIGH），MEDIUM 與 LOW 項目已修正；Docker socket 的測試防護記在 T10。
+    - 未做：`/health/ready`（需要 DB，M1/T04）；統一錯誤 handler 與 request_id（M1，目前 404 仍是 FastAPI 預設格式）；structlog。
+    - 已知限制：
+      - Starlette 1.8 建議 TestClient 改用 `httpx2`。目前用 `httpx`，會出現棄用警告；是否新增套件待決定。
+      - `/docs` 會從 CDN 載入 Swagger UI，M1 有平台 API key 後需要重新評估。
 - [ ] T03 確認掃描器映像、模板與實驗網路。
-  - 前置：安裝 uv、啟動 OrbStack，確認 `docker compose` 可用（不行就改用 `docker-compose`）。
+  - 前置：啟動 OrbStack，確認 `docker compose` 可用（不行就改用 `docker-compose`）。uv 已在 T02 安裝。
   - 產出：
     - 工具相容性表：名稱、版本、digest、arm64 支援、授權條款、必要的可寫路徑、唯讀 rootfs 相容性、proxy/auth/output 相容性。
-    - lab compose：Juice Shop、VAmPI vulnerable/secure，只接 internal network。
+    - lab compose：Juice Shop、VAmPI vulnerable/secure，只接 internal network；同時建立 `make lab-up`（從 T02 移過來）。
   - 做法：用一個暫時的 mitmproxy 讓三個工具都經 proxy 掃描 lab。把真實輸出錄到 `tests/fixtures/<tool>/`，並量測各工具的請求量與耗時，作為之後調整預算的依據。
   - 需要逐項確認：
     - ZAP 的 upstream proxy 設定鍵與 report 格式
@@ -77,6 +87,7 @@
     - api、worker、掃描容器都沒有 Docker socket，也不是 privileged。
     - socket-proxy 只開放容器需要的區段。
     - 未核准的映像、path、args、網路都會被拒絕（SEC-12、SEC-21）。
+    - 測試隔離：unit/contract 測試不能連到 Docker daemon。pytest-socket 目前整個放行 AF_UNIX（asyncio 需要），所以要在 conftest 拒絕 `tmp_path` 以外的 AF_UNIX connect、把測試時的 `DOCKER_HOST` 設為無效值，並禁止未標記 `live` 的測試使用 `enable_socket`。
 - [ ] T11 完成 internal networks、egress guard，以及 DNS/IP/path/method/redirect 檢查。
   - DoD：
     - SEC-02 到 SEC-10 中適用的項目都通過。
