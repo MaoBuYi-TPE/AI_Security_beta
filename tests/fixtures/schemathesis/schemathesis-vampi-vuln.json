@@ -1,0 +1,278 @@
+{
+  "schemathesis_version": "4.31.1",
+  "command": "st --config-file /cfg/schemathesis.toml run /cfg/openapi.yml --url http://vampi-vuln:5000 --max-examples 2 --generation-database none --report ndjson,json,junit --report-dir /out",
+  "seed": 1337,
+  "started_at": "2026-10-17T16:16:07.198532+00:00",
+  "running_time": 2.738825344000361,
+  "stop_reason": "completed",
+  "complete": true,
+  "exit_code": 1,
+  "operations": {
+    "total": 14,
+    "selected": 12,
+    "tested": 12,
+    "errored": 0,
+    "skipped": 0,
+    "skip_reasons": []
+  },
+  "phases": {
+    "examples": {
+      "status": "failure",
+      "skip_reason": null
+    },
+    "coverage": {
+      "status": "failure",
+      "skip_reason": null
+    },
+    "fuzzing": {
+      "status": "failure",
+      "skip_reason": null
+    },
+    "stateful": {
+      "status": "failure",
+      "skip_reason": null
+    }
+  },
+  "test_cases": {
+    "generated": 119,
+    "with_failures": 14,
+    "unique_failures": 14,
+    "without_checks": 10,
+    "errored": 0
+  },
+  "failures": [
+    {
+      "type": "JsonSchemaError",
+      "title": "Response violates schema",
+      "severity": "high",
+      "count": 1,
+      "operations": [
+        "GET /books/v1/{book_title}"
+      ]
+    },
+    {
+      "type": "RejectedPositiveData",
+      "title": "API rejected schema-compliant request",
+      "severity": "medium",
+      "count": 5,
+      "operations": [
+        "POST /books/v1",
+        "POST /users/v1/login",
+        "POST /users/v1/register",
+        "PUT /users/v1/{username}/email",
+        "PUT /users/v1/{username}/password"
+      ]
+    },
+    {
+      "type": "AllowHeaderMismatch",
+      "title": "Invalid Allow header",
+      "severity": "medium",
+      "count": 3,
+      "operations": [
+        "OPTIONS /users/v1/_debug",
+        "OPTIONS /users/v1/login",
+        "OPTIONS /users/v1/register"
+      ]
+    },
+    {
+      "type": "UndefinedContentType",
+      "title": "Undocumented Content-Type",
+      "severity": "medium",
+      "count": 5,
+      "operations": [
+        "GET /books/v1/{book_title}",
+        "GET /me",
+        "POST /books/v1",
+        "PUT /users/v1/{username}/email",
+        "PUT /users/v1/{username}/password"
+      ]
+    }
+  ],
+  "errors": [],
+  "baseline": null,
+  "filtered": 0,
+  "warnings": {
+    "missing_auth": [],
+    "base_url_mismatch": [],
+    "missing_test_data": [],
+    "validation_mismatch": [],
+    "missing_deserializer": [],
+    "unused_openapi_auth": [],
+    "unsupported_regex": [],
+    "method_not_allowed": [],
+    "constants_extraction": [],
+    "unmatched_filter": [],
+    "unresolvable_reference": [],
+    "low_valid_rate": [],
+    "rate_limited": [],
+    "dictionary_mismatch": []
+  },
+  "valid_rates": {
+    "POST /books/v1": {
+      "examples": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 0,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 1
+      }
+    },
+    "POST /users/v1/login": {
+      "examples": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 0,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 1
+      }
+    },
+    "POST /users/v1/register": {
+      "examples": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 0,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 1
+      }
+    },
+    "GET /books/v1/{book_title}": {
+      "examples": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      }
+    },
+    "GET /users/v1/{username}": {
+      "examples": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "coverage": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 2,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      }
+    },
+    "PUT /users/v1/{username}/email": {
+      "examples": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 0,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 1
+      }
+    },
+    "PUT /users/v1/{username}/password": {
+      "examples": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 0,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 1
+      }
+    },
+    "GET /": {
+      "coverage": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      }
+    },
+    "GET /books/v1": {
+      "coverage": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      }
+    },
+    "GET /users/v1": {
+      "coverage": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      },
+      "fuzzing": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      }
+    },
+    "GET /me": {
+      "fuzzing": {
+        "accepted": 2,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      }
+    },
+    "GET /users/v1/_debug": {
+      "fuzzing": {
+        "accepted": 1,
+        "unreachable": 0,
+        "conflicts": 0,
+        "rejected": 0
+      }
+    }
+  },
+  "auth": {
+    "reauth_count": 0,
+    "reauth_broke": false
+  }
+}
