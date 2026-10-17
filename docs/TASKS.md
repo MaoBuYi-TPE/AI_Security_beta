@@ -29,9 +29,8 @@
     - 啟動與重建：`make dev` 只監聽 127.0.0.1:8000，`/health/live` 回傳 envelope。從分支重新 clone 後，bootstrap、test、lint、typecheck 全部通過。
     - code-reviewer 結果是 APPROVE（0 CRITICAL、0 HIGH），MEDIUM 與 LOW 項目已修正；Docker socket 的測試防護記在 T10。
     - 未做：`/health/ready`（需要 DB，M1/T04）；統一錯誤 handler 與 request_id（M1，目前 404 仍是 FastAPI 預設格式）；structlog。
-    - 已知限制：
-      - Starlette 1.8 建議 TestClient 改用 `httpx2`。目前用 `httpx`，會出現棄用警告；是否新增套件待決定。
-      - `/docs` 會從 CDN 載入 Swagger UI，M1 有平台 API key 後需要重新評估。
+    - 後續調整：Starlette 1.8 已棄用 TestClient 搭配 `httpx`，因此改用 `httpx2` 2.13.1（只影響開發依賴）。改用後棄用警告消失，TestClient 回應的型別也從 `Any` 恢復成 `Response`，mypy 能檢查測試程式。
+    - 已知限制：`/docs` 會從 CDN 載入 Swagger UI，M1 有平台 API key 後需要重新評估。
 - [ ] T03 確認掃描器映像、模板與實驗網路。
   - 前置：啟動 OrbStack，確認 `docker compose` 可用（不行就改用 `docker-compose`）。uv 已在 T02 安裝。
   - 產出：
