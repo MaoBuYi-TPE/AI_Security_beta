@@ -27,6 +27,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 | 檔案 | 用途 |
 |---|---|
 | `CLAUDE.md` | 放在專案根目錄的 Claude Code 開發規則 |
+| `docs/REQUIREMENTS.md` | 已凍結的需求摘要：題目、相對於手動使用工具的增益、P0/P1/不做、研究問題與待驗證假設 |
 | `docs/PROJECT_PLAN.md` | 背景、需求、工具選型、功能範圍、時程與交付成果 |
 | `docs/ARCHITECTURE.md` | 元件、信任邊界、egress guard、資料模型、Adapter/Runner 與狀態機 |
 | `docs/API_CONTRACT.md` | 預計實作的 REST API、權限、資料格式與錯誤語意 |
