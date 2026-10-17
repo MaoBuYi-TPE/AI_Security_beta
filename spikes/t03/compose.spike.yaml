@@ -1,0 +1,79 @@
+# T03 spike 的長駐服務：guard-spike（量測 proxy）與 canary（接收端證據）。
+# 掃描工具不放在這裡，改用 run_scans 以 `docker run` 逐一啟動（更接近 M2 runner 的形狀）。
+# 前置：先 `make lab-up` 建立 secscan_lab_net，並產生 runs/spike-t03/secrets/proxy.htpasswd。
+name: secscan-spike
+
+networks:
+  lab_net:
+    name: secscan_lab_net
+    external: true
+  scan_net:
+    name: secscan_scan_net
+    internal: true
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: 10.89.8.0/24
+
+services:
+  guard-spike:
+    image: mitmproxy/mitmproxy:12.2.3@sha256:00b77b5d8804c8ad18cb6caefbf9d5849e895e8986c5ce011f4ae30f4385962f
+    entrypoint: ["mitmdump"] # 預設 entrypoint 需要 root；直接跑 mitmdump
+    user: "1000:1000"
+    command:
+      - --mode
+      - regular
+      - --listen-host
+      - 10.89.8.10 # 只在 scan_net 這一側聽，lab_net 連不到 proxy port
+      - --listen-port
+      - "8080"
+      - --set
+      - proxyauth=@/cfg/proxy.htpasswd
+      - --set
+      - connection_strategy=lazy
+      - --set
+      - flow_detail=0
+      - --set
+      - termlog_verbosity=error
+      - -s
+      - /cfg/guard_spike.py
+    environment:
+      GUARD_POLICY: /cfg/policy.json
+    networks:
+      scan_net:
+        ipv4_address: 10.89.8.10
+      lab_net:
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 256
+    volumes:
+      - ./guard_spike.py:/cfg/guard_spike.py:ro
+      - ./policy.json:/cfg/policy.json:ro
+      - ../../runs/spike-t03/secrets/proxy.htpasswd:/cfg/proxy.htpasswd:ro
+      # confdir 需可寫（mitmproxy 會寫自簽 CA）；tmpfs 設為 world-writable 讓 uid 1000 可寫。
+      - type: tmpfs
+        target: /home/mitmproxy/.mitmproxy
+        tmpfs:
+          mode: 01777
+
+  canary:
+    image: mitmproxy/mitmproxy:12.2.3@sha256:00b77b5d8804c8ad18cb6caefbf9d5849e895e8986c5ce011f4ae30f4385962f
+    entrypoint: ["python"]
+    command: ["/cfg/canary.py"]
+    user: "1000:1000"
+    networks:
+      lab_net:
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 64
+    volumes:
+      - ./canary.py:/cfg/canary.py:ro

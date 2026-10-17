@@ -1,0 +1,28 @@
+# ZAP Automation Framework plan — Z1：Juice Shop（Web profile，無認證）。
+# 經 upstream proxy（guard-spike）掃描；ZAP 不自行解析 juice-shop 名稱。
+env:
+  contexts:
+    - name: juice
+      urls:
+        - http://juice-shop:3000
+      includePaths:
+        - "http://juice-shop:3000.*"
+  parameters:
+    failOnError: false
+    failOnWarning: false
+    progressToStdout: true
+jobs:
+  - type: spider
+    parameters:
+      context: juice
+      url: http://juice-shop:3000
+      maxDuration: 3
+      maxChildren: 20
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 5
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: /zap/wrk/out
+      reportFile: zap-juice-shop.json

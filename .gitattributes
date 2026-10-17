@@ -1,0 +1,2 @@
+# fixture 是真實工具輸出，視為二進位，不做行尾正規化或 diff 改寫。
+tests/fixtures/** -text

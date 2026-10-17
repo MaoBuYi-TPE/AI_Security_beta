@@ -23,6 +23,13 @@ build/
 !.env.example
 *.key
 *.p12
+# 其他秘密與憑證形態（例如 spike 的 proxy 帳密、工具輸出）
+**/secrets/
+*.htpasswd
+*.pem
+*.har
+*.flow
+.hypothesis/
 
 # 掃描產物與實驗原始輸出（可能含敏感資料，不進版本控制）
 artifacts/

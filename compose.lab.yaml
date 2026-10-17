@@ -1,0 +1,101 @@
+# 隔離 lab 靶場（T03 建立，M2 之後沿用）。
+# 只接 internal network、不發布任何 port，映像以 tag@digest 鎖定。
+# 啟動：make lab-up（預設 profiles：juice-shop vampi）。
+# 注意：lab_net 與掃描流程共用，egress guard（M2）會接上同一個網路名稱。
+name: secscan-lab
+
+networks:
+  lab_net:
+    name: secscan_lab_net
+    internal: true
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      # internal 網路預設仍會配 gateway 位址，容器能連到宿主在該位址上的服務。
+      # isolated 模式不配 gateway，切斷這條路徑（需 Engine 支援；不支援時 lab-up 會報錯，改記為限制）。
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: 10.89.7.0/24
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:v20.3.0@sha256:cea5a4af4aacee498c491491af0408934ec81d004035c0a02ef3e54395e3bf27
+    profiles: [juice-shop]
+    networks: [lab_net]
+    environment:
+      NODE_ENV: unsafe # 啟用全部教學關卡；僅限隔離 lab
+    # read_only 不相容：Juice Shop 啟動時會寫 logs、ftp、以及 data/ 下的 SQLite DB
+    # （SQLITE_CANTOPEN），逐一改 tmpfs 會蓋掉映像內已播種的資料。靶機本身不是本專題的
+    # 安全邊界（邊界是網路隔離＋guard），故這裡放寬 rootfs，仍保留 cap_drop 與 no-new-privileges。
+    read_only: false
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 256
+    # distroless 映像沒有 shell，只能用內建 node 直接做健康檢查。
+    healthcheck:
+      test:
+        - CMD
+        - /nodejs/bin/node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/rest/admin/application-version',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+
+  vampi-vuln:
+    image: &vampi erev0s/vampi:latest@sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12
+    profiles: [vampi]
+    networks: [lab_net]
+    environment:
+      vulnerable: "1"
+      tokentimetolive: "3600" # 預設 60 秒，掃描中途會失去認證，拉長以免誤判
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /vampi/database
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 256
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/',timeout=3).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  vampi-secure:
+    image: *vampi
+    profiles: [vampi]
+    networks: [lab_net]
+    environment:
+      vulnerable: "0"
+      tokentimetolive: "3600"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /vampi/database
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 256
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/',timeout=3).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s

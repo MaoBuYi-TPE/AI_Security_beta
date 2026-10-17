@@ -39,10 +39,14 @@ exclude = ["*.md"]
 # S：安全規則（flake8-bandit）；BLE：禁止 except Exception；T20：禁止 print。
 select = ["E", "W", "F", "I", "N", "UP", "B", "S", "BLE", "T20", "SIM", "PT", "C4", "RUF"]
 # 中文註解與文件字串使用的全形標點。
-allowed-confusables = ["，", "：", "；", "（", "）", "！", "？"]
+allowed-confusables = ["，", "：", "；", "（", "）", "！", "？", "／"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101"]
+# spikes/ 是 T03 一次性探查腳本（在容器內以 mitmproxy/python 執行，不屬於 src）。
+# 需要 stdout 輸出（T201）與在隔離 lab_net 綁 0.0.0.0（S104）。不納入 mypy。
+# N802/N815：BaseHTTPRequestHandler 要求 do_GET 等固定命名。
+"spikes/**/*.py" = ["T201", "S104", "N802", "N815"]
 
 [tool.mypy]
 python_version = "3.12"
