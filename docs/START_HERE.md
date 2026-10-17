@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up` 在 T03 與 `compose.lab.yaml` 一起建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -91,7 +91,8 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make test | M0 | 執行離線的 unit/integration 測試與 coverage 門檻，不做 live scan |
 | make lint | M0 | ruff lint/format check、import-linter |
 | make typecheck | M0 | mypy |
-| make lab-up | M0（T03） | 以 compose profile 啟動 lab 靶機（只接 internal network） |
+| make lab-up | M0（T03 已建立） | 以 compose profile 啟動 lab 靶機（只接 internal network，不發布 port） |
+| make lab-down | M0（T03 已建立） | 停止並移除 lab（先停 spike 再執行） |
 | make migrate | M1 | 執行 Alembic upgrade；不含破壞性重置 |
 | make test-contract | M1–M2 | 對固定 fixture 測 API/Parser 契約 |
 | make test-live-lab | M3 起 | 需要 `ENABLE_LIVE_LAB_TESTS=1`、LAB_ONLY、有效 grant，並通過隔離檢查才執行 |

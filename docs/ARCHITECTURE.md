@@ -76,6 +76,8 @@ runner 一旦被攻陷，就能透過 Docker API 影響整台開發機的容器�
 - 在應用層檢查。
 - 從接收端確認實際有沒有收到封包。
 
+Docker 文件指出 `internal: true` 仍會配 gateway 位址、容器可連宿主在該位址上的服務[S32]，因此 lab_net/scan_net 另加 `gateway_mode_ipv4: isolated`（不配 gateway）。T03 在 OrbStack 2.2.1 + Engine 29.4.0 上以 isolated + internal 實測：scan_net 容器連外部 IP 為 unreachable、連 `host.docker.internal` 解析不到，被 guard 擋下的請求也以 canary 證明未送達（見 `TOOLS.md` §3；未另做 internal-only 對照組）。M2 仍須以 egress guard 補齊 DNS/IP 綁定與 redirect 重檢，不以網路設定取代應用層檢查，且部署環境需重測。
+
 ## 3. Egress guard
 
 guard 以 mitmproxy 的 addon/event 機制實作本專題的 scope、budget 與 telemetry，不自行重寫 proxy 或 TLS。[S18] 既有工具只是底層，**不會自動提供本專題的授權模型或完備的 SSRF 防護**。
@@ -210,8 +212,8 @@ ExecutionPlan 只能包含：
 | 映像 | `zaproxy/zap-stable`（日期 tag + digest）[S04] | `projectdiscovery/nuclei`（digest） | `schemathesis/schemathesis`（digest）[S24] |
 | 主要入口 | `zap.sh -cmd -autorun /zap/wrk/plan.yaml`，plan 由伺服器產生 [S02][S04] | 固定參數陣列、唯讀模板目錄、凍結 ID 清單（`-id`）[S23] | `st run <spec> --url … --seed …`，搭配固定 config [S07] |
 | 輸入 | scope context、Web seed 或 API 規格 | 核准的目標/端點、template ID 清單 | 已驗證的 OpenAPI、operation allowlist、seed |
-| 目標認證 | `ZAP_AUTH_HEADER*` 環境變數（啟動時讀取，每個容器各自獨立）[S21] | `-sf` secret 檔（M0 確認格式）[S23] | config 或 header（M0 確認注入方式）[S09] |
-| 出站 | upstream proxy 指向 guard（設定鍵在 M0 確認） | `-p` 指向 guard [S23] | `--proxy` 指向 guard [S07] |
+| 目標認證 | `ZAP_AUTH_HEADER*` 環境變數（啟動時讀取，每個容器各自獨立）[S21]；T03 已驗證 `_SITE` 以 host 子字串比對 | `-sf` secret 檔：`static: - type: bearertoken` + `domains` 完全比對 host:port（T03 驗證）[S23] | `schemathesis.toml` 以 `${ENV}` 帶入 `[auth.openapi.<scheme>] bearer`（T03 驗證）[S09] |
+| 出站 | upstream proxy 設定鍵 `network.connection.httpProxy.*`，以 `-configfile`（0400）注入、不洩漏密碼（T03 驗證） | `-p <檔案>` 指向 guard；經 proxy 不需本機 DNS（T03 驗證）[S23] | `proxy` 指向 guard（T03 驗證）[S07] |
 | 整合輸出 | report job 產生的 JSON；必要的訊息/統計 | `-jsonl -o` + 執行 manifest | `--report json,ndjson`；必要時加 junit [S07] |
 | 必須關閉 | `-silent`（不主動對外請求、不檢查更新）[S20]；OAST | `-ni`（關閉 interactsh/OAST）、`-duc`、`-pt http` 以外的協定、code/headless/dos 模板、雲端上傳 [S23] | 未授權的 method（grant + guard 雙重限制）；自動建立帳號等行為（若該版本有） |
 | 來源鍵 | plugin/rule ID、alert instance | template ID、matcher、matched-at | check、operation、case/event ID |

@@ -28,6 +28,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 |---|---|
 | `CLAUDE.md` | 放在專案根目錄的 Claude Code 開發規則 |
 | `docs/REQUIREMENTS.md` | 已凍結的需求摘要：題目、相對於手動使用工具的增益、P0/P1/不做、研究問題與待驗證假設 |
+| `docs/TOOLS.md` | T03 工具 spike 結果：映像相容性表、digest、授權、網路隔離與各引擎 proxy/auth/output 的實測 |
 | `docs/PROJECT_PLAN.md` | 背景、需求、工具選型、功能範圍、時程與交付成果 |
 | `docs/ARCHITECTURE.md` | 元件、信任邊界、egress guard、資料模型、Adapter/Runner 與狀態機 |
 | `docs/API_CONTRACT.md` | 預計實作的 REST API、權限、資料格式與錯誤語意 |
@@ -41,7 +42,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前只完成 M0 的最小骨架（T02）：一個只有 `GET /health/live` 的 FastAPI 應用，以及測試、lint、型別檢查命令。還沒有 Docker Compose、資料庫、migration 或已安裝的掃描器。其他文件中的指令與 API 仍是**待實作的契約**；不能把寫好的文件、Mock 測試或示意資料當成真實掃描成功的證明。
+目前完成到 M0 的 T02、T03：一個只有 `GET /health/live` 的 FastAPI 應用與品質命令（T02），以及隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。還沒有資料庫、migration、runner 或正式的 Adapter／egress guard（M1 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
 ### 開發環境
 
@@ -59,6 +60,20 @@ make dev          # 只綁 127.0.0.1:8000；/docs 只在 dev 開啟
 `make dev` 啟動後，`curl http://127.0.0.1:8000/health/live` 會回傳 `{"success": true, "data": {"status": "ok"}, "error": null, "meta": null}`。
 
 TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.py`，這樣不會檢查 coverage 門檻；提交前仍以 `make test` 為準。
+
+#### 隔離 lab 靶場（T03）
+
+需要先啟動 OrbStack（`orb start`）。lab 只接 internal network、不發布任何 port：
+
+```bash
+make lab-up                     # 啟動 Juice Shop 與 VAmPI（vulnerable/secure）
+make lab-up LAB_PROFILES=vampi  # 只啟動部分（profile：juice-shop、vampi）
+make lab-down                   # 停止並移除（若 spike 仍接在 lab_net 上，需先停 spike）
+```
+
+工具 spike 的腳本與重現步驟見 `spikes/t03/README.md`，結論見 `docs/TOOLS.md`。只掃 lab，不對外。
+
+#### venv
 
 `make bootstrap` 建立的 `.venv` 是標準的 Python venv，也可以用一般的 venv 方式操作：
 
