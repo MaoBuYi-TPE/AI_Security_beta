@@ -86,7 +86,7 @@
 | Nuclei（v3.11.x）[S23] | 以凍結的 HTTP 模板清單檢查已知問題、暴露資訊與錯誤設定 | JSONL findings、執行 metadata、guard 流量紀錄 | P0（M4） |
 | Schemathesis（4.x）[S07] | 依 OpenAPI 產生 API 邊界/負向輸入與規格檢查 | 鎖定版本的 JSON/NDJSON；必要時加 JUnit | P1（M6，P0 Gate 通過後） |
 
-表中版本是 2026-10 的查核值，M0 會鎖定確切版本與映像 digest。各工具的執行方式見 `ARCHITECTURE.md` §5。
+表中版本是 2026-10 的查核值；T03 已鎖定確切版本與映像 digest（見 `TOOLS.md`）。各工具的執行方式見 `ARCHITECTURE.md` §5。
 
 - **ZAP**：Automation Framework 可用於工作編排；API 掃描會依輸入的規格匯入端點。Web profile 與 API profile 不應混為同一套設定。[S02–S05]
 - **Nuclei**：以模板執行檢查，提供 JSONL、速率與模板控制。本專題只使用受限的 HTTP 模板，不會把所有模板與協定全部打開。[S06]
@@ -248,6 +248,7 @@ FastAPI 官方說明：較重、需要獨立程序執行的工作，應交給外
   - 規劃時 OrbStack 尚未啟動，`docker compose` 子命令也不能用。在 M0 修好之前，可以先用已安裝的 `docker-compose`（v5.1.2）。
 - **記憶體**：
   - 規劃讓 OrbStack 使用 10–12 GB；ZAP 單次容器預估 2–3 GB，以 M0 實際量測為準。
+  - T03 實測本機 OrbStack 預設上限為 **8 GiB**（低於規劃）。M3 ZAP active scan 前需確認是否調高，或據此調整 lab profile 預算，並在報告揭露。
   - 一次只跑一個 ZAP；靶機用 compose profiles 分開啟動。
 - **隔離方式**：控制平面與 runner 在同一台機器，以 internal networks、docker-socket-proxy 與非 root 容器隔離。
   - runner 的 Docker 權限是殘餘風險。[S12]

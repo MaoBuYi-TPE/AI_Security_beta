@@ -31,7 +31,7 @@
     - 未做：`/health/ready`（需要 DB，M1/T04）；統一錯誤 handler 與 request_id（M1，目前 404 仍是 FastAPI 預設格式）；structlog。
     - 後續調整：Starlette 1.8 已棄用 TestClient 搭配 `httpx`，因此改用 `httpx2` 2.13.1（只影響開發依賴）。改用後棄用警告消失，TestClient 回應的型別也從 `Any` 恢復成 `Response`，mypy 能檢查測試程式。
     - 已知限制：`/docs` 會從 CDN 載入 Swagger UI，M1 有平台 API key 後需要重新評估。
-- [ ] T03 確認掃描器映像、模板與實驗網路。
+- [x] T03 確認掃描器映像、模板與實驗網路。
   - 前置：啟動 OrbStack，確認 `docker compose` 可用（不行就改用 `docker-compose`）。uv 已在 T02 安裝。
   - 產出：
     - 工具相容性表：名稱、版本、digest、arm64 支援、授權條款、必要的可寫路徑、唯讀 rootfs 相容性、proxy/auth/output 相容性。
@@ -45,6 +45,16 @@
     - 各工具的秘密注入方式
   - DoD：取得 ZAP、Nuclei、Schemathesis 的真實輸出樣本並保存 hash；不經 proxy 的直連必須失敗。
   - 限制：只掃自建的 lab，不能提前開放任意 URL 的平台功能。環境不可用時標為 blocked，不能改掃公共網站，也不能把 Mock 當成 live 成果。
+  - 交付（2026-10-17，done）：
+    - 檔案：`compose.lab.yaml`、`Makefile`（`lab-up`／`lab-down`，自動選 compose）、`spikes/t03/`（guard-spike、canary、ZAP plan、schemathesis.toml、模板清單、遮罩與彙整腳本、README）、`tests/contract/test_fixture_manifest.py`、`tests/fixtures/`（zap/nuclei/schemathesis 遮罩樣本 + `manifest.json`）、`docs/TOOLS.md`。完整相容性表、量測與逐項驗證結果見 `docs/TOOLS.md`。
+    - 映像（arm64、digest 鎖定）：zaproxy/zap-stable 2.17.0、projectdiscovery/nuclei v3.11.1、schemathesis 4.31.1、mitmproxy 12.2.3、bkimminich/juice-shop v20.3.0、erev0s/vampi latest。nuclei-templates v10.5.0（commit f8b8b8d）。
+    - 直連必須失敗（D1–D7）：scan_net 解析不到、連不到 lab；只有經 guard 且帳密正確才成功；被擋的請求以 canary 證明未送達（403/407，canary 無紀錄）。`internal + gateway_mode_ipv4=isolated` 下連 `host.docker.internal` 都解析不到。
+    - 真實輸出（已遮罩，sha256 記於 `tests/fixtures/manifest.json`）：ZAP traditional-json（juice-shop 4 告警、vampi）、Nuclei JSONL（juice-shop 13、vampi 14 findings）、Schemathesis JSON/NDJSON/JUnit（提交的 fixture 取自 max-examples=2 的 compact run：119 cases/14 failures；另有 max-examples=15 的量測 run 314 cases/16 failures 記於 `TOOLS.md`）。三工具流量全部經 guard，上游 IP 皆在 LAB_CIDR。
+    - 逐項確認：ZAP proxy 鍵 + `-configfile`（不洩漏密碼）+ `-silent`（擋自身對外）+ `ZAP_AUTH_HEADER` 注入；Nuclei `-sf` host:port 完全比對 + 經 proxy 不需本機 DNS；Schemathesis `--proxy`/bearer 以 `${ENV}`、NDJSON 結構、exit code；volume subpath in/out；秘密不落命令列。
+    - 實際執行：先寫會失敗的 `test_fixture_manifest.py`（RED，示範 fixture 竄改 → sha256 與 JWT 檢查同時失敗），遮罩補齊後 `make test` 58 passed、coverage 100%；`make lint`、`make typecheck`、`pre-commit run --all-files` 皆通過。
+    - 未執行（選做）：Z3/N3/S2（vampi-secure 負控制組）與 ZAP active scan，留待 M3；原因為時間與 spike 範圍。
+    - 限制：Juice Shop 不相容唯讀 rootfs（已放寬並保留 cap_drop/no-new-privileges）；OrbStack 記憶體上限實測 8 GiB（低於規劃，影響 M3 active scan 預算）。詳見 `docs/TOOLS.md` §5–§6。
+    - code-reviewer 與 security-reviewer（M0 收尾，依 §12）：兩者皆 APPROVE，0 CRITICAL、0 HIGH，確認無任何真實秘密進入 git（含歷史）。合併前已處理的建議：guard 改 fail-closed（policy 載入失敗 deny-all、判斷例外回 500）、canary 覆蓋所有 method 並讀完 body、強化 fixture 防洩密測試（Bearer/Basic/userinfo/base64 解碼）、遮罩改用與測試共用的 JWT 樣式並處理 Werkzeug SECRET、補 `run_scans.sh` 使隔離旗標可稽核、`lab-up` 加 `lab-verify`（internal+isolated+無對外 port，失敗即收回）、移除誤導的 `block_global`、`.gitignore` 擴充秘密形態。其餘列為 M2 輸入（路徑正規化、HMAC telemetry、socket-proxy 最小開關）。
 
 ## M1｜11/09 – 12/13：API 與資料基礎
 

@@ -4,7 +4,9 @@ repos:
     hooks:
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
+        exclude: ^tests/fixtures/ # fixture 是逐位元組的真實工具輸出，不得改寫
       - id: end-of-file-fixer
+        exclude: ^tests/fixtures/
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files

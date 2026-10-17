@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites errors="0" failures="8" skipped="0" tests="13" time="2.558343">
+  <testsuite name="schemathesis" hostname="47f45b9dea99" errors="0" failures="8" skipped="0" tests="13" time="2.558343">
+    <testcase name="POST /books/v1" time="1.616687">
+      <failure type="failure">1. Test Case ID: CXmDA9
+
+- Undocumented Content-Type
+
+    Received: application/problem+json
+    Documented: application/json
+
+[401] Unauthorized:
+
+    `{
+      "detail": "No authorization token provided",
+      "status": 401,
+      "title": "Unauthorized",
+      "type": "about:blank"
+    }`
+
+Reproduce with:
+
+    curl -X POST -H 'Content-Type: application/json' -d '{"book_title": "book99", "secret": "[Filtered]"}' http://vampi-vuln:5000/books/v1</failure>
+      <failure type="failure">1. Test Case ID: NeVYqR
+
+- API rejected schema-compliant request
+
+    Valid data should have been accepted
+    Expected: 2xx, 3xx, 401, 403, 404, 409, 429, 5xx
+
+[400] Bad Request:
+
+    `{ "status": "fail", "message": "Please provide a proper JSON body."}`
+
+Reproduce with:
+
+    curl -X POST -H 'Authorization: [Filtered]' -H 'Content-Type: application/json' -d '{}' http://vampi-vuln:5000/books/v1</failure>
+    </testcase>
+    <testcase name="POST /users/v1/login" time="0.060831">
+      <failure type="failure">1. Test Case ID: c4uqPe
+
+- Invalid Allow header
+
+    `Allow: GET, DELETE, POST, HEAD, OPTIONS` does not match the schema. Undocumented methods advertised: DELETE, GET
+
+    List exactly the methods this resource supports in `Allow`
+
+[200] OK:
+
+    &lt;EMPTY&gt;
+
+Reproduce with:
+
+    curl -X OPTIONS -H 'Content-Type: application/json' -d '{"username": "name1", "password": "[Filtered]"}' http://vampi-vuln:5000/users/v1/login</failure>
+      <failure type="failure">1. Test Case ID: JUQ7mk
+
+- API rejected schema-compliant request
+
+    Valid data should have been accepted
+    Expected: 2xx, 3xx, 401, 403, 404, 409, 429, 5xx
+
+[400] Bad Request:
+
+    `{ "status": "fail", "message": "'username' is a required property"}`
+
+Reproduce with:
+
+    curl -X POST -H 'Content-Type: application/json' -d '{}' http://vampi-vuln:5000/users/v1/login</failure>
+    </testcase>
+    <testcase name="POST /users/v1/register" time="0.061457">
+      <failure type="failure">1. Test Case ID: g7uQSB
+
+- Invalid Allow header
+
+    `Allow: GET, DELETE, POST, HEAD, OPTIONS` does not match the schema. Undocumented methods advertised: DELETE, GET
+
+    List exactly the methods this resource supports in `Allow`
+
+[200] OK:
+
+    &lt;EMPTY&gt;
+
+Reproduce with:
+
+    curl -X OPTIONS -H 'Content-Type: application/json' -d '{"username": "name1", "password": "[Filtered]", "email": "user@tempmail.com"}' http://vampi-vuln:5000/users/v1/register</failure>
+      <failure type="failure">1. Test Case ID: thfxGJ
+
+- API rejected schema-compliant request
+
+    Valid data should have been accepted
+    Expected: 2xx, 3xx, 401, 403, 404, 409, 429, 5xx
+
+[400] Bad Request:
+
+    `{ "status": "fail", "message": "'username' is a required property"}`
+
+Reproduce with:
+
+    curl -X POST -H 'Content-Type: application/json' -d '{}' http://vampi-vuln:5000/users/v1/register</failure>
+    </testcase>
+    <testcase name="GET /" time="0.048970" />
+    <testcase name="GET /books/v1" time="0.027309" />
+    <testcase name="GET /me" time="0.063184">
+      <failure type="failure">1. Test Case ID: OCELpl
+
+- Undocumented Content-Type
+
+    Received: application/problem+json
+    Documented: application/json
+
+[401] Unauthorized:
+
+    `{
+      "detail": "No authorization token provided",
+      "status": 401,
+      "title": "Unauthorized",
+      "type": "about:blank"
+    }`
+
+Reproduce with:
+
+    curl -X GET http://vampi-vuln:5000/me</failure>
+    </testcase>
+    <testcase name="GET /users/v1" time="0.052014" />
+    <testcase name="GET /users/v1/_debug" time="0.039094">
+      <failure type="failure">1. Test Case ID: GBhjPM
+
+- Invalid Allow header
+
+    `Allow: GET, DELETE, HEAD, OPTIONS` does not match the schema. Undocumented methods advertised: DELETE
+
+    List exactly the methods this resource supports in `Allow`
+
+[200] OK:
+
+    &lt;EMPTY&gt;
+
+Reproduce with:
+
+    curl -X OPTIONS http://vampi-vuln:5000/users/v1/_debug</failure>
+    </testcase>
+    <testcase name="GET /books/v1/{book_title}" time="0.049771">
+      <failure type="failure">1. Test Case ID: B4kFc0
+
+- Response violates schema
+
+    {"book_title":"book99","owner":"name1","secret":"pass1secret"} is not of type "array"
+
+    Validated against the response schema for status code 200.
+
+    Schema:
+
+        {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "book_title": {
+                        "type": "string",
+                        "example": "bookTitle77"
+                    },
+                    "owner": {
+                        "type": "string",
+                        "example": "name1"
+                    },
+                    "secret": {
+                        "type": "string",
+                        "example": "secret for bookTitle77"
+                    }
+                }
+            }
+        }
+
+    Value:
+
+        {
+            "book_title": "book99",
+            "owner": "name1",
+            "secret": "pass1secret"
+        }
+
+[200] OK:
+
+    `{"book_title": "book99", "owner": "name1", "secret": "pass1secret"}`
+
+Reproduce with:
+
+    curl -X GET -H 'Authorization: [Filtered]' http://vampi-vuln:5000/books/v1/book99</failure>
+      <failure type="failure">1. Test Case ID: hYpKoz
+
+- Undocumented Content-Type
+
+    Received: application/problem+json
+    Documented: application/json
+
+[401] Unauthorized:
+
+    `{
+      "detail": "No authorization token provided",
+      "status": 401,
+      "title": "Unauthorized",
+      "type": "about:blank"
+    }`
+
+Reproduce with:
+
+    curl -X GET http://vampi-vuln:5000/books/v1/book99</failure>
+    </testcase>
+    <testcase name="GET /users/v1/{username}" time="0.083094" />
+    <testcase name="PUT /users/v1/{username}/email" time="0.064126">
+      <failure type="failure">1. Test Case ID: gM0FvY
+
+- Undocumented Content-Type
+
+    Received: application/problem+json
+    Documented: application/json
+
+[401] Unauthorized:
+
+    `{
+      "detail": "No authorization token provided",
+      "status": 401,
+      "title": "Unauthorized",
+      "type": "about:blank"
+    }`
+
+Reproduce with:
+
+    curl -X PUT -H 'Content-Type: application/json' -d '{"email": "mail3@mail.com"}' http://vampi-vuln:5000/users/v1/name1/email</failure>
+      <failure type="failure">1. Test Case ID: ebP4Hh
+
+- API rejected schema-compliant request
+
+    Valid data should have been accepted
+    Expected: 2xx, 3xx, 401, 403, 404, 409, 429, 5xx
+
+[400] Bad Request:
+
+    `{ "status": "fail", "message": "Please provide a proper JSON body."}`
+
+Reproduce with:
+
+    curl -X PUT -H 'Authorization: [Filtered]' -H 'Content-Type: application/json' -d '{}' http://vampi-vuln:5000/users/v1/name1/email</failure>
+    </testcase>
+    <testcase name="PUT /users/v1/{username}/password" time="0.054208">
+      <failure type="failure">1. Test Case ID: d4j1i0
+
+- Undocumented Content-Type
+
+    Received: application/problem+json
+    Documented: application/json
+
+[401] Unauthorized:
+
+    `{
+      "detail": "No authorization token provided",
+      "status": 401,
+      "title": "Unauthorized",
+      "type": "about:blank"
+    }`
+
+Reproduce with:
+
+    curl -X PUT -H 'Content-Type: application/json' -d '{"password": "[Filtered]"}' http://vampi-vuln:5000/users/v1/name1/password</failure>
+      <failure type="failure">1. Test Case ID: GMY78U
+
+- API rejected schema-compliant request
+
+    Valid data should have been accepted
+    Expected: 2xx, 3xx, 401, 403, 404, 409, 429, 5xx
+
+[400] Bad Request:
+
+    `{ "status": "fail", "message": "Malformed Data"}`
+
+Reproduce with:
+
+    curl -X PUT -H 'Authorization: [Filtered]' -H 'Content-Type: application/json' -d '{}' http://vampi-vuln:5000/users/v1/name2/password</failure>
+    </testcase>
+    <testcase name="Stateful tests" time="0.337598" />
+  </testsuite>
+</testsuites>

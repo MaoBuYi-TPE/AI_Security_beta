@@ -35,8 +35,16 @@
 | S29 | [Docker — Volumes](https://docs.docker.com/engine/storage/volumes/) | `--mount` 的 `volume-subpath`：只掛載 volume 的子目錄 |
 | S30 | [全國法規資料庫 — 中華民國刑法](https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=C0000001) | 第三十六章妨害電腦使用罪（§358–363）；查核時頁面顯示最新修正日期為民國 115 年 07 月 22 日 |
 | S31 | [Celery — Using Redis](https://docs.celeryq.dev/en/stable/getting-started/backends-and-brokers/redis.html) | 未在 visibility timeout（Redis 預設 1 小時）內確認的工作，會重送給其他 worker 執行（`DECISIONS.md` §3 的理由） |
+| S32 | [Docker — Packet filtering and firewalls / port publishing](https://docs.docker.com/engine/network/port-publishing/) | `internal` 網路仍配 gateway 位址、容器可連宿主該位址；`gateway_mode_ipv4=isolated`（需搭配 `--internal`）不配 gateway（T03 §3 驗證） |
+| S33 | [OrbStack — Container networking](https://docs.orbstack.dev/docker/network) | macOS 可直接連容器 IP、`*.orb.local`、`host.docker.internal`；IPv6 預設關閉（T03 以 isolated 網路驗證隔離行為） |
+| S34 | [mitmproxy — proxyauth / htpasswd 原始碼](https://github.com/mitmproxy/mitmproxy/blob/v12.2.3/mitmproxy/utils/htpasswd.py) | `proxyauth=@file` 只接受 bcrypt 與 `{SHA}`；驗證後把 (user, password) 存入 `flow.metadata["proxyauth"]` 並移除 `Proxy-Authorization` |
+| S35 | [ZAP network add-on ConnectionOptions](https://github.com/zaproxy/zap-extensions/blob/main/addOns/network/src/main/java/org/zaproxy/addon/network/ConnectionOptions.java) | upstream proxy 設定鍵 `network.connection.httpProxy.{enabled,host,port,authEnabled,username,password}` |
+| S36 | [Nuclei authprovider file.go](https://github.com/projectdiscovery/nuclei/blob/v3.11.1/pkg/authprovider/file.go) | `-sf` 的 `domains` 以不分大小寫完全比對 host:port（只去 :80/:443）；`domains-regex` 未錨定 |
 
 ## 需要在 M0–M2 實際確認的事項
+
+> T03（2026-10-17）已完成以下 1–6 針對三個引擎與 egress 的 M0 部分，結果與證據見 `TOOLS.md`。第 7 項（docker-socket-proxy 的最小開關組合）屬 runner 範疇，T03 未做，留待 M2／T10。DNS/IP 綁定、redirect 重檢、HTTPS CA 等也留待 M2。
+
 
 1. 三個引擎的映像版本、digest、arm64 支援與授權條款。
 2. ZAP：

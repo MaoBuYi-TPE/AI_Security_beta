@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "note": "T03 spike 真實工具輸出。raw_sha256 對應本機 runs/spike-t03（未進 git）。masking 由 spikes/t03/mask_fixture.py 產生；多數工具已自行遮罩 Authorization（Nuclei ***、Schemathesis [Filtered]）。",
+  "lab": {
+    "juice_shop": "bkimminich/juice-shop:v20.3.0@sha256:cea5a4af4aacee498c491491af0408934ec81d004035c0a02ef3e54395e3bf27",
+    "vampi": "erev0s/vampi:latest@sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12（上游無版本 tag，以 digest 鎖定）",
+    "proxy": "mitmproxy/mitmproxy:12.2.3@sha256:00b77b5d8804c8ad18cb6caefbf9d5849e895e8986c5ce011f4ae30f4385962f"
+  },
+  "inputs": {
+    "vampi_openapi3.yml_sha256": "35200f354f9c9968182fc19458295ed45bb4c368150348c46d5146a7e40a61c9"
+  },
+  "nuclei_templates": {
+    "release": "v10.5.0",
+    "commit": "f8b8b8dcd70d93826c3767e1829ef8243af9f03b",
+    "archive_sha256": "80fbabceca095fac40afecc7f023748df22b9576b9ff10a4422bd2fbf81f9a41"
+  },
+  "fixtures": [
+    {
+      "path": "zap/zap-juice-shop.json",
+      "tool": "zap",
+      "tool_version": "2.17.0",
+      "image_digest": "sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+      "target": "juice-shop",
+      "run_id": "Z1",
+      "recorded_utc": "2026-10-17",
+      "sha256": "9b69f34e1c773fc75e46a6e0ac1b4c854b81479e3d75d284881ff5180d2f4509",
+      "raw_sha256": "9b69f34e1c773fc75e46a6e0ac1b4c854b81479e3d75d284881ff5180d2f4509",
+      "redactions": 0,
+      "masking": "工具自身已遮罩（本次無額外替換）"
+    },
+    {
+      "path": "zap/zap-vampi-vuln.json",
+      "tool": "zap",
+      "tool_version": "2.17.0",
+      "image_digest": "sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+      "target": "vampi-vuln",
+      "run_id": "Z2",
+      "recorded_utc": "2026-10-17",
+      "sha256": "1cbd2326fbd56d0896ad35ac26343ddc2e51f204a33f66714b82c641f4206086",
+      "raw_sha256": "1cbd2326fbd56d0896ad35ac26343ddc2e51f204a33f66714b82c641f4206086",
+      "redactions": 0,
+      "masking": "工具自身已遮罩（本次無額外替換）"
+    },
+    {
+      "path": "nuclei/nuclei-juice-shop.jsonl",
+      "tool": "nuclei",
+      "tool_version": "v3.11.1",
+      "image_digest": "sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb",
+      "target": "juice-shop",
+      "run_id": "N1",
+      "recorded_utc": "2026-10-17",
+      "sha256": "857dc518c0f35eaa15641eb1e5dfb5952c46e7eeeb76c68d203264a9f6960644",
+      "raw_sha256": "857dc518c0f35eaa15641eb1e5dfb5952c46e7eeeb76c68d203264a9f6960644",
+      "redactions": 0,
+      "masking": "工具自身已遮罩（本次無額外替換）"
+    },
+    {
+      "path": "nuclei/nuclei-vampi-vuln.jsonl",
+      "tool": "nuclei",
+      "tool_version": "v3.11.1",
+      "image_digest": "sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb",
+      "target": "vampi-vuln",
+      "run_id": "N2",
+      "recorded_utc": "2026-10-17",
+      "sha256": "2f51052e8bc54d714a027ccc7736589768ce5d108e41488b49e802a2d101725f",
+      "raw_sha256": "af2bd6d9c1edb6347f2fd5ff4748851a80e289388d9a94463d49018c5cdc42e1",
+      "redactions": 2,
+      "masking": "JWT／lab token／proxy 帳密／Werkzeug SECRET → REDACTED_*（2 處）"
+    },
+    {
+      "path": "schemathesis/schemathesis-vampi-vuln.json",
+      "tool": "schemathesis",
+      "tool_version": "4.31.1",
+      "image_digest": "sha256:e6d34d7defc8c8a5c7a684255648a43b169cfe0c1e51b2bae7c68c310f3b0ab7",
+      "target": "vampi-vuln",
+      "run_id": "S1-compact",
+      "recorded_utc": "2026-10-17",
+      "sha256": "1da899b8f5a9f958676fe40c3a1371f96c376a8fea0c104313249443a77ae451",
+      "raw_sha256": "1da899b8f5a9f958676fe40c3a1371f96c376a8fea0c104313249443a77ae451",
+      "redactions": 0,
+      "masking": "工具自身已遮罩（本次無額外替換）"
+    },
+    {
+      "path": "schemathesis/schemathesis-vampi-vuln.ndjson",
+      "tool": "schemathesis",
+      "tool_version": "4.31.1",
+      "image_digest": "sha256:e6d34d7defc8c8a5c7a684255648a43b169cfe0c1e51b2bae7c68c310f3b0ab7",
+      "target": "vampi-vuln",
+      "run_id": "S1-compact",
+      "recorded_utc": "2026-10-17",
+      "sha256": "8378c17f91fe55ec1f486d4f1a13f9b7be125ad148e9dd389fd61a17a5e23137",
+      "raw_sha256": "ec58a34fca64fcd225dee9dfae751d7a88dd12c7e9b2ef59317c0fd289ef0a99",
+      "redactions": 0,
+      "masking": "工具自身已遮罩（本次無額外替換）"
+    },
+    {
+      "path": "schemathesis/schemathesis-vampi-vuln.junit.xml",
+      "tool": "schemathesis",
+      "tool_version": "4.31.1",
+      "image_digest": "sha256:e6d34d7defc8c8a5c7a684255648a43b169cfe0c1e51b2bae7c68c310f3b0ab7",
+      "target": "vampi-vuln",
+      "run_id": "S1-compact",
+      "recorded_utc": "2026-10-17",
+      "sha256": "69a2497e143a30d02e2a855f9891a6b977f696c3f22ac0e932708a21de5d2115",
+      "raw_sha256": "69a2497e143a30d02e2a855f9891a6b977f696c3f22ac0e932708a21de5d2115",
+      "redactions": 0,
+      "masking": "工具自身已遮罩（本次無額外替換）"
+    }
+  ]
+}

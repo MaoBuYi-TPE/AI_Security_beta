@@ -1,0 +1,30 @@
+# ZAP Automation Framework plan — Z2：VAmPI vulnerable（API profile，Bearer 認證）。
+# 認證以 ZAP_AUTH_HEADER* 環境變數在容器啟動時注入（不寫進 plan）。
+# spike 只做 openapi 匯入 + passive；active scan 留給 M3（耗時且需調預算）。
+env:
+  contexts:
+    - name: vampi
+      urls:
+        - http://vampi-vuln:5000
+      includePaths:
+        - "http://vampi-vuln:5000.*"
+      excludePaths:
+        - "http://vampi-vuln:5000/createdb"
+  parameters:
+    failOnError: false
+    failOnWarning: false
+    progressToStdout: true
+jobs:
+  - type: openapi
+    parameters:
+      apiFile: /zap/wrk/in/vampi-openapi3.yml
+      targetUrl: http://vampi-vuln:5000
+      context: vampi
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 5
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: /zap/wrk/out
+      reportFile: zap-vampi-vuln.json

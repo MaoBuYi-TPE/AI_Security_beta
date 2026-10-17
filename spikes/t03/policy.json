@@ -1,0 +1,12 @@
+{
+  "_comment": "T03 spike guard allowlist（非 M2 policy）。account 來自 proxy 帳號。",
+  "allow": {
+    "probe": ["vampi-vuln:5000", "vampi-secure:5000", "juice-shop:3000", "canary:8000"],
+    "zap": ["vampi-vuln:5000", "vampi-secure:5000", "juice-shop:3000"],
+    "nuclei": ["vampi-vuln:5000", "vampi-secure:5000", "juice-shop:3000"],
+    "schemathesis": ["vampi-vuln:5000", "vampi-secure:5000"]
+  },
+  "scanner_accounts": ["zap", "nuclei", "schemathesis"],
+  "deny_methods_for_scanners": ["DELETE"],
+  "deny_path_substrings_for_scanners": ["/createdb"]
+}

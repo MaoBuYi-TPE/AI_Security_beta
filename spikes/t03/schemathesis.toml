@@ -1,0 +1,24 @@
+# T03 spike 用的 Schemathesis 設定。proxy 與 Bearer 以環境變數帶入，不寫死秘密。
+# 執行：st --config-file schemathesis.toml run <spec> --url http://vampi-vuln:5000
+proxy = "${ST_PROXY}"
+
+# 掃描預算刻意壓小（spike 只為取得真實輸出樣本與量測）。
+request-timeout = 10.0
+workers = 1
+seed = 1337
+
+[generation]
+max-examples = 15
+
+# bearerAuth 對應 VAmPI 規格的 securityScheme 名稱。
+[auth.openapi.bearerAuth]
+bearer = "${ST_TOKEN}"
+
+# 不測破壞性 operation。
+[[operations]]
+include-path-regex = "/createdb"
+enabled = false
+
+[[operations]]
+include-method = "DELETE"
+enabled = false
