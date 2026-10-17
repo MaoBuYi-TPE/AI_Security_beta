@@ -39,9 +39,26 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 ## 使用方式
 
-先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 從 M0 開始。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
+先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-本儲存庫目前沒有 `src/`、Docker Compose、migration 或已安裝的掃描器。文件中的指令與 API 都是**待實作的契約**；不能把寫好的文件、Mock 測試或示意資料當成真實掃描成功的證明。
+目前只完成 M0 的最小骨架（T02）：一個只有 `GET /health/live` 的 FastAPI 應用，以及測試、lint、型別檢查命令。還沒有 Docker Compose、資料庫、migration 或已安裝的掃描器。其他文件中的指令與 API 仍是**待實作的契約**；不能把寫好的文件、Mock 測試或示意資料當成真實掃描成功的證明。
+
+### 開發環境
+
+需要 Homebrew 與 uv；專案固定使用 Python 3.12（見 `.python-version`）。
+
+```bash
+brew install uv   # 依賴管理工具
+make bootstrap    # 依 uv.lock 安裝依賴，並啟用 pre-commit hook
+make test         # 離線測試（封鎖 TCP/UDP 與 DNS）與 coverage 門檻 80%
+make lint         # ruff 與 import-linter
+make typecheck    # mypy strict
+make dev          # 只綁 127.0.0.1:8000；/docs 只在 dev 開啟
+```
+
+`make dev` 啟動後，`curl http://127.0.0.1:8000/health/live` 會回傳 `{"success": true, "data": {"status": "ok"}, "error": null, "meta": null}`。
+
+TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.py`，這樣不會檢查 coverage 門檻；提交前仍以 `make test` 為準。
 
 ## 範圍界線
 

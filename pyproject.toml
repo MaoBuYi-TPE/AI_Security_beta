@@ -1,0 +1,92 @@
+[project]
+name = "secscan"
+version = "0.1.0"
+description = "Web/API 多引擎動態安全檢測後端（畢業專題）"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.143.3",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.0",
+    "uvicorn>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "import-linter>=2.15",
+    "mypy>=2.4.0",
+    "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-socket>=0.8.1",
+    "ruff>=0.17.1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.format]
+# 文件中的 Python 區塊是示意用的概念介面（例如 ARCHITECTURE.md §4），不交給 formatter 改寫。
+exclude = ["*.md"]
+
+[tool.ruff.lint]
+# S：安全規則（flake8-bandit）；BLE：禁止 except Exception；T20：禁止 print。
+select = ["E", "W", "F", "I", "N", "UP", "B", "S", "BLE", "T20", "SIM", "PT", "C4", "RUF"]
+# 中文註解與文件字串使用的全形標點。
+allowed-confusables = ["，", "：", "；", "（", "）", "！", "？"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# unit/contract 測試不得出網：pytest-socket 封鎖 TCP/UDP 與 DNS 查詢。
+# AF_UNIX 必須整個放行（asyncio 需要 socketpair），所以本機 Unix socket 的 connect 不受限制；
+# M2 出現 Docker SDK 前要補上守衛（見 docs/TASKS.md T10）。
+# coverage 門檻放在 make test；單獨執行某個測試檔時不會因門檻而失敗。
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--disable-socket",
+    "--allow-unix-socket",
+]
+xfail_strict = true
+
+[tool.coverage.run]
+branch = true
+source = ["secscan"]
+
+[tool.importlinter]
+root_package = "secscan"
+
+# 依賴方向：main 組裝功能模組，功能模組使用 core；core 不得依賴功能模組或 main。
+# exhaustive：secscan 底下每個頂層模組都必須列在 layers，新模組不會默默繞過檢查；
+# 同一層的功能模組以 "a | b" 並列（彼此獨立）。
+# domain、runner 與 Docker 的限制在 M1/M2 建立對應模組時再加入。
+[[tool.importlinter.contracts]]
+name = "Layers: main -> features -> core"
+type = "layers"
+containers = ["secscan"]
+exhaustive = true
+layers = [
+    "main",
+    "health",
+    "core",
+]
