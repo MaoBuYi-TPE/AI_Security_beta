@@ -11,3 +11,11 @@ class LiveStatus(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     status: Literal["ok"]
+
+
+class ReadyStatus(BaseModel):
+    """可以接受請求；不回傳 DB 主機、版本等細節。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["ready"]
