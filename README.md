@@ -42,24 +42,52 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成到 M0 的 T02、T03：一個只有 `GET /health/live` 的 FastAPI 應用與品質命令（T02），以及隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。還沒有資料庫、migration、runner 或正式的 Adapter／egress guard（M1 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
+目前完成到 M1 的 T04：
+- **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
+- **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
+
+還沒有業務 API（`/api/v1`，T05 起）、runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
 ### 開發環境
 
-需要 Homebrew 與 uv；專案固定使用 Python 3.12（見 `.python-version`）。
+需要 Homebrew、uv 與 OrbStack；專案固定使用 Python 3.12（見 `.python-version`）。
 
 ```bash
 brew install uv   # 依賴管理工具
 make bootstrap    # 依 uv.lock 安裝依賴，並啟用 pre-commit hook
-make test         # 離線測試（封鎖 TCP/UDP 與 DNS）與 coverage 門檻 80%
+orb start         # 啟動 OrbStack（PostgreSQL 與 lab 都跑在容器裡）
+make db-up        # 啟動開發用 PostgreSQL（第一次會自動產生 .env 裡的本機密碼）
+make migrate      # 把開發資料庫升級到最新 schema，最後印出目前版本
+make test         # 先啟動 db-test，再跑 unit/contract/integration 測試與 coverage 門檻 80%
 make lint         # ruff 與 import-linter
 make typecheck    # mypy strict
 make dev          # 只綁 127.0.0.1:8000；/docs 只在 dev 開啟
 ```
 
-`make dev` 啟動後，`curl http://127.0.0.1:8000/health/live` 會回傳 `{"success": true, "data": {"status": "ok"}, "error": null, "meta": null}`。
+`make dev` 啟動後：
 
-TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.py`，這樣不會檢查 coverage 門檻；提交前仍以 `make test` 為準。
+- `curl http://127.0.0.1:8000/health/live` 回傳 `{"success": true, "data": {"status": "ok"}, "error": null, "meta": null}`。
+- `curl http://127.0.0.1:8000/health/ready` 在 DB 可連線且已 migrate 時回 200；否則回 503（`DEPENDENCY_UNAVAILABLE`）。
+
+TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.py`，這樣不會檢查 coverage 門檻；提交前仍以 `make test` 為準。不需要 DB 的測試可用 `uv run pytest -m "not integration"`。
+
+#### PostgreSQL（T04）
+
+`compose.yaml` 有兩個只綁 127.0.0.1 的 PostgreSQL 18：
+
+| 服務 | port | 用途 | 資料 |
+|---|---|---|---|
+| `db` | 55432 | 開發（`make dev`、`make migrate`） | 保存在 volume `secscan_db_data` |
+| `db-test` | 55433 | 整合測試 | tmpfs，停掉就清空 |
+
+- **密碼**：都在 `.env`（權限 600，不進 git）。`make env` 只會補上缺少的隨機值，不會覆寫既有的值；`db-up`、`test-db-up`、`test` 會自動呼叫它。
+- **連線角色**：應用程式與 migration 用非 superuser 的 `secscan_app`。superuser 只給容器初始化與手動維運。
+- **整合測試**：每次 session 都在 db-test 建立專屬角色與全新資料庫，結束時刪除。只接受 `cluster_name=secscan-test` 的伺服器，不會碰到開發資料庫。
+- **停止**：`make db-down` 停止兩者，但保留開發資料。
+- **不要分享的輸出**：`docker-compose config` 與 `docker inspect` 會顯示 `.env` 裡的明文密碼，不要貼到 issue、報告或聊天中。pre-commit 會擋下 `.env` 檔（即使用 `git add -f`）。
+- **改了 `.env` 的 `DB_PASSWORD` 之後**：要讓新密碼生效，得重建開發資料庫。這會**刪除所有開發資料**：`make db-down && docker volume rm secscan_db_data && make db-up && make migrate`。
+
+新增 schema 變更時：先寫會失敗的測試，再改 model，最後產生 migration。例如：`uv run alembic revision --autogenerate --rev-id 0002 -m "<說明>"`。產生後補上升降級說明並檢查內容；`tests/integration/test_migrations.py` 會檢查 model 與 migration 沒有漂移。
 
 #### 隔離 lab 靶場（T03）
 

@@ -60,8 +60,87 @@
 
 前置：T01–T02。
 
-- [ ] T04 建立 DB Model、Alembic、Repository 與設定。
+- [x] T04 建立 DB Model、Alembic、Repository 與設定。
   - DoD：全新 DB 可完成 migration；FK、unique、index 都有測試；測試資料與正式配置分離。
+  - 交付（2026-10-18，done）：
+    - 範圍：資料層基礎，以及第一批資料表 projects、api_keys、audit_events（T05 的 key 與稽核要用）。其餘資料表由 T06–T09 各自以 migration 與測試加入，不預先建立還沒有功能測試驅動的欄位（`ARCHITECTURE.md` §6.2）。
+    - 檔案：
+      - 環境：`compose.yaml`（`db`、`db-test`）、`deploy/postgres/initdb/10-app-role.sql`、`Makefile`（`env`、`db-up`、`test-db-up`、`db-down`、`migrate`；`make test` 會先啟動 db-test）、`.env.example`、`pyproject.toml`（`[tool.alembic]`、import-linter、coverage）、`.pre-commit-config.yaml`（擋下 `.env`）
+      - 程式：`src/secscan/core/`（`config`、`db`、`errors`、`request_id`、`pagination`、`text`、`json_types`）、`src/secscan/{projects,api_keys,audit}/`（`domain`、`models`、`repository`）、`src/secscan/migrations/`（`env.py`、`metadata.py`、`versions/v0001_identity_and_audit.py`）、`/health/ready`
+      - 測試：`tests/integration/`、`tests/unit/`、`tests/api/test_errors.py`
+    - 依賴（uv 實際解析）：sqlalchemy 2.1.5、alembic 1.20.0、psycopg[binary] 3.3.6。PostgreSQL 映像為 `postgres:18.6-trixie@sha256:74935e72…`（arm64；19 仍是 RC，不採用）。
+    - DoD 對照：
+      - **全新 DB 可完成 migration**：每個測試 session 都在 db-test 建立全新資料庫並 upgrade head。另外測了：downgrade base 後再 upgrade、model 與 migration 無漂移（autogenerate 比較結果為空）、離線 `--sql` 不需連線與密碼、`env.py` 依 `DB_*` 連線（`make migrate` 的路徑）。
+      - **FK、unique、index**：直接用 SQL 觸發每個約束，驗證 SQLSTATE 與約束名稱：FK 3 個、unique 3 個、CHECK 11 個，以及刪除被引用的 project（RESTRICT）與 NOT NULL。另有通用測試比對「model 宣告的 CHECK」與「DB 實際的 CHECK」，因為 autogenerate 看不到 CHECK。索引以 `pg_indexes` 確認；audit_events 的 UPDATE、DELETE、TRUNCATE 都被 trigger 拒絕。
+      - **測試資料與正式配置分離**：
+        - 整合測試只讀 `TEST_DB_*`，只接受 loopback 位址上 `cluster_name=secscan-test` 的伺服器。
+        - 每個 session 以專屬的非 superuser 角色和全新資料庫執行，結束時刪除。角色時區刻意設成 Asia/Taipei，用來驗證應用程式自己固定成 UTC。
+        - 測試不讀 `.env`、會清除 `DB_*`；非整合測試連 DB 會直接失敗（psycopg 走 libpq，pytest-socket 擋不到）。
+        - prod 缺少 `DB_PASSWORD` 時，啟動就失敗。
+        - 決策理由見 `DECISIONS.md` §7：以 compose 管理的 db-test 取代 testcontainers，測試程序不碰 Docker daemon。
+    - 一併補上 T02 延後的項目：
+      - `GET /health/ready`：DB 可連線且 schema 在目前版本才回 200，否則回 503 `DEPENDENCY_UNAVAILABLE`。不洩漏主機或帳號；失敗原因（例外類別、SQLSTATE）記在伺服器端。
+      - 統一錯誤處理：AppError、404、405、422、500 都回 envelope，並帶伺服器產生的 request_id（`X-Request-ID`，不採用 client 送來的值）。
+        - 422 只列欄位位置，不回顯輸入。
+        - 500 回通用訊息，只記 request_id 與例外類別（`API_CONTRACT.md` §12）。
+    - 其他設計：
+      - 時間欄位用 `UtcDateTime`，拒絕沒有時區的 datetime。
+      - engine 設 `hide_parameters`；約束錯誤不接上含資料值的原始例外。
+      - domain 的 `New*` 物件先驗證長度、空白與 NUL；分頁頁碼上限 10,000。
+      - 功能模組依呼叫關係分層（`DECISIONS.md` §8）；`main` 載入完整的 model 登記。
+    - 實際執行：
+      - 先寫測試並確認失敗。第一輪：`ModuleNotFoundError`、設定測試 14 failed、`/health/ready` 回 404。審查修正那一輪：7 failed，包括 registry、loopback、時區、readiness log。實作後才通過。
+      - model 與 migration 是依 `ARCHITECTURE.md` §6 先寫的，所以另做突變檢查，每一項都會讓測試失敗：
+        - 拿掉 row trigger
+        - model 少一個 index
+        - 拿掉 `NewApiKey` 驗證
+        - migration 少一個 CHECK
+        - `main` 沒載入 model 登記
+        - engine 沒有 `hide_parameters`
+        - 專案排序改成反向
+      - `make test` 260 passed、coverage 100%（含分支；改以路徑量測後，`env.py` 與 migration 檔也納入）。`make lint`、`make typecheck`、`pre-commit run --all-files` 都通過。
+      - `make migrate` 把開發 DB 升級到 `0001 (head)`；`make dev` 後 `/health/ready` 回 200。db-test 在測試後沒有殘留的角色或資料庫。
+    - 安全檢查（實測）：
+      - db 與 db-test 只綁 127.0.0.1，從區網 IP 連線被拒。
+      - 容器以非 root（999）、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges` 執行，並有記憶體與 pids 上限。
+      - 容器內的本機連線也要 SCRAM 密碼，沒有 trust。
+      - 應用程式角色 `secscan_app` 不是 superuser，`COPY ... PROGRAM` 被拒，也連不進 `postgres` 維運資料庫。
+      - 秘密只存在 `.env`（權限 600，`make env` 產生 192-bit 隨機值，並檢查 openssl 確實有輸出）與容器環境變數。不在 argv、git，也不在容器日誌（實測 0 筆）。init SQL 建立角色時，失敗也不會把密碼寫進日誌。
+    - 審查（依 CLAUDE.md §12 與全域規則，T04 結束時執行）：
+      - code-reviewer：REQUEST CHANGES（0 CRITICAL、1 HIGH、5 MEDIUM、7 LOW）。
+        - HIGH 與 MEDIUM 已全部修正：入口未載入 model 登記、功能分層、統一錯誤 envelope、naive datetime、5 個 CHECK 沒有測試、readiness 吞錯。
+        - LOW 已修 5 項：排序與 UTC 測試沒有鑑別力、測試隔離、DataError 與頁碼、domain 檢查範圍。
+        - LOW 的 `.env` 拆分列入 M2；基礎設施提醒寫在下方「給後續任務」。
+      - security-reviewer：APPROVE（0 CRITICAL、0 HIGH）。
+        - MEDIUM 已修：SQL 參數進入例外、unit 測試可連 DB。
+        - MEDIUM 的 DDL/DML 角色分離列入 M2/T23（`DECISIONS.md` §7）。
+        - LOW 已修：init 日誌含密碼、容器內 trust、readiness log、500 沒有 request_id、`make env` 未檢查 openssl、守衛沒有測試、pre-commit 擋 `.env`、trigger 函式的 search_path。
+        - LOW 的連線逾時與 sslmode 列入 T09／M2。
+      - 修正後重新執行全部測試與突變檢查（見上方「實際執行」）。
+    - 限制：
+      - 資料庫擁有者仍可停用 audit trigger，目前只能稱「防誤改」。
+      - 開發 db 的密碼只在第一次初始化時寫入。
+      - `make test` 需要 OrbStack。
+      - superuser 與應用程式密碼同在 `.env`。
+      - 尚未設定 `statement_timeout`、`sslmode`。
+    - 給後續任務：
+      - **T05**：
+        - key 至少 128-bit CSPRNG，以 SHA-256 或 HMAC＋pepper 雜湊，用 `hmac.compare_digest` 比對；完整值只顯示一次；「不存在」與「錯誤」回同樣的回應。
+        - 對外 schema 不帶 `key_hash`。
+        - `ConstraintViolationError` 要對應成穩定錯誤碼，不回傳約束名稱。
+        - 補「A 專案讀不到 B 專案」的 404 測試；`redacted_changes` 要先遮罩並限制大小。
+        - 建立正式的 request-scoped session（commit／rollback）。重試類邏輯用 `begin_nested()`。
+        - 初始管理 key 的 CLI 也必須 import model 登記。
+      - **T09**：
+        - 目前的 `db_session` fixture（單一連線、外層交易）測不了 SKIP LOCKED 與併發，需要每個測試一個資料庫，或用 template DB。
+        - `created_at` 是交易開始時間，佇列順序要用序號欄位。
+        - 補上 statement 與 idle-in-transaction 的逾時。
+      - **M2／T23**：
+        - DDL/DML 角色分離。
+        - 秘密改用 compose `secrets:` 與 `POSTGRES_PASSWORD_FILE`，並拆開基礎設施與應用程式的秘密。
+        - DB 只接 internal 的 control_net，加 `sslmode`。
+        - 正式映像評估 `psycopg[c]`。
+        - 已確認 `uv build` 的 wheel 包含 `migrations/`（`env.py`、樣板與 `versions/`）。
 - [ ] T05 建立 API key、project 與 object-level 權限。
   - DoD：
     - key 高熵且只存 hash，支援過期與撤銷。

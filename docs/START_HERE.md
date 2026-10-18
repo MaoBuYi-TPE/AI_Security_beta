@@ -82,18 +82,21 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
 | make bootstrap | M0 | 安裝已鎖定的開發依賴；第一次要真正產生 lock |
 | make dev | M0 | 啟動 API 開發程序，只綁 127.0.0.1 |
-| make test | M0 | 執行離線的 unit/integration 測試與 coverage 門檻，不做 live scan |
+| make test | M0（T04 起會先啟動 db-test） | 執行 unit/contract/integration 測試與 coverage 門檻，不做 live scan。測試程序不連網、不碰 Docker；需要 OrbStack 執行 db-test |
 | make lint | M0 | ruff lint/format check、import-linter |
 | make typecheck | M0 | mypy |
 | make lab-up | M0（T03 已建立） | 以 compose profile 啟動 lab 靶機（只接 internal network，不發布 port） |
 | make lab-down | M0（T03 已建立） | 停止並移除 lab（先停 spike 再執行） |
-| make migrate | M1 | 執行 Alembic upgrade；不含破壞性重置 |
+| make env | M1（T04 已建立） | 建立或補齊 `.env`（權限 600）中缺少的本機 DB 密碼（隨機值），不覆寫既有的值 |
+| make db-up／make db-down | M1（T04 已建立） | 啟動開發用 PostgreSQL（只綁 127.0.0.1:55432）／停止 db 與 db-test（保留開發資料） |
+| make test-db-up | M1（T04 已建立） | 啟動整合測試用 PostgreSQL（tmpfs，只綁 127.0.0.1:55433） |
+| make migrate | M1（T04 已建立） | 執行 Alembic upgrade head，並印出目前版本；不含破壞性重置 |
 | make test-contract | M1–M2 | 對固定 fixture 測 API/Parser 契約 |
 | make test-live-lab | M3 起 | 需要 `ENABLE_LIVE_LAB_TESTS=1`、LAB_ONLY、有效 grant，並通過隔離檢查才執行 |
 | make record-fixtures | M3 起 | 只在 lab 重新錄製工具輸出 fixture，並產生差異供人工審查 |

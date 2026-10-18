@@ -167,7 +167,7 @@ BOLA、權限越界與業務流程問題涉及「哪個身分可以存取哪個�
 | 啟動與隔離 | Docker 單次容器；runner 經 docker-socket-proxy 存取 Docker [S27] | 各掃描器環境分離；只有 runner 有 Docker API 權限 |
 | 出站控制 | mitmproxy addon（egress guard）[S18] + internal Docker networks | 不能只依賴掃描器自己守 scope |
 | 報告 | JSON + Markdown（P1 加 SARIF） | 易於 API/CI 使用，不做前端頁面 |
-| 測試 | pytest、Hypothesis、testcontainers、pytest-socket；分成 fixture/contract/integration/security/live 幾層 | Mock 與 live 分開，不混淆完成度 |
+| 測試 | pytest、Hypothesis、pytest-socket；整合測試用 compose 的 `db-test`（`DECISIONS.md` §7）；分成 fixture/contract/integration/security/live 幾層 | Mock 與 live 分開，不混淆完成度 |
 | 依賴固定 | uv.lock、映像 digest、模板 release/hash | 讓實驗與 Parser 版本可以追溯 |
 
 FastAPI 官方說明：較重、需要獨立程序執行的工作，應交給外部的工作佇列工具處理。[S10] 本專題把掃描交給獨立的 runner 程序，並以 PostgreSQL 資料列作為工作佇列；不採用 message broker 的理由見 `DECISIONS.md` §3。

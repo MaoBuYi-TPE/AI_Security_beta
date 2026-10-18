@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -40,6 +40,10 @@
 | S34 | [mitmproxy — proxyauth / htpasswd 原始碼](https://github.com/mitmproxy/mitmproxy/blob/v12.2.3/mitmproxy/utils/htpasswd.py) | `proxyauth=@file` 只接受 bcrypt 與 `{SHA}`；驗證後把 (user, password) 存入 `flow.metadata["proxyauth"]` 並移除 `Proxy-Authorization` |
 | S35 | [ZAP network add-on ConnectionOptions](https://github.com/zaproxy/zap-extensions/blob/main/addOns/network/src/main/java/org/zaproxy/addon/network/ConnectionOptions.java) | upstream proxy 設定鍵 `network.connection.httpProxy.{enabled,host,port,authEnabled,username,password}` |
 | S36 | [Nuclei authprovider file.go](https://github.com/projectdiscovery/nuclei/blob/v3.11.1/pkg/authprovider/file.go) | `-sf` 的 `domains` 以不分大小寫完全比對 host:port（只去 :80/:443）；`domains-regex` 未錨定 |
+| S37 | [Docker Hub — postgres（Docker Official Image）](https://hub.docker.com/_/postgres) | 18 版起 `PGDATA=/var/lib/postgresql/18/docker`、volume 掛在 `/var/lib/postgresql`；`/docker-entrypoint-initdb.d` 只在資料目錄為空時執行；`POSTGRES_USER` 是 superuser（T04 以 `docker image inspect` 與實際啟動確認） |
+| S38 | [Alembic — Tutorial（pyproject.toml 設定）](https://alembic.sqlalchemy.org/en/latest/tutorial.html) | 1.16 起可用 `[tool.alembic]`；`%(here)s` 與 `%%` 跳脫；post_write_hooks；離線 `--sql` 模式 |
+| S39 | [SQLAlchemy — Configuring Constraint Naming Conventions](https://docs.sqlalchemy.org/en/20/core/constraints.html#configuring-constraint-naming-conventions) | `MetaData(naming_convention=…)` 讓約束與索引名稱固定，autogenerate 可重現（T04 以實際 DDL 確認） |
+| S40 | [PostgreSQL — psql](https://www.postgresql.org/docs/current/app-psql.html) | `\getenv` 把環境變數讀進 psql 變數；`:'var'`、`:"var"` 以字串常值或識別字插入（T04 的初始化 SQL 用它避免把密碼放進命令列） |
 
 ## 需要在 M0–M2 實際確認的事項
 
