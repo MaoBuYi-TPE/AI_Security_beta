@@ -23,10 +23,11 @@ from secscan.core.errors import (
     ErrorCode,
     app_error_handler,
     http_exception_handler,
+    not_found_error,
     register_error_handlers,
     validation_error_handler,
 )
-from secscan.core.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
+from secscan.core.request_id import REQUEST_ID_HEADER, RequestIdMiddleware, current_request_id
 
 REQUEST_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SECRET_INPUT = "Bearer canary-secret-input-0001"
@@ -84,6 +85,23 @@ def _app(*, with_request_id: bool = True) -> FastAPI:
     def crash() -> None:
         raise RuntimeError(SECRET_EXCEPTION_DETAIL)
 
+    @app.get("/protected")
+    def protected() -> None:
+        raise AppError(
+            status_code=401,
+            code=ErrorCode.UNAUTHENTICATED,
+            message="需要驗證。",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @app.get("/things/{thing_id}")
+    def thing(thing_id: str) -> None:
+        raise not_found_error()
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, str | None]:
+        return {"request_id": current_request_id()}
+
     return app
 
 
@@ -127,6 +145,15 @@ def test_every_response_gets_a_distinct_server_generated_request_id() -> None:
     assert first != second
 
 
+def test_current_request_id_is_available_only_during_the_request() -> None:
+    """不經手 Request 物件的 service（sync 路由在 threadpool 執行），日誌也能帶 request_id。"""
+    with TestClient(_app()) as client:
+        response = client.get("/whoami")
+
+    assert response.json() == {"request_id": response.headers[REQUEST_ID_HEADER]}
+    assert current_request_id() is None
+
+
 def test_client_supplied_request_id_is_ignored() -> None:
     with TestClient(_app()) as client:
         response = client.get("/unavailable", headers={REQUEST_ID_HEADER: "attacker\r\nX: 1"})
@@ -150,6 +177,31 @@ def test_unknown_route_is_a_not_found_envelope() -> None:
     error = _error(response.json())
     assert (error["code"], error["message"]) == ("RESOURCE_NOT_FOUND", "找不到資源。")
     assert error["request_id"] == response.headers[REQUEST_ID_HEADER]
+
+
+def test_app_error_headers_are_sent_with_the_envelope() -> None:
+    """例如 401 的 WWW-Authenticate（RFC 6750）。"""
+    with TestClient(_app()) as client:
+        response = client.get("/protected")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert REQUEST_ID_PATTERN.match(response.headers[REQUEST_ID_HEADER])
+    assert _error(response.json())["code"] == "UNAUTHENTICATED"
+
+
+def test_object_level_not_found_is_identical_to_unknown_route() -> None:
+    """無權存取的物件要和不存在的路徑分不出來，才不會洩漏物件是否存在。"""
+    with TestClient(_app()) as client:
+        hidden = client.get("/things/someone-elses")
+        unknown = client.get("/nope")
+
+    assert hidden.status_code == unknown.status_code == 404
+    hidden_error, unknown_error = _error(hidden.json()), _error(unknown.json())
+    assert hidden_error["request_id"] != unknown_error["request_id"]
+    hidden_error.pop("request_id")
+    unknown_error.pop("request_id")
+    assert hidden_error == unknown_error
 
 
 def test_wrong_method_keeps_allow_header() -> None:

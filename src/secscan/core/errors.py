@@ -30,8 +30,12 @@ MAX_LOCATION_LENGTH = 64
 class ErrorCode(StrEnum):
     """對外的穩定錯誤碼；隨功能逐步加入（M1 起）。"""
 
+    UNAUTHENTICATED = "UNAUTHENTICATED"
+    API_KEY_EXPIRED = "API_KEY_EXPIRED"
+    ROLE_NOT_ALLOWED = "ROLE_NOT_ALLOWED"
     RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND"
     METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
+    PROJECT_NAME_CONFLICT = "PROJECT_NAME_CONFLICT"
     HTTP_ERROR = "HTTP_ERROR"
     INVALID_REQUEST = "INVALID_REQUEST"
     DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
@@ -39,19 +43,38 @@ class ErrorCode(StrEnum):
 
 
 class AppError(Exception):
-    """可預期的 API 錯誤：HTTP 狀態碼、穩定錯誤碼與給使用者看的訊息。"""
+    """可預期的 API 錯誤：HTTP 狀態碼、穩定錯誤碼、給使用者看的訊息，以及必要的回應 header。"""
 
-    def __init__(self, *, status_code: int, code: ErrorCode, message: str) -> None:
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        code: ErrorCode,
+        message: str,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.headers = dict(headers) if headers is not None else None
 
+
+NOT_FOUND_MESSAGE = "找不到資源。"
 
 _HTTP_ERRORS: dict[int, tuple[ErrorCode, str]] = {
-    HTTPStatus.NOT_FOUND: (ErrorCode.RESOURCE_NOT_FOUND, "找不到資源。"),
+    HTTPStatus.NOT_FOUND: (ErrorCode.RESOURCE_NOT_FOUND, NOT_FOUND_MESSAGE),
     HTTPStatus.METHOD_NOT_ALLOWED: (ErrorCode.METHOD_NOT_ALLOWED, "不支援這個 HTTP 方法。"),
 }
+
+
+def not_found_error() -> AppError:
+    """物件不存在或無權存取：回應與「路徑不存在」完全相同，不洩漏物件是否存在。"""
+    return AppError(
+        status_code=HTTPStatus.NOT_FOUND,
+        code=ErrorCode.RESOURCE_NOT_FOUND,
+        message=NOT_FOUND_MESSAGE,
+    )
 
 
 def failure_envelope(code: ErrorCode, message: str, request_id: str) -> Envelope[None]:
@@ -78,7 +101,7 @@ async def app_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """把 AppError 轉成失敗 envelope。只註冊給 AppError；收到其他例外時原樣拋出，不吞掉。"""
     if not isinstance(exc, AppError):
         raise exc
-    return _failure_response(request, exc.status_code, exc.code, exc.message)
+    return _failure_response(request, exc.status_code, exc.code, exc.message, headers=exc.headers)
 
 
 async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:

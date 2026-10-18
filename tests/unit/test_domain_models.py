@@ -18,13 +18,16 @@ from secscan.api_keys.domain import (
     Role,
 )
 from secscan.audit.domain import (
+    AUDIT_CHANGES_MAX_BYTES,
     AUDIT_LABEL_MAX_LENGTH,
     REQUEST_ID_MAX_LENGTH,
     AuditEvent,
     NewAuditEvent,
 )
+from secscan.core.json_types import JsonObject
 from secscan.core.text import require_text
 from secscan.projects.domain import PROJECT_NAME_MAX_LENGTH, NewProject, Project
+from secscan.security.redaction import REDACTED, redact_object
 
 NOW = datetime(2026, 10, 18, tzinfo=UTC)
 HASH = bytes(range(KEY_HASH_BYTES))
@@ -38,9 +41,23 @@ def _admin_key(**overrides: object) -> NewApiKey:
         "name": "admin",
         "prefix": "p1",
         "key_hash": HASH,
+        "expires_at": NOW + timedelta(days=90),
     }
     fields.update(overrides)
     return NewApiKey(**fields)  # type: ignore[arg-type]
+
+
+def test_new_key_requires_an_expiry() -> None:
+    """所有 key 都會過期（docs/DECISIONS.md §9.1）：沒有到期時間的 key 建立不出來。"""
+    fields: dict[str, object] = {
+        "role": Role.PLATFORM_ADMIN,
+        "name": "admin",
+        "prefix": "p1",
+        "key_hash": HASH,
+    }
+
+    with pytest.raises(TypeError, match="expires_at"):
+        NewApiKey(**fields)  # type: ignore[arg-type]
 
 
 # --- 共用文字規則 ----------------------------------------------------------------------------
@@ -176,6 +193,50 @@ def test_new_audit_event_validates_text_fields(field: str, value: str) -> None:
 
     with pytest.raises(ValueError, match=field):
         NewAuditEvent(**fields)  # type: ignore[arg-type]
+
+
+def test_new_audit_event_requires_changes_to_be_redacted_first() -> None:
+    """欄位名稱叫 redacted_changes，就必須真的遮罩過；沒遮罩的內容在送進 DB 前就拒絕。"""
+    with pytest.raises(ValueError, match="redacted_changes"):
+        NewAuditEvent(
+            action="api_key.create", object_type="api_key", redacted_changes={"token": "abc"}
+        )
+
+
+def test_new_audit_event_accepts_redacted_changes() -> None:
+    event = NewAuditEvent(
+        action="api_key.create",
+        object_type="api_key",
+        redacted_changes=redact_object({"token": "abc", "name": "ci"}),
+    )
+
+    assert event.redacted_changes == {"token": REDACTED, "name": "ci"}
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        # 每個值都在遮罩的長度上限內，但合計超過 AUDIT_CHANGES_MAX_BYTES。
+        redact_object({f"field{n}": "x" * 250 for n in range(AUDIT_CHANGES_MAX_BYTES // 250 + 1)}),
+        # NaN 不是合法的 JSON，JSONB 也存不進去。
+        {"ratio": float("nan")},
+        # tuple 不是 JSON 型別；遮罩會把它變成 list，與原本不同，所以視為沒遮罩而拒絕。
+        {"headers": ("Authorization", "Bearer abc")},
+    ],
+    ids=["too-large", "not-json", "tuple"],
+)
+def test_new_audit_event_rejects_oversized_or_non_json_changes(changes: JsonObject) -> None:
+    with pytest.raises(ValueError, match="redacted_changes"):
+        NewAuditEvent(action="api_key.create", object_type="api_key", redacted_changes=changes)
+
+
+def test_audit_changes_limit_leaves_room_for_ordinary_events() -> None:
+    """名稱上限 100 個中文字（每字 3 bytes）的 key 事件，必須遠低於上限。"""
+    changes = redact_object({"name": "教" * 100, "role": "viewer", "expires_at": "2027-01-17"})
+
+    event = NewAuditEvent(action="api_key.create", object_type="api_key", redacted_changes=changes)
+
+    assert event.redacted_changes == changes
 
 
 # --- 不可變 ----------------------------------------------------------------------------------

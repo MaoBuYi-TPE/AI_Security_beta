@@ -9,7 +9,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import StatementError
 from sqlalchemy.orm import Session
 
-from secscan.api_keys.domain import KEY_HASH_BYTES, ApiKey, NewApiKey, Role
+from secscan.api_keys.domain import (
+    KEY_HASH_BYTES,
+    AllProjects,
+    ApiKey,
+    NewApiKey,
+    OneProject,
+    Role,
+)
 from secscan.api_keys.models import ApiKeyModel
 from secscan.api_keys.repository import ApiKeyRepository
 from secscan.audit.domain import NewAuditEvent
@@ -33,6 +40,7 @@ def _new_key(**overrides: object) -> NewApiKey:
         "name": "admin",
         "prefix": uuid4().hex[:12],
         "key_hash": _hash(),
+        "expires_at": datetime.now(UTC) + timedelta(days=30),
     }
     fields.update(overrides)
     return NewApiKey(**fields)  # type: ignore[arg-type]
@@ -82,8 +90,8 @@ def test_list_projects_oldest_first_and_paginated(db_session: Session) -> None:
         )
     db_session.expire_all()
 
-    first = repository.list_page(PageRequest(page=1, limit=2))
-    second = repository.list_page(PageRequest(page=2, limit=2))
+    first = repository.list_page(PageRequest(page=1, limit=2), scope=AllProjects())
+    second = repository.list_page(PageRequest(page=2, limit=2), scope=AllProjects())
 
     names = [project.name for project in first.items + second.items]
     assert names == ["lab-2", "lab-1", "lab-0"]
@@ -94,9 +102,28 @@ def test_list_projects_breaks_ties_by_id(db_session: Session) -> None:
     repository = ProjectRepository(db_session)
     created = [repository.create(NewProject(name=f"tie-{n}")) for n in range(3)]
 
-    listed = repository.list_page(PageRequest(limit=10)).items
+    listed = repository.list_page(PageRequest(limit=10), scope=AllProjects()).items
 
     assert [project.id for project in listed] == sorted(project.id for project in created)
+
+
+def test_list_projects_restricted_to_one_project(db_session: Session) -> None:
+    """operator/viewer 的清單：只有自己的 project，total 也只算它。"""
+    repository = ProjectRepository(db_session)
+    mine, _other = (
+        repository.create(NewProject(name="mine")),
+        repository.create(NewProject(name="other")),
+    )
+
+    listed = repository.list_page(PageRequest(limit=10), scope=OneProject(mine.id))
+
+    assert (listed.items, listed.total) == ((mine,), 1)
+
+
+def test_list_projects_rejects_an_unknown_scope(db_session: Session) -> None:
+    """scope 傳錯（例如 None）時直接失敗，不會默默列出全部 project。"""
+    with pytest.raises(TypeError, match="scope"):
+        ProjectRepository(db_session).list_page(PageRequest(), scope=None)  # type: ignore[arg-type]
 
 
 # --- api_keys -----------------------------------------------------------------------------
@@ -177,9 +204,11 @@ def test_revoke_marks_key_without_deleting_it(db_session: Session) -> None:
     repository = ApiKeyRepository(db_session)
     created = repository.create(_new_key())
 
-    revoked = repository.revoke(created.id)
+    revocation = repository.revoke(created.id)
 
-    assert revoked is not None
+    assert revocation is not None
+    assert revocation.newly_revoked is True
+    revoked = revocation.key
     assert revoked.revoked_at is not None
     assert revoked.revoked_at >= revoked.created_at
     assert repository.get(created.id) == revoked
@@ -204,7 +233,8 @@ def test_revoking_twice_keeps_the_first_revocation_time(db_session: Session) -> 
     again = repository.revoke(created.id)
 
     assert again is not None
-    assert again.revoked_at == first_revoked_at
+    assert again.newly_revoked is False
+    assert again.key.revoked_at == first_revoked_at
 
 
 def test_revoke_returns_none_for_missing_key(db_session: Session) -> None:

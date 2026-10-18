@@ -6,20 +6,23 @@
 import subprocess
 import sys
 
+import pytest
+
 from secscan.migrations.metadata import MODELS
 
 _PROBE = (
-    "import secscan.main\n"
+    "import {module}\n"
     "from secscan.core.db import Base\n"
     "[fk.column for table in Base.metadata.sorted_tables for fk in table.foreign_keys]\n"
     "print(','.join(sorted(Base.metadata.tables)))\n"
 )
 
 
-def test_importing_main_registers_every_orm_model() -> None:
+@pytest.mark.parametrize("module", ["secscan.main", "secscan.cli"])
+def test_entrypoint_registers_every_orm_model(module: str) -> None:
     # 執行的是本測試寫死的程式碼與目前的直譯器，沒有外部輸入。
     result = subprocess.run(  # noqa: S603
-        [sys.executable, "-I", "-c", _PROBE],
+        [sys.executable, "-I", "-c", _PROBE.format(module=module)],
         capture_output=True,
         text=True,
         check=False,
