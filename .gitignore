@@ -21,6 +21,11 @@ build/
 .env
 .env.*
 !.env.example
+.envrc
+compose.override.yml
+compose.override.yaml
+# 資料庫匯出檔可能含資料與 hash
+*.dump
 *.key
 *.p12
 # 其他秘密與憑證形態（例如 spike 的 proxy 帳密、工具輸出）
