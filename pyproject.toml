@@ -4,9 +4,12 @@ version = "0.1.0"
 description = "Web/API 多引擎動態安全檢測後端（畢業專題）"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "alembic>=1.20.0",
     "fastapi>=0.143.3",
+    "psycopg[binary]>=3.3.6",
     "pydantic>=2.14.1",
     "pydantic-settings>=2.16.0",
+    "sqlalchemy>=2.1.5",
     "uvicorn>=0.54.0",
 ]
 
@@ -42,7 +45,8 @@ select = ["E", "W", "F", "I", "N", "UP", "B", "S", "BLE", "T20", "SIM", "PT", "C
 allowed-confusables = ["，", "：", "；", "（", "）", "！", "？", "／"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101"]
+# S105/S106：測試用的假密碼（真實秘密只在 .env 與執行期產生，fixture 另有防洩密測試）。
+"tests/**/*.py" = ["S101", "S105", "S106"]
 # spikes/ 是 T03 一次性探查腳本（在容器內以 mitmproxy/python 執行，不屬於 src）。
 # 需要 stdout 輸出（T201）與在隔離 lab_net 綁 0.0.0.0（S104）。不納入 mypy。
 # N802/N815：BaseHTTPRequestHandler 要求 do_GET 等固定命名。
@@ -72,25 +76,72 @@ addopts = [
     "--allow-unix-socket",
 ]
 xfail_strict = true
+# psycopg 經 libpq 連線，不受 pytest-socket 影響：非整合測試由 tests/conftest.py 封鎖 DB 連線；
+# 整合測試只連 loopback 上 cluster_name=secscan-test 的 db-test（tests/integration/database.py）。
+markers = [
+    "integration: 需要 db-test（make test-db-up）；以 -m 'not integration' 可只跑離線測試",
+]
 
 [tool.coverage.run]
 branch = true
-source = ["secscan"]
+# 用路徑而不是套件名稱：Alembic 以自訂模組名稱（env_py…）載入 env.py 與 migration 檔，
+# 依套件名稱比對會把這些實際執行過的程式漏算成 0%。
+source = ["src/secscan"]
 
 [tool.importlinter]
 root_package = "secscan"
+# forbidden contract 要檢查第三方套件（fastapi、sqlalchemy…），必須把它們納入 import graph。
+include_external_packages = true
 
-# 依賴方向：main 組裝功能模組，功能模組使用 core；core 不得依賴功能模組或 main。
+# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8）：
+# - main 組裝 app；migrations 登記所有 ORM model。
+# - 功能模組依實際呼叫關係排列：projects 會用 api_keys 的身分驗證與 audit；
+#   api_keys 撤銷 key 時寫 audit；audit 只依賴 core。T06 起的 targets 等模組排在 projects 之上。
+# - 跨功能的 FK 以資料表名稱引用，不 import 對方的 model。
 # exhaustive：secscan 底下每個頂層模組都必須列在 layers，新模組不會默默繞過檢查；
-# 同一層的功能模組以 "a | b" 並列（彼此獨立）。
-# domain、runner 與 Docker 的限制在 M1/M2 建立對應模組時再加入。
+# 同一層以 "a | b" 並列（彼此獨立）。runner 與 Docker 的限制在 M2 加入。
 [[tool.importlinter.contracts]]
-name = "Layers: main -> features -> core"
+name = "Layers: main -> migrations -> features -> core"
 type = "layers"
 containers = ["secscan"]
 exhaustive = true
 layers = [
     "main",
-    "health",
+    "migrations",
+    "health | projects",
+    "api_keys",
+    "audit",
     "core",
 ]
+
+# domain 規則（狀態機、scope 比對、fingerprint…）不得依賴 Web 框架、DB 或 Docker（CLAUDE.md §5）。
+# 規則一律放在 <feature>/domain.py，或拆成 <feature>/domain/ 套件（子模組也受檢查）。
+# 預設也檢查間接 import：domain 只能用標準函式庫與 core 中的純模組（json_types、text）。
+[[tool.importlinter.contracts]]
+name = "Domain modules stay free of frameworks, DB and Docker"
+type = "forbidden"
+source_modules = ["secscan.*.domain", "secscan.*.domain.**"]
+forbidden_modules = ["fastapi", "starlette", "sqlalchemy", "alembic", "psycopg", "docker"]
+
+[tool.alembic]
+# migration 放在套件內，和其他程式一樣受 ruff、mypy 與 coverage 檢查。
+script_location = "%(here)s/src/secscan/migrations"
+# 檔名必須是合法的 Python 模組名稱（mypy 才能檢查）。revision id 用四位數流水號：
+#   uv run alembic revision --autogenerate --rev-id 0002 -m "<說明>"
+file_template = "v%%(rev)s_%%(slug)s"
+timezone = "UTC"
+truncate_slug_length = 40
+# 依賴已裝在 venv；不把工作目錄加進 sys.path，避免載入工作目錄中意外的同名模組。
+prepend_sys_path = []
+
+[[tool.alembic.post_write_hooks]]
+name = "ruff_format"
+type = "module"
+module = "ruff"
+options = "format REVISION_SCRIPT_FILENAME"
+
+[[tool.alembic.post_write_hooks]]
+name = "ruff_fix"
+type = "module"
+module = "ruff"
+options = "check --fix REVISION_SCRIPT_FILENAME"

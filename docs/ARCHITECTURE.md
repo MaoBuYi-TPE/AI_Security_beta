@@ -44,6 +44,8 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 | scan_net（internal） | 單次掃描容器、egress guard | 掃描器唯一能連到的對象是 guard |
 | lab_net（internal） | egress guard、靶機、canary | 靶機與 canary 不能連到其他網路 |
 
+**T04 的開發階段**：api 仍在宿主以 `make dev` 執行，PostgreSQL 由 `compose.yaml` 啟動，只綁 127.0.0.1（開發 55432、整合測試 55433），不接 lab_net 或 scan_net。應用程式以非 superuser 的資料庫擁有者角色連線（`DECISIONS.md` §7）。M2 把 api/worker/runner 容器化之後，PostgreSQL 改成只接 control_net。
+
 ### 掃描容器
 
 - 只接 scan_net；沒有 Docker socket、沒有 host network、不掛載任何 host 路徑。
@@ -176,6 +178,12 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 | `scanners/` | 只產生 ExecutionPlan 與解析輸出，都是純函式 |
 | `runner/` | 唯一 import Docker SDK 的模組；負責執行與監督，但不自行判斷使用者是否有授權 |
 
+T04 起的實作慣例（理由見 `DECISIONS.md` §8）：
+
+- **domain 規則放在固定位置**：`<feature>/domain.py`，或拆成 `<feature>/domain/` 套件。import-linter 只檢查這兩種位置。
+- **功能模組之間依呼叫關係分層**：`health | projects → api_keys → audit → core`，上層可以 import 下層。
+- **跨功能的 FK 以資料表名稱引用**，不 import 對方的 model。所有 model 登記在 `secscan.migrations.metadata`；API、CLI、worker、runner 等每個使用 ORM 的程序入口都必須 import 它。
+
 建議介面（概念契約，不是已存在的程式）：
 
 ```python
@@ -268,6 +276,18 @@ ExecutionPlan 只能包含：
 - **findings**：`(target, fingerprint)` 唯一；低可信度的映射不得強行共用 fingerprint。
 
 JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但不能把所有資料都塞進單一 JSON 欄位，導致失去授權與查詢約束。
+
+### 6.2 實作狀態
+
+- **T04（migration `0001`）已建立 projects、api_keys、audit_events**：
+  - 約束與索引依固定命名慣例產生（例如 `uq_api_keys_prefix`、`fk_api_keys_project_id_projects`），service 可以依約束名稱對應錯誤碼。
+  - api_keys：platform_admin 一律 `project_id IS NULL`，operator/viewer 必須屬於一個 project（CHECK）；key_hash 固定 32 bytes 且唯一；撤銷只設 `revoked_at`，不刪除資料列。
+  - audit_events：trigger 拒絕 UPDATE、DELETE 與 TRUNCATE（append-only）。FK 一律 `ON DELETE RESTRICT`，被稽核紀錄引用的 project 與 key 不能刪除。
+  - 時間欄位是 timestamptz，以 `UtcDateTime` 型別存取：拒絕沒有時區的 datetime（否則會被當成 UTC，靜默差 8 小時），讀出時一律轉成 UTC。連線也固定以 UTC 解讀。
+  - id 是 UUIDv4，ORM 與 DB 兩邊都有預設值。
+  - engine 設定 `hide_parameters`：SQL 參數不出現在例外與日誌中。repository 把約束錯誤轉成 `ConstraintViolationError`，帶約束名稱與 SQLSTATE，但不接上原始例外，因為原始例外含 DB 回傳的資料值。
+  - domain 的 `New*` 物件在送進 DB 前先驗證長度、空白（含全形空白）與 NUL；DB 的 CHECK 是最後一道防線。
+- **其餘資料表由各功能任務以自己的 migration 加入**：targets、scope_grants（T06）、api_specs（T07）、auth_profiles（T08）、scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照
 

@@ -5,14 +5,18 @@ UV_RUN := uv run --locked
 # OrbStack 目前沒有 compose 外掛，`docker compose` 不可用時改用 docker-compose。
 # 用遞延指派（=）：只有 lab 目標才會求值，避免每次 make test/lint 都 fork docker。
 COMPOSE = $(shell if docker compose version >/dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi)
+DB_FILE := compose.yaml
 LAB_FILE := compose.lab.yaml
 LAB_PROJECT := secscan-lab
 LAB_NET := secscan_lab_net
 # 預設啟動全部靶機；可用 `make lab-up LAB_PROFILES="vampi"` 只啟動部分。
 LAB_PROFILES ?= juice-shop vampi
 LAB_PROFILE_ARGS := $(foreach p,$(LAB_PROFILES),--profile $(p))
+# make env 會補齊的本機秘密（隨機 hex，只寫進不進 git 的 .env）。
+LOCAL_SECRET_KEYS := DB_PASSWORD DB_ADMIN_PASSWORD TEST_DB_PASSWORD
 
-.PHONY: bootstrap dev test lint typecheck lab-up lab-down lab-verify
+.PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
+	lab-up lab-down lab-verify
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -24,9 +28,10 @@ dev:
 	APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
 		--host 127.0.0.1 --port 8000 --reload --reload-dir src
 
-# 離線測試（封鎖 TCP/UDP 與 DNS）與 coverage 門檻（分支覆蓋），不做 live scan。
-test:
-	$(UV_RUN) pytest --cov=secscan --cov-report=term-missing --cov-fail-under=80
+# unit/contract/integration 測試與 coverage 門檻（分支覆蓋），不做 live scan。
+# 測試程序本身不連網、也不碰 Docker；整合測試用的 db-test 由這裡先啟動。
+test: test-db-up
+	$(UV_RUN) pytest --cov --cov-report=term-missing --cov-fail-under=80
 
 # ruff lint、format 檢查與 import-linter 依賴方向檢查。
 lint:
@@ -38,9 +43,45 @@ lint:
 typecheck:
 	$(UV_RUN) mypy
 
-# 啟動隔離 lab 靶場（只接 internal network，不發布 port）。
-lab-up:
+# 建立或補齊本機 .env（權限 600）：只新增缺少的秘密，不修改既有的值。
+env:
+	@umask 077; touch .env; chmod 600 .env
+	@for key in $(LOCAL_SECRET_KEYS); do \
+		if grep -q "^$$key=[[:space:]]*$$" .env; then \
+			echo "錯誤：.env 的 $$key 是空值；請刪除那一行再執行 make env（不會覆寫既有的值）"; exit 1; \
+		fi; \
+		if ! grep -q "^$$key=" .env; then \
+			secret=$$(openssl rand -hex 24) || exit 1; \
+			[ "$${#secret}" -eq 48 ] || { echo "錯誤：openssl 沒有產生有效的隨機值"; exit 1; }; \
+			if [ -s .env ] && [ -n "$$(tail -c1 .env)" ]; then echo >> .env; fi; \
+			echo "$$key=$$secret" >> .env; \
+			echo "已在 .env 產生 $$key（隨機值，只供本機使用）"; \
+		fi; \
+	done
+
+docker-check:
 	@docker version >/dev/null 2>&1 || { echo "Docker daemon 未執行，請先啟動 OrbStack（orb start）"; exit 1; }
+
+# 開發用 PostgreSQL（只綁 127.0.0.1，預設 port 55432）。
+db-up: env docker-check
+	$(COMPOSE) -f $(DB_FILE) up -d --wait db
+
+# 整合測試用 PostgreSQL（tmpfs，只綁 127.0.0.1，預設 port 55433）。
+test-db-up: env docker-check
+	$(COMPOSE) -f $(DB_FILE) --profile test up -d --wait db-test
+
+# 停止 db 與 db-test；開發資料保存在 volume，不會刪除。
+db-down:
+	$(COMPOSE) -f $(DB_FILE) --profile test down
+
+# 把開發資料庫升級到最新 schema（Alembic upgrade head）；不做任何破壞性重置。
+# 最後印出目前版本（例如 0001 (head)），確認實際升級到哪裡。
+migrate:
+	$(UV_RUN) alembic upgrade head
+	@$(UV_RUN) alembic current
+
+# 啟動隔離 lab 靶場（只接 internal network，不發布 port）。
+lab-up: docker-check
 	@# up 之前先擋掉對外 port 與 host 網路的設定
 	@if $(COMPOSE) -f $(LAB_FILE) $(LAB_PROFILE_ARGS) config | grep -qE '^[[:space:]]*(published|network_mode):'; then \
 		echo "錯誤：compose 含對外 port 或 network_mode，lab 必須完全隔離"; exit 1; fi

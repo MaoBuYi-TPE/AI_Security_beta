@@ -37,7 +37,7 @@ UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project �
 | 方法 | 路徑 | 權限 | 回應與要點 |
 |---|---|---|---|
 | GET | /health/live | 可僅本機公開 | 200；僅程序存活，不含敏感依賴資訊 |
-| GET | /health/ready | 管理網 | 200/503；DB、runner heartbeat、必要配置可用 |
+| GET | /health/ready | 管理網 | 200/503；DB、runner heartbeat、必要配置可用。T04 已實作 DB 可連線且 schema 在目前的 migration 版本，不符時回 503 `DEPENDENCY_UNAVAILABLE`；runner heartbeat 在 M2 加入 |
 | POST | /api/v1/projects | platform_admin | 201 建立專案 |
 | GET | /api/v1/projects | 已授權 key | 200，只列可存取專案 |
 | POST | /api/v1/projects/{project_id}/keys | platform_admin | 201，建立 operator/viewer key，僅回傳一次完整值 |
@@ -274,10 +274,24 @@ Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 �
 | 401 | UNAUTHENTICATED、API_KEY_EXPIRED |
 | 403 | ROLE_NOT_ALLOWED、SCOPE_NOT_APPROVED、SCOPE_EXPIRED |
 | 404 | RESOURCE_NOT_FOUND |
+| 405 | METHOD_NOT_ALLOWED |
 | 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION |
 | 413 | SPEC_TOO_LARGE、ARTIFACT_TOO_LARGE |
-| 422 | INVALID_TARGET、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
+| 422 | INVALID_REQUEST、INVALID_TARGET、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
 | 429 | API_RATE_LIMITED |
+| 500 | INTERNAL_ERROR |
 | 503 | RUNNER_UNAVAILABLE、DEPENDENCY_UNAVAILABLE |
 
 執行時錯誤如 AUTH_FAILED、AUTH_EXPIRED、ENGINE_TIMEOUT、OUTPUT_INVALID、POLICY_BLOCKED、BUDGET_EXHAUSTED 記於 scan/run，不全部變成 API 的 500。未知例外回通用訊息與 request_id，不洩漏 stack trace/Token。
+
+T04 已實作的部分（`src/secscan/core/errors.py`）：
+
+- 所有錯誤回應都是 envelope，並帶伺服器產生的 request_id（回應 header `X-Request-ID`；client 送來的值不採用）。
+- 由框架產生的錯誤：
+  - 路徑不存在：404 `RESOURCE_NOT_FOUND`。
+  - 方法不符：405 `METHOD_NOT_ALLOWED`，保留 `Allow` header。
+  - 其他 HTTP 狀態：`HTTP_ERROR`。
+  - 這三種都不回傳框架的 detail 原文。
+- 請求驗證失敗：422 `INVALID_REQUEST`。訊息只列出欄位位置（例如 `query.page`），最多 5 個，不回顯輸入值。
+- 未處理的例外：500 `INTERNAL_ERROR`，回固定訊息與 request_id。伺服器端只記 request_id 與例外類別，不記例外訊息。
+- 寫入違反 DB 約束時，repository 拋出帶約束名稱的 `ConstraintViolationError`，由 service 對應成上表的穩定錯誤碼（T05 起）。約束名稱本身不回給 client。

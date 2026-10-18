@@ -16,6 +16,13 @@ repos:
   # Python 工具都透過 uv 執行，版本與 uv.lock 一致，不在這裡另外鎖版本。
   - repo: local
     hooks:
+      # .gitignore 擋得住一般的 git add，擋不住 git add -f；.env 裡有真實的本機密碼。
+      - id: forbid-env-files
+        name: 禁止提交 .env（只允許 .env.example）
+        entry: 不能提交 .env 檔案；範例請寫在 .env.example
+        language: fail
+        files: (^|/)\.env(\..*)?$
+        exclude: (^|/)\.env\.example$
       - id: ruff-check
         name: ruff check
         entry: uv run --locked ruff check --fix --force-exclude

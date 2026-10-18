@@ -70,7 +70,7 @@ SEC-03/04/05 等使用完全在本機測試網路的接收器與 mock DNS，不�
 - 版本可比性、severity mapping、fingerprint
 - secret redaction、artifact path validation
 
-常見和邊界輸入都要測。fingerprint 與 URL 正規化用 Hypothesis 做 property test；unit 測試以 pytest-socket 禁止連網。
+常見和邊界輸入都要測。fingerprint 與 URL 正規化用 Hypothesis 做 property test；unit 測試以 pytest-socket 禁止連網。psycopg 經 libpq 連線，pytest-socket 擋不到，所以非整合測試另由 `tests/conftest.py` 封鎖 DB 連線；測試也不讀 `.env`（T04）。
 
 ### 4.2 Contract / Parser
 
@@ -78,7 +78,7 @@ SEC-03/04/05 等使用完全在本機測試網路的接收器與 mock DNS，不�
 
 ### 4.3 Integration
 
-以 PostgreSQL（testcontainers）+ FakeRunner 驗證：
+以 PostgreSQL（compose 的 `db-test`，見 `DECISIONS.md` §7）+ FakeRunner 驗證。每個測試 session 以專屬的非 superuser 角色與全新資料庫執行，伺服器必須是 `cluster_name=secscan-test`；測試程序本身不碰 Docker daemon。驗證項目：
 
 - 交易一致性
 - SKIP LOCKED 認領、重複認領、lease 過期

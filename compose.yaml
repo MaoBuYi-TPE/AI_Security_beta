@@ -1,0 +1,81 @@
+# 控制平面的本機資源（T04 只有 PostgreSQL；M2 再加入 api/worker/runner 與 control_net）。
+# 只綁 127.0.0.1，不對外；映像以 tag@digest 鎖定。密碼來自 .env（make env 產生，不進 git）。
+#   make db-up        啟動開發用 db（持久 volume）
+#   make test-db-up   啟動整合測試用 db-test（tmpfs，停掉即清空）
+#   make db-down      停止兩者（保留開發資料 volume）
+name: secscan
+
+x-postgres: &postgres
+  image: postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+  # 以映像內的 postgres(999) 直接執行，不需 root 的 chown/gosu，因此能丟掉全部 capability。
+  user: "999:999"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+  environment: &postgres-env
+    # 容器內的 Unix socket 與 TCP 連線都要密碼（映像預設對容器內連線用 trust）。
+    # 只在資料目錄第一次初始化時生效。
+    POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+  # 用 TCP 檢查：初始化期間的暫時 server 只聽 Unix socket，避免 healthcheck 太早成功。
+  healthcheck:
+    test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+services:
+  db:
+    <<: *postgres
+    # cluster_name 用來辨識伺服器：整合測試只接受 secscan-test，不會誤用開發資料庫。
+    # log_error_verbosity=terse：伺服器日誌不記錄 DETAIL（例如重複鍵的值）。
+    command: ["postgres", "-c", "cluster_name=secscan-dev", "-c", "log_error_verbosity=terse"]
+    environment:
+      <<: *postgres-env
+      # superuser 只給初始化與手動維運使用，應用程式一律用下面的非 superuser 角色。
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?請先執行 make env 產生 .env}
+      SECSCAN_APP_DB_USER: ${DB_USER:-secscan_app}
+      SECSCAN_APP_DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
+      SECSCAN_APP_DB_NAME: ${DB_NAME:-secscan}
+    ports:
+      - "127.0.0.1:${DB_PORT:-55432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql
+      # 只在第一次初始化資料目錄時執行；之後改 .env 的密碼不會自動同步（見 README）。
+      - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /var/run/postgresql:mode=1777
+      - /tmp:mode=1777
+    mem_limit: 1g
+
+  db-test:
+    <<: *postgres
+    profiles: [test]
+    # 資料在 tmpfs、可丟棄，所以關閉 fsync 等持久化設定換取速度；絕不用於開發或正式資料。
+    command:
+      - postgres
+      - -c
+      - cluster_name=secscan-test
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+      - -c
+      - log_error_verbosity=terse
+    environment:
+      <<: *postgres-env
+      # 測試 fixture 以 superuser 為每個 session 建立專屬的非 superuser 角色與全新資料庫。
+      POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:?請先執行 make env 產生 .env}
+    ports:
+      - "127.0.0.1:${TEST_DB_PORT:-55433}:5432"
+    tmpfs:
+      - /var/lib/postgresql:mode=1777
+      - /var/run/postgresql:mode=1777
+      - /tmp:mode=1777
+    mem_limit: 512m
+
+volumes:
+  db_data:
