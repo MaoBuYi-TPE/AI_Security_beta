@@ -23,6 +23,13 @@ repos:
         language: fail
         files: (^|/)\.env(\..*)?$
         exclude: (^|/)\.env\.example$
+      # 平台 API key 的固定格式（docs/DECISIONS.md §9.1）。測試以程式組出 key，文件用 <佔位符>，
+      # 所以任何檔案出現完整格式的 key，都當成外洩擋下。
+      - id: forbid-platform-api-keys
+        name: 禁止提交平台 API key
+        entry: secscan_[0-9a-f]{16}_[0-9a-f]{64}
+        language: pygrep
+        types: [text]
       - id: ruff-check
         name: ruff check
         entry: uv run --locked ruff check --fix --force-exclude
