@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S46 為 2026-10-19。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -44,6 +44,12 @@
 | S38 | [Alembic — Tutorial（pyproject.toml 設定）](https://alembic.sqlalchemy.org/en/latest/tutorial.html) | 1.16 起可用 `[tool.alembic]`；`%(here)s` 與 `%%` 跳脫；post_write_hooks；離線 `--sql` 模式 |
 | S39 | [SQLAlchemy — Configuring Constraint Naming Conventions](https://docs.sqlalchemy.org/en/20/core/constraints.html#configuring-constraint-naming-conventions) | `MetaData(naming_convention=…)` 讓約束與索引名稱固定，autogenerate 可重現（T04 以實際 DDL 確認） |
 | S40 | [PostgreSQL — psql](https://www.postgresql.org/docs/current/app-psql.html) | `\getenv` 把環境變數讀進 psql 變數；`:'var'`、`:"var"` 以字串常值或識別字插入（T04 的初始化 SQL 用它避免把密碼放進命令列） |
+| S41 | [RFC 6750 — OAuth 2.0 Bearer Token Usage](https://www.rfc-editor.org/rfc/rfc6750) | §2.1 `Authorization: Bearer <b64token>` 的格式；§3 請求沒帶憑證或憑證無效時，回應必須含 `WWW-Authenticate`（T05 的 401 都帶 `WWW-Authenticate: Bearer`） |
+| S42 | [Python — secrets](https://docs.python.org/3/library/secrets.html)；[hmac.compare_digest](https://docs.python.org/3/library/hmac.html#hmac.compare_digest) | `token_hex(n)` 產生 n bytes 亂數的 hex 字串；「一般認為 32 bytes（256 bits）的亂數已足夠」；`compare_digest` 以常數時間比對，降低 timing attack 的風險 |
+| S43 | [FastAPI — Dependencies with yield：Early exit and scope](https://fastapi.tiangolo.com/tutorial/dependencies/dependencies-with-yield/#early-exit-and-scope) | yield 依賴預設（`scope="request"`）在回應送出之後才結束；`scope="function"` 在送出之前結束（T05 的 request transaction；另以 FastAPI 0.143.3 原始碼與 commit 失敗的測試確認） |
+| S44 | [OWASP — API2:2023 Broken Authentication](https://api-security.owasp.org/editions/2023/en/0xa2-broken-authentication) | API key 用於驗證 API client，不用於使用者登入；驗證端點應有比一般更嚴格的防暴力猜測與速率限制（T05 尚未做速率限制，列入 M2/T23，見 `DECISIONS.md` §9.5） |
+| S45 | [SQLAlchemy — Session.get](https://docs.sqlalchemy.org/en/21/orm/session_api.html#sqlalchemy.orm.Session.get) | 物件已在 identity map 時直接回傳、不查 DB；`populate_existing` 一定重新查詢並以新資料更新物件。T05 以 SQLAlchemy 2.1.5 原始碼確認：`with_for_update` 會送出 `SELECT … FOR UPDATE`，但不覆寫已載入的屬性，所以撤銷 key 時兩者一起用 |
+| S46 | [SQLAlchemy — Using SAVEPOINT](https://docs.sqlalchemy.org/en/21/orm/session_transaction.html#using-savepoint) | `begin_nested()` 內出錯只回滾 savepoint，外層 transaction 繼續；PostgreSQL 遇到 IntegrityError 通常會中止整個 transaction（T05 prefix 碰撞重試的依據） |
 
 ## 需要在 M0–M2 實際確認的事項
 

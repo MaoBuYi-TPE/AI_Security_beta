@@ -3,18 +3,22 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 
 # 載入所有 ORM model：跨功能的 FK（例如 api_keys → projects）以資料表名稱引用，
 # 被引用的 model 必須已在 metadata 裡。每個使用 ORM 的程序入口（API、CLI、worker、runner）
 # 都要這樣做；tests/unit/test_entrypoint_registry.py 在新程序裡檢查。
 import secscan.migrations.metadata  # noqa: F401
+from secscan.api_keys.dependencies import authenticated_router
+from secscan.api_keys.router import router as api_keys_router
+from secscan.core.api import API_V1_PREFIX
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseResources, create_db_engine
 from secscan.core.errors import register_error_handlers
 from secscan.core.request_id import RequestIdMiddleware
 from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
+from secscan.projects.router import router as projects_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -44,4 +48,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
     register_error_handlers(app)
     app.include_router(health_router)
+    app.include_router(_api_v1())
     return app
+
+
+def _api_v1() -> APIRouter:
+    """業務 API：整個 router 都要平台 API key，之後新增的路由不會意外變成公開端點。"""
+    api_v1 = authenticated_router(prefix=API_V1_PREFIX)
+    api_v1.include_router(projects_router)
+    api_v1.include_router(api_keys_router)
+    return api_v1

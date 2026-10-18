@@ -13,6 +13,10 @@ dependencies = [
     "uvicorn>=0.54.0",
 ]
 
+[project.scripts]
+# 本機管理指令：建立 platform_admin key（docs/DECISIONS.md §9.1）。
+secscan-admin = "secscan.cli:main"
+
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
@@ -93,34 +97,41 @@ root_package = "secscan"
 # forbidden contract 要檢查第三方套件（fastapi、sqlalchemy…），必須把它們納入 import graph。
 include_external_packages = true
 
-# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8）：
-# - main 組裝 app；migrations 登記所有 ORM model。
+# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4）：
+# - main 組裝 app，cli 是本機管理指令；兩者都是程序入口。migrations 登記所有 ORM model。
 # - 功能模組依實際呼叫關係排列：projects 會用 api_keys 的身分驗證與 audit；
-#   api_keys 撤銷 key 時寫 audit；audit 只依賴 core。T06 起的 targets 等模組排在 projects 之上。
+#   api_keys 撤銷 key 時寫 audit；audit 依賴 security 的遮罩。T06 起的 targets 等模組排在 projects 之上。
+# - security 是共用的安全元件（key 雜湊、遮罩），只依賴 core 的純模組。
 # - 跨功能的 FK 以資料表名稱引用，不 import 對方的 model。
 # exhaustive：secscan 底下每個頂層模組都必須列在 layers，新模組不會默默繞過檢查；
 # 同一層以 "a | b" 並列（彼此獨立）。runner 與 Docker 的限制在 M2 加入。
 [[tool.importlinter.contracts]]
-name = "Layers: main -> migrations -> features -> core"
+name = "Layers: main -> migrations -> features -> security -> core"
 type = "layers"
 containers = ["secscan"]
 exhaustive = true
 layers = [
-    "main",
+    "main | cli",
     "migrations",
     "health | projects",
     "api_keys",
     "audit",
+    "security",
     "core",
 ]
 
-# domain 規則（狀態機、scope 比對、fingerprint…）不得依賴 Web 框架、DB 或 Docker（CLAUDE.md §5）。
-# 規則一律放在 <feature>/domain.py，或拆成 <feature>/domain/ 套件（子模組也受檢查）。
-# 預設也檢查間接 import：domain 只能用標準函式庫與 core 中的純模組（json_types、text）。
+# domain 規則（狀態機、scope 比對、fingerprint…）與 security 元件不得依賴 Web 框架、DB 或 Docker
+# （CLAUDE.md §5）。規則一律放在 <feature>/domain.py，或拆成 <feature>/domain/ 套件（子模組也受檢查）。
+# 預設也檢查間接 import：只能用標準函式庫、security 與 core 中的純模組（json_types、text）。
 [[tool.importlinter.contracts]]
-name = "Domain modules stay free of frameworks, DB and Docker"
+name = "Domain and security modules stay free of frameworks, DB and Docker"
 type = "forbidden"
-source_modules = ["secscan.*.domain", "secscan.*.domain.**"]
+source_modules = [
+    "secscan.*.domain",
+    "secscan.*.domain.**",
+    "secscan.security",
+    "secscan.security.**",
+]
 forbidden_modules = ["fastapi", "starlette", "sqlalchemy", "alembic", "psycopg", "docker"]
 
 [tool.alembic]

@@ -7,14 +7,16 @@ secscan.migrations.metadata；repository 只回傳 frozen domain model。domain 
 """
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Annotated
 from uuid import UUID, uuid4
 
 import psycopg
-from fastapi import Request
+from fastapi import Depends, Request
 from sqlalchemy import URL, DateTime, Dialect, Engine, MetaData, create_engine, func, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -169,6 +171,21 @@ def database_resources(request: Request) -> DatabaseResources:
     if not isinstance(resources, DatabaseResources):
         raise RuntimeError("資料庫資源尚未初始化（create_app 應設定 app.state.db）")
     return resources
+
+
+def request_session(
+    resources: Annotated[DatabaseResources, Depends(database_resources)],
+) -> Iterator[Session]:
+    """每個請求一個 session 與 transaction：正常結束時 commit，有例外時 rollback。
+
+    一律以 DbSession 使用：scope="function" 讓依賴在回應送出「之前」結束，commit 失敗會變成 500，
+    client 不會先拿到成功的回應（預設 scope 在回應送出之後才結束；docs/DECISIONS.md §9.3）。
+    """
+    with Session(resources.engine, expire_on_commit=False) as session, session.begin():
+        yield session
+
+
+DbSession = Annotated[Session, Depends(request_session, scope="function")]
 
 
 class ConstraintViolationError(Exception):

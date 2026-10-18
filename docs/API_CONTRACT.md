@@ -10,6 +10,8 @@ Prefix：`/api/v1`。平台使用 `Authorization: Bearer <platform_api_key>`。�
 
 UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project 授權過濾。不存在或無權存取的物件通常回 404，避免洩漏存在性；角色不足的已知操作回 403。無效 key 回 401。
 
+T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回應、權限矩陣與端點範例見 §13。
+
 所有回應都使用統一的 envelope：
 
 ```json
@@ -38,10 +40,11 @@ UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project �
 |---|---|---|---|
 | GET | /health/live | 可僅本機公開 | 200；僅程序存活，不含敏感依賴資訊 |
 | GET | /health/ready | 管理網 | 200/503；DB、runner heartbeat、必要配置可用。T04 已實作 DB 可連線且 schema 在目前的 migration 版本，不符時回 503 `DEPENDENCY_UNAVAILABLE`；runner heartbeat 在 M2 加入 |
-| POST | /api/v1/projects | platform_admin | 201 建立專案 |
-| GET | /api/v1/projects | 已授權 key | 200，只列可存取專案 |
-| POST | /api/v1/projects/{project_id}/keys | platform_admin | 201，建立 operator/viewer key，僅回傳一次完整值 |
-| DELETE | /api/v1/keys/{key_id} | platform_admin | 204，撤銷而非刪除 audit |
+| POST | /api/v1/projects | platform_admin | 201 建立專案（T05 已實作） |
+| GET | /api/v1/projects | 已授權 key | 200，只列可存取專案（T05 已實作） |
+| GET | /api/v1/projects/{project_id} | 同專案 | 200；其他 project 與不存在的一樣回 404（T05 新增並實作） |
+| POST | /api/v1/projects/{project_id}/keys | platform_admin | 201，建立 operator/viewer key，僅回傳一次完整值（T05 已實作） |
+| DELETE | /api/v1/keys/{key_id} | platform_admin | 204，撤銷而非刪除 audit；重複撤銷也回 204（T05 已實作） |
 | POST | /api/v1/projects/{project_id}/targets | operator/admin | 201 建立靶場目標，尚不可掃 |
 | GET | /api/v1/projects/{project_id}/targets | viewer/operator/admin | 200 |
 | GET | /api/v1/targets/{target_id} | 同專案 | 200 |
@@ -66,7 +69,7 @@ UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project �
 | POST | /api/v1/scan-comparisons | 同專案 | 200；只比較有權限且相同 target 的 scans |
 | POST | /api/v1/scans/{scan_id}/reports | operator/admin | 201；建立 JSON/Markdown 遮罩報告 artifact（P1 加 SARIF） |
 | GET | /api/v1/artifacts/{artifact_id}/download | 同專案 | 200；P0 僅遮罩報告/證據；不提供 raw secret artifact |
-| GET | /api/v1/projects/{project_id}/audit-events | platform_admin | 200；遮罩且分頁 |
+| GET | /api/v1/projects/{project_id}/audit-events | platform_admin | 200；遮罩且分頁，由新到舊（T05 已實作） |
 
 `/health` 不在 `/api/v1`，便於部署探針；其他業務路由統一版本前綴。API 文件端點僅管理/開發環境開啟，不視為自行開發前端。
 
@@ -275,7 +278,7 @@ Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 �
 | 403 | ROLE_NOT_ALLOWED、SCOPE_NOT_APPROVED、SCOPE_EXPIRED |
 | 404 | RESOURCE_NOT_FOUND |
 | 405 | METHOD_NOT_ALLOWED |
-| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION |
+| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT |
 | 413 | SPEC_TOO_LARGE、ARTIFACT_TOO_LARGE |
 | 422 | INVALID_REQUEST、INVALID_TARGET、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
 | 429 | API_RATE_LIMITED |
@@ -295,3 +298,104 @@ T04 已實作的部分（`src/secscan/core/errors.py`）：
 - 請求驗證失敗：422 `INVALID_REQUEST`。訊息只列出欄位位置（例如 `query.page`），最多 5 個，不回顯輸入值。
 - 未處理的例外：500 `INTERNAL_ERROR`，回固定訊息與 request_id。伺服器端只記 request_id 與例外類別，不記例外訊息。
 - 寫入違反 DB 約束時，repository 拋出帶約束名稱的 `ConstraintViolationError`，由 service 對應成上表的穩定錯誤碼（T05 起）。約束名稱本身不回給 client。
+
+T05 加入的部分：
+
+- 401、403、404 的判斷規則見 §13.2；`AppError` 可以帶回應 header（例如 401 的 `WWW-Authenticate: Bearer`）。
+- 物件層級的 404 與「路徑不存在」的 404 完全相同（相同的 code 與訊息）。
+- 約束對應：`uq_projects_name` → 409 `PROJECT_NAME_CONFLICT`；`fk_api_keys_project_id_projects` → 404；`ck_api_keys_expires_after_created` → 422 `INVALID_REQUEST`；不認得的約束 → 500 `INTERNAL_ERROR`（通用訊息）。
+
+## 13. 平台 API key 與專案（T05 已實作）
+
+理由見 `DECISIONS.md` §9。
+
+### 13.1 key 的格式、有效期與驗證
+
+- **格式**：`secscan_<prefix>_<secret>`。prefix 是 16 個小寫 hex（公開的識別碼），secret 是 64 個小寫 hex（256-bit 亂數）。
+- **保存**：DB 只存 prefix 與完整 key 的 SHA-256；完整的 key 只在建立時出現一次，之後無法再取得，也不出現在 audit 與 log。
+- **有效期**：所有 key 都會過期。`expires_at` 必須帶時區，晚於現在且不超過 365 天後；沒指定時為 90 天後。回應中的時間一律是 UTC。沒有到期時間的 key（只可能經由直接寫 DB 產生）一律視為過期。
+- **撤銷**：撤銷後立即失效；資料列保留（audit 仍可追溯）。
+- **使用方式**：`Authorization: Bearer <key>`。這把 key 只授權使用本平台，不可送往被測網站。
+
+驗證失敗的回應：
+
+| 情況 | HTTP | code |
+|---|---|---|
+| 沒帶 key、scheme 不是 Bearer、格式不符、key 不存在、secret 錯誤、已撤銷 | 401 | `UNAUTHENTICATED`：回應完全相同，都含 `WWW-Authenticate: Bearer` |
+| secret 正確但已過期 | 401 | `API_KEY_EXPIRED` |
+
+- 先比對 secret，再判斷撤銷與到期：只知道 prefix 的人看不出 key 是否已過期。
+- `/api/v1` 的所有路由都要 key，驗證在欄位驗證之前：沒有 key 時，body 欄位不符不會先得到 422。但 FastAPI 會在驗證 key 之前先讀取並解析 JSON body，所以語法錯誤的 JSON 會得到 422 `INVALID_REQUEST`（只列出位置），非法的 UTF-8 等會得到 400；路徑不存在（404）與方法不符（405）也與 key 無關。
+- 目前沒有請求大小上限，也沒有速率限制（429 `API_RATE_LIMITED`）；在驗證前先擋下的 middleware 列入 T07 與 T23（`DECISIONS.md` §9.5）。
+- 伺服器日誌記下失敗原因（missing、malformed、unknown_key、hash_mismatch、revoked、expired）與 request_id，不記 client 送來的值。
+
+### 13.2 權限
+
+| 角色 | 全域管理<br>（建立 project、撤銷 key） | 自己 project：讀 | 自己 project：寫<br>（T06 起的資源） | 自己 project：管理<br>（建立 key、看稽核） | 其他 project |
+|---|---|---|---|---|---|
+| platform_admin | 允許 | 允許 | 允許 | 允許 | 允許（不存在才 404） |
+| operator | 403 | 允許 | 允許 | 403 | 404 |
+| viewer | 403 | 允許 | 403 | 403 | 404 |
+
+先判斷 project，再判斷角色：不是自己的 project 一律回 404（與不存在相同），是自己的 project 但角色不足才回 403 `ROLE_NOT_ALLOWED`。被拒絕的存取會記在伺服器日誌（decision、key_id、角色、權限、project_id、request_id），不記 body。
+
+### 13.3 端點
+
+建立專案（`POST /api/v1/projects`，201）：
+
+```json
+{"name": "API 教學靶場"}
+```
+
+```json
+{"id": "<uuid>", "name": "API 教學靶場", "created_at": "2026-10-19T08:00:00Z"}
+```
+
+- 名稱 1–100 個字元，不可全是空白（含全形空白）或含 NUL；不接受其他欄位。
+- 名稱重複回 409 `PROJECT_NAME_CONFLICT`。
+
+清單（`GET /api/v1/projects?page=1&limit=25`）：platform_admin 看到全部，其他角色只看到自己的 project；依建立時間由舊到新，`meta` 帶 page、limit、total。
+
+建立 key（`POST /api/v1/projects/{project_id}/keys`，201，回應帶 `Cache-Control: no-store`）：
+
+```json
+{"name": "ci-reader", "role": "viewer", "expires_at": "2027-01-17T00:00:00Z"}
+```
+
+```json
+{
+  "id": "<uuid>",
+  "project_id": "<uuid>",
+  "role": "viewer",
+  "name": "ci-reader",
+  "prefix": "<16 個 hex>",
+  "created_at": "2026-10-19T08:00:00Z",
+  "expires_at": "2027-01-17T00:00:00Z",
+  "key": "secscan_<16 個 hex>_<64 個 hex>"
+}
+```
+
+- `role` 只接受 `operator` 或 `viewer`；platform_admin key 只能由本機 CLI 建立（§13.4）。
+- `expires_at` 可省略；不接受其他欄位（例如 `key_hash`）。
+- project 不存在時回 404。
+
+撤銷 key（`DELETE /api/v1/keys/{key_id}`，204，沒有 body）：重複撤銷也回 204，但 audit 只記第一次；key 不存在時回 404。
+
+稽核事件（`GET /api/v1/projects/{project_id}/audit-events`）：由新到舊、分頁。每筆含 `id`、`created_at`、`action`、`object_type`、`object_id`、`actor_key_id`、`request_id` 與 `changes`。
+
+- `changes` 寫入前已遮罩（authorization、cookie、password、secret、token、key hash 等欄位，以及文字中的平台 key、Bearer 值與 JWT），讀出時再遮罩一次，也有大小上限。
+- T05 會寫入的事件：`project.create`、`api_key.create`、`api_key.revoke`。
+- 沒有所屬 project 的事件（CLI 建立 admin key、撤銷 admin key）目前只能直接查 DB；查詢 API 留給 T21。
+
+### 13.4 本機 CLI
+
+```bash
+uv run secscan-admin create-admin-key --name "本機管理員" [--expires-in-days 90] [--output PATH]
+```
+
+- DB 連線設定與 API 相同（`DB_*` 環境變數或 `.env`）。DB 無法連線或 schema 不是最新版時，提示 `make db-up` 或 `make migrate`，exit 1；參數錯誤時 exit 2。
+- 有效天數 1–365，預設 90。
+- 完整的 key 只在 commit 成功之後寫出一次：預設寫到 stdout；`--output` 寫進新建、權限 600 的檔案（已存在就拒絕，不覆寫）。說明、key id 與 prefix 寫到 stderr。
+- 沒有建立 key（設定錯誤、DB 不可用、commit 失敗）時 exit 1，不寫出任何東西，也不留下空檔；DB 錯誤只回報例外類別。
+- key 已建立但寫不出去（例如 stdout 已關閉）時 exit 1，只回報 key id；沒有人拿得到它的值，所以無法使用。
+- 寫一筆 `api_key.create` audit，actor 為空、`changes.source` 為 `cli`。

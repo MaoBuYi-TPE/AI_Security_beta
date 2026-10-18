@@ -4,7 +4,7 @@
 - 畢業專題，1 人開發，2026/10/16 – 2027/06/30；只做後端，不建立 React、Vue、Next.js 或其他前端。
 - 題目：Web 與 API 多引擎動態安全檢測暨結果整合後端系統之設計與實作。
 - 以 REST API、內建 API 文件及 JSON/Markdown 報告展示；不開發互動式儀表板。
-- **目前進度：M0 完成；M1 進行中（T04 完成）；下一步 T05。** 每完成一個里程碑就更新這一行。
+- **目前進度：M0 完成；M1 進行中（T04、T05 完成）；下一步 T06。** 每完成一個里程碑就更新這一行。
 - 先檢查實際檔案，不得假設程式、指令或測試已存在。
 - 沒有真實掃描數據前，不得杜撰成功紀錄、效能、版本號或測試結果。
 
@@ -131,7 +131,7 @@
 - lab 靶機以 compose profiles 分開啟動，只接 internal network；一次只跑一個 ZAP。
 - 指令（`docs/START_HERE.md` §7；建立前不得宣稱可執行）：
   - M0：make bootstrap、make dev、make test、make lint、make typecheck（T02 已建立）；make lab-up、make lab-down（T03 已建立）
-  - M1：make env、make db-up、make test-db-up、make db-down、make migrate（T04 已建立；make test 會先啟動 db-test，需要 OrbStack）
+  - M1：make env、make db-up、make test-db-up、make db-down、make migrate（T04 已建立；make test 會先啟動 db-test，需要 OrbStack）；uv run secscan-admin create-admin-key（T05 已建立，建立初始管理 key）
   - M1–M2：make test-contract
   - M3 起：make test-live-lab、make record-fixtures；M5 起：make bench
 - Live 指令必須檢查 LAB_ONLY、有效 grant、網路隔離及 `ENABLE_LIVE_LAB_TESTS=1`。
