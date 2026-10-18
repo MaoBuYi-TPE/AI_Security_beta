@@ -141,11 +141,136 @@
         - DB 只接 internal 的 control_net，加 `sslmode`。
         - 正式映像評估 `psycopg[c]`。
         - 已確認 `uv build` 的 wheel 包含 `migrations/`（`env.py`、樣板與 `versions/`）。
-- [ ] T05 建立 API key、project 與 object-level 權限。
+- [x] T05 建立 API key、project 與 object-level 權限。
   - DoD：
     - key 高熵且只存 hash，支援過期與撤銷。
     - viewer 不可寫入；A 專案不能讀 B 專案的資料。
     - 初始管理 key 由本機 CLI 建立，且只顯示一次。
+  - 交付（2026-10-19，done）：
+    - 範圍：
+      - 平台 API key 的產生、驗證、到期與撤銷；project 的建立與查詢；以 project 與角色為準的 object-level 授權；稽核查詢；建立初始管理 key 的本機 CLI。
+      - 沒有新增 migration（`0001` 的欄位已足夠）。
+      - 設計決定見 `DECISIONS.md` §9，API 見 `API_CONTRACT.md` §13。
+    - 檔案：
+      - 程式：
+        - `src/secscan/security/`：`api_key_tokens`（產生、格式檢查、SHA-256、常數時間比對）、`redaction`（遮罩）
+        - `src/secscan/api_keys/`：`domain`（權限、期限、`ProjectScope`）、`service`、`access`、`dependencies`、`router`、`schemas`
+        - `src/secscan/projects/`：`service`、`router`、`schemas`；`src/secscan/audit/`：`service`、`schemas`
+        - `src/secscan/core/`：`api`（版本前綴、分頁 query）、`db`（request session）、`errors`（新錯誤碼、回應 header）、`request_id`（給日誌用的 context variable）
+        - `src/secscan/cli.py`（`secscan-admin`）、`src/secscan/main.py`（`/api/v1`）
+      - 設定：`pyproject.toml`（`[project.scripts]`；import-linter 加入 `cli` 與 `security`）、`.pre-commit-config.yaml`（擋下平台 key 格式的字串）
+      - 測試：
+        - `tests/unit/security/`、`tests/unit/test_access_policy.py`、`tests/unit/test_api_schemas.py`、`tests/unit/test_cli.py`、`tests/unit/test_admin_key_callers.py`、`tests/unit/core/test_api.py`
+        - `tests/api/test_authentication.py`、`tests/api/test_authorization.py`
+        - `tests/integration/` 的 service、API、CLI 測試、撤銷競爭測試與 `api_support.py`
+    - 端點：
+      - `POST`、`GET /api/v1/projects`
+      - `GET /api/v1/projects/{project_id}`（新增）
+      - `POST /api/v1/projects/{project_id}/keys`
+      - `DELETE /api/v1/keys/{key_id}`
+      - `GET /api/v1/projects/{project_id}/audit-events`
+    - DoD 對照：
+      - **key 高熵且只存 hash**：
+        - secret 是 `secrets.token_hex(32)`（256-bit），prefix 另外產生；測試確認兩者分開向 CSPRNG 取亂數，1,000 把 key 互不重複。
+        - DB 只存 prefix 與 SHA-256。以 `row_to_json` 搜尋 api_keys 與 audit_events，找不到 key 與 secret；之後的回應、audit 與 log 也都找不到；OpenAPI 沒有 `key_hash`。
+        - 以 `hmac.compare_digest` 比對。以下情況的回應完全相同：
+          - 沒帶 key、格式錯、key 不存在
+          - secret 錯誤
+          - 已撤銷
+          - 已過期但 secret 錯誤
+      - **支援過期與撤銷**：
+        - 所有 key 都有到期時間（預設 90 天、最多 365 天），到期那一刻就失效（邊界測試）；過期回 `API_KEY_EXPIRED`。沒有到期時間的 key（只可能直接寫 DB 產生）一律視為過期。
+        - 撤銷後立即回 401；重複撤銷回 204，audit 只記一次。
+        - 兩個連線同時撤銷只算一次，同一個 session 已載入的 key 也以 DB 最新值判斷（兩個測試分別固定 `FOR UPDATE` 與 `populate_existing`）。
+      - **viewer 不可寫入**：
+        - viewer 與 operator 呼叫所有管理端點：自己的 project 回 403，其他 project 回 404。
+        - PROJECT_WRITE 規則以整張表測試，並用測試 app 確認 viewer 403、operator 允許。
+        - 真正寫入 project 資源的端點要到 T06 才有，屆時直接沿用。
+      - **A 專案不能讀 B 專案**：
+        - A 的 viewer、operator 在清單只看到 A。
+        - `GET /projects/{B}`、`POST /projects/{B}/keys`、`GET /projects/{B}/audit-events` 都回 404，回應與不存在的 project、不存在的路徑完全相同。
+      - **初始管理 key 由本機 CLI 建立，且只顯示一次**：
+        - `secscan-admin create-admin-key` 在 commit 成功後才寫出 key 一次：寫到 stdout，或寫到 `--output` 新建、權限 600 的檔案（已存在就拒絕）。stderr 只有 id、prefix 與到期時間。
+        - DB 只有 hash；audit 的 actor 為空、來源標為 CLI。
+        - 失敗時都不寫出 key、不留下空檔，訊息不含密碼：
+          - 設定錯誤、DB 未 migrate 或連不上
+          - commit 失敗（以 DEFERRABLE trigger 模擬）
+        - key 已建立但寫不出去時，只回報 id。
+    - 其他設計：
+      - `/api/v1` 在 router 層強制驗證。測試走訪所有路由與 OpenAPI，確認每個端點都要求 key；另用一個沒宣告驗證參數的路由，確認 router 層本身就會擋。
+      - request transaction 以 `scope="function"` 的依賴在回應送出前 commit。以 DEFERRABLE constraint trigger 讓 commit 失敗，確認 client 收到 500 而不是 201。
+      - prefix 碰撞在 savepoint 內重試（最多 3 次），外層 transaction 仍可使用。
+      - 清單查詢收明確的 `ProjectScope`（`AllProjects`／`OneProject`），不用 `None` 代表全部；傳錯就失敗。
+      - 被拒絕的存取寫進日誌（decision、key_id、角色、權限、project_id、request_id）。
+      - audit 的 changes 先遮罩再寫入：
+        - 遮罩依欄位名稱（含 NFKC 正規化），以及文字中的平台 key、Bearer／Basic 值與 JWT。
+        - 重複遮罩到結果不變；JWT 樣式保持線性時間；tuple 不能繞過。
+        - domain 再檢查已遮罩且不超過 8 KiB；讀出時再遮罩一次。
+      - 約束對應成穩定錯誤碼，回應不含約束名稱；以測試確保 src 中只有 CLI 呼叫 `issue_admin_key`。
+    - 實際執行：
+      - TDD：每一步先寫測試並確認失敗，例如：
+        - `ModuleNotFoundError`（security、service、CLI）
+        - `ImportError`（domain 與 core 的新名稱）
+        - repository 新介面 5 failed
+        - UTC 正規化 1 failed（暫時拿掉實作確認）
+        - 審查後的修正：遮罩 16 failed、CLI 7 failed
+        - 例外：API 的整合測試是在 router 完成後才寫的，以下方的突變檢查證明鑑別力。
+      - 測試本身的問題（都已修正）：
+        - 走訪路由的測試一開始空轉通過：FastAPI 0.143 的 `app.routes` 只放 include 進來的 router。被「端點清單」測試抓到，改用 `iter_route_contexts()` 並要求清單非空。
+        - stale identity map 的測試一開始也空轉通過：identity map 只弱參照 ORM 物件，沒人引用就被回收。改成保留參照。
+      - 突變檢查（24 項，每一項都讓測試失敗）：
+        - 權限：其他 project 改回允許、其他 project 改回 403、清單不過濾 project、未知 scope 當成全部、`OneProject` 接受 None、拿掉 router 層驗證、授權拒絕不記日誌
+        - 驗證：拿掉 hash 比對、拿掉撤銷檢查、拿掉到期檢查、沒有到期時間的 key 視為有效、先判斷到期再比對 secret
+        - 撤銷與 transaction：撤銷不用 `FOR UPDATE`、撤銷不刷新已載入的物件、session 改回預設 scope、拿掉 savepoint 重試
+        - 遮罩與 audit：audit 寫入時不遮罩、audit domain 不檢查遮罩、audit 讀出時不遮罩、遮罩只做一輪、JWT 樣式沒有 lookbehind、tuple 不遮罩
+        - 其他：拿掉 `no-store`、CLI 失敗時不刪除輸出檔
+      - 檢查結果：
+        - `make test` 571 passed、coverage 100%（含分支；`security/` 與權限規則都是 100%）。
+        - `make lint`（含新的 import-linter 契約）、`make typecheck`、`pre-commit run --all-files` 都通過。
+        - 新的 pre-commit hook 實測會擋下含平台 key 的檔案。
+      - 手動端到端：在 db-test 上建立暫時資料庫，審查前後各跑一次，結束後刪除。
+        1. CLI 建立 admin key，只寫入 0600 檔；第二次執行拒絕覆寫。
+        2. 啟動 API，依序確認：
+           - 建立 project 與 viewer key，回應有 `no-store`。
+           - viewer 讀得到自己的 project，寫入與管理操作被拒，撤銷後回 401。
+           - audit 依序為 revoke、create、create。
+           - OpenAPI 只有 `PlatformApiKey`，沒有 `key_hash`。
+           - 伺服器日誌找不到完整的 key；被拒絕的存取有 request_id。
+        3. 撤銷這把 admin key，刪除暫時資料庫與檔案；db-test 沒有殘留的資料庫或角色。
+    - 審查（依 CLAUDE.md §12 與全域規則：驗證與授權程式必須做安全審查）：
+      - code-reviewer：APPROVE（0 CRITICAL、0 HIGH、4 MEDIUM、5 LOW），MEDIUM 全部已修：
+        - 遮罩不是 idempotent，特定名稱會讓 API 回 500。
+        - 文件誤稱「驗證在讀取 body 之前」。
+        - 「先比對 secret 再判斷到期」與並發撤銷沒有測試固定。
+        - JWT 樣式是二次方時間。
+      - code-reviewer 的 LOW：已修 4 項（「所有 key 都會過期」只在 service 層成立、`Permission.PLATFORM_ADMIN` 易與角色混淆、CLI commit 失敗沒有測試、只是釘住常數的斷言）。過度遮罩與 405 的 `Allow` 不完整記為取捨或框架行為。
+      - security-reviewer：REQUEST CHANGES（輕度；0 CRITICAL、0 HIGH、1 MEDIUM、8 LOW）。
+        - MEDIUM（body 在驗證前就被讀取與解析）：文件與測試已改成實際行為，middleware 列入 T07、T23。
+        - LOW 已修：
+          - 遮罩：二次方時間、tuple 繞過、全形名稱與常見名稱。
+          - 沒有到期時間的 key。
+          - 授權拒絕沒有日誌。
+          - CLI 輸出檔的覆寫與寫出失敗。
+          - `None` 當作「全部」。
+          - API 誤用 `issue_admin_key`。
+          - `/docs` 的提醒、措辭過滿的文件、pre-commit 擋平台 key。
+        - LOW 延後：事故應變工具、自行託管 Swagger UI、遮罩的其他缺口（`DECISIONS.md` §9.5）。
+      - 修正後重跑全部測試、24 項突變檢查與手動端到端。
+    - 限制：
+      - 沒有速率限制與請求大小上限（OWASP API2:2023 建議驗證端點要有）。key 是 256-bit，API 目前只綁 127.0.0.1；列入 T07、T23，T23 完成前不發布 port。
+      - 沒有 `last_used_at`、列出 key、依 prefix 撤銷等事故應變工具。沒有所屬 project 的 audit（admin key 的建立與撤銷）只能直接查 DB，查詢 API 留給 T21。
+      - 只有回傳完整 key 的回應有 `no-store`；全域安全 header 列入 T23。
+      - 遮罩依欄位名稱與樣式判斷，不保證認得所有秘密；HAR 成對格式、URL 帳密等留給 T08 與 M3。
+      - SEC-16 的 scan、finding、artifact 跨專案測試，隨相關資源完成。
+    - 給後續任務：
+      - **T06 起**：
+        - 新路由掛在 `/api/v1` router 底下就會自動要求 key，並加進 `tests/api/test_authentication.py` 的 `V1_ROUTES`。
+        - service 一開始呼叫 `authorize()`：讀取用 `PROJECT_READ`，寫入用 `PROJECT_WRITE`（viewer 403），grant 核准等管理操作用 `PLATFORM_MANAGE` 搭配 project_id。
+        - 清單查詢收 `ProjectScope`。以 id 讀取的資源（例如 `GET /targets/{id}`）要在查詢加上 project 條件，或取出 project_id 後再 `authorize()`；其他 project 與不存在一樣回 404，並補 A/B 兩個 project 的測試。
+        - 需要稽核的變更經 `AuditTrail.record`，與業務變更在同一個 transaction。
+      - **T07**：規格上傳前，先在 `/api/v1` 加上驗證前的 body 大小上限（413）與格式檢查（`DECISIONS.md` §9.5）。
+      - **T09**：建立 scan 沿用 `DbSession`；runner 與 worker 不經 HTTP，需要自己的 session 與 transaction 管理。
+      - **M2／T23**：速率限制、全域安全 header、key 的事故應變工具、自行託管 Swagger UI；以上完成前不發布 port、不綁非 loopback 位址。
 - [ ] T06 建立 target、ScopeGrant 與審批流程。
   - DoD：
     - pending/approved/revoked/expired 的轉換正確。

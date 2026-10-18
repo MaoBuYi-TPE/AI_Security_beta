@@ -31,7 +31,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 | `docs/TOOLS.md` | T03 工具 spike 結果：映像相容性表、digest、授權、網路隔離與各引擎 proxy/auth/output 的實測 |
 | `docs/PROJECT_PLAN.md` | 背景、需求、工具選型、功能範圍、時程與交付成果 |
 | `docs/ARCHITECTURE.md` | 元件、信任邊界、egress guard、資料模型、Adapter/Runner 與狀態機 |
-| `docs/API_CONTRACT.md` | 預計實作的 REST API、權限、資料格式與錯誤語意 |
+| `docs/API_CONTRACT.md` | REST API、權限、資料格式與錯誤語意；§13 是 T05 已實作的 key、專案與權限 |
 | `docs/SECURITY_AND_TESTING.md` | 平台自身的安全要求、測試矩陣與實驗設計 |
 | `docs/TASKS.md` | 依里程碑排列的工作、依賴、驗收條件與降階方案 |
 | `docs/START_HERE.md` | 開發順序，以及給 Claude Code 的第一段任務提示 |
@@ -42,11 +42,12 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成到 M1 的 T04：
+目前完成到 M1 的 T05：
 - **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
 - **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
+- **T05**：平台 API key（DB 只存 hash、一定會過期、可撤銷）、project 與 object-level 權限、`/api/v1` 的 projects、keys 與稽核查詢端點，以及建立初始管理 key 的本機 CLI `secscan-admin`（見下方「平台 API key」與 `docs/API_CONTRACT.md` §13）。
 
-還沒有業務 API（`/api/v1`，T05 起）、runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
+還沒有 target、scope grant、掃描任務等其他業務 API（T06 起），也還沒有 runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
 ### 開發環境
 
@@ -88,6 +89,27 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
 - **改了 `.env` 的 `DB_PASSWORD` 之後**：要讓新密碼生效，得重建開發資料庫。這會**刪除所有開發資料**：`make db-down && docker volume rm secscan_db_data && make db-up && make migrate`。
 
 新增 schema 變更時：先寫會失敗的測試，再改 model，最後產生 migration。例如：`uv run alembic revision --autogenerate --rev-id 0002 -m "<說明>"`。產生後補上升降級說明並檢查內容；`tests/integration/test_migrations.py` 會檢查 model 與 migration 沒有漂移。
+
+#### 平台 API key（T05）
+
+`/api/v1` 的每個請求都要帶 `Authorization: Bearer <key>`。第一把管理 key 由本機 CLI 建立，完整的 key 只會出現這一次；DB 只存 hash，遺失時只能重新建立。
+
+```bash
+make db-up && make migrate
+umask 077 && mkdir -p ~/.config/secscan
+uv run secscan-admin create-admin-key --name "本機管理員" --output ~/.config/secscan/admin.key
+printf 'Authorization: Bearer %s\n' "$(cat ~/.config/secscan/admin.key)" > ~/.config/secscan/admin.header
+make dev   # 另開一個終端機
+curl -H @"$HOME/.config/secscan/admin.header" http://127.0.0.1:8000/api/v1/projects
+```
+
+- **key 只寫出一次**：`--output` 把 key 寫進新建、權限 600 的檔案；檔案已存在時拒絕，不會覆寫舊的 key。不加 `--output` 則寫到 stdout。
+- **不要把 key 放在命令列參數**：其他程序可以從 `ps` 看到命令列，shell 歷史也會留下紀錄。上面的做法讓 curl 從權限 600 的檔案讀 header。
+- **有效期**：所有 key 都會過期，預設 90 天、最多 365 天（CLI 用 `--expires-in-days` 調整）。過期後重新建立即可。
+- **專案成員的 key**：admin 以 `POST /api/v1/projects/{project_id}/keys` 建立 operator 或 viewer key，回應中的 `key` 同樣只出現這一次，請立即存起來。
+- **撤銷**：`DELETE /api/v1/keys/{key_id}`；撤銷後立即失效。
+- **dev 的 API 文件**：`/docs` 會從 CDN 載入 Swagger UI。要在 Authorize 填 key 時，只用權限最小的 viewer key，不要貼 admin key。
+- 權限規則、錯誤碼與範例見 `docs/API_CONTRACT.md` §13，設計理由見 `docs/DECISIONS.md` §9。
 
 #### 隔離 lab 靶場（T03）
 

@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -97,6 +97,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make db-up／make db-down | M1（T04 已建立） | 啟動開發用 PostgreSQL（只綁 127.0.0.1:55432）／停止 db 與 db-test（保留開發資料） |
 | make test-db-up | M1（T04 已建立） | 啟動整合測試用 PostgreSQL（tmpfs，只綁 127.0.0.1:55433） |
 | make migrate | M1（T04 已建立） | 執行 Alembic upgrade head，並印出目前版本；不含破壞性重置 |
+| uv run secscan-admin create-admin-key --name … [--output PATH] | M1（T05 已建立） | 建立 platform_admin key（預設 90 天、最多 365 天）；完整的 key 只寫出一次（stdout，或新建、權限 600 的檔案），DB 只存 hash（`API_CONTRACT.md` §13.4） |
 | make test-contract | M1–M2 | 對固定 fixture 測 API/Parser 契約 |
 | make test-live-lab | M3 起 | 需要 `ENABLE_LIVE_LAB_TESTS=1`、LAB_ONLY、有效 grant，並通過隔離檢查才執行 |
 | make record-fixtures | M3 起 | 只在 lab 重新錄製工具輸出 fixture，並產生差異供人工審查 |

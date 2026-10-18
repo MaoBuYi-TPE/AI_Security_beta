@@ -89,6 +89,18 @@ SEC-03/04/05 等使用完全在本機測試網路的接收器與 mock DNS，不�
 
 普通 CI 不啟動真實掃描器，也不出網。
 
+API 與 CLI 的整合測試走正式的 request transaction，資料會真正 commit，所以另用一個全新的資料庫，不和 repository 測試共用（T05）。
+
+T05 已涵蓋 project 層的權限：
+- A 專案的 viewer、operator 讀不到 B 專案，回應與不存在的 project、不存在的路徑完全相同。
+- viewer 不能寫入；非 admin 不能使用管理端點。
+- key 不存在、secret 錯誤、已撤銷，以及已過期但 secret 錯誤的回應都相同；DB 只存 hash，回應、audit 與 log 都找不到完整的 key。
+- 兩個連線同時撤銷同一把 key 時只算一次（以 `pg_stat_activity` 確認第二個請求在等列鎖，不靠固定時間的 sleep）。
+- 遮罩以固定 seed 的隨機輸入檢查 idempotent，並檢查惡意輸入下仍是線性時間。
+- 以突變檢查確認上述測試有鑑別力（`TASKS.md` T05）。
+
+SEC-16 要求的 scan、finding、artifact 跨專案測試，隨這些資源在 T09 與 M3–M5 加入，尚未完成。
+
 ### 4.4 Live E2E
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。

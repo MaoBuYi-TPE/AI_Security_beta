@@ -178,11 +178,19 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 | `scanners/` | 只產生 ExecutionPlan 與解析輸出，都是純函式 |
 | `runner/` | 唯一 import Docker SDK 的模組；負責執行與監督，但不自行判斷使用者是否有授權 |
 
-T04 起的實作慣例（理由見 `DECISIONS.md` §8）：
+T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
 
-- **domain 規則放在固定位置**：`<feature>/domain.py`，或拆成 `<feature>/domain/` 套件。import-linter 只檢查這兩種位置。
-- **功能模組之間依呼叫關係分層**：`health | projects → api_keys → audit → core`，上層可以 import 下層。
-- **跨功能的 FK 以資料表名稱引用**，不 import 對方的 model。所有 model 登記在 `secscan.migrations.metadata`；API、CLI、worker、runner 等每個使用 ORM 的程序入口都必須 import 它。
+- **domain 規則放在固定位置**：`<feature>/domain.py`，或拆成 `<feature>/domain/` 套件。import-linter 只檢查這兩種位置，以及共用的 `security/`。
+- **模組之間依呼叫關係分層**：`main | cli → migrations → health | projects → api_keys → audit → security → core`，上層可以 import 下層。`security/` 放 API key 的產生與雜湊、遮罩（T08 加 MultiFernet），和 domain 一樣不得依賴框架、DB 與 Docker。
+- **跨功能的 FK 以資料表名稱引用**，不 import 對方的 model。所有 model 登記在 `secscan.migrations.metadata`；API（`main`）、CLI（`cli`）、worker、runner 等每個使用 ORM 的程序入口都必須 import 它。
+- **驗證與授權（T05）**：
+  - `/api/v1` 在 router 層強制平台 key 驗證（`authenticated_router`），新增的路由不會意外變成公開端點。
+  - service 先呼叫 `authorize(principal, permission, project_id)`；規則是 `api_keys/domain.py` 的純函式 `decide()`，其他 project 回 404、角色不足回 403，被拒絕時記下日誌（含 request_id）。
+  - 清單查詢收明確的 `ProjectScope`（`AllProjects` 或 `OneProject`），由 `Principal.project_scope` 決定；不用 `None` 代表全部。T06 起的 target、grant、scan 等資源沿用同樣的做法。
+- **request transaction（T05）**：
+  - 路由以 `DbSession` 取得 session：每個請求一個 transaction，回應送出之前 commit，有例外時 rollback。
+  - 業務變更與 audit 在同一個 transaction；可能撞到唯一約束而需要重試的寫入，放在 `begin_nested()` savepoint 內。
+- **audit（T05）**：一律經 `AuditTrail.record` 寫入，changes 先以 `security.redaction` 遮罩；`NewAuditEvent` 再檢查是否已遮罩，並限制在 8 KiB 以內。
 
 建議介面（概念契約，不是已存在的程式）：
 
@@ -287,6 +295,7 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - id 是 UUIDv4，ORM 與 DB 兩邊都有預設值。
   - engine 設定 `hide_parameters`：SQL 參數不出現在例外與日誌中。repository 把約束錯誤轉成 `ConstraintViolationError`，帶約束名稱與 SQLSTATE，但不接上原始例外，因為原始例外含 DB 回傳的資料值。
   - domain 的 `New*` 物件在送進 DB 前先驗證長度、空白（含全形空白）與 NUL；DB 的 CHECK 是最後一道防線。
+- **T05 沒有新增 migration**：key 的 prefix、hash、撤銷與到期欄位在 `0001` 已建立。T05 新增的是 API、權限規則、request transaction 與本機 CLI（`API_CONTRACT.md` §13）。
 - **其餘資料表由各功能任務以自己的 migration 加入**：targets、scope_grants（T06）、api_specs（T07）、auth_profiles（T08）、scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照
