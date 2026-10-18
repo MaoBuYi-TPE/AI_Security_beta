@@ -181,6 +181,75 @@ main → migrations → health | projects → api_keys → audit → core
 
 何時重新檢討：如果出現雙向需求（例如 audit 需要 api_keys 的型別），先考慮把共用的純型別移到 core，而不是打破順序。
 
+T05 加入 `cli` 與 `security` 兩個模組，更新後的順序見 §9。
+
+## 9. T05 補充決定：平台 API key、權限與 request-scoped transaction（2026-10-19）
+
+T05 實作 §2 第 6 項「平台 API key（只存雜湊）加 project 角色」。以下是規劃文件沒有寫到、實作前才定下的細節。
+
+### 9.1 key 的格式、雜湊與驗證
+
+| 項目 | 採用 | 理由 |
+|---|---|---|
+| 格式 | `secscan_<prefix>_<secret>`<br>prefix：16 個小寫 hex（64-bit，公開的識別碼，存在 DB）<br>secret：`secrets.token_hex(32)`（256-bit） | 固定標記讓秘密掃描容易辨識；長度與字元集固定，格式不符直接回 401，不查 DB |
+| 雜湊 | 對完整 key 做 SHA-256（32 bytes），不加 pepper | key 是 256-bit 亂數，離線猜測不可行，不需要 bcrypt、argon2 這類為低熵密碼設計的慢雜湊。pepper 要多管理一個秘密（API 與 CLI 都要讀，更換時所有 key 一起失效）。<br>代價：能寫入 api_keys 的人（例如 SQL injection 或被竄改的還原檔）可以插入自己知道的 key 的 hash，取得管理權限；把 pepper 放在 DB 之外的 HMAC 擋得住這種情況。M1 是單一信任區（同一台機器、同一組 DB 帳密），接受這個代價，重新檢討的時機見 §9.5 |
+| 比對 | 以 prefix 查詢，再用 `hmac.compare_digest` 比對 hash；prefix 不存在時，仍與假 hash 比對一次 | 「不存在」與「secret 錯誤」的運算量相近 |
+| 401 回應 | 缺少、格式錯、不存在、secret 錯、已撤銷：同一個 `UNAUTHENTICATED`，訊息與 `WWW-Authenticate: Bearer` 都相同<br>secret 驗證成功但已過期：`API_KEY_EXPIRED`。先比對 secret，再判斷撤銷與到期（有測試固定這個順序） | 不洩漏 key 是否存在或已撤銷；「已過期」只會告訴真正持有 key 的人，只知道公開 prefix 的人探測不到 |
+| 有效期 | 所有 key 都會過期：預設 90 天、最多 365 天，而且必須晚於現在。API 與 CLI 規則相同<br>domain 的 `NewApiKey` 要求一定要有到期時間；DB 欄位仍可為 NULL（T04 的 schema），驗證時把沒有到期時間的 key 一律視為過期 | 平台 key（尤其 platform_admin）權限大，不留永久憑證；過期後用 CLI 或 API 重新建立即可。不為此新增 migration：驗證時 fail closed 已足夠 |
+| 誰能建立 admin key | 只有本機 CLI `secscan-admin create-admin-key`；API 只能建立 operator、viewer key。`issue_admin_key` 本身不做授權檢查，另以測試確保 src 中只有 CLI 呼叫它 | 能執行 CLI 的人本來就有 DB 帳密。外洩的 admin key 無法經 API 再建立 admin key，撤銷後就失去管理權限；但它在撤銷前建立的 project 與 operator、viewer key 仍然有效，要另外從 audit 找出來撤銷（§9.5） |
+| 完整 key 的去向 | 只在建立時出現一次：API 的回應（加 `Cache-Control: no-store`），或 CLI 在 commit 成功後寫到 stdout 或 `--output` 指定的新檔案（`O_EXCL`、權限 600，已存在就拒絕）。DB 只存 prefix 與 hash；audit 與 log 不記完整 key、secret 或 hash | DoD「只存 hash、只顯示一次」。沒有建立 key 時不寫出任何東西，也不留下空檔 |
+
+### 9.2 權限規則
+
+| 角色 | 全域管理<br>（建立 project、撤銷 key） | 自己 project：讀 | 自己 project：寫<br>（T06 起） | 自己 project：管理<br>（建立 key、看稽核） | 其他 project |
+|---|---|---|---|---|---|
+| platform_admin | 允許 | 允許 | 允許 | 允許 | 允許（不存在才 404） |
+| operator | 403 | 允許 | 允許 | 403 | 404 |
+| viewer | 403 | 允許 | 403 | 403 | 404 |
+
+- **規則集中成一個純函式**：`decide(principal, permission, project_id)`，放在 `api_keys/domain.py`，回傳 ALLOWED、NOT_FOUND 或 FORBIDDEN。service 呼叫它，route 不自行判斷。
+- **先判斷 project，再判斷角色**：不是自己的 project 一律 404（與不存在相同），是自己的 project 但角色不足才 403（`API_CONTRACT.md` §1）。
+- **`/api/v1` 在 router 層強制驗證 key**：之後新增的路由即使忘了宣告依賴，也不會變成公開端點。
+- **新增 `GET /api/v1/projects/{project_id}`**：T05 其他以 project 為範圍的端點都只限 admin，viewer 需要一個能讀的單一物件，才能驗證 object-level 的 404。
+- **清單查詢的範圍用明確的型別**：`ProjectScope` 是 `AllProjects`（只有 platform_admin）或 `OneProject(project_id)`，由 `Principal.project_scope` 決定，repository 必須收到其中一種。不用 `None` 代表「全部」：漏傳或傳錯時直接失敗，不會變成列出所有 project。
+- **被拒絕的存取寫進日誌**：`authorize()` 記下 decision、key_id、角色、權限、project_id 與 request_id（不記 body），方便發現有人逐一嘗試其他 project 的 UUID。
+- **T06 起的資源**（target、grant、scan…）：同樣呼叫 `authorize()`，清單查詢同樣收 `ProjectScope`。
+
+### 9.3 request-scoped transaction
+
+- **每個請求一個 session 與 transaction**：成功就 commit，有例外就 rollback；業務變更與 audit 在同一個 transaction。
+- **依賴使用 `Depends(..., scope="function")`**：FastAPI 0.143.3 的 yield 依賴預設在回應送出**之後**才結束，那樣 commit 失敗時 client 已經收到 201。function scope 在回應送出之前結束，commit 失敗會回 500。
+- **重試放在 savepoint 裡**：可能撞到唯一約束的重試（prefix 碰撞）在 `begin_nested()` 內進行，失敗時不會讓整個 transaction 無法繼續使用。
+
+### 9.4 模組與分層（更新 §8）
+
+```text
+main | cli → migrations → health | projects → api_keys → audit → security → core
+```
+
+| 模組 | 為什麼在這一層 |
+|---|---|
+| cli | 本機管理指令（建立 admin key）。和 main 一樣是程序入口，必須 import model 登記（`tests/unit/test_entrypoint_registry.py` 兩個入口都檢查） |
+| security | CLAUDE.md §5 規劃的共用模組：API key 的產生與雜湊、遮罩（T08 再加 MultiFernet）。audit 要用遮罩，api_keys 要用 key 雜湊，所以放在兩者之下。和 domain 一樣不得依賴框架、DB 與 Docker（import-linter 的 forbidden contract） |
+
+### 9.5 不在 T05 範圍
+
+- **速率限制（429 `API_RATE_LIMITED`）**：key 有 256-bit，暴力猜測不可行，而且 API 目前只綁 127.0.0.1。多個 worker 之間要共享計數，需要一併設計，列入 M2/T23 的部署強化。
+- **`last_used_at`**：需要改 schema，而且每個請求都要寫 DB；需要時再加 migration。
+- **全域 audit 查詢**：CLI 建立 admin key、撤銷 admin key 的事件沒有所屬 project，T05 只能直接查 DB；查詢 API 留給 T21。
+- **全域安全 header**（`X-Content-Type-Options`、所有回應的 `Cache-Control: no-store`）：列入 M2/T23。T05 只對含完整 key 的回應設 `no-store`。
+- **請求大小上限與「驗證前不讀 body」**：FastAPI 在執行依賴（包括驗證 key）之前，就先讀完並解析 JSON body。所以沒有 key 的請求送壞掉的 JSON 會得到 422（不是 401），送很大的 body 也會被整個讀進記憶體。T05 只把文件與測試改成實際行為。在 `/api/v1` 前加 pure-ASGI middleware（`Authorization` 格式不符就先回 401、累計超過上限就回 413）列入 T07（規格上傳的大小限制）與 T23。
+- **key 的事故應變工具**：列出 key、依 prefix 撤銷、撤銷某把 key 建立過的所有 key，以及 `last_used_at`。目前遺失 key id 時，只能從建立時的 stderr、project 的 audit 或直接查 DB 找回。列入 M2。
+- **dev 的 `/docs`**：FastAPI 預設從 CDN 載入 Swagger UI（沒有 SRI）。README 提醒不要在 `/docs` 貼 admin key；改為自行託管列入 M2/T23。
+- **遮罩的已知缺口**：HAR 那種 name/value 成對的格式、URL 中的帳密與 query 參數、`password=…` 之類的文字還不處理（`security/redaction.py` 的說明）。T08（認證設定）與 M3（證據遮罩）需要時再擴充，並補對應的測試。
+
+T23 的硬性條件：速率限制、請求大小上限與安全 header 都完成之前，不發布 API 的 port，也不綁 loopback 以外的位址（目前只靠 `make dev` 綁 127.0.0.1）。
+
+何時重新檢討：
+- key 要給 CI 等系統長期使用，而 365 天的上限太短：改成可設定的上限，並記錄理由。
+- API 要改成多 worker 或對外開放：先完成速率限制。
+- DB 與應用程式分屬不同的信任區（例如 DB 由他人管理），或 DB 的寫入權限可能外流：重新評估 HMAC＋pepper。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。
