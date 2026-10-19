@@ -3,12 +3,18 @@ from collections.abc import Callable, Iterator
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from hypothesis import settings as hypothesis_settings
 from pydantic import SecretStr
 
 from secscan.core.config import AppEnv, Settings
 from secscan.main import create_app
 
 type ClientFactory = Callable[[AppEnv], TestClient]
+
+# Hypothesis 的 property test：亂數由測試內容決定（derandomize），每次執行的輸入都相同，
+# 失敗可以重現；也不在工作目錄寫入 .hypothesis/ 範例資料庫。
+hypothesis_settings.register_profile("secscan", derandomize=True, database=None)
+hypothesis_settings.load_profile("secscan")
 
 # 應用程式的 DB 連線設定。測試一律不得沿用開發者 shell 或 .env 裡的值，以免連到開發或正式資料庫；
 # 整合測試另有 TEST_DB_* 設定（tests/integration/database.py）。
