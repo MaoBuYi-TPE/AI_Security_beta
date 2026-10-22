@@ -10,7 +10,7 @@ Prefix：`/api/v1`。平台使用 `Authorization: Bearer <platform_api_key>`。�
 
 UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project 授權過濾。不存在或無權存取的物件通常回 404，避免洩漏存在性；角色不足的已知操作回 403。無效 key 回 401。
 
-T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回應、權限矩陣與端點範例見 §13。
+T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回應、權限矩陣與端點範例見 §13。T06 的 target 與 scope grant 見 §14。
 
 所有回應都使用統一的 envelope：
 
@@ -45,13 +45,15 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/projects/{project_id} | 同專案 | 200；其他 project 與不存在的一樣回 404（T05 新增並實作） |
 | POST | /api/v1/projects/{project_id}/keys | platform_admin | 201，建立 operator/viewer key，僅回傳一次完整值（T05 已實作） |
 | DELETE | /api/v1/keys/{key_id} | platform_admin | 204，撤銷而非刪除 audit；重複撤銷也回 204（T05 已實作） |
-| POST | /api/v1/projects/{project_id}/targets | operator/admin | 201 建立靶場目標，尚不可掃 |
-| GET | /api/v1/projects/{project_id}/targets | viewer/operator/admin | 200 |
-| GET | /api/v1/targets/{target_id} | 同專案 | 200 |
-| PATCH | /api/v1/targets/{target_id} | operator/admin | 200；origin 變更需新 target 或重新授權 |
-| POST | /api/v1/targets/{target_id}/scope-grants | operator/admin | 201 建立 pending 授權申請 |
-| POST | /api/v1/scope-grants/{grant_id}/approve | platform_admin | 200；核對靶場/授權證據後核准 |
-| POST | /api/v1/scope-grants/{grant_id}/revoke | platform_admin | 200；使有效執行停止新流量 |
+| POST | /api/v1/projects/{project_id}/targets | operator/admin | 201 建立靶場目標，尚不可掃（T06 已實作） |
+| GET | /api/v1/projects/{project_id}/targets | viewer/operator/admin | 200（T06 已實作） |
+| GET | /api/v1/targets/{target_id} | 同專案 | 200（T06 已實作） |
+| PATCH | /api/v1/targets/{target_id} | operator/admin | 200；只能改名稱與啟用狀態，origin 要改就建立新的 target（T06 已實作） |
+| POST | /api/v1/targets/{target_id}/scope-grants | operator/admin | 201 建立 pending 授權申請（T06 已實作） |
+| GET | /api/v1/targets/{target_id}/scope-grants | 同專案 | 200；target 的所有版本，新版本在前（T06 新增並實作） |
+| GET | /api/v1/scope-grants/{grant_id} | 同專案 | 200（T06 新增並實作） |
+| POST | /api/v1/scope-grants/{grant_id}/approve | platform_admin | 200；核對靶場/授權證據後核准（T06 已實作） |
+| POST | /api/v1/scope-grants/{grant_id}/revoke | platform_admin | 200；之後不能再用它建立 scan。停止執行中的 scan 由 T09、T13 處理（T06 已實作撤銷本身） |
 | POST | /api/v1/targets/{target_id}/api-specs | operator/admin | 201；multipart 規格上傳，P0 不接受遠端 URL |
 | GET | /api/v1/api-specs/{spec_id}/operations | 同專案 | 200；method/path、是否納入 scope |
 | POST | /api/v1/targets/{target_id}/auth-profiles | operator/admin | 201；secret 只寫不讀 |
@@ -84,9 +86,13 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 }
 ```
 
-`kind` 為 web/api/hybrid；P0 `environment` 僅 lab。URL 僅接 origin 與受限 seed path，禁止 userinfo/fragment/其他 scheme；實際解析與可達性由授權流程決定，不在 public API 隨意 fetch。
+`kind` 為 web/api/hybrid；P0 `environment` 僅 lab。實際解析與可達性由授權流程決定，不在 public API 隨意 fetch。
 
-回應 target_id、canonical_origin、enabled、authorization_status=pending。Target 存在不代表允許掃描。
+T06 的實際規則（理由見 `DECISIONS.md` §10.2，完整說明見 §14.1）：
+
+- `base_url` 只能是 origin：`http://主機[:port]`，結尾可以有一個 `/`。原規劃的「受限 seed path」延到 M3（ZAP web profile 需要時）。
+- P0 只接受 http；userinfo、反斜線、percent-encoding、path、query、fragment、非 ASCII、IPv6、`localhost`、數字形式模糊的 host 都拒絕。
+- 回應中沒有 `authorization_status`：target 本身沒有授權狀態，能不能掃描看 scope grant（§4）。Target 存在不代表允許掃描。
 
 ## 4. ScopeGrant
 
@@ -107,6 +113,13 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 日期、IP 與編號為示例，不代表真實授權或可用環境；實作時使用實際已核准資產。P0 不接受任意 regex；path 模式只允許完整 literal path 或由可信 OpenAPI 解析出的 route 佔位，禁止從字串前綴直接推論安全範圍。
 
 核准需管理員驗證文件/靶場資產、origin 到 IP 的對應、隔離網路與副作用可接受性。若需 POST 等狀態改變方法，建立明確的實驗 scope，不擅自放寬原本只讀 grant。新 grant 版本不得偷偷改變執行中 scan。
+
+T06 的實際規則（理由見 `DECISIONS.md` §10.3、§10.4，完整說明見 §14.2–§14.4）：
+
+- 要允許全部 path，必須明確設定 `"allow_all_paths": true`（此時 `allowed_paths` 必須是空的）；空的 `allowed_paths` 不代表全部。
+- `budget` 可省略，省略的項目使用上限（2 req/s、5,000 次、1,500 秒）。
+- `LAB_ONLY` 時，`allowed_ips` 的每個 IP 都必須是 `LAB_CIDR` 內的主機位址。
+- 建立後範圍不能修改；要改範圍就申請新版本（`version` 遞增）。
 
 ## 5. 上傳 API 規格
 
@@ -278,9 +291,9 @@ Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 �
 | 403 | ROLE_NOT_ALLOWED、SCOPE_NOT_APPROVED、SCOPE_EXPIRED |
 | 404 | RESOURCE_NOT_FOUND |
 | 405 | METHOD_NOT_ALLOWED |
-| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT |
+| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED |
 | 413 | SPEC_TOO_LARGE、ARTIFACT_TOO_LARGE |
-| 422 | INVALID_REQUEST、INVALID_TARGET、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
+| 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
 | 429 | API_RATE_LIMITED |
 | 500 | INTERNAL_ERROR |
 | 503 | RUNNER_UNAVAILABLE、DEPENDENCY_UNAVAILABLE |
@@ -304,6 +317,15 @@ T05 加入的部分：
 - 401、403、404 的判斷規則見 §13.2；`AppError` 可以帶回應 header（例如 401 的 `WWW-Authenticate: Bearer`）。
 - 物件層級的 404 與「路徑不存在」的 404 完全相同（相同的 code 與訊息）。
 - 約束對應：`uq_projects_name` → 409 `PROJECT_NAME_CONFLICT`；`fk_api_keys_project_id_projects` → 404；`ck_api_keys_expires_after_created` → 422 `INVALID_REQUEST`；不認得的約束 → 500 `INTERNAL_ERROR`（通用訊息）。
+
+T06 加入的部分（§14）：
+
+- 422 `INVALID_TARGET`：URL 不是可接受的 origin；422 `SCOPE_OUTSIDE_LAB`：IP 不是 `LAB_CIDR` 內的主機位址。
+- 範圍、預算與期限不合規則：422 `INVALID_REQUEST`，訊息說明欄位、位置與原因（例如「allowed_paths 第 2 個：path 不可有 . 或 .. 段落。」），但不回顯輸入的值（URL 可能帶帳密）。
+- 409：`TARGET_ORIGIN_CONFLICT`（同一個 project 已有相同 origin 的 target）、`INVALID_STATE_TRANSITION`（目前的狀態不允許核准或撤銷）、`TARGET_DISABLED`（掃描 gate）、`QUOTA_EXCEEDED`（target 或待核准申請的數量已達上限，§14.1、§14.2）。
+- 名稱、授權文件編號、核准與撤銷的說明都不接受控制字元與不可見的格式字元（例如換行、tab、零寬空白、bidi 控制字元），T05 的 project 與 key 名稱也一樣（`DECISIONS.md` §10.10）。
+- 403 `SCOPE_NOT_APPROVED`、`SCOPE_EXPIRED`：由掃描 gate 回傳（§14.5），T09 建立 scan 時使用。
+- 約束對應：`uq_targets_project_id_canonical_origin` → 409 `TARGET_ORIGIN_CONFLICT`；其他 T06 的約束在 domain 層就已擋下，萬一 DB 回報則是 500（代表程式有錯）。
 
 ## 13. 平台 API key 與專案（T05 已實作）
 
@@ -399,3 +421,166 @@ uv run secscan-admin create-admin-key --name "本機管理員" [--expires-in-day
 - 沒有建立 key（設定錯誤、DB 不可用、commit 失敗）時 exit 1，不寫出任何東西，也不留下空檔；DB 錯誤只回報例外類別。
 - key 已建立但寫不出去（例如 stdout 已關閉）時 exit 1，只回報 key id；沒有人拿得到它的值，所以無法使用。
 - 寫一筆 `api_key.create` audit，actor 為空、`changes.source` 為 `cli`。
+
+## 14. Target 與 ScopeGrant（T06 已實作）
+
+理由見 `DECISIONS.md` §10。T06 不對使用者給的 URL 發出任何流量：不解析 DNS，也不連線。以下的名稱、IP 與日期都是示例。
+
+### 14.1 Target
+
+建立（`POST /api/v1/projects/{project_id}/targets`，201）：
+
+```json
+{"name": "VAmPI", "kind": "api", "base_url": "http://vampi-vuln:5000"}
+```
+
+```json
+{
+  "id": "<uuid>",
+  "project_id": "<uuid>",
+  "name": "VAmPI",
+  "kind": "api",
+  "canonical_origin": "http://vampi-vuln:5000",
+  "environment": "lab",
+  "enabled": true,
+  "created_at": "2026-10-19T08:00:00Z"
+}
+```
+
+- `name` 1–100 字元（規則同 project 名稱）；`kind` 為 `web`、`api`、`hybrid`；`environment` 可省略，P0 只有 `lab`。
+- `base_url` 最長 256 字元，只能是 `http://主機[:port]`，結尾可以有一個 `/`：
+  - canonical 形式：scheme 與主機轉小寫，省略 `:80`。
+  - 主機是名稱（英數字與連字號，每段 1–63 字元）或四段十進位的 IPv4。IPv4 必須是 `LAB_CIDR` 內的主機位址，否則 422 `SCOPE_OUTSIDE_LAB`。
+  - 其他拒絕的情形見 `DECISIONS.md` §10.2，回 422 `INVALID_TARGET`；訊息說明原因，不回顯輸入。
+- 同一個 project 內 canonical origin 不可重複：409 `TARGET_ORIGIN_CONFLICT`。
+- 每個 project 最多 100 個 target：409 `QUOTA_EXCEEDED`（`DECISIONS.md` §10.9）。
+- 清單（`GET …/targets`）依建立時間由舊到新、分頁。
+
+修改（`PATCH /api/v1/targets/{target_id}`，200）：`{"enabled": false}` 或 `{"name": "…"}`。至少要有一個欄位，不接受 null 與其他欄位；origin 要改就建立新的 target。停用之後，已核准的 grant 就不能再用來建立 scan（§14.5）。operator 也能重新啟用，所以停用不是權威的停止手段；權威的停止是 admin 撤銷 grant。
+
+### 14.2 ScopeGrant
+
+申請（`POST /api/v1/targets/{target_id}/scope-grants`，201）：
+
+```json
+{
+  "allowed_origins": ["http://vampi-vuln:5000"],
+  "allowed_ips": ["10.89.7.20"],
+  "allowed_paths": ["/users/v1", "/books/v1/{book_title}"],
+  "excluded_paths": ["/users/v1/_debug"],
+  "allowed_methods": ["GET", "HEAD", "OPTIONS"],
+  "budget": {"requests_per_second": 2, "max_requests": 5000, "max_duration_seconds": 1500},
+  "authorization_reference": "LAB-ASSET-RECORD-001",
+  "valid_from": "2026-10-19T00:00:00Z",
+  "valid_until": "2026-10-26T00:00:00Z"
+}
+```
+
+回應（查詢時相同）：
+
+```json
+{
+  "id": "<uuid>",
+  "target_id": "<uuid>",
+  "project_id": "<uuid>",
+  "version": 1,
+  "status": "pending",
+  "allowed_origins": ["http://vampi-vuln:5000"],
+  "allowed_ips": ["10.89.7.20"],
+  "allowed_paths": ["/users/v1", "/books/v1/{book_title}"],
+  "allow_all_paths": false,
+  "excluded_paths": ["/users/v1/_debug"],
+  "allowed_methods": ["GET", "HEAD", "OPTIONS"],
+  "budget": {"requests_per_second": 2, "max_requests": 5000, "max_duration_seconds": 1500},
+  "authorization_reference": "LAB-ASSET-RECORD-001",
+  "valid_from": "2026-10-19T00:00:00Z",
+  "valid_until": "2026-10-26T00:00:00Z",
+  "requested_by_key_id": "<uuid>",
+  "created_at": "2026-10-19T08:00:00Z",
+  "approved_by_key_id": null,
+  "approved_at": null,
+  "approval_note": null,
+  "revoked_by_key_id": null,
+  "revoked_at": null,
+  "revocation_reason": null
+}
+```
+
+| 欄位 | 規則 |
+|---|---|
+| `allowed_origins` | 1–4 個，規則同 §14.1 的 `base_url`；必須包含 target 的 origin。主機是 IP 的 origin，該 IP 必須列在 `allowed_ips` |
+| `allowed_ips` | 1–16 個，四段十進位的 IPv4 主機位址；`LAB_ONLY` 時必須在 `LAB_CIDR` 內，而且不是網段或廣播位址 |
+| `allowed_paths` | 最多 256 個：完整的 literal path，或含整段 `{name}` 佔位的 route。不可有 `%`、`\`、`?`、`#`、`;`、`*`、空白、空段落或 `.`、`..` 段落，每個最長 512 字元。清單是空的時，必須設定 `allow_all_paths: true` |
+| `allow_all_paths` | 預設 false；true 時 `allowed_paths` 必須是空的 |
+| `excluded_paths` | 最多 64 個，語法同上；排除優先於允許，不可與 `allowed_paths` 重複 |
+| `allowed_methods` | GET、HEAD、OPTIONS、POST、PUT、PATCH、DELETE 的子集，大小寫必須一致 |
+| `budget` | 三個正整數，上限 2、5,000、1,500；可省略，省略的項目用上限 |
+| `authorization_reference` | 必填，1–200 字元 |
+| `valid_from`、`valid_until` | 必須帶時區；`valid_from` 預設為申請時間。`valid_from < valid_until`、`valid_until` 晚於現在、期間最長 30 天 |
+
+- 任何清單有重複（正規化之後）都拒絕。
+- 每個 target 最多 10 個待核准的申請（pending 且未過期）：409 `QUOTA_EXCEEDED`，請先核准或撤銷。
+- 時間換算成 UTC 會超出可表示的範圍時（例如 `9999-12-31T23:59:59-05:00`），回 422 `INVALID_REQUEST`。
+- `status`、`version` 與核准、撤銷的欄位不能由 client 指定；`version` 是每個 target 各自的流水號。
+- 查詢：`GET /api/v1/scope-grants/{grant_id}`，以及 `GET /api/v1/targets/{target_id}/scope-grants`（新版本在前、分頁）。`status` 是讀取當下推導出的狀態。
+
+### 14.3 狀態與轉換
+
+| 狀態 | 意義 |
+|---|---|
+| `pending` | 已申請，尚未核准 |
+| `approved` | 已核准；`valid_from` 之前還不能使用 |
+| `revoked` | 已撤銷；優先於 expired |
+| `expired` | pending 或 approved，而且已到 `valid_until`。由時間推導，不寫入 DB |
+
+| 目前狀態 | `POST …/approve`（`{"note": "…"}`） | `POST …/revoke`（`{"reason": "…"}`） |
+|---|---|---|
+| pending | 200 → approved（以目前的 `LAB_CIDR` 重新檢查，不合就 422 `SCOPE_OUTSIDE_LAB`） | 200 → revoked |
+| approved | 409 `INVALID_STATE_TRANSITION` | 200 → revoked |
+| revoked | 409 | 200，不改變任何東西，也不重記 audit |
+| expired | 409（請重新申請新版本） | 409 |
+
+- `note`、`reason` 1–500 字元，不可空白。
+- 同時核准與撤銷時，後到的請求等先到的 commit，再以最新的狀態判斷。
+- `approved_at` 是核准那個 transaction 開始的時間；`revoked_at` 是撤銷實際寫入的時間，一定不早於 `approved_at`。
+- DB 以 trigger 再擋一次非法的轉換與範圍修改（`DECISIONS.md` §10.4）。
+
+### 14.4 權限
+
+| 操作 | platform_admin | operator（自己的 project） | viewer（自己的 project） | 其他 project |
+|---|---|---|---|---|
+| 建立、修改 target；申請 grant | 允許 | 允許 | 403 | 404 |
+| 查詢 target 與 grant | 允許 | 允許 | 允許 | 404 |
+| 核准、撤銷 grant | 允許 | 403 | 403 | 404 |
+
+不存在的 project、target 或 grant 也回 404，回應與其他 project 的完全相同。
+
+### 14.5 掃描 gate（給 T09 使用）
+
+T06 還沒有建立 scan 的 API。`ScopeGrantService.require_usable()` 是「這個 grant 現在能不能用來掃描」的唯一判斷，T09 的 `POST /scans` 會在同一個 transaction 中呼叫它：
+
+| 情況 | 回應 |
+|---|---|
+| target 或 grant 不存在、屬於其他 project | 404 |
+| 呼叫者是 viewer | 403 `ROLE_NOT_ALLOWED` |
+| grant 屬於同一個 project 的其他 target | 422 `INVALID_REQUEST` |
+| target 的 origin 不在 grant 的範圍內（只可能是直接改了 DB） | 422 `INVALID_REQUEST` |
+| pending、已撤銷、尚未生效 | 403 `SCOPE_NOT_APPROVED`（訊息不同） |
+| 已過期 | 403 `SCOPE_EXPIRED` |
+| target 已停用 | 409 `TARGET_DISABLED` |
+| IP 不在目前的 `LAB_CIDR` 內 | 422 `SCOPE_OUTSIDE_LAB` |
+
+它以 `FOR SHARE` 鎖住 target 與 grant：撤銷或停用一旦 commit，之後就不會再通過；正在建立 scan 時，撤銷會等它 commit。
+
+### 14.6 Audit
+
+| 事件 | `changes` |
+|---|---|
+| `target.create` | `name`、`kind`、`origin` |
+| `target.update` | 有變動的欄位，例如 `{"enabled": {"from": true, "to": false}}` |
+| `scope_grant.create` | `version`、`target_id`、`origins`、`ips`、`methods`、`allow_all_paths`、`path_count`、`excluded_path_count`、`budget`、`valid_from`、`valid_until`、`reference` |
+| `scope_grant.approve` | `version`、`note` |
+| `scope_grant.revoke` | `version`、`reason`、`previous_state` |
+
+- 完整的 path 清單不寫進 audit：grant 本身不可變。
+- 授權文件編號記為 `reference`：欄位名稱含 authorization 會被遮罩規則整個遮掉。

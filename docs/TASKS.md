@@ -271,12 +271,133 @@
       - **T07**：規格上傳前，先在 `/api/v1` 加上驗證前的 body 大小上限（413）與格式檢查（`DECISIONS.md` §9.5）。
       - **T09**：建立 scan 沿用 `DbSession`；runner 與 worker 不經 HTTP，需要自己的 session 與 transaction 管理。
       - **M2／T23**：速率限制、全域安全 header、key 的事故應變工具、自行託管 Swagger UI；以上完成前不發布 port、不綁非 loopback 位址。
-- [ ] T06 建立 target、ScopeGrant 與審批流程。
+- [x] T06 建立 target、ScopeGrant 與審批流程。
   - DoD：
     - pending/approved/revoked/expired 的轉換正確。
     - 沒有核准就不能開始掃描。
     - `LAB_ONLY` 時，grant 的 IP 必須在 `LAB_CIDR` 內。
     - 留下 audit 紀錄。
+  - 交付（2026-10-22，done）：
+    - 範圍：
+      - target（要掃描的靶場）的建立、查詢、改名與停用；scope grant 的申請、查詢、核准與撤銷。
+      - 建立 scan 前的唯一檢查入口（掃描 gate）；建立 scan 的 API 在 T09。
+      - 設定 `LAB_ONLY`、`LAB_CIDR`；migration `0002`（targets、scope_grants 與生命週期 trigger）。
+      - 設計決定見 `DECISIONS.md` §10，API 見 `API_CONTRACT.md` §14。T06 不對使用者給的 URL 發出任何流量（不解析 DNS、不連線）。
+    - 檔案：
+      - 程式：
+        - `src/secscan/targets/`：`domain`（origin 的嚴格解析、`LabNetwork`）、`models`、`repository`、`service`、`errors`、`schemas`、`router`、`dependencies`
+        - `src/secscan/grants/`：`domain/scope`（範圍、預算、期限）、`domain/lifecycle`（狀態、轉換、掃描 gate）、`models`、`repository`、`service`、`schemas`、`router`
+        - `src/secscan/migrations/versions/v0002_targets_and_scope_grants.py`
+        - `src/secscan/core/`：`config`（`LAB_ONLY`、`LAB_CIDR`）、`errors`（新錯誤碼）、`text`（拒絕控制字元與格式字元）；`main.py`（`app.state.lab`、兩個 router）；`migrations/metadata.py`
+      - 設定：`pyproject.toml`（layers 加入 targets、grants；開發依賴 hypothesis 6.170.2）、`.env.example`
+      - 測試：
+        - unit：`tests/unit/targets/`、`tests/unit/grants/`、`test_scope_schemas.py`、`test_lab_dependency.py`、`core/test_config.py`、`core/test_text.py`
+        - integration：`test_scope_schema.py`、`test_scope_repositories.py`、`test_target_service.py`、`test_grant_service.py`、`test_grant_races.py`、`test_targets_api.py`、`test_grants_api.py`
+        - 共用：`sql_support.py`、`scope_support.py`、`locks.py`（等鎖 helper 從 `test_revocation_race.py` 移出）；`api_support.py` 的 `Seeder` 加上 target、grant、approve
+    - 端點：
+      - `POST`、`GET /api/v1/projects/{project_id}/targets`
+      - `GET`、`PATCH /api/v1/targets/{target_id}`
+      - `POST`、`GET /api/v1/targets/{target_id}/scope-grants`（GET 為新增）
+      - `GET /api/v1/scope-grants/{grant_id}`（新增）
+      - `POST /api/v1/scope-grants/{grant_id}/approve`、`/revoke`
+    - DoD 對照：
+      - **pending/approved/revoked/expired 的轉換正確**：
+        - DB 只存 pending、approved、revoked；expired 由 `valid_until` 推導（到期那一刻起），revoked 優先於 expired。不需要排程工作，也沒有「已過期、DB 卻還是 approved」的空窗。
+        - domain：4 種狀態 × 2 種動作的轉換表，並有測試確認「允許」與「拒絕」兩張表合起來涵蓋所有組合；時間邊界以注入的 `now` 測試（`valid_until` 前 1µs、等於時）。
+        - service 與 API：核准只限 pending；撤銷 pending、approved；重複撤銷回 200、不重記 audit；其他一律 409 `INVALID_STATE_TRANSITION`。讀取時的 `status` 由當下時間推導（API 測試直接寫入一筆期限已過的資料，讀出為 expired、不能核准）。
+        - DB：trigger `scope_grants_guard` 只允許 pending→approved、pending→revoked、approved→revoked，範圍欄位不可修改，DELETE、TRUNCATE 一律拒絕；以 raw SQL 逐一測試每種非法轉換與每個範圍欄位。
+        - 併發：同時核准與撤銷時，後到的等先到的 commit 再判斷（`FOR UPDATE` 加 `populate_existing`），以 `pg_stat_activity` 確認在等列鎖；「撤銷先開始、核准先 commit」另有確定性測試（見下方審查）。
+      - **沒有核准就不能開始掃描**：
+        - `ScopeGrantService.require_usable()` 是唯一的判斷：pending、已撤銷、尚未生效回 403 `SCOPE_NOT_APPROVED`，過期回 403 `SCOPE_EXPIRED`，target 停用回 409 `TARGET_DISABLED`，IP 不在目前的 `LAB_CIDR` 內回 422 `SCOPE_OUTSIDE_LAB`，其他 target 的 grant 或 target 的 origin 不在 grant 內回 422，其他 project 回 404。
+        - 以 `FOR SHARE` 依序鎖住 target 與 grant：併發測試確認撤銷或停用 commit 之後 gate 拒絕，gate 持有鎖時撤銷會等待。
+        - 建立 scan 的 API 要到 T09 才有：T06 只能證明這個判斷本身，`POST /scans` 呼叫它的 API 層測試留給 T09。
+      - **`LAB_ONLY` 時 grant 的 IP 必須在 `LAB_CIDR` 內**：
+        - 設定：`LAB_ONLY=false` 時啟動失敗；`LAB_CIDR` 必須在 RFC 1918 內、前綴 /16–/30，預設值與 `compose.lab.yaml` 的 lab_net 一致（測試比對兩者）。
+        - grant 的每個 IP 必須是 `LAB_CIDR` 內的主機位址（網段位址、廣播位址、IPv6 都拒絕），IP 形式的 target 主機也一樣。
+        - 申請、核准、gate 三個時點都以當下的設定檢查：申請後縮小 `LAB_CIDR`，核准與 gate 都會拒絕。
+      - **留下 audit 紀錄**：`target.create`、`target.update`（只記有變動的欄位與前後值）、`scope_grant.create`、`scope_grant.approve`、`scope_grant.revoke`，與業務變更在同一個 transaction；被拒絕或失敗的操作不留紀錄；changes 經遮罩（測試確認 Bearer 樣式的授權文件編號被遮掉）。
+    - 實際執行：
+      - TDD：每一步先寫測試並確認失敗，例如：
+        - `ImportError`（`DEFAULT_LAB_CIDR`、`GrantRequest`）、`ModuleNotFoundError`（targets、grants、service、schemas）
+        - schema 測試在 migration 之前：`relation "targets" does not exist`（17 failed、71 errors）
+        - 路由：`V1_ROUTES` 先更新，12 failed；API 整合測試先寫，27 failed（T05 的 API 測試是路由完成後才補的，這次改正）
+        - 審查後的修正：13 failed（含確定性重現的 `ck_scope_grants_decision_times` 違反）
+        - 例外：repository 的 14 個測試寫在實作之前，但沒有先執行確認失敗；鑑別力以下方的突變檢查補證明。
+      - 測試本身的問題（都已修正）：
+        - 隨機輸入的 property test 一開始在 2,000 個樣本中只接受 1 個，幾乎只測到「不會丟出其他例外」；改成由合法與危險片段拼成的 URL（約 20% 被接受），並以 Hypothesis 的 `find()` 證明兩種結果都存在。
+        - 「轉換表涵蓋所有組合」的測試一開始永遠不會失敗；改成檢查允許與拒絕兩張表的聯集等於所有組合。
+        - 「valid_until 必須晚於現在」的情境，一開始其實被「開始必須早於結束」先擋下；補上整段期間都在過去的案例。
+        - 長度上限的測試一開始沒有測到剛好 256 字元的邊界。
+        - 上鎖時讀最新值的兩個測試一開始空轉通過：identity map 只弱參照 ORM 物件，沒人引用就被回收（T05 的同一個教訓）。被突變檢查抓出，改成刻意保留參照。
+        - 離線 migration 的既有測試假設 head 版本直接寫入 `alembic_version`；有兩個 migration 後改成檢查最後停在 head。
+      - 突變檢查（66 項，每一項都讓測試失敗；腳本不進 repo，跑完還原檔案）：
+        - 第一輪 58 項抓到 56 項：漏掉的是 grant、target「上鎖時不讀最新值」，原因是上面那兩個空轉的測試；修正測試後 2/2 抓到。
+        - 審查後更新受影響的目標字串並新增 8 項，最後全部重跑 66/66。
+        - 權限：建立 target 不檢查權限、viewer 可以建立 target 或申請 grant、operator 可以核准或撤銷、以 id 讀 target 或 grant 不檢查 project
+        - 轉換：撤銷後還能核准、可以核准已過期的申請、可以撤銷已過期的 grant、到期判斷差一格、revoked 不優先於 expired、重複撤銷再寫一次
+        - `LAB_CIDR`：建立 target、申請、核准、gate 任一處不檢查；接受網段或廣播位址；`LAB_ONLY` 可以關閉；`LAB_CIDR` 不限 RFC 1918
+        - URL：接受 userinfo、反斜線、非 ASCII、模糊的數字 host、IPv6、https、localhost、前導 0 的 port
+        - 範圍與上限：path 接受 `..` 或 `%`、method 接受 TRACE、空清單代表全部 path、grant 不需包含 target 的 origin、IP 形式的 origin 不需列在 allowed_ips、拿掉預算或期限上限、期限可以在過去
+        - gate：pending、尚未生效、target 停用、別的 target 的 grant 可以通過
+        - 鎖：gate 不鎖 grant 或 target、核准與撤銷不鎖 grant、申請時不鎖 target、grant 或 target 上鎖時不讀最新值、target 鎖的模式不分
+        - DB：拿掉 row trigger 或 TRUNCATE trigger、trigger 不檢查範圍欄位、讀取時把網段當成主機
+        - audit 與回應：申請、核准、撤銷、建立 target、修改 target 不寫 audit；回應的 status 不推導 expired
+        - 審查後新增：撤銷時間改回 transaction 開始時間、極端時間不轉成 422、gate 不比對 target 的 origin、待核准的申請沒有上限、過期的申請也佔名額、target 數量沒有上限、文字欄位接受控制字元、先驗證說明文字再檢查權限
+      - 檢查結果：
+        - `make test` 1166 passed、coverage 100%（含分支；`targets`、`grants` 的 domain 都是 100%）。
+        - `make lint`（含新的 layers）、`make typecheck`、`pre-commit run --all-files` 都通過（新檔案先以 `git add -N` 納入，否則 `--all-files` 不會檢查未追蹤的檔案）。
+      - 手動端到端：做法同 T05（db-test 上的暫時資料庫、API 跑在 127.0.0.1:8765、key 只寫入 0600 檔），審查前後各跑一次，結束後刪除。不啟動 lab，target 只是登記，沒有任何流量送往靶場。
+        1. CLI 建立 admin key；admin 建立 project A、B，以及 A 的 operator、viewer key。
+        2. target：
+           - operator 以 `HTTP://VAMPI-VULN:5000/` 建立，canonical origin 為 `http://vampi-vuln:5000`。
+           - viewer 建立回 403；含帳密的 base_url 回 422 `INVALID_TARGET`，回應不含密碼；lab 以外的 IP 回 422 `SCOPE_OUTSIDE_LAB`。
+        3. grant 申請：
+           - operator 申請成功，201、pending、version 1；IP 不在 `LAB_CIDR` 內回 422 `SCOPE_OUTSIDE_LAB`。
+           - 審查後那次另確認：授權文件編號含 bidi 控制字元、`valid_until` 為 `9999-12-31T23:59:59-05:00`，都回 422 `INVALID_REQUEST`。
+        4. operator 核准回 403；admin 核准後 viewer 查得到 approved；再核准一次回 409 `INVALID_STATE_TRANSITION`。
+        5. A 的 operator 讀 B 的 target 回 404，回應除了 request_id 之外與不存在的 id 完全相同。
+        6. admin 撤銷：`revoked_at` 不早於 `approved_at`；重複撤銷回 200、`revoked_at` 不變；核准已撤銷的 grant 回 409。operator 停用 target。
+        7. A 的 audit 依序為 project.create、api_key.create ×2、target.create、scope_grant.create、scope_grant.approve、scope_grant.revoke、target.update；被拒絕的操作與重複撤銷都沒有紀錄。
+        8. OpenAPI 有 11 個 `/api/v1` 路徑。撤銷驗證用的 admin key。伺服器日誌沒有完整的 key、測試密碼或未處理的例外；被拒絕的存取都有記錄（forbidden ×2、not_found ×1）。
+        9. 刪除暫時資料庫與檔案；db-test 沒有殘留的資料庫或角色。
+    - 審查（依 CLAUDE.md §12 與全域規則：授權與輸入驗證必須做安全審查）：
+      - 第一次啟動的兩個審查因 API 用量上限中途停止，重新執行後完成。
+      - code-reviewer：APPROVE（0 CRITICAL、0 HIGH、2 MEDIUM、4 LOW），全部已修：
+        - M1：撤銷的 transaction 比同時進行的核准更早開始、卻在核准 commit 之後才拿到鎖時，`revoked_at`（原本是 `now()`，即 transaction 開始時間）早於 `approved_at`，違反 CHECK，撤銷回 500。改用 `clock_timestamp()`，並加上不需要執行緒的確定性測試。
+        - M2：極端時區的期限（例如 `9999-12-31T23:59:59-05:00`）換算成 UTC 時溢位，回 500；改成先以原本的時區比較，溢位回 422。
+        - LOW：`environment` 欄位被接受後丟掉、approve／revoke 先驗證說明文字再檢查權限、一個測試名稱與內容不符、交付紀錄尚未更新。
+      - security-reviewer：APPROVE（0 CRITICAL、0 HIGH、1 MEDIUM、4 LOW、5 INFO）。沒有找到能繞過 gate、`LAB_CIDR` 或 origin 解析的方法，也沒有跨 project 洩漏；它以約 21.5 萬個字串和 Node 的 WHATWG `new URL()` 及 `urlsplit` 比對被接受的 origin，0 個不一致。
+        - MEDIUM 與 code-reviewer 的 M1 相同，已修。
+        - LOW 已修：
+          - 極端日期回 500（同 M2）。
+          - gate 沒比對 target 的 origin 是否在 grant 內（只有直接改 DB 才會不一致）：gate 加上這項比對。
+          - 無法刪除的大型 pending grant 沒有數量上限：每個 target 最多 10 個待核准的申請、每個 project 最多 100 個 target（409 `QUOTA_EXCEEDED`，`DECISIONS.md` §10.9）。
+          - 文字欄位接受控制字元與 bidi 字元：`require_text` 拒絕 Unicode 類別 Cc、Cf（也影響 T05 的名稱，`DECISIONS.md` §10.10）。
+        - INFO（path 比對語意、lab 網段內的基礎設施位址、gate 的時間與鎖等待、停用 target 不是權威的停止手段、報告以 `approved_at` 為授權時間）寫進 `DECISIONS.md` §10.5、§10.8 與下方「給後續任務」。
+      - 修正後重跑全部測試、突變檢查與手動端到端。
+    - 限制：
+      - 建立 scan 的 API 還不存在：「沒有核准就不能開始掃描」目前由 gate 本身的測試證明，`POST /scans` 的 API 層測試在 T09；撤銷 grant 或停用 target 之後停止執行中的 scan，在 T09、T13。
+      - 平台不驗證 origin 與 IP 的對應（不解析 DNS），由管理員核准時人工核對；執行時的 DNS/IP 綁定由 M2 的 guard 強制。SEC-02、SEC-05 目前只完成應用層。
+      - origin 解析的自動化測試只與標準函式庫 `urlsplit` 做 parser differential；與 WHATWG 的一致性靠「只接受最嚴格的子集」的設計、對照表測試與一次性的審查比對，與 mitmproxy 的比對在 T11。
+      - path 與 method 的比對規則還沒有實作（T07、T11），T06 只定語法。
+      - admin 可以核准自己提出的申請（只有一位管理員；audit 記下申請者與核准者）。核准新版本不會自動撤銷舊版本。
+      - 到期是推導出來的：到期當下沒有 audit 事件（到期時間記在 `scope_grant.create`）。
+      - trigger 與 CHECK 只防程式錯誤造成的誤改；擁有 DDL 權限的人仍可停用 trigger（`DECISIONS.md` §7）。targets 沒有 trigger，origin 的不可修改由 API 與 gate 的比對保證。
+      - target 數量是軟上限，同時建立時可能略為超過。
+      - 預算上限沿用 M0–M2 的保守值，期限最長 30 天；M3 量測後若要調整，在 DECISIONS 記錄。
+      - 仍沒有請求大小上限與速率限制（T05 已知，列入 T07、T23）。
+      - 環境：開發期間 OrbStack VM 的時鐘一度比主機慢約 149 秒，T05 三個比較 DB 時間與應用程式時間（容許 1 分鐘）的測試因此暫時失敗；時鐘恢復同步後重跑全部通過。其後 OrbStack 曾停止，依 README 以 `orb start` 重新啟動。
+    - 給後續任務：
+      - **T07**：
+        - 規格上傳前，先在 `/api/v1` 加上驗證前的 body 大小上限（413）與格式檢查（T05 已列）。
+        - operation 是否在範圍內：依 grant 的 `allowed_paths`（literal 與 `{name}` 佔位）、`allow_all_paths`、`excluded_paths`（排除優先）、`allowed_methods` 判斷；比對至少和伺服器語意一樣寬（`DECISIONS.md` §10.8）。
+      - **T09**：
+        - `POST /scans` 在同一個 transaction 呼叫 `ScopeGrantService.require_usable()`，並把 grant 的 id、version 與範圍放進不可變的 scan 快照。取得鎖之後再取 `now`，並設定 `lock_timeout`。
+        - scan 與 grant、target、project 的 DB 層一致性（例如複合 FK）。
+        - 撤銷 grant 或停用 target 時，處理已建立但尚未執行的 scan；runner 啟動前再呼叫一次 gate。
+      - **T11（M2）**：guard 以 grant 快照逐請求強制 origin、DNS/IP 綁定、path、method 與預算；以 mitmproxy 的 URL 解析做 parser differential；lab 網段內的基礎設施位址（guard、canary）要排除；實際收包證據補齊 SEC-01、SEC-02、SEC-05。
+      - **M3**：ZAP web profile 需要的 seed path；依量測調整預算上限（`grants/domain/scope.py` 的常數與 `DECISIONS.md` §10.3）。
+      - **T21**：全域的待核准清單與全域 audit 查詢；報告以 `approved_at` 作為授權成立的時間。
 - [ ] T07 建立 OpenAPI 上傳與受限的 operation inventory。
   - DoD：驗證大小、格式、$ref、servers，包含惡意與跨 origin 的測試；不從外部抓取任何東西。
 - [ ] T08 建立 auth profile 與 secret 生命週期。

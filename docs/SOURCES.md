@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S46 為 2026-10-19。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -50,6 +50,18 @@
 | S44 | [OWASP — API2:2023 Broken Authentication](https://api-security.owasp.org/editions/2023/en/0xa2-broken-authentication) | API key 用於驗證 API client，不用於使用者登入；驗證端點應有比一般更嚴格的防暴力猜測與速率限制（T05 尚未做速率限制，列入 M2/T23，見 `DECISIONS.md` §9.5） |
 | S45 | [SQLAlchemy — Session.get](https://docs.sqlalchemy.org/en/21/orm/session_api.html#sqlalchemy.orm.Session.get) | 物件已在 identity map 時直接回傳、不查 DB；`populate_existing` 一定重新查詢並以新資料更新物件。T05 以 SQLAlchemy 2.1.5 原始碼確認：`with_for_update` 會送出 `SELECT … FOR UPDATE`，但不覆寫已載入的屬性，所以撤銷 key 時兩者一起用 |
 | S46 | [SQLAlchemy — Using SAVEPOINT](https://docs.sqlalchemy.org/en/21/orm/session_transaction.html#using-savepoint) | `begin_nested()` 內出錯只回滾 savepoint，外層 transaction 繼續；PostgreSQL 遇到 IntegrityError 通常會中止整個 transaction（T05 prefix 碰撞重試的依據） |
+| S47 | [WHATWG — URL Standard](https://url.spec.whatwg.org/) | 瀏覽器與部分工具採用的解析規則：special scheme（http 等）把 `\` 當成 `/`（記為 validation error）；host 的最後一段是數字時交給 IPv4 parser，接受 `0x` 十六進位、前導 0 的八進位與不足 4 段（單一數字就是整個位址）；domain 經 UTS #46 ToASCII（例如全形字母對應成半形）。T06 只接受與它解讀一致的子集（`DECISIONS.md` §10.2） |
+| S48 | [Python — urllib.parse](https://docs.python.org/3.12/library/urllib.parse.html) | `urlsplit()`／`urlparse()` 不驗證輸入，官方建議有安全影響時自行檢查各部分；3.12 起去掉開頭的 C0 控制字元與空白；`hostname` 轉小寫。T06 以它做 parser differential 測試，並以 Python 3.12.6 實測 `http://lab\@evil` 解出 host `evil` |
+| S49 | [Python — ipaddress](https://docs.python.org/3.12/library/ipaddress.html) | 3.9.5 起 `IPv4Address` 不接受前導 0（與 glibc `inet_pton()` 一樣嚴格），也接受 32-bit 整數輸入；`IPv4Network` 在 strict 模式下 host bits 不為 0 時拋出 `ValueError`；`network_address`、`broadcast_address` |
+| S50 | [RFC 3986 — URI Generic Syntax](https://www.rfc-editor.org/rfc/rfc3986) | §3.3：`pchar = unreserved / pct-encoded / sub-delims / ":" / "@"`；`.`、`..` 是 dot-segment，在解析參照時會被移除。§2.1–2.4：percent-encoding 的大小寫與 unreserved 字元的編碼都視為等價。所以 T06 的 path 不接受 `%` 與點段落，避免同一條 path 有多種寫法 |
+| S51 | [RFC 6454 — The Web Origin Concept](https://www.rfc-editor.org/rfc/rfc6454) | §4：由 URI 取 origin 時 scheme 與 host 轉小寫；§6.2：序列化時只有 port 不是該 scheme 的預設值才附加（T06 的 canonical origin 省略 `:80`） |
+| S52 | [RFC 1918 — Address Allocation for Private Internets](https://www.rfc-editor.org/rfc/rfc1918) | §3：私有網段 10/8、172.16/12、192.168/16（`LAB_CIDR` 必須在其中） |
+| S53 | [RFC 6761 — Special-Use Domain Names](https://www.rfc-editor.org/rfc/rfc6761) | §6.3：`localhost.` 與 `.localhost.` 底下的名稱都解析到 loopback（T06 拒絕這類 target） |
+| S54 | [RFC 9110 — HTTP Semantics](https://www.rfc-editor.org/rfc/rfc9110) | §9.1：method token 區分大小寫；§9.2.1：GET、HEAD、OPTIONS、TRACE 是 safe method。T06 只接受大寫的 GET、HEAD、OPTIONS、POST、PUT、PATCH、DELETE；TRACE 會回顯請求內容，掃描用不到，不接受 |
+| S55 | [RFC 5891 — IDNA Protocol](https://www.rfc-editor.org/rfc/rfc5891) | §4.2.3.1：標籤的第 3、4 個字元不可是 `--`（保留給 `xn--` 等國際化網域名稱；T06 不接受） |
+| S56 | [PostgreSQL — CREATE TABLE](https://www.postgresql.org/docs/current/sql-createtable.html) | 多個 CHECK 依名稱的字母順序檢查（9.5 起）；CHECK 不能有子查詢、只能參照同一列的欄位，所以 `LAB_CIDR` 這類設定無法放進 CHECK |
+| S57 | [PostgreSQL — Explicit Locking：Row-Level Locks](https://www.postgresql.org/docs/current/explicit-locking.html) | `FOR UPDATE` 阻擋其他 transaction 的 UPDATE、DELETE 與任何 `FOR …` 鎖；`FOR SHARE` 阻擋 UPDATE、DELETE、`FOR UPDATE`，但彼此不衝突；`SELECT … FOR UPDATE` 等到對方的 transaction 結束後，回傳更新後的列。鎖在 transaction 結束時釋放（T06 的核准、撤銷與掃描 gate） |
+| S58 | [Hypothesis — API reference：settings](https://hypothesis.readthedocs.io/en/latest/reference/api.html) | `derandomize=True` 以測試函式的 hash 決定亂數，每次執行測同一組輸入；`database=None` 不保存範例資料庫。`find()` 回傳符合條件的最小例子（以已安裝的 6.170.2 確認找不到時拋出 `NoSuchExample`） |
 
 ## 需要在 M0–M2 實際確認的事項
 

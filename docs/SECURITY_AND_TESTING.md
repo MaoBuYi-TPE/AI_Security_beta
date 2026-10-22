@@ -72,6 +72,16 @@ SEC-03/04/05 等使用完全在本機測試網路的接收器與 mock DNS，不�
 
 常見和邊界輸入都要測。fingerprint 與 URL 正規化用 Hypothesis 做 property test；unit 測試以 pytest-socket 禁止連網。psycopg 經 libpq 連線，pytest-socket 擋不到，所以非整合測試另由 `tests/conftest.py` 封鎖 DB 連線；測試也不讀 `.env`（T04）。
 
+T06 已涵蓋：
+
+- **target canonicalization**：
+  - 接受與拒絕的對照表，每一類模糊寫法至少一例，並檢查錯誤訊息指出原因、不回顯輸入。
+  - Hypothesis property test：結果 idempotent、輸出符合嚴格文法，而且標準函式庫 `urlsplit` 解出相同的 host 與 port。profile 以 derandomize 固定輸入，失敗可以重現。
+  - 不解析 DNS。
+- **grant 的範圍、預算、期限**：每個欄位的語法與邊界，以及狀態轉換表（所有狀態與動作的組合都明確決定）與掃描 gate。
+
+scope matching（path 與 method 的比對）、guard policy 比對與 policy budget，留給 T07 與 M2。
+
 ### 4.2 Contract / Parser
 
 每個鎖定版本保存遮罩後真實輸出 fixture：正常無告警、存在告警、非零退出但有有效 findings、格式截斷、未知欄位、缺必要欄位、空檔、重複事件、Unicode、超大單行/總量、timeout 後部分 artifact。版本不支援時明確 error，不默默漏掉資料。
@@ -100,6 +110,18 @@ T05 已涵蓋 project 層的權限：
 - 以突變檢查確認上述測試有鑑別力（`TASKS.md` T05）。
 
 SEC-16 要求的 scan、finding、artifact 跨專案測試，隨這些資源在 T09 與 M3–M5 加入，尚未完成。
+
+T06 已涵蓋 target 與 scope grant：
+- A 專案讀寫 B 專案的 target 與 grant（含核准、撤銷），回應與不存在的 id、不存在的路徑完全相同。
+- viewer 不能建立 target 或申請 grant；operator 不能核准或撤銷。
+- 狀態轉換：domain 的轉換表、service 與 API 的 200 與 409，以及 DB trigger 擋下 raw SQL 的非法轉換與範圍修改。
+- 併發：同時申請（version 連號）、同時核准與撤銷、掃描 gate 與撤銷或停用的先後，都以 `pg_stat_activity` 確認後到的在等列鎖；另有「撤銷先開始、核准先 commit」的確定性測試（審查時發現原本會回 500）。
+- 數量上限：每個 target 的待核准申請與每個 project 的 target 數。
+- `LAB_CIDR`：設定驗證，以及建立 target、申請、核准、掃描 gate 四個時點的檢查。
+
+仍未完成的部分：
+- **SEC-01**：「建立或開始掃描被拒」的判斷（gate）已實作並測試，但建立 scan 的 API 要到 T09 才有；「已執行者停止新出站」要到 M2/T13。
+- **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；guard 的檢查與實際收包證據要到 M2。
 
 ### 4.4 Live E2E
 
