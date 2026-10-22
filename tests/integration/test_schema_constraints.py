@@ -3,79 +3,42 @@
 直接用 SQL 驗證 schema 本身，不經過 repository，確認即使程式有 bug，DB 也會擋下錯誤資料。
 """
 
-from collections.abc import Mapping
 from datetime import timedelta
 from uuid import UUID, uuid4
 
-import psycopg
 import pytest
 from sqlalchemy import CheckConstraint, text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from secscan.api_keys.domain import KEY_HASH_BYTES, Role
 from secscan.migrations.metadata import target_metadata
+from tests.integration.sql_support import (
+    CHECK_VIOLATION,
+    FOREIGN_KEY_VIOLATION,
+    INSERT_KEY,
+    INSERT_PROJECT,
+    INTEGRITY_CONSTRAINT_VIOLATION,
+    NOT_NULL_VIOLATION,
+    RESTRICT_VIOLATION,
+    UNIQUE_VIOLATION,
+)
+from tests.integration.sql_support import insert_key as _key
+from tests.integration.sql_support import insert_project as _project
+from tests.integration.sql_support import key_params as _key_params
+from tests.integration.sql_support import returning_id as _execute
+from tests.integration.sql_support import violation as _violation
 
 pytestmark = pytest.mark.integration
 
-INTEGRITY_CONSTRAINT_VIOLATION = "23000"
-RESTRICT_VIOLATION = "23001"
-NOT_NULL_VIOLATION = "23502"
-FOREIGN_KEY_VIOLATION = "23503"
-UNIQUE_VIOLATION = "23505"
-CHECK_VIOLATION = "23514"
-# projects 1、api_keys 7、audit_events 3；每一個都有對應的行為測試。
-EXPECTED_CHECK_COUNT = 11
+# projects 1、api_keys 7、audit_events 3、targets 4、scope_grants 12；
+# 每一個都有對應的行為測試（targets 與 scope_grants 的在 test_scope_schema.py）。
+EXPECTED_CHECK_COUNT = 27
 
-INSERT_PROJECT = "INSERT INTO projects (name) VALUES (:name) RETURNING id"
-INSERT_KEY = (
-    "INSERT INTO api_keys (project_id, role, name, prefix, key_hash, expires_at) "
-    "VALUES (:project_id, :role, :name, :prefix, :key_hash, :expires_at) RETURNING id"
-)
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "
     "VALUES (:actor_key_id, :project_id, :action, :object_type, "
     "CAST(:changes AS jsonb)) RETURNING id"
 )
-
-
-def _execute(session: Session, statement: str, params: Mapping[str, object]) -> UUID | None:
-    value = session.execute(text(statement), params).scalar()
-    return value if isinstance(value, UUID) else None
-
-
-def _violation(session: Session, statement: str, params: Mapping[str, object]) -> psycopg.Error:
-    """執行應該被 DB 拒絕的 SQL；以 savepoint 隔離，後續步驟仍可使用同一個 session。"""
-    with pytest.raises(IntegrityError) as caught, session.begin_nested():
-        session.execute(text(statement), params)
-    error = caught.value.orig
-    assert isinstance(error, psycopg.Error)
-    return error
-
-
-def _project(session: Session, name: str = "lab") -> UUID:
-    project_id = _execute(session, INSERT_PROJECT, {"name": name})
-    assert project_id is not None
-    return project_id
-
-
-def _key_params(**overrides: object) -> dict[str, object]:
-    params: dict[str, object] = {
-        "project_id": None,
-        "role": Role.PLATFORM_ADMIN.value,
-        "name": "admin",
-        "prefix": uuid4().hex[:12],
-        "key_hash": uuid4().bytes + uuid4().bytes,
-        "expires_at": None,
-    }
-    params.update(overrides)
-    return params
-
-
-def _key(session: Session, **overrides: object) -> UUID:
-    key_id = _execute(session, INSERT_KEY, _key_params(**overrides))
-    assert key_id is not None
-    return key_id
 
 
 def _audit_params(**overrides: object) -> dict[str, object]:
@@ -332,6 +295,8 @@ def test_audit_events_are_append_only(db_session: Session, statement: str) -> No
         ("uq_api_keys_prefix", "UNIQUE INDEX"),
         ("uq_api_keys_key_hash", "UNIQUE INDEX"),
         ("uq_projects_name", "UNIQUE INDEX"),
+        ("uq_targets_project_id_canonical_origin", "(project_id, canonical_origin)"),
+        ("uq_scope_grants_target_id_version", "(target_id, version)"),
     ],
 )
 def test_expected_indexes_exist(db_session: Session, index_name: str, definition: str) -> None:

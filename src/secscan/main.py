@@ -16,9 +16,12 @@ from secscan.core.config import Settings
 from secscan.core.db import DatabaseResources, create_db_engine
 from secscan.core.errors import register_error_handlers
 from secscan.core.request_id import RequestIdMiddleware
+from secscan.grants.router import router as grants_router
 from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
 from secscan.projects.router import router as projects_router
+from secscan.targets.domain import LabNetwork
+from secscan.targets.router import router as targets_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -45,6 +48,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.db = DatabaseResources(engine=engine, schema_revision=head_revision())
+    # LAB_ONLY 時 target 與 grant 的 IP 必須在這個網段內（docs/DECISIONS.md §10.1）。
+    app.state.lab = LabNetwork(resolved.lab_cidr)
     app.add_middleware(RequestIdMiddleware)
     register_error_handlers(app)
     app.include_router(health_router)
@@ -57,4 +62,6 @@ def _api_v1() -> APIRouter:
     api_v1 = authenticated_router(prefix=API_V1_PREFIX)
     api_v1.include_router(projects_router)
     api_v1.include_router(api_keys_router)
+    api_v1.include_router(targets_router)
+    api_v1.include_router(grants_router)
     return api_v1

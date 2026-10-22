@@ -1,9 +1,13 @@
+import re
+from ipaddress import IPv4Network
 from pathlib import Path
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from secscan.core.config import ENV_FILE, AppEnv, Settings
+from secscan.core.config import DEFAULT_LAB_CIDR, ENV_FILE, AppEnv, Settings
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_defaults_to_prod_when_app_env_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -135,3 +139,66 @@ def test_settings_repr_masks_db_password() -> None:
 
     assert "super-secret-value" not in repr(settings)
     assert "super-secret-value" not in str(settings)
+
+
+# --- LAB_ONLY 與 LAB_CIDR（docs/DECISIONS.md §10.1）-------------------------------------------
+
+
+def test_lab_only_by_default_with_the_lab_network() -> None:
+    settings = Settings(app_env="test", _env_file=None)
+
+    assert settings.lab_only is True
+    assert settings.lab_cidr == IPv4Network("10.89.7.0/24")
+
+
+def test_default_lab_cidr_is_the_lab_compose_network() -> None:
+    """預設值必須是 compose.lab.yaml 的 lab_net；只改其中一邊時，這裡會失敗。"""
+    compose = (REPO_ROOT / "compose.lab.yaml").read_text(encoding="utf-8")
+
+    assert re.findall(r"subnet:\s*(\S+)", compose) == [str(DEFAULT_LAB_CIDR)]
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no"])
+def test_lab_only_cannot_be_turned_off(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """P0 只掃 lab：關掉 LAB_ONLY 時啟動就失敗，不會變成可以掃任何 IP。"""
+    monkeypatch.setenv("LAB_ONLY", value)
+
+    with pytest.raises(ValidationError, match="LAB_ONLY"):
+        Settings(app_env="test", _env_file=None)
+
+
+@pytest.mark.parametrize("cidr", ["10.89.0.0/16", "172.16.5.0/24", "192.168.56.0/30"])
+def test_reads_lab_cidr_from_environment(monkeypatch: pytest.MonkeyPatch, cidr: str) -> None:
+    monkeypatch.setenv("LAB_CIDR", cidr)
+
+    assert Settings(app_env="test", _env_file=None).lab_cidr == IPv4Network(cidr)
+
+
+@pytest.mark.parametrize(
+    "cidr",
+    [
+        "10.89.7.5/24",  # host bits 不為 0
+        "10.89.7.0",  # 沒有前綴等於 /32
+        "8.8.8.0/24",  # 公開網段
+        "100.64.0.0/16",  # CGNAT，不是 RFC 1918
+        "127.0.0.0/16",  # loopback
+        "169.254.0.0/16",  # link-local（含雲端 metadata 位址）
+        "10.0.0.0/8",  # 太寬：等於開放整個私有網段
+        "172.16.0.0/12",
+        "10.88.0.0/15",
+        "10.89.7.0/31",  # 太窄：沒有一般意義的網段與廣播位址
+        "10.89.7.4/32",
+        "fd00::/64",  # IPv6
+        "",
+        "lab_net",
+    ],
+)
+def test_rejects_lab_cidr_outside_the_allowed_bounds(
+    monkeypatch: pytest.MonkeyPatch, cidr: str
+) -> None:
+    monkeypatch.setenv("LAB_CIDR", cidr)
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(app_env="test", _env_file=None)
+
+    assert [error["loc"] for error in caught.value.errors()] == [("lab_cidr",)]
