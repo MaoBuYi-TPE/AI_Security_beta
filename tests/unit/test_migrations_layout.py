@@ -75,8 +75,14 @@ def test_offline_mode_renders_sql_without_connection_or_password(
         "CREATE TABLE audit_events",
         "CREATE TRIGGER audit_events_append_only",
         "CREATE TRIGGER audit_events_no_truncate",
-        "INSERT INTO alembic_version (version_num) VALUES",
-        f"('{head_revision()}')",
+        "CREATE TABLE targets",
+        "CREATE TABLE scope_grants",
+        "CREATE TRIGGER scope_grants_guard_rows",
+        "CREATE TRIGGER scope_grants_no_truncate",
+        "INSERT INTO alembic_version (version_num) VALUES ('0001')",
+        # 之後每個 migration 都以 UPDATE 把版本往前推，最後停在 head。
+        "UPDATE alembic_version SET version_num=",
+        f"version_num='{head_revision()}' WHERE",
         "COMMIT;",
     ):
         assert expected in script

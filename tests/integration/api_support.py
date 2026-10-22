@@ -3,7 +3,7 @@
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -12,8 +12,18 @@ from sqlalchemy.orm import Session
 
 from secscan.api_keys.domain import IssuedApiKey, Principal, Role
 from secscan.api_keys.service import ApiKeyService
+from secscan.core.config import DEFAULT_LAB_CIDR
+from secscan.grants.domain.lifecycle import ScopeGrant
+from secscan.grants.domain.scope import GrantRequest
+from secscan.grants.service import ScopeGrantService
 from secscan.projects.domain import Project
 from secscan.projects.service import ProjectService
+from secscan.targets.domain import LabNetwork, Target, TargetKind
+from secscan.targets.service import TargetService
+
+# 與 API（create_app 的預設設定）相同的 lab 網段。
+LAB = LabNetwork(DEFAULT_LAB_CIDR)
+LAB_IP = "10.89.7.20"
 
 
 @dataclass(frozen=True)
@@ -89,6 +99,33 @@ class Seeder:
             operator_a=self.member(admin, project_a.id, Role.OPERATOR),
         )
 
+    def target(self, caller: Caller, project_id: UUID, base_url: str | None = None) -> Target:
+        with self._session() as session:
+            return TargetService(session, lab=LAB).create(
+                caller.principal,
+                project_id,
+                name=unique_name("target"),
+                kind=TargetKind.API,
+                base_url=base_url or f"http://{unique_name('lab')}:5000",
+                request_id=None,
+            )
+
+    def grant(self, caller: Caller, target: Target, **overrides: object) -> ScopeGrant:
+        with self._session() as session:
+            return ScopeGrantService(session, lab=LAB).request(
+                caller.principal,
+                target.id,
+                lab_grant_request(target, **overrides),
+                now=datetime.now(UTC),
+                request_id=None,
+            )
+
+    def approve(self, admin: Caller, grant: ScopeGrant) -> ScopeGrant:
+        with self._session() as session:
+            return ScopeGrantService(session, lab=LAB).approve(
+                admin.principal, grant.id, note="已核對 lab", now=datetime.now(UTC), request_id=None
+            )
+
     def query(self, statement: str, **params: object) -> Sequence[Row[Any]]:
         """以應用程式角色直接查詢（測試用：查證 DB 實際存了什麼）。"""
         with self._session() as session:
@@ -98,6 +135,22 @@ class Seeder:
         """以應用程式角色直接修改並 commit（測試用：模擬過期等不易經 API 產生的狀態）。"""
         with self._session() as session:
             session.execute(text(statement), params)
+
+
+def lab_grant_request(target: Target, **overrides: object) -> GrantRequest:
+    """target 的申請內容：預設只允許 GET /users/v1、lab 內的一個 IP，期限 7 天。"""
+    fields: dict[str, object] = {
+        "origins": (str(target.origin),),
+        "ips": (LAB_IP,),
+        "paths": ("/users/v1",),
+        "allow_all_paths": False,
+        "excluded_paths": (),
+        "methods": ("GET",),
+        "authorization_reference": "LAB-ASSET-001",
+        "valid_until": datetime.now(UTC) + timedelta(days=7),
+    }
+    fields.update(overrides)
+    return GrantRequest(**fields)  # type: ignore[arg-type]
 
 
 def _caller(issued: IssuedApiKey) -> Caller:

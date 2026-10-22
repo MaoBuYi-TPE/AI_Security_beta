@@ -26,14 +26,25 @@ from secscan.core.db import DatabaseResources, create_db_engine
 from secscan.core.errors import register_error_handlers
 from secscan.core.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
 
-# T05 的業務端點；新增端點時要同步更新這張表（也會出現在 401 的測試中）。
+# 所有業務端點；新增端點時要同步更新這張表（也會出現在 401 的測試中）。
 V1_ROUTES = {
+    # T05
     ("POST", "/api/v1/projects"),
     ("GET", "/api/v1/projects"),
     ("GET", "/api/v1/projects/{project_id}"),
     ("GET", "/api/v1/projects/{project_id}/audit-events"),
     ("POST", "/api/v1/projects/{project_id}/keys"),
     ("DELETE", "/api/v1/keys/{key_id}"),
+    # T06
+    ("POST", "/api/v1/projects/{project_id}/targets"),
+    ("GET", "/api/v1/projects/{project_id}/targets"),
+    ("GET", "/api/v1/targets/{target_id}"),
+    ("PATCH", "/api/v1/targets/{target_id}"),
+    ("POST", "/api/v1/targets/{target_id}/scope-grants"),
+    ("GET", "/api/v1/targets/{target_id}/scope-grants"),
+    ("GET", "/api/v1/scope-grants/{grant_id}"),
+    ("POST", "/api/v1/scope-grants/{grant_id}/approve"),
+    ("POST", "/api/v1/scope-grants/{grant_id}/revoke"),
 }
 CANARY = "canary-credential-0003"
 

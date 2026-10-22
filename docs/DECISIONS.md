@@ -232,6 +232,8 @@ main | cli → migrations → health | projects → api_keys → audit → secur
 | cli | 本機管理指令（建立 admin key）。和 main 一樣是程序入口，必須 import model 登記（`tests/unit/test_entrypoint_registry.py` 兩個入口都檢查） |
 | security | CLAUDE.md §5 規劃的共用模組：API key 的產生與雜湊、遮罩（T08 再加 MultiFernet）。audit 要用遮罩，api_keys 要用 key 雜湊，所以放在兩者之下。和 domain 一樣不得依賴框架、DB 與 Docker（import-linter 的 forbidden contract） |
 
+T06 加入 targets 與 grants 兩個模組，更新後的順序見 §10.7。
+
 ### 9.5 不在 T05 範圍
 
 - **速率限制（429 `API_RATE_LIMITED`）**：key 有 256-bit，暴力猜測不可行，而且 API 目前只綁 127.0.0.1。多個 worker 之間要共享計數，需要一併設計，列入 M2/T23 的部署強化。
@@ -249,6 +251,152 @@ T23 的硬性條件：速率限制、請求大小上限與安全 header 都完�
 - key 要給 CI 等系統長期使用，而 365 天的上限太短：改成可設定的上限，並記錄理由。
 - API 要改成多 worker 或對外開放：先完成速率限制。
 - DB 與應用程式分屬不同的信任區（例如 DB 由他人管理），或 DB 的寫入權限可能外流：重新評估 HMAC＋pepper。
+
+## 10. T06 補充決定：target、scope grant 與審批（2026-10-19）
+
+T06 實作 §2 第 5 項：ScopeGrant（origin、IP、path、method、預算、期限）加上管理員核准，以及它的上限——`LAB_ONLY` 時 grant 的 IP 必須落在 `LAB_CIDR` 內。以下是規劃文件沒有寫到、實作前才定下的細節。
+
+### 10.1 LAB_ONLY 與 LAB_CIDR
+
+| 項目 | 採用 | 理由 |
+|---|---|---|
+| `LAB_ONLY` | 設定 `LAB_ONLY`，預設 true；P0 設成 false 時程式啟動就失敗 | P0 只掃 lab（`PROJECT_PLAN.md` §5.3）。要掃描 lab 以外的目標，必須先滿足 §6 的條件：HTTPS guard 與 CA 測試、runner 與掃描容器移到獨立 VM。不留「關掉就能掃任何 IP」的開關 |
+| `LAB_CIDR` | 設定 `LAB_CIDR`，預設 `10.89.7.0/24`，也就是 `compose.lab.yaml` 的 lab_net（有測試比對兩者一致）。必須是 RFC 1918 私有網段 [S52] 內、前綴 /16–/30 的 IPv4 網段 | CLAUDE.md §6：不一律開放 RFC 1918。太寬的設定（例如 `10.0.0.0/8`）可能涵蓋校園網路；/31、/32 沒有一般意義的網段與廣播位址，規則會變得難懂 |
+| grant 的 IP | 只收個別的 IPv4 主機位址，不收網段與 IPv6。每個都要在 `LAB_CIDR` 內，而且不是網段位址或廣播位址 | 「靶場私有位址逐項白名單」。lab 網路已關閉 IPv6（`compose.lab.yaml`） |
+| 檢查時點 | 建立 target（host 是 IP 時）、申請 grant、核准、掃描 gate（§10.6），每次都以當下的設定檢查 | 設定可能在申請與核准之間、核准與掃描之間改變。縮小 `LAB_CIDR` 之後，範圍外的 grant 就不能再核准或使用 |
+
+`LAB_CIDR` 只存在設定中，DB 無法檢查；DB 只保證 IP 的筆數（§10.4）。
+
+### 10.2 URL 與 origin
+
+- **只接受 `http://host[:port]`**，結尾可以有一個 `/`。scheme 與 host 轉成小寫、省略 `:80`，結果就是 canonical origin。
+- **一律拒絕**：
+  - https（P0 只支援 HTTP 靶場，CLAUDE.md §6）與其他 scheme
+  - userinfo（`user:pass@`）、反斜線、percent-encoding
+  - path、query、fragment（seed path 見下方）
+  - 非 ASCII 字元、空白與控制字元
+  - IPv6、尾端的點、`localhost` 與 `*.localhost`（解析到 loopback [S53]）
+  - 數字形式模糊的 host：前導 0、十六進位、整數、不足 4 段，以及最後一段以數字開頭、卻不是合法 IPv4 的名稱 [S49]
+  - 第 3、4 個字元是 `--` 的標籤（保留給 `xn--` 等國際化網域名稱 [S55]）
+  - 不合法的 port：0、超過 65535、前導 0
+- **理由**：同一個字串，不同的 URL parser 可能解出不同的 host（SEC-05）。以 Python 3.12 實測與 WHATWG URL 規格（瀏覽器與部分工具採用）對照 [S47][S48]：
+  - `http://lab\@evil`：`urlsplit` 解出 host `evil`；WHATWG 把反斜線當成斜線，解出 `lab`。
+  - `http://0x0a.89.7.20`、`http://167772160`：WHATWG 當成 IPv4（`10.89.7.20`、`10.0.0.0`），`urlsplit` 當成主機名稱。
+  - 全形的 `ｌａｂ`：WHATWG 轉成 `lab`，`urlsplit` 原樣保留。
+  - `urlsplit` 會默默去掉開頭的空白。
+
+  只接受各家解讀一致的最嚴格子集，平台記錄的 origin 才會和工具實際連線的 host 相同。測試以 Hypothesis 檢查結果 idempotent，並和 `urlsplit` 比對解析結果；M2 的 guard 再和 mitmproxy 比對（T11）。
+- **錯誤訊息不回顯輸入**：只說明原因（例如「不可包含帳密」），userinfo 裡的密碼不會出現在回應或日誌。
+- **不解析 DNS、不連線**：API 不對使用者給的 URL 發出任何流量。origin 與 IP 的對應，由管理員核准時人工核對；執行時由 guard 強制（DNS 結果必須在 grant 的 IP 內，`ARCHITECTURE.md` §3.2）。
+- **seed path 延後**：`API_CONTRACT.md` §3 的「受限 seed path」目前沒有使用者，T06 不收，`base_url` 只能是 origin。M3 的 ZAP web profile 需要時再加，屆時與 grant 的 path 範圍一起驗證。
+- **同一個 project 內 origin 不重複**：重複時回 409 `TARGET_ORIGIN_CONFLICT`。target 代表一個 origin，重複會讓「這次掃描該用哪個 target 的 grant 與預算」變得不明確。
+
+### 10.3 grant 的範圍、預算與期限
+
+| 欄位 | 規則 | 理由 |
+|---|---|---|
+| `allowed_origins` | 1–4 個，依 §10.2 正規化，必須包含 target 自己的 origin；host 是 IP 的 origin，那個 IP 必須列在 `allowed_ips` | 一個 grant 至少涵蓋自己的 target；IP 綁定以 `allowed_ips` 為準 |
+| `allowed_ips` | 1–16 個，規則見 §10.1 | guard 以這份清單檢查 DNS 結果與實際連線的位址 |
+| `allowed_paths` | 1–256 個，每個是完整的 literal path，或含整段 `{name}` 佔位的 route（例如 `/api/items/{id}`）。也可以改用明確的 `allow_all_paths: true`，此時清單必須是空的 | 不用「空清單代表全部」（理由同 §9.2 的 `ProjectScope`）。不接受 regex，也不從字串前綴推論範圍（`API_CONTRACT.md` §4）。Web 爬蟲事先不知道會走到哪些 path，需要一個明確的「全部」 |
+| `excluded_paths` | 0–64 個，語法同上；排除優先於允許 | 例如 `/api/logout`、`/api/admin` |
+| path 的語法 | 以 `/` 開頭、只用 ASCII 的 URI path 字元；不可有 `%`、`\`、`?`、`#`、`;`、`*`、空白與控制字元，也不可有空段落（`//`）或 `.`、`..` 段落；每個最長 512 字元 | SEC-08：percent-encoding 與點段落讓同一條 path 有多種寫法 [S50]，無法可靠比對時 fail closed；`;` 會被部分伺服器當成 path 參數，`*` 容易被誤認成萬用字元。比對規則由 T07 與 M2 實作，T06 只定語法 |
+| `allowed_methods` | GET、HEAD、OPTIONS、POST、PUT、PATCH、DELETE 的子集，大小寫必須完全一致；TRACE、CONNECT 一律拒絕 | HTTP method 區分大小寫 [S54]。狀態改變的 method 必須明確列出（CLAUDE.md §7）。TRACE 雖是 safe method，但會回顯請求內容，掃描用不到；CONNECT 是建立通道，不屬於對 target 的請求 |
+| 重複值 | 任何清單有重複（正規化之後）都拒絕，不默默去重 | 不默默修正輸入，與分頁參數的原則相同 |
+| 預算 | `requests_per_second`、`max_requests`、`max_duration_seconds` 三個正整數，上限是 M0–M2 的保守起始值 2、5,000、1,500；沒指定時用上限 | 沿用 `ARCHITECTURE.md` §3.4。上限放在 domain，DB 只檢查大於 0；M3 量測後要提高時，在這裡記錄理由，不需要 migration |
+| 期限 | `valid_until` 必填；`valid_from` 預設為申請時間。必須 `valid_from < valid_until`、`valid_until` 晚於現在，期間最長 30 天。先以原本的時區比較，再換算成 UTC；換算時超出 datetime 範圍（例如 `9999-12-31T23:59:59-05:00`）回 422 | 授權不能沒有期限。30 天代表一學期的 lab 大約每月重新核准一次。帶時區的時間之間比較不會溢位，換算成 UTC 卻可能會（審查時發現原本回 500） |
+| `authorization_reference` | 必填，1–200 字元 | 對應的授權文件或靶場資產紀錄編號，核准時核對 |
+
+### 10.4 狀態與轉換
+
+- **DB 只存 `pending`、`approved`、`revoked`**。`expired` 由 `valid_until` 推導：pending 或 approved 的 grant，從 `valid_until` 那一刻起就是 expired；revoked 優先於 expired。
+  - 不需要排程工作把資料改成 expired，也就沒有「已過期、DB 卻還是 approved」的空窗。
+  - 代價：到期的當下沒有 audit 事件；到期時間已記在 `scope_grant.create` 的 audit 中。
+- **轉換**：
+
+| 目前狀態 | approve（admin） | revoke（admin） |
+|---|---|---|
+| pending | → approved（重新檢查期限與 `LAB_CIDR`） | → revoked |
+| approved | 409 `INVALID_STATE_TRANSITION` | → revoked |
+| revoked | 409 | 200，不改變任何東西，也不重記 audit |
+| expired | 409（要重新申請） | 409 |
+
+- 撤銷是安全方向，可以安全重試；核准是放行方向，必須明確，重複核准是錯誤。
+- approve 必須附 `note`（核對了什麼），revoke 必須附 `reason`，都寫進 audit。
+- **併發**：核准與撤銷以 `SELECT … FOR UPDATE` 鎖住 grant，並以 DB 的最新值判斷（`populate_existing`，同 §9 撤銷 key 的做法）[S57]。同時核准與撤銷時，結果和其中一個先執行的結果相同。
+- **時間戳**：
+  - `approved_at` 是核准那個 transaction 開始的時間（`now()`）。transaction 在驗證 key 時就開始，早於 service 判斷「尚未到期」的時間，所以 CHECK 的 `approved_at < valid_until` 與 domain 的判斷一致。
+  - `revoked_at` 是實際寫入的時間（`clock_timestamp()`）。撤銷的 transaction 可能比一個同時進行的核准更早開始，卻在核准 commit 之後才拿到鎖；若記成 transaction 開始的時間，會早於 `approved_at` 而違反 CHECK，撤銷回 500。審查時重現了這個情境，改用 `clock_timestamp()`，並加上確定性的測試。
+- **不可變**：
+  - grant 建立後範圍不能改，沒有 PATCH。要改範圍就申請新版本；`version` 是每個 target 各自的流水號，申請時先鎖住 target 再取下一號。
+  - 核准新版本不會自動撤銷舊版本：scan 會明確指定使用哪個 grant，舊版本由 admin 自行撤銷。
+- **DB 的最後一道防線**：
+  - CHECK：各狀態的核准、撤銷欄位成對且一致、時間先後、清單筆數、method 白名單、預算大於 0、文字不空白。
+  - trigger：UPDATE 只允許 pending→approved、pending→revoked、approved→revoked，而且只能改狀態與核准、撤銷欄位；DELETE 與 TRUNCATE 一律拒絕。
+  - 和 audit 的 append-only trigger 一樣，只能防程式錯誤造成的誤改（§7）。
+
+### 10.5 權限
+
+| 操作 | 需要的權限 | 誰可以 |
+|---|---|---|
+| 建立 target、申請 grant | `PROJECT_WRITE` | operator、admin |
+| 停用或改名 target（`PATCH`） | `PROJECT_WRITE` | operator、admin |
+| 查詢 target 與 grant | `PROJECT_READ` | 同專案的 viewer、operator，以及 admin |
+| 核准、撤銷 grant | `PLATFORM_MANAGE`＋project_id | admin |
+
+- 其他 project 的 target 與 grant 一律回 404，與不存在相同（§9.2）。
+- operator 的緊急停止是停用 target：已核准的 grant 就不能再用來建立新的 scan（§10.6）。但 operator 也能把它重新啟用，所以這不是權威的停止手段；權威的停止是撤銷 grant，只有 admin 能做（`API_CONTRACT.md` §2）。
+- admin 可以核准自己提出的申請。目前只有一位管理員，CLI 本來就能再建立 admin key，以 key 區分並不會帶來真正的職責分離；audit 會記下申請者與核准者。
+
+### 10.6 掃描 gate
+
+- `ScopeGrantService.require_usable()` 是「這個 grant 現在能不能用來掃描」的唯一判斷。T09 建立 scan 時在同一個 transaction 呼叫；runner 啟動前（M2）再判斷一次。
+- 通過條件：grant 屬於該 target、target 的 origin 在 grant 的範圍內、狀態是 approved、`valid_from <= 現在 < valid_until`、target 未停用、所有 IP 都在當下的 `LAB_CIDR` 內。
+- target 的 origin 由 API 保證不可修改；gate 仍自己比對一次，因為 targets 沒有像 scope_grants 那樣的 trigger，直接改 DB 時會不一致（縱深防禦）。
+- 以 `FOR SHARE` 依序鎖住 target 與 grant [S57]：撤銷 grant 或停用 target 一旦 commit，之後就不可能再建立使用它的 scan；反過來，正在建立 scan 時，撤銷會等它 commit。撤銷之後停止執行中的 scan，由 T09、T13 處理。
+- 鎖的順序固定為 target 先、grant 後；只有 gate 同時鎖兩者，所以不會互相等待而死結。
+
+### 10.7 模組與分層（更新 §9.4）
+
+```text
+main | cli → migrations → health | grants → targets → projects → api_keys → audit → security → core
+```
+
+| 模組 | 為什麼在這一層 |
+|---|---|
+| grants | 申請 grant 要鎖住 target 取得版本號，並由 target 得知所屬的 project |
+| targets | 建立與列出 target 前要確認 project 存在：admin 指定不存在的 project 時回 404 |
+
+### 10.8 不在 T06 範圍
+
+- path 與 method 的比對規則，以及 OpenAPI operation 是否在 grant 範圍內：T07、T11。
+- `POST /scans` 呼叫 gate；撤銷 grant 或停用 target 之後，停止執行中的 scan：T09、T13。
+- guard 的 DNS/IP 綁定與 redirect 檢查，以及與 mitmproxy 的 URL 解析比對：T11。
+- seed path、依量測調整預算上限：M3。
+- 全域的待核准清單：目前要從 project → target → grant 逐層查詢，和全域 audit 查詢一起留給 T21。
+- 請求大小上限：T07（§9.5）。
+- 審查時提出、留給後續的事項：
+  - path 比對的語意（T07、T11）：`/api/logout`、`/api/logout/`、`/API/Logout` 在語法上是不同字串，但許多伺服器視為同一個 route。`excluded_paths` 的比對至少要和伺服器一樣寬（例如不分大小寫、結尾斜線視為相同），請求路徑含 `%2e`、`%2f`、`;`、`//`、`/./` 時直接拒絕，不做正規化。
+  - lab 網段內的基礎設施位址（M2）：guard 與 canary 也會接 lab_net，位址在 `LAB_CIDR` 內。`check_host` 只排除網段與廣播位址，目前靠 admin 人工核對；M2 加上保留位址清單，或讓靶機使用固定 IP。`localhost.localdomain`、`host.docker.internal` 這類名稱沒有在 API 擋下，由 guard 要求 DNS 結果落在 `allowed_ips` 內來防。
+  - gate 的時間與鎖等待（T09）：呼叫端在取得 `FOR SHARE` 之後再取 `now`，並設定 `lock_timeout`（§7 已記錄尚未設定 `statement_timeout`），避免建立 scan 的 transaction 拖長時卡住撤銷。
+  - 報告以 `approved_at` 作為授權成立的時間：`valid_from` 可以早於申請時間（最多約 30 天）。
+
+### 10.9 數量上限（審查後補充）
+
+- 每個 target 最多 10 個待核准的申請（pending 且未過期），每個 project 最多 100 個 target；超過時回 409 `QUOTA_EXCEEDED`。
+- 理由：grant 無法刪除（trigger 擋下 DELETE），單筆最大可達約 165 KB（256 個 path，每個 512 字元）。一把外洩的 operator key 只靠申請就能不斷寫入，而速率限制要到 T23 才有。兩個上限一起，讓一個 project 的待核准資料有上界（約 100 × 10 × 165 KB）。
+- 已核准、已撤銷與已過期的申請不佔名額：它們要經過 admin 的動作或時間才會增加。
+- target 的上限是軟上限：同時建立時可能略為超過，不為此鎖住 project。申請 grant 時已鎖住 target，所以待核准申請的上限是精確的。
+
+### 10.10 文字欄位（審查後補充）
+
+- `require_text`（所有名稱、`authorization_reference`、核准與撤銷的說明）拒絕 Unicode 類別 Cc 與 Cf 的字元：控制字元（ESC、換行、tab…）與不可見的格式字元（零寬空白、BOM、bidi 控制字元…）。這也影響 T05 的 project 與 key 名稱。
+- 理由：這些都是單行文字。bidi 控制字元（例如 U+202E）會讓 admin 核准前要核對的授權文件編號、日後的 Markdown 報告顯示成誤導的內容；JSON 會跳脫 ESC，卻不會跳脫 bidi 字元。
+- 代價：不接受含零寬連接字元的 emoji 序列；名稱與說明不需要它們。
+
+何時重新檢討：
+- 要掃描 lab 以外的目標：先完成 §6 的條件，再設計 `LAB_ONLY=false` 時的規則（例如書面授權的核對方式）。
+- 30 天的期限或預算上限妨礙實驗：依量測調整，並在這裡記錄。
+- 有多位管理員：考慮禁止核准自己的申請。
 
 ## 來源
 

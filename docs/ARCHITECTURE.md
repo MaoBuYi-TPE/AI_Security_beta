@@ -181,7 +181,7 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
 
 - **domain 規則放在固定位置**：`<feature>/domain.py`，或拆成 `<feature>/domain/` 套件。import-linter 只檢查這兩種位置，以及共用的 `security/`。
-- **模組之間依呼叫關係分層**：`main | cli → migrations → health | projects → api_keys → audit → security → core`，上層可以 import 下層。`security/` 放 API key 的產生與雜湊、遮罩（T08 加 MultiFernet），和 domain 一樣不得依賴框架、DB 與 Docker。
+- **模組之間依呼叫關係分層**：`main | cli → migrations → health | grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06 的更新見 `DECISIONS.md` §10.7）。`security/` 放 API key 的產生與雜湊、遮罩（T08 加 MultiFernet），和 domain 一樣不得依賴框架、DB 與 Docker。
 - **跨功能的 FK 以資料表名稱引用**，不 import 對方的 model。所有 model 登記在 `secscan.migrations.metadata`；API（`main`）、CLI（`cli`）、worker、runner 等每個使用 ORM 的程序入口都必須 import 它。
 - **驗證與授權（T05）**：
   - `/api/v1` 在 router 層強制平台 key 驗證（`authenticated_router`），新增的路由不會意外變成公開端點。
@@ -191,6 +191,10 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - 路由以 `DbSession` 取得 session：每個請求一個 transaction，回應送出之前 commit，有例外時 rollback。
   - 業務變更與 audit 在同一個 transaction；可能撞到唯一約束而需要重試的寫入，放在 `begin_nested()` savepoint 內。
 - **audit（T05）**：一律經 `AuditTrail.record` 寫入，changes 先以 `security.redaction` 遮罩；`NewAuditEvent` 再檢查是否已遮罩，並限制在 8 KiB 以內。
+- **掃描範圍（T06，`DECISIONS.md` §10）**：
+  - `LAB_CIDR` 由 `create_app` 依設定放在 `app.state.lab`，路由以 `CurrentLab` 依賴取得，再傳給 service。
+  - origin 的嚴格解析與 `LabNetwork` 在 `targets/domain.py`；grant 的範圍、預算、期限、狀態與掃描 gate 在 `grants/domain/`。都不依賴框架與 DB。
+  - 鎖的順序固定為 target 先、grant 後：申請 grant 以 `FOR UPDATE` 鎖 target；核准、撤銷以 `FOR UPDATE` 鎖 grant；掃描 gate 以 `FOR SHARE` 依序鎖兩者。上鎖時都用 `populate_existing` 讀 DB 的最新值。
 
 建議介面（概念契約，不是已存在的程式）：
 
@@ -253,8 +257,8 @@ ExecutionPlan 只能包含：
 |---|---|
 | projects | id、name、created_at；初版可以只有一個專案，但結構仍保留隔離 |
 | api_keys | id、key_hash、prefix、role、project_id、expires_at、revoked_at；admin 可以不屬於任何 project |
-| targets | id、project_id、name、kind、canonical_origin、environment、enabled |
-| scope_grants | target_id、version、allowed_origins/ips/ports/paths/methods、max_budget、approval、有效期；`LAB_ONLY` 時 allowed_ips 必須在 `LAB_CIDR` 內 |
+| targets | id、project_id、name、kind、canonical_origin、environment、enabled（T06 已建立） |
+| scope_grants | target_id、version、status（pending/approved/revoked；expired 由期限推導）、allowed_origins/ips/paths/methods、excluded_paths、allow_all_paths、預算、authorization_reference、有效期、申請與核准、撤銷的 key 與時間；`LAB_ONLY` 時 allowed_ips 必須在 `LAB_CIDR` 內（T06 已建立；port 由 origin 決定，不另存） |
 | api_specs | id、target_id、version、content_hash、受控 storage key、operation inventory |
 | auth_profiles | id、target_id、version、type、role_label、encrypted_secret、preflight_definition |
 | scans | id、project_id、target_id、status、snapshot、idempotency_key/hash、cancel_requested_at、manifest、時間 |
@@ -296,7 +300,12 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - engine 設定 `hide_parameters`：SQL 參數不出現在例外與日誌中。repository 把約束錯誤轉成 `ConstraintViolationError`，帶約束名稱與 SQLSTATE，但不接上原始例外，因為原始例外含 DB 回傳的資料值。
   - domain 的 `New*` 物件在送進 DB 前先驗證長度、空白（含全形空白）與 NUL；DB 的 CHECK 是最後一道防線。
 - **T05 沒有新增 migration**：key 的 prefix、hash、撤銷與到期欄位在 `0001` 已建立。T05 新增的是 API、權限規則、request transaction 與本機 CLI（`API_CONTRACT.md` §13）。
-- **其餘資料表由各功能任務以自己的 migration 加入**：targets、scope_grants（T06）、api_specs（T07）、auth_profiles（T08）、scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
+- **T06（migration `0002`）建立 targets 與 scope_grants**：
+  - targets：`(project_id, canonical_origin)` 唯一；CHECK 限定 kind、`environment = 'lab'`，並以 regex 檢查 canonical origin 的形式。
+  - scope_grants：`(target_id, version)` 唯一；allowed_ips 是 `inet[]`。CHECK 涵蓋狀態與核准、撤銷欄位的一致性、時間先後（核准必須在到期之前）、清單筆數、method 白名單、`allow_all_paths` 與 path 清單的搭配、預算大於 0。預算上限與 `LAB_CIDR` 是政策或設定，放在 domain。
+  - trigger `scope_grants_guard`：UPDATE 只允許 pending→approved、pending→revoked、approved→revoked，而且只能改狀態與核准、撤銷欄位；DELETE 與 TRUNCATE 一律拒絕。
+  - FK 一律 `ON DELETE RESTRICT`；grant 所屬的 project 由 target 取得，不重複存放。
+- **其餘資料表由各功能任務以自己的 migration 加入**：api_specs（T07）、auth_profiles（T08）、scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照
 

@@ -15,8 +15,8 @@ from tests.integration.database import ProvisionedDatabase
 
 pytestmark = pytest.mark.integration
 
-APP_TABLES = {"projects", "api_keys", "audit_events"}
-REJECT_FUNCTION = "audit_events_reject_mutation"
+APP_TABLES = {"projects", "api_keys", "audit_events", "targets", "scope_grants"}
+TRIGGER_FUNCTIONS = ("audit_events_reject_mutation", "scope_grants_guard")
 
 
 def _migrate(engine: Engine, direction: str, target: str) -> None:
@@ -38,12 +38,16 @@ def _current_revisions(engine: Engine) -> list[str]:
         return list(rows.scalars())
 
 
-def _function_exists(engine: Engine) -> bool:
+def _existing_functions(engine: Engine) -> set[str]:
     with engine.connect() as connection:
-        found = connection.execute(
-            text("SELECT to_regprocedure(:signature)"), {"signature": f"{REJECT_FUNCTION}()"}
-        ).scalar()
-    return found is not None
+        return {
+            name
+            for name in TRIGGER_FUNCTIONS
+            if connection.execute(
+                text("SELECT to_regprocedure(:signature)"), {"signature": f"{name}()"}
+            ).scalar()
+            is not None
+        }
 
 
 def test_fresh_database_upgrades_to_head(fresh_database: ProvisionedDatabase) -> None:
@@ -53,7 +57,7 @@ def test_fresh_database_upgrades_to_head(fresh_database: ProvisionedDatabase) ->
 
         assert _tables(engine) == APP_TABLES | {"alembic_version"}
         assert _current_revisions(engine) == [head_revision()]
-        assert _function_exists(engine)
+        assert _existing_functions(engine) == set(TRIGGER_FUNCTIONS)
     finally:
         engine.dispose()
 
@@ -66,7 +70,7 @@ def test_downgrade_to_base_then_upgrade_again(fresh_database: ProvisionedDatabas
 
         assert _tables(engine) == {"alembic_version"}
         assert _current_revisions(engine) == []
-        assert not _function_exists(engine)
+        assert _existing_functions(engine) == set()
 
         _migrate(engine, "up", "head")
 

@@ -24,6 +24,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "httpx2>=2.13.1",
+    "hypothesis>=6.170.2",
     "import-linter>=2.15",
     "mypy>=2.4.0",
     "pre-commit>=4.7.0",
@@ -97,10 +98,11 @@ root_package = "secscan"
 # forbidden contract 要檢查第三方套件（fastapi、sqlalchemy…），必須把它們納入 import graph。
 include_external_packages = true
 
-# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4）：
+# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7）：
 # - main 組裝 app，cli 是本機管理指令；兩者都是程序入口。migrations 登記所有 ORM model。
-# - 功能模組依實際呼叫關係排列：projects 會用 api_keys 的身分驗證與 audit；
-#   api_keys 撤銷 key 時寫 audit；audit 依賴 security 的遮罩。T06 起的 targets 等模組排在 projects 之上。
+# - 功能模組依實際呼叫關係排列：grants 要鎖住 target、得知所屬 project；targets 要確認 project
+#   存在；projects 會用 api_keys 的身分驗證與 audit；api_keys 撤銷 key 時寫 audit；
+#   audit 依賴 security 的遮罩。
 # - security 是共用的安全元件（key 雜湊、遮罩），只依賴 core 的純模組。
 # - 跨功能的 FK 以資料表名稱引用，不 import 對方的 model。
 # exhaustive：secscan 底下每個頂層模組都必須列在 layers，新模組不會默默繞過檢查；
@@ -113,7 +115,9 @@ exhaustive = true
 layers = [
     "main | cli",
     "migrations",
-    "health | projects",
+    "health | grants",
+    "targets",
+    "projects",
     "api_keys",
     "audit",
     "security",

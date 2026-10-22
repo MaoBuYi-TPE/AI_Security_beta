@@ -1,8 +1,9 @@
 """應用程式設定：從環境變數與 .env 載入，建立後不可修改。"""
 
+from ipaddress import IPv4Network
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["dev", "test", "prod"]
@@ -18,6 +19,18 @@ DEFAULT_DB_USER = "secscan_app"
 DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 5
 MAX_DB_CONNECT_TIMEOUT_SECONDS = 60
 MAX_TCP_PORT = 65535
+
+# 靶場網段（docs/DECISIONS.md §10.1）：預設是 compose.lab.yaml 的 lab_net。只接受 RFC 1918
+# 私有網段內、前綴 /16 到 /30 的網段：太寬（例如 10.0.0.0/8）可能涵蓋校園網路，/31、/32 沒有
+# 一般意義的網段與廣播位址。
+DEFAULT_LAB_CIDR = IPv4Network("10.89.7.0/24")
+RFC1918_NETWORKS = (
+    IPv4Network("10.0.0.0/8"),
+    IPv4Network("172.16.0.0/12"),
+    IPv4Network("192.168.0.0/16"),
+)
+MIN_LAB_PREFIX_LENGTH = 16
+MAX_LAB_PREFIX_LENGTH = 30
 
 
 class Settings(BaseSettings):
@@ -42,10 +55,32 @@ class Settings(BaseSettings):
         default=DEFAULT_DB_CONNECT_TIMEOUT_SECONDS, ge=1, le=MAX_DB_CONNECT_TIMEOUT_SECONDS
     )
 
+    # 掃描範圍的上限（環境變數 LAB_ONLY、LAB_CIDR）。P0 只掃 lab，LAB_ONLY 不能關閉。
+    lab_only: bool = True
+    lab_cidr: IPv4Network = DEFAULT_LAB_CIDR
+
     @property
     def docs_enabled(self) -> bool:
         """API 文件端點只在開發環境開啟（docs/API_CONTRACT.md §2）。"""
         return self.app_env == "dev"
+
+    @field_validator("lab_cidr")
+    @classmethod
+    def _lab_cidr_is_a_narrow_private_network(cls, value: IPv4Network) -> IPv4Network:
+        if not any(value.subnet_of(network) for network in RFC1918_NETWORKS):
+            raise ValueError("LAB_CIDR 必須在 RFC 1918 私有網段內（10/8、172.16/12、192.168/16）")
+        if not MIN_LAB_PREFIX_LENGTH <= value.prefixlen <= MAX_LAB_PREFIX_LENGTH:
+            raise ValueError(
+                f"LAB_CIDR 的前綴長度必須介於 /{MIN_LAB_PREFIX_LENGTH} 與 /{MAX_LAB_PREFIX_LENGTH}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _require_lab_only(self) -> Self:
+        """要掃描 lab 以外的目標，必須先完成 docs/DECISIONS.md §6 的條件；P0 不提供這個開關。"""
+        if not self.lab_only:
+            raise ValueError("P0 只支援 LAB_ONLY=true（見 docs/DECISIONS.md §10.1）")
+        return self
 
     @model_validator(mode="after")
     def _require_db_password_in_prod(self) -> Self:

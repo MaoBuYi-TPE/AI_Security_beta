@@ -5,7 +5,6 @@
 """
 
 import threading
-import time
 from collections.abc import Iterator
 
 import pytest
@@ -19,12 +18,11 @@ from secscan.core.db import create_db_engine
 from tests.integration.api_support import Seeder, World
 from tests.integration.conftest import app_engine
 from tests.integration.database import ProvisionedDatabase
+from tests.integration.locks import LOCK_WAIT_TIMEOUT_SECONDS, wait_until_waiting_for_a_lock
 
 pytestmark = pytest.mark.integration
 
 RACER_APPLICATION = "secscan-revoke-racer"
-LOCK_WAIT_TIMEOUT_SECONDS = 10.0
-POLL_INTERVAL_SECONDS = 0.05
 
 
 @pytest.fixture
@@ -78,7 +76,7 @@ def test_concurrent_revocations_are_counted_once(
         with Session(engine) as holder, holder.begin():
             first = ApiKeyRepository(holder).revoke(key_id)
             racer.start()
-            _wait_until_waiting_for_a_lock(seed, RACER_APPLICATION)
+            wait_until_waiting_for_a_lock(seed, RACER_APPLICATION)
         racer.join(timeout=LOCK_WAIT_TIMEOUT_SECONDS)
     finally:
         racer_engine.dispose()
@@ -90,18 +88,3 @@ def test_concurrent_revocations_are_counted_once(
     assert second is not None
     assert second.newly_revoked is False
     assert second.key.revoked_at == first.key.revoked_at
-
-
-def _wait_until_waiting_for_a_lock(seed: Seeder, application_name: str) -> None:
-    """以 pg_stat_activity 確認對手的連線正在等列鎖，不靠固定時間的 sleep 猜測。"""
-    deadline = time.monotonic() + LOCK_WAIT_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        [row] = seed.query(
-            "SELECT count(*) AS n FROM pg_stat_activity "
-            "WHERE application_name = :name AND wait_event_type = 'Lock'",
-            name=application_name,
-        )
-        if row.n:
-            return
-        time.sleep(POLL_INTERVAL_SECONDS)
-    pytest.fail("對手的撤銷沒有在等待列鎖")

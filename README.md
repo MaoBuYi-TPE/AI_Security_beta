@@ -31,7 +31,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 | `docs/TOOLS.md` | T03 工具 spike 結果：映像相容性表、digest、授權、網路隔離與各引擎 proxy/auth/output 的實測 |
 | `docs/PROJECT_PLAN.md` | 背景、需求、工具選型、功能範圍、時程與交付成果 |
 | `docs/ARCHITECTURE.md` | 元件、信任邊界、egress guard、資料模型、Adapter/Runner 與狀態機 |
-| `docs/API_CONTRACT.md` | REST API、權限、資料格式與錯誤語意；§13 是 T05 已實作的 key、專案與權限 |
+| `docs/API_CONTRACT.md` | REST API、權限、資料格式與錯誤語意；§13 是 T05 已實作的 key、專案與權限，§14 是 T06 已實作的 target 與 scope grant |
 | `docs/SECURITY_AND_TESTING.md` | 平台自身的安全要求、測試矩陣與實驗設計 |
 | `docs/TASKS.md` | 依里程碑排列的工作、依賴、驗收條件與降階方案 |
 | `docs/START_HERE.md` | 開發順序，以及給 Claude Code 的第一段任務提示 |
@@ -42,12 +42,13 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成到 M1 的 T05：
+目前完成到 M1 的 T06：
 - **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
 - **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
 - **T05**：平台 API key（DB 只存 hash、一定會過期、可撤銷）、project 與 object-level 權限、`/api/v1` 的 projects、keys 與稽核查詢端點，以及建立初始管理 key 的本機 CLI `secscan-admin`（見下方「平台 API key」與 `docs/API_CONTRACT.md` §13）。
+- **T06**：掃描目標（target）與管理員核准的掃描範圍（scope grant）：origin 的嚴格解析、`LAB_ONLY`／`LAB_CIDR`、pending／approved／revoked／expired 的轉換，以及建立 scan 前要通過的檢查（見下方「掃描目標與授權」與 `docs/API_CONTRACT.md` §14）。
 
-還沒有 target、scope grant、掃描任務等其他業務 API（T06 起），也還沒有 runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
+還沒有規格上傳、認證設定、掃描任務等其他業務 API（T07 起），也還沒有 runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
 ### 開發環境
 
@@ -110,6 +111,33 @@ curl -H @"$HOME/.config/secscan/admin.header" http://127.0.0.1:8000/api/v1/proje
 - **撤銷**：`DELETE /api/v1/keys/{key_id}`；撤銷後立即失效。
 - **dev 的 API 文件**：`/docs` 會從 CDN 載入 Swagger UI。要在 Authorize 填 key 時，只用權限最小的 viewer key，不要貼 admin key。
 - 權限規則、錯誤碼與範例見 `docs/API_CONTRACT.md` §13，設計理由見 `docs/DECISIONS.md` §9。
+
+#### 掃描目標與授權（T06）
+
+target 只是登記要掃描的靶場；要掃描，還需要管理員核准的 scope grant（允許的 origin、IP、path、method、預算與期限）。以下假設 `operator.header`、`admin.header` 是用上一節的方式做成、權限 600 的 header 檔，`<…>` 換成實際的 id。
+
+```bash
+cd ~/.config/secscan
+# operator（或 admin）建立 target：只接受 http 的 origin
+curl -H @operator.header -H 'Content-Type: application/json' \
+  -d '{"name": "VAmPI", "kind": "api", "base_url": "http://vampi-vuln:5000"}' \
+  http://127.0.0.1:8000/api/v1/projects/<project_id>/targets
+# 申請 scope grant（狀態是 pending），內容範例見 docs/API_CONTRACT.md §14.2
+curl -H @operator.header -H 'Content-Type: application/json' -d @grant.json \
+  http://127.0.0.1:8000/api/v1/targets/<target_id>/scope-grants
+# admin 核對之後核准，note 寫下核對了什麼
+curl -H @admin.header -H 'Content-Type: application/json' \
+  -d '{"note": "已核對 lab 資產紀錄與 vampi-vuln 的 IP，網路為 internal"}' \
+  http://127.0.0.1:8000/api/v1/scope-grants/<grant_id>/approve
+```
+
+- **`LAB_ONLY` 與 `LAB_CIDR`**：P0 只掃 lab，`LAB_ONLY` 不能關閉（設成 false 時啟動就失敗）。`LAB_CIDR` 預設是 `compose.lab.yaml` 的 lab_net（`10.89.7.0/24`）；grant 的每個 IP，以及 IP 形式的 target 主機，都必須是這個網段內的主機位址。
+- **核准前要核對**：靶場資產紀錄（`authorization_reference`）、origin 與 IP 的對應、網路是否隔離，以及允許的 method 有沒有副作用。API 不會替你解析 DNS 或連線。查容器的 IP 時只取需要的欄位，例如 `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <container>`；完整的 `docker inspect` 會印出環境變數。
+- **改範圍就申請新版本**：grant 建立後不能修改；核准新版本不會自動撤銷舊版本，不用的版本請撤銷。
+- **停止**：admin 以 `POST /api/v1/scope-grants/<grant_id>/revoke`（附 `reason`）撤銷；operator 可以用 `PATCH /api/v1/targets/<target_id>` 送 `{"enabled": false}` 停用 target。兩者都讓之後不能再用它建立 scan。operator 也能重新啟用 target，所以權威的停止是撤銷 grant。
+- **上限**：每個 project 最多 100 個 target；每個 target 最多 10 個待核准的申請（`409 QUOTA_EXCEEDED`）。
+- **期限**：grant 最長 30 天，到期後狀態自動顯示為 `expired`，要重新申請。
+- 建立 scan 的 API 在 T09；規則、錯誤碼與範例見 `docs/API_CONTRACT.md` §14，設計理由見 `docs/DECISIONS.md` §10。
 
 #### 隔離 lab 靶場（T03）
 
