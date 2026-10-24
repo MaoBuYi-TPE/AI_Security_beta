@@ -181,7 +181,7 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
 
 - **domain 規則放在固定位置**：`<feature>/domain.py`，或拆成 `<feature>/domain/` 套件。import-linter 只檢查這兩種位置，以及共用的 `security/`。
-- **模組之間依呼叫關係分層**：`main | cli → migrations → health | grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06 的更新見 `DECISIONS.md` §10.7）。`security/` 放 API key 的產生與雜湊、遮罩（T08 加 MultiFernet），和 domain 一樣不得依賴框架、DB 與 Docker。
+- **模組之間依呼叫關係分層**：`main | cli → migrations → health | specs → grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06、T07 的更新見 `DECISIONS.md` §10.7、§11.7）。`security/` 放 API key 的產生與雜湊、遮罩（T08 加 MultiFernet），和 domain 一樣不得依賴框架、DB 與 Docker。
 - **跨功能的 FK 以資料表名稱引用**，不 import 對方的 model。所有 model 登記在 `secscan.migrations.metadata`；API（`main`）、CLI（`cli`）、worker、runner 等每個使用 ORM 的程序入口都必須 import 它。
 - **驗證與授權（T05）**：
   - `/api/v1` 在 router 層強制平台 key 驗證（`authenticated_router`），新增的路由不會意外變成公開端點。
@@ -195,6 +195,12 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - `LAB_CIDR` 由 `create_app` 依設定放在 `app.state.lab`，路由以 `CurrentLab` 依賴取得，再傳給 service。
   - origin 的嚴格解析與 `LabNetwork` 在 `targets/domain.py`；grant 的範圍、預算、期限、狀態與掃描 gate 在 `grants/domain/`。都不依賴框架與 DB。
   - 鎖的順序固定為 target 先、grant 後：申請 grant 以 `FOR UPDATE` 鎖 target；核准、撤銷以 `FOR UPDATE` 鎖 grant；掃描 gate 以 `FOR SHARE` 依序鎖兩者。上鎖時都用 `populate_existing` 讀 DB 的最新值。
+- **驗證之前的關卡（T07，`DECISIONS.md` §11.1）**：兩個 pure-ASGI middleware，順序是 request_id → key 格式（`api_keys/middleware.py`）→ 大小上限（`core/body_limit.py`）。`/api/v1` 沒有 Bearer 或 key 格式不符就直接回 401、不讀 body；任何請求超過 2 MiB 回 413。key 格式的判斷與 `current_principal` 共用同一組函式。
+- **API 規格（T07，`DECISIONS.md` §11）**：
+  - 上傳是 raw body，由 async 依賴（`specs/dependencies.py`）逐塊讀取，限制在 1 MiB 與 10 秒（身分驗證已取得 DB 連線，慢速上傳不能一直佔住連線）；解析是 CPU 工作，在 service（threadpool）中進行。
+  - 解析與正規化都在 `specs/domain/`，是不做 I/O 的純函式：`documents`（JSON、YAML 的子集與上限；YAML 只用 PyYAML 純 Python 的事件 API，由迭代式 composer 組成資料）、`references`（參照）、`openapi`（servers 改綁、inventory、canonical 文件）。
+  - path 與 method 的比對在 `grants/domain/matching.py`（`covers()`、`ScopeRules`），M2 的 guard 也用它比對實際的請求。
+  - 上傳先檢查權限、再解析，解析完才以 `FOR UPDATE` 鎖 target 取 version，不拖長鎖住 target 的時間。
 
 建議介面（概念契約，不是已存在的程式）：
 
@@ -259,7 +265,8 @@ ExecutionPlan 只能包含：
 | api_keys | id、key_hash、prefix、role、project_id、expires_at、revoked_at；admin 可以不屬於任何 project |
 | targets | id、project_id、name、kind、canonical_origin、environment、enabled（T06 已建立） |
 | scope_grants | target_id、version、status（pending/approved/revoked；expired 由期限推導）、allowed_origins/ips/paths/methods、excluded_paths、allow_all_paths、預算、authorization_reference、有效期、申請與核准、撤銷的 key 與時間；`LAB_ONLY` 時 allowed_ips 必須在 `LAB_CIDR` 內（T06 已建立；port 由 origin 決定，不另存） |
-| api_specs | id、target_id、version、content_hash、受控 storage key、operation inventory |
+| api_specs | id、target_id、version、上傳檔的格式、大小與 sha256、正規化文件（bytea）與它的 sha256、openapi_version、base_path、operation_count、上傳者（T07 已建立；原規劃的受控 storage key 改成存在 DB，理由見 `DECISIONS.md` §11.5） |
+| api_spec_operations | spec_id、ordinal、method、path（含 base path）、operation_id；inventory 的每一列（T07 已建立） |
 | auth_profiles | id、target_id、version、type、role_label、encrypted_secret、preflight_definition |
 | scans | id、project_id、target_id、status、snapshot、idempotency_key/hash、cancel_requested_at、manifest、時間 |
 | scanner_runs | id、scan_id、engine、engine_version、sequence（執行順序）、status、attempt、lease_owner、lease_expires_at、heartbeat_at、container_label、proxy_credential_hash、error、coverage；同時是 runner 與 worker 的工作佇列 |
@@ -305,7 +312,12 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - scope_grants：`(target_id, version)` 唯一；allowed_ips 是 `inet[]`。CHECK 涵蓋狀態與核准、撤銷欄位的一致性、時間先後（核准必須在到期之前）、清單筆數、method 白名單、`allow_all_paths` 與 path 清單的搭配、預算大於 0。預算上限與 `LAB_CIDR` 是政策或設定，放在 domain。
   - trigger `scope_grants_guard`：UPDATE 只允許 pending→approved、pending→revoked、approved→revoked，而且只能改狀態與核准、撤銷欄位；DELETE 與 TRUNCATE 一律拒絕。
   - FK 一律 `ON DELETE RESTRICT`；grant 所屬的 project 由 target 取得，不重複存放。
-- **其餘資料表由各功能任務以自己的 migration 加入**：api_specs（T07）、auth_profiles（T08）、scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
+- **T07（migration `0003`）建立 api_specs 與 api_spec_operations**：
+  - api_specs：`(target_id, version)` 唯一；CHECK 涵蓋格式、上傳檔大小（1 MiB）、文件大小（2 MiB）、hash 長度、`document_sha256 = sha256(document)`、openapi_version 為 3.0.x、base path 的形式、operation 數量。文件欄位以 deferred 載入，一般查詢不讀它。
+  - api_spec_operations：主鍵 `(spec_id, ordinal)`；`(spec_id, method, path)` 與 `(spec_id, operation_id)` 唯一（NULL 不相等，沒有 operationId 的可以有很多個）；CHECK 涵蓋 method 白名單（含 TRACE）、path 以 `/` 開頭、operationId 不空白、ordinal 範圍。
+  - trigger `api_specs_guard`：兩張表的 UPDATE、DELETE、TRUNCATE 一律拒絕（只防程式錯誤造成的誤改，同 `DECISIONS.md` §7）。
+  - FK 一律 `ON DELETE RESTRICT`；規格所屬的 project 與 origin 由 target 取得。
+- **其餘資料表由各功能任務以自己的 migration 加入**：auth_profiles（T08）、scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照
 

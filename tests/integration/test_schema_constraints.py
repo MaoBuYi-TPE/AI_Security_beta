@@ -30,9 +30,10 @@ from tests.integration.sql_support import violation as _violation
 
 pytestmark = pytest.mark.integration
 
-# projects 1、api_keys 7、audit_events 3、targets 4、scope_grants 12；
-# 每一個都有對應的行為測試（targets 與 scope_grants 的在 test_scope_schema.py）。
-EXPECTED_CHECK_COUNT = 27
+# projects 1、api_keys 7、audit_events 3、targets 4、scope_grants 12、api_specs 9、
+# api_spec_operations 4；每一個都有對應的行為測試（targets 與 scope_grants 的在
+# test_scope_schema.py，api_specs 與 api_spec_operations 的在 test_spec_schema.py）。
+EXPECTED_CHECK_COUNT = 40
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "
@@ -297,6 +298,10 @@ def test_audit_events_are_append_only(db_session: Session, statement: str) -> No
         ("uq_projects_name", "UNIQUE INDEX"),
         ("uq_targets_project_id_canonical_origin", "(project_id, canonical_origin)"),
         ("uq_scope_grants_target_id_version", "(target_id, version)"),
+        ("uq_api_specs_target_id_version", "(target_id, version)"),
+        ("pk_api_spec_operations", "(spec_id, ordinal)"),
+        ("uq_api_spec_operations_spec_id_method_path", "(spec_id, method, path)"),
+        ("uq_api_spec_operations_spec_id_operation_id", "(spec_id, operation_id)"),
     ],
 )
 def test_expected_indexes_exist(db_session: Session, index_name: str, definition: str) -> None:

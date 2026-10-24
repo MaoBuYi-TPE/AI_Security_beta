@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -62,6 +62,16 @@
 | S56 | [PostgreSQL — CREATE TABLE](https://www.postgresql.org/docs/current/sql-createtable.html) | 多個 CHECK 依名稱的字母順序檢查（9.5 起）；CHECK 不能有子查詢、只能參照同一列的欄位，所以 `LAB_CIDR` 這類設定無法放進 CHECK |
 | S57 | [PostgreSQL — Explicit Locking：Row-Level Locks](https://www.postgresql.org/docs/current/explicit-locking.html) | `FOR UPDATE` 阻擋其他 transaction 的 UPDATE、DELETE 與任何 `FOR …` 鎖；`FOR SHARE` 阻擋 UPDATE、DELETE、`FOR UPDATE`，但彼此不衝突；`SELECT … FOR UPDATE` 等到對方的 transaction 結束後，回傳更新後的列。鎖在 transaction 結束時釋放（T06 的核准、撤銷與掃描 gate） |
 | S58 | [Hypothesis — API reference：settings](https://hypothesis.readthedocs.io/en/latest/reference/api.html) | `derandomize=True` 以測試函式的 hash 決定亂數，每次執行測同一組輸入；`database=None` 不保存範例資料庫。`find()` 回傳符合條件的最小例子（以已安裝的 6.170.2 確認找不到時拋出 `NoSuchExample`） |
+| S59 | [OpenAPI Specification 3.0.4](https://spec.openapis.org/oas/v3.0.4.html) | 2024-10-24 發布。Format：建議 YAML 1.2，「Tags MUST be limited to those allowed by YAML's JSON schema ruleset」、「Keys used in YAML maps MUST be limited to a scalar string」；沒有 `servers` 時預設是 url 為 `/` 的 Server Object；只差在佔位名稱的 path「MUST NOT exist as they are identical」；operationId「MUST be unique among all operations」；Link 的 `operationRef`（URI reference）與 `server`、Example 的 `externalValue`（指向範例的 URL）、Discriminator 的 `mapping`（schema 名稱或 URI reference）、Operation 的 `callbacks`。T07 依此決定拒絕與改綁的範圍（`DECISIONS.md` §11.3、§11.4） |
+| S60 | [YAML 1.2.2](https://yaml.org/spec/1.2.2/) | §5.4：YAML 1.1 把 NEL、LS、PS 當成換行，1.2 起是一般字元；§10.3 core schema 的 tag 解析：`null\|Null\|NULL\|~` 與空值、`true…FALSE`、`[-+]?[0-9]+`、`0o[0-7]+`、`0x[0-9a-fA-F]+`、浮點數、`.inf`、`.nan`，其他 plain scalar 都是 str；§10.2 JSON schema 中對不到的 plain scalar 是錯誤 |
+| S61 | [RFC 6901 — JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901) | §3：`~` 寫成 `~0`、`/` 寫成 `~1`，解碼時先 `~1` 再 `~0`；§4：陣列索引不可有前導 0，`-` 指向不存在的元素；§6：URI fragment 表示法要 percent-encode（T07 不接受 `%`，見 `DECISIONS.md` §11.4） |
+| S62 | [RFC 8259 — JSON](https://www.rfc-editor.org/rfc/rfc8259) | §4：名稱 SHOULD 唯一，不唯一時「the behavior of software that receives such an object is unpredictable」；§6：Infinity 與 NaN 不允許；§8.1：不可加 BOM（parser MAY 忽略）。T07 拒絕重複的 key、NaN 與 BOM |
+| S63 | [RFC 9512 — YAML Media Type](https://www.rfc-editor.org/rfc/rfc9512) | 註冊 `application/yaml` 與 `+yaml` 後綴；建議 UTF-8；安全考量：alias 重複展開造成指數成長（billion laughs）、參照形成循環、tag 解析可能執行程式碼，deserializer 預設應關閉。T07 拒絕 anchor、alias 與 tag |
+| S64 | [RFC 9110 — HTTP Semantics](https://www.rfc-editor.org/rfc/rfc9110) | §15.5.9：408 Request Timeout；§15.5.14：413 Content Too Large；§15.5.16：415 Unsupported Media Type（T07 的上傳時間、大小與 Content-Type；408 於 2026-10-25 審查後補查） |
+| S65 | [PyYAML Documentation](https://pyyaml.org/wiki/PyYAMLDocumentation) | `parse(stream)` 產生 parsing events；LibYAML 綁定是選用的，預設是純 Python；`yaml.load` 不可用於不可信的輸入。T07 只用純 Python 的事件 API，自己組成資料（以已安裝的 6.0.3 實測：plain scalar 的 style 在純 Python 為 None、在 C 版為空字串） |
+| S66 | [Python — json](https://docs.python.org/3.12/library/json.html) | 預設接受並輸出 `Infinity`、`-Infinity`、`NaN`；`parse_constant`、`parse_float`、`object_pairs_hook`；重複的名稱預設只留最後一個；3.11 起 `int()` 受 integer string conversion length limitation 限制（預設 4,300 位，以 3.12.6 實測超過時拋出 ValueError） |
+| S67 | [PostgreSQL — Binary String Functions](https://www.postgresql.org/docs/current/functions-binarystring.html) | `sha256(bytea) → bytea`。T07 以 CHECK `document_sha256 = sha256(document)` 讓 DB 核對規格文件的 hash |
+| S68 | [GitHub Advisory Database — python-multipart](https://github.com/advisories?query=python-multipart) | 以 `gh api /advisories` 查核：CVE-2024-24762（Content-Type 的 ReDoS，0.0.7 修正）、CVE-2024-53981（boundary 造成的 DoS，0.0.18）、CVE-2026-40347（preamble／epilogue 的 DoS，0.0.26）、CVE-2026-42561（part header 沒有上限的 DoS，0.0.27）等。T07 不用 multipart 的理由之一 |
 
 ## 需要在 M0–M2 實際確認的事項
 

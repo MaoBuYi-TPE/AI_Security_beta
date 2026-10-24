@@ -9,6 +9,7 @@ dependencies = [
     "psycopg[binary]>=3.3.6",
     "pydantic>=2.14.1",
     "pydantic-settings>=2.16.0",
+    "pyyaml>=6.0.3",
     "sqlalchemy>=2.1.5",
     "uvicorn>=0.54.0",
 ]
@@ -32,6 +33,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-socket>=0.8.1",
     "ruff>=0.17.1",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]
@@ -100,7 +102,8 @@ include_external_packages = true
 
 # 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7）：
 # - main 組裝 app，cli 是本機管理指令；兩者都是程序入口。migrations 登記所有 ORM model。
-# - 功能模組依實際呼叫關係排列：grants 要鎖住 target、得知所屬 project；targets 要確認 project
+# - 功能模組依實際呼叫關係排列：specs 要鎖住 target，並以 grant 預覽 inventory；
+#   grants 要鎖住 target、得知所屬 project；targets 要確認 project
 #   存在；projects 會用 api_keys 的身分驗證與 audit；api_keys 撤銷 key 時寫 audit；
 #   audit 依賴 security 的遮罩。
 # - security 是共用的安全元件（key 雜湊、遮罩），只依賴 core 的純模組。
@@ -115,7 +118,8 @@ exhaustive = true
 layers = [
     "main | cli",
     "migrations",
-    "health | grants",
+    "health | specs",
+    "grants",
     "targets",
     "projects",
     "api_keys",
@@ -126,7 +130,8 @@ layers = [
 
 # domain 規則（狀態機、scope 比對、fingerprint…）與 security 元件不得依賴 Web 框架、DB 或 Docker
 # （CLAUDE.md §5）。規則一律放在 <feature>/domain.py，或拆成 <feature>/domain/ 套件（子模組也受檢查）。
-# 預設也檢查間接 import：只能用標準函式庫、security 與 core 中的純模組（json_types、text）。
+# 預設也檢查間接 import：只能用標準函式庫、security 與 core 中的純模組（json_types、text）；
+# 例外是 specs 的 domain 以 PyYAML 純 Python 的事件 API 解析 YAML（docs/DECISIONS.md §11.2）。
 [[tool.importlinter.contracts]]
 name = "Domain and security modules stay free of frameworks, DB and Docker"
 type = "forbidden"

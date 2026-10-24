@@ -15,8 +15,16 @@ from tests.integration.database import ProvisionedDatabase
 
 pytestmark = pytest.mark.integration
 
-APP_TABLES = {"projects", "api_keys", "audit_events", "targets", "scope_grants"}
-TRIGGER_FUNCTIONS = ("audit_events_reject_mutation", "scope_grants_guard")
+APP_TABLES = {
+    "projects",
+    "api_keys",
+    "audit_events",
+    "targets",
+    "scope_grants",
+    "api_specs",
+    "api_spec_operations",
+}
+TRIGGER_FUNCTIONS = ("audit_events_reject_mutation", "scope_grants_guard", "api_specs_guard")
 
 
 def _migrate(engine: Engine, direction: str, target: str) -> None:

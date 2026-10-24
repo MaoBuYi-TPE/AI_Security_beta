@@ -10,7 +10,7 @@ Prefix：`/api/v1`。平台使用 `Authorization: Bearer <platform_api_key>`。�
 
 UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project 授權過濾。不存在或無權存取的物件通常回 404，避免洩漏存在性；角色不足的已知操作回 403。無效 key 回 401。
 
-T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回應、權限矩陣與端點範例見 §13。T06 的 target 與 scope grant 見 §14。
+T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回應、權限矩陣與端點範例見 §13。T06 的 target 與 scope grant 見 §14，T07 的 API 規格見 §15。
 
 所有回應都使用統一的 envelope：
 
@@ -54,8 +54,10 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/scope-grants/{grant_id} | 同專案 | 200（T06 新增並實作） |
 | POST | /api/v1/scope-grants/{grant_id}/approve | platform_admin | 200；核對靶場/授權證據後核准（T06 已實作） |
 | POST | /api/v1/scope-grants/{grant_id}/revoke | platform_admin | 200；之後不能再用它建立 scan。停止執行中的 scan 由 T09、T13 處理（T06 已實作撤銷本身） |
-| POST | /api/v1/targets/{target_id}/api-specs | operator/admin | 201；multipart 規格上傳，P0 不接受遠端 URL |
-| GET | /api/v1/api-specs/{spec_id}/operations | 同專案 | 200；method/path、是否納入 scope |
+| POST | /api/v1/targets/{target_id}/api-specs | operator/admin | 201；raw body 上傳 OpenAPI 3.0（JSON 或 YAML），P0 不接受遠端 URL；servers 改綁到 target 的 origin（T07 已實作；原規劃的 multipart 改掉，理由見 `DECISIONS.md` §11.1） |
+| GET | /api/v1/targets/{target_id}/api-specs | 同專案 | 200；target 的所有版本，新版本在前（T07 新增並實作） |
+| GET | /api/v1/api-specs/{spec_id} | 同專案 | 200；不含文件內容（T07 新增並實作） |
+| GET | /api/v1/api-specs/{spec_id}/operations | 同專案 | 200；method/path，帶 `scope_grant_id` 時附上是否在範圍內與原因（T07 已實作） |
 | POST | /api/v1/targets/{target_id}/auth-profiles | operator/admin | 201；secret 只寫不讀 |
 | PATCH | /api/v1/auth-profiles/{profile_id} | operator/admin | 200；產生新版本，舊 scan 快照不修改 |
 | GET | /api/v1/scan-profiles | 同專案 | 200；只列當前 Runner 已驗證支援的 profile |
@@ -123,9 +125,15 @@ T06 的實際規則（理由見 `DECISIONS.md` §10.3、§10.4，完整說明見
 
 ## 5. 上傳 API 規格
 
-P0 支援 OpenAPI 3.0 JSON/YAML，單檔上限 5 MiB（規劃值），使用安全 YAML loader，限制巢狀深度與解析資源。僅同文件內部 `$ref`；拒絕 file、network、absolute path refs 與任意 callback/webhook。
+P0 支援 OpenAPI 3.0 JSON/YAML，使用安全 YAML loader，限制巢狀深度與解析資源。僅同文件內部 `$ref`；拒絕 file、network、absolute path refs 與任意 callback/webhook。
 
 伺服器將 `servers` 固定對應至 target/grant，並產生受 scope 限制的 operation inventory。外部 import、GraphQL、Postman collection 是後續擴充，不先假設有做。
+
+T07 的實際規則（理由見 `DECISIONS.md` §11，完整說明見 §15）：
+
+- 以 raw body 上傳（不是 multipart），`Content-Type` 只接受 `application/json` 與 `application/yaml`。
+- 單檔上限 1 MiB（原規劃 5 MiB），正規化後最多 2 MiB；巢狀 64 層、10 萬個節點、1,000 個 operation。
+- `servers` 一律改綁成 target 的 origin 加 base path；path、operation、link 層級的 server 拒絕。
 
 Operation 回應示例：
 
@@ -287,13 +295,16 @@ Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 �
 
 | HTTP | 常見 code |
 |---|---|
+| 400 | INVALID_REQUEST（Content-Length 不合法、上傳途中斷線） |
 | 401 | UNAUTHENTICATED、API_KEY_EXPIRED |
 | 403 | ROLE_NOT_ALLOWED、SCOPE_NOT_APPROVED、SCOPE_EXPIRED |
 | 404 | RESOURCE_NOT_FOUND |
 | 405 | METHOD_NOT_ALLOWED |
+| 408 | REQUEST_TIMEOUT |
 | 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED |
-| 413 | SPEC_TOO_LARGE、ARTIFACT_TOO_LARGE |
-| 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
+| 413 | SPEC_TOO_LARGE、REQUEST_TOO_LARGE、ARTIFACT_TOO_LARGE |
+| 415 | UNSUPPORTED_MEDIA_TYPE |
+| 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、INVALID_SPEC、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
 | 429 | API_RATE_LIMITED |
 | 500 | INTERNAL_ERROR |
 | 503 | RUNNER_UNAVAILABLE、DEPENDENCY_UNAVAILABLE |
@@ -327,6 +338,14 @@ T06 加入的部分（§14）：
 - 403 `SCOPE_NOT_APPROVED`、`SCOPE_EXPIRED`：由掃描 gate 回傳（§14.5），T09 建立 scan 時使用。
 - 約束對應：`uq_targets_project_id_canonical_origin` → 409 `TARGET_ORIGIN_CONFLICT`；其他 T06 的約束在 domain 層就已擋下，萬一 DB 回報則是 500（代表程式有錯）。
 
+T07 加入的部分（§15）：
+
+- 413：`REQUEST_TOO_LARGE`（任何請求超過 2 MiB，在路由之前由 middleware 回應）、`SPEC_TOO_LARGE`（規格超過 1 MiB，或正規化後超過 2 MiB）。
+- 415 `UNSUPPORTED_MEDIA_TYPE`：上傳的 Content-Type 不是 `application/json` 或 `application/yaml`，或 charset 不是 UTF-8。
+- 422：`INVALID_SPEC`（壞掉的文件、超過上限、缺少必要欄位、懸空的參照…）、`UNSUPPORTED_SCHEMA`（P0 不支援的功能）、`EXTERNAL_REF_FORBIDDEN`（參照指向文件以外）。訊息說明原因與位置（行與欄，或只由 key 與陣列索引組成的 JSON Pointer），不含任何值。
+- 408 `REQUEST_TIMEOUT`：上傳的規格沒有在 10 秒內讀完。
+- 400 `INVALID_REQUEST`：Content-Length 不是十進位整數，或上傳途中斷線。
+
 ## 13. 平台 API key 與專案（T05 已實作）
 
 理由見 `DECISIONS.md` §9。
@@ -347,8 +366,12 @@ T06 加入的部分（§14）：
 | secret 正確但已過期 | 401 | `API_KEY_EXPIRED` |
 
 - 先比對 secret，再判斷撤銷與到期：只知道 prefix 的人看不出 key 是否已過期。
-- `/api/v1` 的所有路由都要 key，驗證在欄位驗證之前：沒有 key 時，body 欄位不符不會先得到 422。但 FastAPI 會在驗證 key 之前先讀取並解析 JSON body，所以語法錯誤的 JSON 會得到 422 `INVALID_REQUEST`（只列出位置），非法的 UTF-8 等會得到 400；路徑不存在（404）與方法不符（405）也與 key 無關。
-- 目前沒有請求大小上限，也沒有速率限制（429 `API_RATE_LIMITED`）；在驗證前先擋下的 middleware 列入 T07 與 T23（`DECISIONS.md` §9.5）。
+- `/api/v1` 的所有路由都要 key，驗證在欄位驗證之前（T07 起，`DECISIONS.md` §11.1）：
+  - 沒有 Bearer，或 key 的格式不符：middleware 在路由之前就回上表的 401，一個 byte 的 body 都不讀。所以沒有 key 時，`/api/v1` 下不存在的路徑與不符的 method 也回 401（有 key 時才是 404、405）。
+  - 格式正確的 key 要查 DB 才知道是否有效：FastAPI 在那之前仍會先讀取並解析 JSON body，語法錯誤的 JSON 得到 422 `INVALID_REQUEST`（只列出位置），非法的 UTF-8 等得到 400。
+- 請求大小上限（T07）：任何請求超過 2 MiB 回 413 `REQUEST_TOO_LARGE`；有 Content-Length 時不讀 body，chunked 時讀到超過就停。順序在 key 的檢查之後：沒有 key 的大請求回 401。
+- 以 `--root-path` 部署時，middleware 判斷是否在 `/api/v1` 底下之前，先去掉 `root_path`（與路由的判斷相同）。
+- 目前沒有速率限制（429 `API_RATE_LIMITED`），列入 T23（`DECISIONS.md` §9.5）。
 - 伺服器日誌記下失敗原因（missing、malformed、unknown_key、hash_mismatch、revoked、expired）與 request_id，不記 client 送來的值。
 
 ### 13.2 權限
@@ -584,3 +607,113 @@ T06 還沒有建立 scan 的 API。`ScopeGrantService.require_usable()` 是「�
 
 - 完整的 path 清單不寫進 audit：grant 本身不可變。
 - 授權文件編號記為 `reference`：欄位名稱含 authorization 會被遮罩規則整個遮掉。
+
+## 15. API 規格（T07 已實作）
+
+理由見 `DECISIONS.md` §11。上傳與解析都不發出任何流量：不抓外部參照、不連 `servers` 指向的位址。以下的名稱與 hash 都是示例。
+
+### 15.1 上傳
+
+`POST /api/v1/targets/{target_id}/api-specs`（201），body 就是規格檔本身：
+
+```bash
+curl -s -H @admin.header -H 'Content-Type: application/yaml' \
+  --data-binary @openapi3.yml http://127.0.0.1:8000/api/v1/targets/<target_id>/api-specs
+```
+
+```json
+{
+  "id": "<uuid>",
+  "target_id": "<uuid>",
+  "project_id": "<uuid>",
+  "version": 1,
+  "openapi_version": "3.0.1",
+  "source_format": "yaml",
+  "source_size_bytes": 19631,
+  "source_sha256": "<64 個 hex：上傳檔的 SHA-256>",
+  "document_sha256": "<64 個 hex：正規化文件的 SHA-256>",
+  "server_url": "http://vampi-vuln:5000",
+  "base_path": "",
+  "operation_count": 14,
+  "uploaded_by_key_id": "<uuid>",
+  "created_at": "2026-10-24T08:00:00Z"
+}
+```
+
+| 項目 | 規則 |
+|---|---|
+| Content-Type | `application/json` 或 `application/yaml`；charset 只能是 UTF-8。其他回 415 `UNSUPPORTED_MEDIA_TYPE` |
+| 大小 | 最多 1 MiB（1,048,576 bytes），超過回 413 `SPEC_TOO_LARGE`；有 Content-Length 時不讀 body，chunked 時讀到超過就停。任何請求超過 2 MiB 由 middleware 回 413 `REQUEST_TOO_LARGE` |
+| 時間 | body 必須在 10 秒內讀完，否則回 408 `REQUEST_TIMEOUT`；途中斷線回 400 `INVALID_REQUEST` |
+| 編碼 | 嚴格 UTF-8，不接受 BOM；字串不可有 NUL 或孤立的 surrogate |
+| 結構 | 最外層是物件；巢狀最多 64 層、最多 10 萬個節點（key、值與容器各算一個）；key 不可重複 |
+| JSON | 不接受 `NaN`、`Infinity` 與溢位成無限大的數字；整數最多 4,300 位 |
+| YAML | 單一文件；不接受 directive、anchor、alias、明確的 tag、複合 key、plain 的 `<<`、直接出現的 U+0085／U+2028／U+2029。key 一律是字串，值依 YAML 1.2 core schema 解讀：`yes`、`on`、日期都是字串，`0x1F` 是 31，`.inf`、`.nan` 拒絕 |
+| 版本 | `openapi: 3.0.x`（必須是字串，patch 最多 12 位數）；Swagger 2.0 與 3.1 回 422 `UNSUPPORTED_SCHEMA` |
+| 頂層 | 只接受 OAS 3.0 的欄位與 `x-` 擴充；`info.title`、`info.version` 必須是字串，`paths` 必須存在 |
+| components 的名稱 | schemas、responses、parameters、examples、requestBodies、headers、securitySchemes、links、callbacks 的名稱必須符合 `^[a-zA-Z0-9.\-_]+$`（OAS 3.0 的規定） |
+| 參照 | 任何位置的 `$ref`、`operationRef` 只接受 `#/…`、只有 ASCII 可見字元、不含 `%` 的 JSON Pointer，而且必須指得到；不可形成只由參照組成的循環，參照鏈最多 32 層。`discriminator.mapping` 的值只接受 `#/components/schemas/<名稱>`（只寫名稱也不接受）。security scheme、response 與 link 的 `$ref` 只能指向 `#/components/<同一個區段>/<名稱>`。`externalValue` 與 `$id`、`$schema`、`$anchor`、`$dynamicRef` 等一律拒絕 |
+| servers | 改綁成 target 的 origin 加 base path（取 URL 的 path、去掉結尾的 `/`）。URL 必須是 `http(s)://主機/…` 或以 `/` 開頭，而且解析得了；不可有變數、query、fragment；所有 server 的 base path 必須相同。原本的 host 不保存，也不出現在回應與錯誤訊息中 |
+| path | base path 加上規格的 path 就是完整 path，語法同 grant 的 path（§14.2）：佔位必須占滿一整段；只差在佔位名稱的兩個 route 拒絕；最長 512 字元 |
+| operation | 最多 1,000 個；`operationId` 可省略，有的話必須唯一、1–200 字元、不含控制字元 |
+| 拒絕的功能 | `callbacks`、`webhooks`、path item 的 `$ref`、path 與 operation 層級的 `servers`、Link 的 `server`、`oauth2` 與 `openIdConnect` 類型的 security scheme |
+
+錯誤的先後：
+
+1. 沒有 key 或格式不符：401（middleware，不讀 body）。
+2. 請求超過 2 MiB：413 `REQUEST_TOO_LARGE`（middleware）。
+3. key 無效（查 DB）：401。
+4. Content-Type：415。
+5. 讀取 body：超過 1 MiB 回 413 `SPEC_TOO_LARGE`，超過 10 秒回 408 `REQUEST_TIMEOUT`，途中斷線回 400。
+6. target 不存在或屬於其他 project：404；viewer：403。
+7. 解析與驗證：422（或正規化後太大的 413）。
+8. 每個 target 最多 20 個版本：409 `QUOTA_EXCEEDED`。
+
+解析一定在權限檢查之後，不替沒有權限的呼叫者解析內容。
+
+- 規格建立後不可修改、不可刪除；要改就上傳新版本，`version` 是每個 target 各自的流水號。
+- 正規化文件是 key 排序的 canonical JSON，存在 DB；同一份內容以 JSON 或 YAML 上傳，`document_sha256` 相同。目前沒有下載文件的端點（M3 的工具直接從 DB 取）。
+- 停用的 target 仍可上傳（上傳不會送出任何流量）。
+
+### 15.2 查詢與 inventory
+
+- `GET /api/v1/targets/{target_id}/api-specs`：新版本在前、分頁。
+- `GET /api/v1/api-specs/{spec_id}`：回應同 §15.1。
+- `GET /api/v1/api-specs/{spec_id}/operations?scope_grant_id=<uuid>`：依 path（字元碼的順序，所以 `_debug` 在 `{username}` 之前）、method（OAS 的順序：get、put、post、delete…）排序、分頁。
+
+```json
+[
+  {"method": "GET", "path": "/users/v1/_debug", "operation_id": "api_views.users.debug", "eligible": false, "reason": "PATH_EXCLUDED"},
+  {"method": "GET", "path": "/users/v1/{username}", "operation_id": "api_views.users.get_by_username", "eligible": true, "reason": null},
+  {"method": "DELETE", "path": "/users/v1/{username}", "operation_id": "api_views.users.delete_user", "eligible": false, "reason": "METHOD_NOT_AUTHORIZED"}
+]
+```
+
+- 不帶 `scope_grant_id` 時，`eligible` 與 `reason` 都是 null。
+- 帶的時候，grant 必須屬於同一個 target（否則 422 `INVALID_REQUEST`）；讀不到的 grant 與不存在的一樣回 404。grant 的任何狀態都可以預覽：`eligible` 只表示 method 與 path 在範圍內，能不能拿來掃描由掃描 gate 判斷（§14.5）。
+- 被排除或不在範圍內的 operation 照樣列出（§5）。
+
+判斷的規則與先後：
+
+| 順序 | reason | 條件 |
+|---|---|---|
+| 1 | `PATH_EXCLUDED` | 被任一 `excluded_paths` 涵蓋：不分大小寫、忽略結尾的斜線 |
+| 2 | `METHOD_NOT_AUTHORIZED` | method 不在 `allowed_methods`（TRACE 一定不在） |
+| 3 | `PATH_NOT_AUTHORIZED` | 沒有 `allow_all_paths`，也沒有被任一 `allowed_paths` 涵蓋：大小寫與結尾的斜線都要一致 |
+
+「涵蓋」：段數相同；grant 的佔位涵蓋任何一段，literal 只涵蓋相同的 literal，不涵蓋規格中的佔位；不從前綴推論（排除 `/api/admin` 不包含 `/api/admin/{id}`）。
+
+### 15.3 權限
+
+| 操作 | platform_admin | operator（自己的 project） | viewer（自己的 project） | 其他 project |
+|---|---|---|---|---|
+| 上傳 | 允許 | 允許 | 403 | 404 |
+| 查詢規格與 inventory | 允許 | 允許 | 允許 | 404 |
+
+### 15.4 Audit
+
+| 事件 | `changes` |
+|---|---|
+| `api_spec.create` | `version`、`target_id`、`format`、`size_bytes`、`source_sha256`、`document_sha256`、`operation_count`、`base_path` |
+
+文件本身不寫進 audit：規格不可變，以 hash 對應。被拒絕的上傳不留紀錄。

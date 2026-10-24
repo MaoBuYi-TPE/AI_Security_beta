@@ -10,8 +10,10 @@ from fastapi import APIRouter, FastAPI
 # 都要這樣做；tests/unit/test_entrypoint_registry.py 在新程序裡檢查。
 import secscan.migrations.metadata  # noqa: F401
 from secscan.api_keys.dependencies import authenticated_router
+from secscan.api_keys.middleware import BearerKeyFormatMiddleware
 from secscan.api_keys.router import router as api_keys_router
 from secscan.core.api import API_V1_PREFIX
+from secscan.core.body_limit import BodyLimitMiddleware
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseResources, create_db_engine
 from secscan.core.errors import register_error_handlers
@@ -20,6 +22,7 @@ from secscan.grants.router import router as grants_router
 from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
 from secscan.projects.router import router as projects_router
+from secscan.specs.router import router as specs_router
 from secscan.targets.domain import LabNetwork
 from secscan.targets.router import router as targets_router
 
@@ -50,6 +53,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.db = DatabaseResources(engine=engine, schema_revision=head_revision())
     # LAB_ONLY 時 target 與 grant 的 IP 必須在這個網段內（docs/DECISIONS.md §10.1）。
     app.state.lab = LabNetwork(resolved.lab_cidr)
+    # 後加入的在外層。順序：request_id → key 格式 → 大小上限（docs/DECISIONS.md §11.1）：
+    # 沒有 key 的請求連 body 都不讀；錯誤回應也都帶 request_id。
+    app.add_middleware(BodyLimitMiddleware)
+    app.add_middleware(BearerKeyFormatMiddleware)
     app.add_middleware(RequestIdMiddleware)
     register_error_handlers(app)
     app.include_router(health_router)
@@ -64,4 +71,5 @@ def _api_v1() -> APIRouter:
     api_v1.include_router(api_keys_router)
     api_v1.include_router(targets_router)
     api_v1.include_router(grants_router)
+    api_v1.include_router(specs_router)
     return api_v1

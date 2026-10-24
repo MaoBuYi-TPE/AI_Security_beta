@@ -366,6 +366,8 @@ main | cli → migrations → health | grants → targets → projects → api_k
 | grants | 申請 grant 要鎖住 target 取得版本號，並由 target 得知所屬的 project |
 | targets | 建立與列出 target 前要確認 project 存在：admin 指定不存在的 project 時回 404 |
 
+T07 加入 specs 模組，更新後的順序見 §11.7。
+
 ### 10.8 不在 T06 範圍
 
 - path 與 method 的比對規則，以及 OpenAPI operation 是否在 grant 範圍內：T07、T11。
@@ -397,6 +399,165 @@ main | cli → migrations → health | grants → targets → projects → api_k
 - 要掃描 lab 以外的目標：先完成 §6 的條件，再設計 `LAB_ONLY=false` 時的規則（例如書面授權的核對方式）。
 - 30 天的期限或預算上限妨礙實驗：依量測調整，並在這裡記錄。
 - 有多位管理員：考慮禁止核准自己的申請。
+
+## 11. T07 補充決定：OpenAPI 上傳與 operation inventory（2026-10-24）
+
+T07 實作 `PROJECT_PLAN.md` §5.1 的「API 規格」：上傳 OpenAPI 3.0、固定目標 origin、只接受同文件的 `$ref`、不抓外部 URL。規格是不可信的資料：外部參照會讓解析器或掃描工具去抓外部資源（SSRF、讀本機檔），`servers` 可以指向任意位址（SEC-02），YAML 本身也有解析風險（SEC-11、SEC-17）。以下是規劃文件沒有寫到、實作前才定下的細節。
+
+實測依據（M1 Pro，只在記憶體中產生資料）：
+- VAmPI 的真實規格（T03 的輸入，sha256 記在 `tests/fixtures/manifest.json`）：19.7 KB、OpenAPI 3.0.1、14 個 operation、1,300 個節點、14 層；`servers` 是 `http://localhost:5000`，沒有 `$ref`、anchor 或 tag。
+- 1 MiB 的合成 YAML 規格（約 9.1 萬個節點、9 層）：PyYAML 純 Python 的事件 API 約 1.2 秒，完整載入約 1.5 秒；libyaml 約 0.08 秒。最壞的形態（單行 flow sequence，52 萬個事件）約 5.8 秒。
+- 1 MiB 的 JSON：`json.loads` 約 6 ms。
+
+### 11.1 上傳方式與大小
+
+| 項目 | 採用 | 理由 |
+|---|---|---|
+| 上傳方式 | raw body：`Content-Type` 為 `application/json` 或 `application/yaml`（RFC 9512 [S63]），charset 只能是 UTF-8；其他回 415 `UNSUPPORTED_MEDIA_TYPE` [S64]。不用 `API_CONTRACT.md` §2 原本寫的 multipart | multipart 需要新的依賴 python-multipart，它在 2024–2026 年有多個 DoS 類的 advisory（例如 CVE-2024-24762、CVE-2024-53981、CVE-2026-42561）[S68]；Starlette 也會把超過 1 MB 的上傳檔暫存到磁碟（以 1.8.0 原始碼確認）。一次只上傳一個檔案，raw body 能逐塊精確計算大小，也不留暫存檔。<br>`application/vnd.oai.openapi` 等 OpenAPI 專用的 media type 不在 IANA 的登記表中（查核時只有 `vnd.oai.workflows`），所以不採用 |
+| 規格的大小 | 1 MiB：先看 Content-Length，再逐塊累計，超過回 413 `SPEC_TOO_LARGE` [S64]。正規化後的文件最多 2 MiB | contract 的 5 MiB 是規劃值。lab 的規格很小（VAmPI 19.7 KB），而 1 MiB 的 YAML 以純 Python 解析就要 1 秒以上（§11.2）。量測後不夠再放寬 |
+| 所有請求的大小 | pure-ASGI middleware：任何請求超過 2 MiB（Content-Length 或逐塊累計）回 413 `REQUEST_TOO_LARGE` | §9.5 的規劃。目前最大的 JSON body 是 grant 的申請（約 170 KB）；FastAPI 會先把整個 JSON body 讀進記憶體 |
+| 驗證前的 401 | pure-ASGI middleware：`/api/v1` 的請求沒有 Bearer，或 key 格式不符，就直接回與 `current_principal` 完全相同的 401，不讀 body。格式正確的 key 仍由 `current_principal` 查 DB | §9.5 的規劃：沒有 key 的人不能讓伺服器讀取與解析 body。判斷沿用 `HTTPBearer` 與 `parse_prefix` 的邏輯，日誌也共用同一個函式，並以測試確認兩者的結果一致 |
+
+- middleware 的順序：request_id → key 格式 → 大小上限。沒有 key 的大請求回 401，不是 413。
+- key 格式檢查的範圍與路由一致：以 `--root-path` 部署時，先去掉 `root_path` 再判斷是否在 `/api/v1` 底下（同 Starlette 的 `get_route_path`，以性質測試比對）。
+- **讀取 body 的時間**（審查後補上）：上傳的依賴在身分驗證之後執行，那時已經取得 DB 連線；很慢的上傳會一直佔住連線，少數幾個就能耗盡連線池。所以讀取 body 的總時間最多 10 秒，超過回 408 `REQUEST_TIMEOUT` [S64]；上傳途中斷線回 400 `INVALID_REQUEST`（原本是 500）。lab 的規格很小，10 秒很寬裕。同時進行的慢速上傳仍會佔用連線，速率限制在 T23。
+- 副作用：沒有 key 時，`/api/v1` 底下不存在的路徑與不符的 method 改回 401（原本是 404、405）。有 key 時不變。
+- 格式正確但無效的 key：FastAPI 仍會在查 DB 之前先解析 JSON body，語法錯誤時得到 422（§9.5 的已知行為，大小已有上限）。
+
+### 11.2 JSON 與 YAML 的解析
+
+- **解析器**：
+  - JSON：標準函式庫 `json` [S66]。
+  - YAML：PyYAML 純 Python 的事件 API（`yaml.parse` 搭配 `SafeLoader`）[S65]，由自己寫的迭代式 composer 把事件組成 JSON 值。不用 PyYAML 的 composer 與 constructor，也不用 C 擴充（libyaml）。
+  - 理由：不在 API 程序裡用 C 解析不可信的 YAML，行為也不隨環境是否安裝 libyaml 而改變。PyYAML 的 composer 是遞迴的，巢狀太深會 RecursionError；事件 API 是狀態機，超過深度上限就能立刻停下（實測 20 萬層的輸入，在第 65 層就停止）。
+  - 代價：比 libyaml 慢約 15 倍。以大小與節點上限控制最壞情況：審查的 PoC 在修正後重跑（M1 Pro，單次，沒有重複取中位數），各種 1 MiB 的形態，被節點上限拒絕的是 1.1–1.7 秒，通過的是 0.5–1.1 秒；速率限制在 T23。
+- **共同規則**（兩種格式都是）：
+  - 嚴格 UTF-8，不接受 BOM。
+  - 最外層必須是物件；巢狀最多 64 層、最多 10 萬個節點。
+  - 字串（含 key）不可有 NUL 或孤立的 surrogate：無法編碼成 UTF-8，PostgreSQL 也存不了 NUL。
+  - 重複的 key 一律拒絕：RFC 8259 說重複名稱的行為無法預期 [S62]，不同工具可能取到不同的值。
+  - 數字必須是有限值；超過 4,300 位的整數拒絕（Python 的上限 [S66]）。
+- **JSON**：
+  - 拒絕 `NaN`、`Infinity`：Python 的 json 預設接受，但它們不是 JSON [S62]。`1e400` 這類溢位成無限大的數字也拒絕。
+  - 在 `json.loads` 之前，以迭代方式檢查巢狀深度並預估節點數，不依賴 RecursionError。預估值是字串外的開括號、逗號與冒號的數量加一，最多是實際節點數的兩倍，所以超過上限的兩倍才拒絕；精確的數量在解析後檢查。理由：`[{},{},…]` 這類 1 MiB 的輸入會先被解析成數十萬個物件（security-reviewer 回報峰值約 70 MiB）。修正後以 tracemalloc 重量：1 MiB 的 `{}` 或 `[]` 陣列峰值 1.0 MiB，1 MiB 的不同浮點數陣列峰值 23.3 MiB，都在預估階段或解析後被拒絕；不含 tracemalloc 的牆鐘時間，`{}` 陣列是 0.07 秒。
+- **YAML**：
+  - 只接受單一文件；不接受 directive：任何以 `%` 開頭的行都在解析之前拒絕。PyYAML 對保留的 directive（例如 `%FOO`）不產生任何事件，只看事件會漏掉它們（審查發現）。
+  - 不接受 anchor 與 alias（billion laughs 的基礎）、任何明確的 tag（`!!python/…`、`!!binary`、`!` …）、複合 key（以 mapping 或 sequence 當 key）與 `<<`（YAML 1.1 的 merge key）。
+  - key 一律是字串，值依 YAML 1.2 的 core schema 解讀 [S60]：`null`、`true`／`false`（含首字大寫與全大寫）、十進位與 `0o`、`0x` 整數、浮點數，其他都是字串。所以 `yes`、`no`、`on` 與日期都是字串；`.inf`、`.nan` 拒絕。OAS 3.0 建議 YAML 1.2，tag 只用 JSON schema 的型別，key 一律是字串（`200:` 是字串 "200"）[S59]。
+  - 不接受直接出現的 U+0085、U+2028、U+2029：YAML 1.1 把它們當成換行，YAML 1.2 不會 [S60]。
+  - 以兩個 `\u` 跳脫寫成的 surrogate pair（例如 `"\uD83D\uDE00"`）會被拒絕：PyYAML 不會把它們合併，解出的是兩個孤立的 surrogate。BMP 以外的字元請直接寫，或用 `\U0001F600`。
+  - 超出 Unicode 範圍的 `\U` 跳脫（大於 `\U0010FFFF`）回 422 `INVALID_SPEC`：PyYAML 在這裡拋出的是 `ValueError`／`OverflowError`，不是 YAMLError，原本會變成 500（審查發現）。
+- **錯誤訊息只說明原因與位置**：
+  - 語法錯誤給行與欄。
+  - 結構問題給 JSON Pointer，只由 key 與陣列索引組成，不含任何值；非 ASCII 可見字元以 `\uXXXX` 表示，過長就截斷。
+  - 位置字串只在要拋錯時才組，而且組到長度上限就停：合法的文件不付這個成本，很長的 key 也不會讓成本變大（審查發現：原本每個參照都先組一次位置字串，1 MiB 的 key 乘上大量參照就是 CPU 放大）。
+  - 理由：規格中的值（URL、example）可能含帳密，所以不回顯；位置是使用者自己文件的結構，指出來才修得了。這是 §10.2「錯誤訊息不回顯輸入」的延伸：key 是文件的結構，值才是內容。
+
+### 11.3 OpenAPI 的支援範圍
+
+- **版本**：只接受 `openapi: 3.0.x`，patch 最多 12 位數（DB 的欄位是 16 個字元，太長的版本號原本會變成 DB 的錯誤）。Swagger 2.0 與 3.1（P1）回 422 `UNSUPPORTED_SCHEMA`。
+- **只驗證平台依賴的部分**：
+  - 頂層只接受 OAS 3.0 的欄位與 `x-` 擴充。
+  - `info` 的 `title`、`version` 必須是字串；`paths` 必須存在。
+  - path item 與 operation 必須是物件；`operationId` 在整份文件中唯一，1–200 字元，不含控制字元。
+  - `components` 底下 9 個區段（schemas、responses、parameters、examples、requestBodies、headers、securitySchemes、links、callbacks）的名稱必須符合 OAS 3.0 的 `^[a-zA-Z0-9.\-_]+$` [S59]，否則回 422 `INVALID_SPEC`；訊息只說是第幾個名稱，不回顯名稱。理由：名稱本身可以是 URL 或路徑，工具可能把它當成參照（審查發現）。
+  - 其他欄位（schema、parameter、response…）當成不透明的 JSON，不逐一驗證。
+  - 不引入 openapi-spec-validator 這類套件：它們預設會解析遠端參照，等於多一個會連網的依賴。其他格式問題由工具在 M3 回報。
+- **path**：
+  - 規格的 path 與 base path 接起來，就是 inventory 中的完整 path，語法與 grant 的 path 相同（`check_path`，§10.3）：佔位必須占滿一整段、名稱以英文字母或底線開頭，不接受 `%`、`;`、`*`、點段落等。
+  - 只差在佔位名稱的兩個 route（例如 `/users/{id}` 與 `/users/{name}`）視為重複，拒絕：OAS 也規定它們不可並存 [S59]。
+  - 這樣 grant 才寫得出規格中的每一個 route。跨段的佔位（`/files/{name}.json`）留到需要時再支援。
+- **一律拒絕的功能**（422 `UNSUPPORTED_SCHEMA`）：
+  - `callbacks`、`webhooks`、path item 的 `$ref`。
+  - path、operation 層級的 `servers`，以及 Link 的 `server`。
+  - server URL 無法解析（例如不合法的 IPv6 括號）回 422 `INVALID_SPEC`，不回顯 URL；原本 `urlsplit` 的 ValueError 會變成 500（審查發現）。
+  - `oauth2` 與 `openIdConnect` 類型的 security scheme：裡面的 token、authorization 與 discovery URL 都是工具可能會去連的位址；P0 的認證只有固定的 Bearer、API key 與 Cookie（T08）。
+- **上限**：每份規格最多 1,000 個 operation。
+
+### 11.4 外部參照與 servers
+
+- **參照**（文件中任何位置，包含 example 與 `x-` 擴充）：
+  - `$ref` 與 `operationRef` 只接受 `#/…` 形式、只有 ASCII 可見字元、不含 `%` 的 JSON Pointer [S61]，而且必須指到存在的節點。RFC 6901 §6 的 URI fragment 表示法會把 `{`、`}` 等字元 percent-encode；不同工具對 percent-encoding 的解碼不一致，所以 P0 一律不接受 `%`，佔位直接寫成 `{id}`（OAS 規格中的範例也是這樣寫）。不以 `#` 開頭的（`http:`、`file:`、`./other.yaml`、`urn:`…）回 422 `EXTERNAL_REF_FORBIDDEN`；`#foo` 這類 anchor 形式、`#` 本身與含 `%` 的回 422 `UNSUPPORTED_SCHEMA`；指不到節點的回 422 `INVALID_SPEC`。
+  - 不可形成只由參照組成的循環（`A → B → A`）：工具解析時會無窮迴圈。schema 的遞迴（屬性引用自己）不受影響。
+  - 參照鏈最多 32 層。檢查時記住已確認的鏈還剩幾層，很多參照共用同一條鏈時，每條鏈只走一次；還沒確認的鏈走到上限就停（審查發現：原本每個參照都重走整條鏈）。陣列索引最多 9 位數（`int()` 不處理超過 4,300 位的字串，原本會變成 500）。
+  - `discriminator.mapping` 的值只接受 `#/components/schemas/<名稱>`，而且必須存在。只寫名稱（`Dog`）回 422 `UNSUPPORTED_SCHEMA` 並提示改寫；其他不以 `#` 開頭的值回 `EXTERNAL_REF_FORBIDDEN`。理由：OAS 規定 mapping 的值可以是名稱或 URI reference，名稱本身又可以長得像 URL，工具可能把它當成參照去抓（審查發現）。
+  - **會被拒絕的物件不能透過 `$ref` 繞過**（審查發現）：security scheme（oauth2／OIDC）、response（其中的 link）與 link（`server`）都是要檢查內容的物件；這些位置的 `$ref` 只能指向 `#/components/<同一個區段>/<名稱>`，否則回 `UNSUPPORTED_SCHEMA`。`components` 中的每一項都會被檢查，轉一手也繞不過；同一個物件中 `$ref` 以外的欄位照樣檢查。
+  - 一律拒絕 `externalValue`，以及 `$id`、`$schema`、`$anchor`、`$dynamicRef`、`$dynamicAnchor`、`$recursiveRef`、`$recursiveAnchor`：前者會讓工具去抓外部的範例，後者會改變 JSON Schema 工具解析參照的基準。
+  - 「任何位置」：寧可誤拒，也不讓某個工具把它當成參照。代價是 example 中剛好有 `$ref` 這個 key 的規格也會被拒絕。
+- **servers 一律改綁成 target 的 origin 加 base path**（SEC-02 的「固定綁定到核准 origin」）：
+  - base path 取自 server URL 的 path，去掉結尾的 `/`；沒有 `servers` 或是空陣列時為空（OAS 的預設是 `/` [S59]）。
+  - URL 必須是 `http(s)://主機/…` 或以 `/` 開頭的 path；不可有變數（`{…}`）、query 或 fragment。所有 server 的 base path 必須相同。
+  - 原本的 host 一律丟掉，也不出現在回應與錯誤訊息中（可能含帳密）。正規化文件的 `servers` 只剩一個：`[{"url": "<target origin><base path>"}]`。
+  - 例：VAmPI 的 `http://localhost:5000` 綁成 target 的 `http://vampi-vuln:5000`。
+- **平台本身不做任何 I/O**：解析與正規化都是純函式，不連網、不讀檔；單元測試以 pytest-socket 封鎖網路，另把 socket 與 `open` 換成會失敗的版本確認。
+- **已知限制**：
+  - 不展開參照，所以擋不了「參照炸彈」（多層 `allOf` 互相引用，展開後指數成長）。平台本身不展開；M3 的工具容器有記憶體與時間上限，屆時量測工具的實際行為。
+  - JSON Schema draft-04 的 `id`（`$id` 的舊名）不拒絕：`id` 是很常見的屬性名稱與 example 欄位，在任何位置拒絕會誤拒大多數的規格。工具是否把 schema 中的 `id` 當成解析參照的基準，在 T14 量測。
+  - `externalDocs`、`info.termsOfService`、`contact.url`、`license.url` 等說明用的 URL 原樣保留：平台不連線，工具通常也不會去抓；報告中要安全編碼（T21）。
+
+### 11.5 正規化文件、儲存與版本
+
+- **正規化文件**：以 key 排序、沒有空白的 canonical JSON 保存（`servers` 已改綁）。同一份內容不論以 JSON 或 YAML 上傳，`document_sha256` 都相同；另存上傳檔的 sha256、大小與格式，使用者可以核對自己上傳的是哪一個檔案。
+- **存在 DB**（`api_specs.document`，`bytea`）：DB 以 CHECK 確認 `sha256(document) = document_sha256` [S67]。`ARCHITECTURE.md` §6 原本規劃「受控 storage key」，但 artifact storage 要到 M3 才有；存在 DB 可以和 inventory、audit 在同一個 transaction 寫入，不會留下孤兒檔案，大小也有上限（2 MiB）。M3 有 artifact storage 之後再檢討。
+- **不可變**：建立後不可修改、不可刪除（trigger 擋下 UPDATE、DELETE 與 TRUNCATE，和 grant 一樣只防程式錯誤造成的誤改，§7）。之後的 scan 會引用規格的版本。對既有的規格再 INSERT 新的 operation 不會被擋下：repository 只在建立規格的同一個 transaction 中寫入 inventory，T09 凍結 scan 的範圍時也會一併保存 operation 的清單。
+- **版本**：每個 target 各自的流水號；上傳時先以 `FOR UPDATE` 鎖住 target 再取下一號（同 grant 的申請，§10.4）。解析在上鎖之前完成，不拖長鎖住 target 的時間。
+- **數量上限**：每個 target 最多 20 個版本，超過回 409 `QUOTA_EXCEEDED`。理由同 §10.9：不能刪除，一把外洩的 operator key 才不能無限寫入（上界約 100 個 target × 20 × 2 MiB）。
+
+### 11.6 operation inventory 與 path 比對
+
+- **inventory**：每個 operation 一列，包含 method（大寫，含 TRACE）、完整 path 與 operationId，依 path、method 排序。被排除或不在範圍內的 operation 也照樣列出，並附上原因（contract §5：報告要顯示哪些操作未測及理由）。
+- **route 層級的比對**（`grants/domain/matching.py`）：pattern（grant 的 path）「涵蓋」route（規格的 path）的條件：
+  - 段數相同。
+  - pattern 的佔位涵蓋任何一段；pattern 的 literal 只涵蓋相同的 literal，不涵蓋 route 中的佔位（`/users/v1/_debug` 不涵蓋 `/users/v1/{username}`，因為後者還包含其他 path）。佔位的名稱不影響比對。
+  - **允許**：大小寫與結尾的斜線都必須一致。
+  - **排除**：不分大小寫、忽略結尾的斜線，至少和伺服器一樣寬（§10.8）。
+  - 兩者都不從前綴推論：排除 `/api/admin` 不包含 `/api/admin/{id}`，子路徑要另外列出。理由：與 contract §4「完整的 literal path」一致；以前綴推論會讓排除 `/users/v1` 時連帶排除整個使用者 API。
+  - 允許往窄、排除往寬，都是安全的一側。M2 的 guard 以同一個函式比對實際的請求（請求的 path 全是 literal）。
+- **eligible 與原因**，依序判斷：
+  1. `PATH_EXCLUDED`：被任一 `excluded_paths` 涵蓋。
+  2. `METHOD_NOT_AUTHORIZED`：method 不在 `allowed_methods`（TRACE 一定不在）。
+  3. `PATH_NOT_AUTHORIZED`：沒有 `allow_all_paths`，也沒有被任一 `allowed_paths` 涵蓋。
+  都不是才 eligible。
+- **預覽**：`GET /api-specs/{id}/operations?scope_grant_id=` 以那個 grant 判斷；grant 必須屬於同一個 target（否則 422），grant 的任何狀態都可以預覽。不帶參數時 `eligible` 與 `reason` 為 null。eligible 只表示「在範圍內」，grant 能不能拿來掃描仍由掃描 gate 判斷（§10.6）。T09 建立 scan 時以同樣的規則凍結 eligible 的 operation。
+
+### 11.7 模組與分層（更新 §10.7）
+
+```text
+main | cli → migrations → health | specs → grants → targets → projects → api_keys → audit → security → core
+```
+
+| 模組 | 為什麼在這一層 |
+|---|---|
+| specs | 上傳時要鎖住 target、取得 origin；預覽 inventory 時要讀 grant，並用 grants 的比對規則 |
+
+- specs 的 domain 使用 PyYAML（只用純 Python 的事件 API），仍不得依賴 Web 框架、DB 與 Docker。
+- 兩個 middleware：大小上限在 `core/body_limit.py`；key 格式的檢查在 `api_keys/middleware.py`（要用 key 的格式與 401 的回應）。
+
+### 11.8 錯誤碼
+
+| HTTP | code | 情況 |
+|---|---|---|
+| 413 | `SPEC_TOO_LARGE` | 規格超過 1 MiB，或正規化後超過 2 MiB |
+| 413 | `REQUEST_TOO_LARGE` | 任何請求超過 2 MiB（middleware） |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | 上傳的 Content-Type 不是 JSON 或 YAML |
+| 408 | `REQUEST_TIMEOUT` | 上傳的規格沒有在 10 秒內讀完（審查後補上） |
+| 400 | `INVALID_REQUEST` | 上傳途中斷線（沿用既有的錯誤碼） |
+| 422 | `INVALID_SPEC` | 不是合法的 JSON／YAML、編碼錯誤、重複的 key、超過深度或數量上限、缺少必要欄位、path 或 operationId 不合規則、懸空的參照 |
+| 422 | `UNSUPPORTED_SCHEMA` | P0 不支援的功能：版本、YAML 的 anchor／tag、`callbacks`、path 層級的 servers、oauth2… |
+| 422 | `EXTERNAL_REF_FORBIDDEN` | 參照或 discriminator 的 mapping 指向文件以外 |
+
+### 11.9 不在 T07 範圍
+
+- 建立 scan 時綁定規格的版本與 `document_sha256`、凍結 eligible 的 operation：T09。
+- guard 比對實際的請求（先拒絕 `%2e`、`;`、`//` 等寫法）：T11。
+- 交給工具的規格（只含 eligible 的 operation）、量測參照炸彈與工具的實際行為：T14。
+- 規格的刪除或封存、速率限制、報告中規格文字的安全編碼：T21、T23。
+- OpenAPI 3.1、Swagger 2.0、servers 的變數、跨段的佔位、`oauth2`：P1 以後。
+
+何時重新檢討：
+- lab 的規格超過 1 MiB 或 1,000 個 operation：依量測放寬，並在這裡記錄。
+- 規格需要經常修改、20 個版本不夠：加上刪除或封存（必須保留 scan 引用的版本）。
+- 合法的規格因為「任何位置的 `$ref`」或 YAML 的限制被拒絕：記下實例，再決定是否只在特定位置檢查。
 
 ## 來源
 

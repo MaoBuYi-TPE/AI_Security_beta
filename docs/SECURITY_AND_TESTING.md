@@ -80,11 +80,28 @@ T06 已涵蓋：
   - 不解析 DNS。
 - **grant 的範圍、預算、期限**：每個欄位的語法與邊界，以及狀態轉換表（所有狀態與動作的組合都明確決定）與掃描 gate。
 
-scope matching（path 與 method 的比對）、guard policy 比對與 policy budget，留給 T07 與 M2。
+T07 已涵蓋：
+
+- **scope matching（route 層級）**：`covers()` 的對照表（佔位、大小寫、結尾的斜線、段數、根目錄），以及 Hypothesis 的性質：自反、排除至少和允許一樣寬、把 literal 換成佔位不會縮小涵蓋範圍、排除不分大小寫；`find()` 證明涵蓋與不涵蓋兩種結果都會出現。判斷的原因與先後（`PATH_EXCLUDED` → `METHOD_NOT_AUTHORIZED` → `PATH_NOT_AUTHORIZED`）。
+- **規格的解析（SEC-11、SEC-17 的應用層）**：
+  - JSON 與 YAML 的接受、拒絕對照表：billion laughs、`!!python/object/apply`、多份文件、directive、tab、重複的 key、`<<`、複合 key、`.inf`、`1e400`、NaN、超長整數、NUL、孤立的 surrogate、BOM、非法的 UTF-8、U+2028、超過深度與節點上限。錯誤訊息只有原因與位置，不含輸入的值。
+  - 性質：BMP 內的任何 JSON 值，以 `json.dumps` 輸出後，JSON 與 YAML 兩個 parser 解回相同的值。
+  - 很深或很多節點的 YAML 在超過上限時就停下（計算 parser 實際產生的事件數），不依賴 RecursionError。
+  - 不做 I/O：把 socket、`urlopen`、`open` 換成會失敗的版本，處理含外部參照與外部 servers 的規格仍只得到檢查結果。
+- **參照與 servers（SEC-02 的規格部分）**：外部參照（http、https、file、相對檔案、network-path、urn）、`#foo`、`%`、懸空、循環、參照鏈的長度、`operationRef`、discriminator、`externalValue`、`$id` 等；servers 的改綁、base path 的各種寫法與拒絕的情形，確認原本的 host 與帳密不出現在文件與訊息中。
+- **審查後補上的測試**（code-reviewer 與 security-reviewer 的發現）：
+  - 透過 `$ref` 轉一手繞過 Link 的 `server`、oauth2／OIDC 的拒絕（指向 `x-` 擴充、example 或區段底下），六種寫法都回 `UNSUPPORTED_SCHEMA`；components 的名稱不可以是 URL 或路徑；discriminator 的 mapping 只寫名稱也拒絕。
+  - 成本有上限：合法的文件不組位置字串（把 `pointer_text` 換成會失敗的版本）、共用的參照鏈只走一次、還沒確認的長鏈走到上限就停（計算 `_resolve` 的呼叫次數）、JSON 在解析之前就以預估的節點數拒絕。
+  - 不會變成 500：Hypothesis 在合法的文件中放入變化的 server URL、陣列索引與 YAML 的 `\U` 跳脫，只能被接受或拋出 InvalidSpecError；另有不合法的 IPv6 括號、超長的陣列索引與版本號、超出範圍的 `\U`、`%FOO` directive 的對照表。
+  - 上傳讀取 body 超過時間上限回 408、途中斷線回 400；key 格式的 middleware 以 `root_path` 部署時仍涵蓋 `/api/v1`（與 Starlette 的 `get_route_path` 以性質測試比對）。
+
+guard policy 比對與 policy budget，留給 M2。
 
 ### 4.2 Contract / Parser
 
 每個鎖定版本保存遮罩後真實輸出 fixture：正常無告警、存在告警、非零退出但有有效 findings、格式截斷、未知欄位、缺必要欄位、空檔、重複事件、Unicode、超大單行/總量、timeout 後部分 artifact。版本不支援時明確 error，不默默漏掉資料。
+
+T07 加入上傳用的規格 fixture `tests/fixtures/openapi/vampi-openapi3.yml`：T03 輸入的 VAmPI 規格，只把登入回應 example 中的範例 JWT 遮罩成 `REDACTED_JWT`。manifest 的 `openapi_fixtures` 記下遮罩前後的 sha256，contract 測試檢查兩者與防洩密規則。
 
 ### 4.3 Integration
 
@@ -109,7 +126,7 @@ T05 已涵蓋 project 層的權限：
 - 遮罩以固定 seed 的隨機輸入檢查 idempotent，並檢查惡意輸入下仍是線性時間。
 - 以突變檢查確認上述測試有鑑別力（`TASKS.md` T05）。
 
-SEC-16 要求的 scan、finding、artifact 跨專案測試，隨這些資源在 T09 與 M3–M5 加入，尚未完成。
+SEC-16 要求的 scan、finding、artifact 跨專案測試，隨這些資源在 T09 與 M3–M5 加入，尚未完成。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。
 
 T06 已涵蓋 target 與 scope grant：
 - A 專案讀寫 B 專案的 target 與 grant（含核准、撤銷），回應與不存在的 id、不存在的路徑完全相同。
@@ -121,7 +138,9 @@ T06 已涵蓋 target 與 scope grant：
 
 仍未完成的部分：
 - **SEC-01**：「建立或開始掃描被拒」的判斷（gate）已實作並測試，但建立 scan 的 API 要到 T09 才有；「已執行者停止新出站」要到 M2/T13。
-- **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；guard 的檢查與實際收包證據要到 M2。
+- **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
+- **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
+- **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；工具輸出的 parser（JSONL、XML、Markdown）在 M3 之後。
 
 ### 4.4 Live E2E
 

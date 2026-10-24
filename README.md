@@ -31,7 +31,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 | `docs/TOOLS.md` | T03 工具 spike 結果：映像相容性表、digest、授權、網路隔離與各引擎 proxy/auth/output 的實測 |
 | `docs/PROJECT_PLAN.md` | 背景、需求、工具選型、功能範圍、時程與交付成果 |
 | `docs/ARCHITECTURE.md` | 元件、信任邊界、egress guard、資料模型、Adapter/Runner 與狀態機 |
-| `docs/API_CONTRACT.md` | REST API、權限、資料格式與錯誤語意；§13 是 T05 已實作的 key、專案與權限，§14 是 T06 已實作的 target 與 scope grant |
+| `docs/API_CONTRACT.md` | REST API、權限、資料格式與錯誤語意；§13 是 T05 已實作的 key、專案與權限，§14 是 T06 已實作的 target 與 scope grant，§15 是 T07 已實作的 API 規格 |
 | `docs/SECURITY_AND_TESTING.md` | 平台自身的安全要求、測試矩陣與實驗設計 |
 | `docs/TASKS.md` | 依里程碑排列的工作、依賴、驗收條件與降階方案 |
 | `docs/START_HERE.md` | 開發順序，以及給 Claude Code 的第一段任務提示 |
@@ -42,13 +42,14 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成到 M1 的 T06：
+目前完成到 M1 的 T07：
 - **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
 - **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
 - **T05**：平台 API key（DB 只存 hash、一定會過期、可撤銷）、project 與 object-level 權限、`/api/v1` 的 projects、keys 與稽核查詢端點，以及建立初始管理 key 的本機 CLI `secscan-admin`（見下方「平台 API key」與 `docs/API_CONTRACT.md` §13）。
 - **T06**：掃描目標（target）與管理員核准的掃描範圍（scope grant）：origin 的嚴格解析、`LAB_ONLY`／`LAB_CIDR`、pending／approved／revoked／expired 的轉換，以及建立 scan 前要通過的檢查（見下方「掃描目標與授權」與 `docs/API_CONTRACT.md` §14）。
+- **T07**：上傳 OpenAPI 3.0 規格（JSON 或 YAML），嚴格解析、拒絕外部參照，`servers` 一律改綁到 target 的 origin；產生 operation inventory，並依 grant 判斷每個 operation 是否在範圍內。另外在 `/api/v1` 前加上驗證之前的 key 格式檢查與請求大小上限（見下方「API 規格」與 `docs/API_CONTRACT.md` §15）。
 
-還沒有規格上傳、認證設定、掃描任務等其他業務 API（T07 起），也還沒有 runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
+還沒有認證設定、掃描任務等其他業務 API（T08 起），也還沒有 runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
 ### 開發環境
 
@@ -138,6 +139,26 @@ curl -H @admin.header -H 'Content-Type: application/json' \
 - **上限**：每個 project 最多 100 個 target；每個 target 最多 10 個待核准的申請（`409 QUOTA_EXCEEDED`）。
 - **期限**：grant 最長 30 天，到期後狀態自動顯示為 `expired`，要重新申請。
 - 建立 scan 的 API 在 T09；規則、錯誤碼與範例見 `docs/API_CONTRACT.md` §14，設計理由見 `docs/DECISIONS.md` §10。
+
+#### API 規格（T07）
+
+上傳的規格只是保存與檢查：平台不會去抓規格中的外部參照，也不會連 `servers` 指向的位址。body 就是規格檔本身（不是 multipart）：
+
+```bash
+cd ~/.config/secscan
+# operator（或 admin）上傳；YAML 用 application/yaml，JSON 用 application/json
+curl -H @operator.header -H 'Content-Type: application/yaml' --data-binary @openapi3.yml \
+  http://127.0.0.1:8000/api/v1/targets/<target_id>/api-specs
+# 預覽 inventory：帶 scope_grant_id 時，每個 operation 附上是否在範圍內與原因
+curl -H @operator.header \
+  'http://127.0.0.1:8000/api/v1/api-specs/<spec_id>/operations?limit=100&scope_grant_id=<grant_id>'
+```
+
+- **servers 會被改綁**：例如 VAmPI 規格中的 `http://localhost:5000` 會變成 target 的 `http://vampi-vuln:5000`；原本的 host 不保存。回應的 `server_url` 是改綁後的位址。
+- **限制**：最多 1 MiB、10 秒內上傳完成、OpenAPI 3.0.x；只接受同一份文件中的 `$ref`（`#/…`），discriminator 的 mapping 要寫成 `#/components/schemas/<名稱>`。YAML 不接受 anchor、alias 與 tag，`yes`、`on`、日期一律當成字串（YAML 1.2）；被拒絕時，錯誤訊息會指出行、欄或 JSON Pointer 位置。完整規則見 `docs/API_CONTRACT.md` §15.1。
+- **範圍判斷**：排除的 path 不分大小寫、忽略結尾的斜線；允許的 path 必須完全一致；都不從前綴推論，要排除 `/api/admin` 底下的 route 必須另外列出（例如 `/api/admin/{id}`）。
+- **版本**：規格不能修改或刪除，要改就重新上傳（每個 target 最多 20 個版本）；同一份內容以 JSON 或 YAML 上傳，`document_sha256` 相同。
+- **驗證之前的關卡**：`/api/v1` 沒有 key 或 key 格式不符時直接回 401，不讀 body；任何請求超過 2 MiB 回 413。
 
 #### 隔離 lab 靶場（T03）
 

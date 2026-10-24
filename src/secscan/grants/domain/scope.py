@@ -139,12 +139,13 @@ def check_lab(scope: Scope, lab: LabNetwork) -> None:
 
 def check_path(path: str, *, label: str) -> None:
     """完整的 literal path，或含整段 {name} 佔位的 route；不接受 regex、萬用字元或編碼。"""
-    problem = _path_problem(path)
+    problem = path_problem(path)
     if problem is not None:
         raise InvalidScopeError(f"{label}：{problem}")
 
 
-def _path_problem(path: str) -> str | None:
+def path_problem(path: str) -> str | None:
+    """check_path 的判斷本身：不合規則時回傳原因（不含 path 的內容），合規則時回傳 None。"""
     if len(path) > PATH_MAX_LENGTH:
         return f"path 不可超過 {PATH_MAX_LENGTH} 個字元"
     if not path.startswith("/"):
