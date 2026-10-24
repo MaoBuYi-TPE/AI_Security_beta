@@ -16,7 +16,7 @@ import json
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -33,9 +33,11 @@ _INT_LIMIT = 10**MAX_INT_DIGITS
 _INT_TOO_LONG = f"整數最多 {MAX_INT_DIGITS:,} 位"
 
 # JSON 的巢狀深度：只看括號、字串的引號與跳脫。逐一前進，最壞情況也是線性時間。
-_JSON_STRUCTURE = re.compile(r'[\[\]{}"\\]')
+_JSON_STRUCTURE = re.compile(r'[\[\]{},:"\\]')
 # YAML 1.1 把它們當成換行，YAML 1.2 不會（只有 LF 與 CR）。
 _AMBIGUOUS_LINE_BREAK = re.compile("[\\x85\\u2028\\u2029]")
+# 行首的 % 是 directive。PyYAML 會默默忽略 %YAML、%TAG 以外的保留 directive，所以先看原文。
+_DIRECTIVE = re.compile(r"^%", re.MULTILINE)
 # YAML 1.2 的 core schema（只用於 plain scalar；加引號或 block 的一律是字串）。
 _NULL = re.compile(r"(?:null|Null|NULL|~)?")
 _TRUE = frozenset({"true", "True", "TRUE"})
@@ -101,19 +103,35 @@ def pointer_text(tokens: Sequence[str | int]) -> str:
     """錯誤訊息中的位置：JSON Pointer 形式（`#/paths/~1users/get`），只由 key 與陣列索引組成。
 
     非 ASCII 可見字元以 \\uXXXX 表示（不讓控制字元或 bidi 字元進入訊息），過長就截斷。
+    逐字產生、到上限就停：成本與 key 的長度無關（審查發現，先組整串再截斷會讓 CPU 時間平方成長）。
     """
-    pointer = "#" + "".join(
-        "/" + str(token).replace("~", "~0").replace("/", "~1") for token in tokens
-    )
-    return printable(pointer, limit=POINTER_MAX_LENGTH)
+    return _bounded(_pointer_characters(tokens), limit=POINTER_MAX_LENGTH)
 
 
 def printable(text: str, *, limit: int) -> str:
     """只留 ASCII 可見字元，其他以 \\u 跳脫；超過 limit 個字元就截斷並加上「…」。"""
-    escaped = "".join(
-        character if " " <= character <= "~" else _escape(character) for character in text
-    )
-    return escaped if len(escaped) <= limit else escaped[:limit] + "…"
+    return _bounded(iter(text), limit=limit)
+
+
+def _pointer_characters(tokens: Sequence[str | int]) -> Iterator[str]:
+    yield "#"
+    for token in tokens:
+        yield "/"
+        for character in token if isinstance(token, str) else str(token):
+            yield {"~": "~0", "/": "~1"}.get(character, character)
+
+
+def _bounded(characters: Iterator[str], *, limit: int) -> str:
+    """把字元（或 ~0、~1 這類已跳脫的片段）逐一轉成可見字元，超過 limit 就停止讀取。"""
+    parts: list[str] = []
+    length = 0
+    for character in characters:
+        piece = character if all(" " <= c <= "~" for c in character) else _escape(character)
+        if length + len(piece) > limit:
+            return "".join(parts) + "…"
+        parts.append(piece)
+        length += len(piece)
+    return "".join(parts)
 
 
 def _escape(character: str) -> str:
@@ -177,7 +195,7 @@ def _check_text(text: str, location: tuple[str | int, ...]) -> None:
 
 
 def _parse_json(text: str, limits: DocumentLimits) -> JsonValue:
-    _check_json_depth(text, limits.max_depth)
+    _scan_json_structure(text, limits)
     try:
         value: JsonValue = json.loads(
             text,
@@ -193,8 +211,15 @@ def _parse_json(text: str, limits: DocumentLimits) -> JsonValue:
     return value
 
 
-def _check_json_depth(text: str, max_depth: int) -> None:
+def _scan_json_structure(text: str, limits: DocumentLimits) -> None:
+    """在 json.loads 之前，以迭代方式檢查巢狀深度並估算節點數。
+
+    節點數的上界 = 開括號 + 逗號 + 冒號 + 1（字串外）；它最多是實際節點數的兩倍（多出的是空容器），
+    所以超過上限的兩倍才拒絕，不會誤拒合法的文件。這樣 1 MiB 的 [{},{},…] 不會先被整個解析成
+    數十萬個物件（審查發現峰值約 70 MiB）；精確的數量由解析後的走訪檢查。
+    """
     depth = 0
+    estimate = 1
     in_string = False
     position = 0
     while (match := _JSON_STRUCTURE.search(text, position)) is not None:
@@ -205,14 +230,20 @@ def _check_json_depth(text: str, max_depth: int) -> None:
                 position += 1  # 跳過被跳脫的字元（例如 \" 或 \\）
             elif character == '"':
                 in_string = False
-        elif character == '"':
+            continue
+        if character == '"':
             in_string = True
-        elif character in "[{":
-            depth += 1
-            if depth > max_depth:
-                raise _invalid(f"巢狀不可超過 {max_depth} 層")
-        elif character in "]}":
+            continue
+        if character in "]}":
             depth -= 1
+            continue
+        estimate += 1
+        if estimate > 2 * limits.max_nodes:
+            raise _invalid(f"節點（key、值與容器）不可超過 {limits.max_nodes:,} 個")
+        if character in "[{":
+            depth += 1
+            if depth > limits.max_depth:
+                raise _invalid(f"巢狀不可超過 {limits.max_depth} 層")
 
 
 def _json_object(pairs: list[tuple[str, JsonValue]]) -> JsonObject:
@@ -247,6 +278,12 @@ def _parse_yaml(text: str, limits: DocumentLimits) -> JsonValue:
             f"YAML 第 {line} 行：不可直接使用 U+{ord(ambiguous.group()):04X}"
             "（YAML 1.1 與 1.2 對換行的定義不同），請改用跳脫寫法",
         )
+    directive = _DIRECTIVE.search(text)
+    if directive is not None:
+        line = text.count("\n", 0, directive.start()) + 1
+        raise InvalidSpecError(
+            SpecProblem.UNSUPPORTED, f"YAML 第 {line} 行：不接受 YAML 的 directive（以 % 開頭的行）"
+        )
     composer = _YamlComposer(limits)
     try:
         for event in yaml.parse(text, Loader=yaml.SafeLoader):
@@ -255,6 +292,10 @@ def _parse_yaml(text: str, limits: DocumentLimits) -> JsonValue:
         raise _invalid(f"YAML 語法錯誤{_position(exc.problem_mark)}") from None
     except yaml.YAMLError:
         raise _invalid("YAML 含有不允許的字元（例如控制字元）") from None
+    except (ValueError, OverflowError):
+        # PyYAML 以 chr() 轉換 \\U 跳脫：超出 Unicode 範圍時拋出這兩種例外，不是 YAMLError。
+        # composer 自己的錯誤是 InvalidSpecError（不是 ValueError 的子類別），不會被攔到這裡。
+        raise _invalid("YAML 的 \\U 跳脫超出 Unicode 的範圍（最大 \\U0010FFFF）") from None
     return composer.result()
 
 
@@ -316,10 +357,9 @@ class _YamlComposer:
 
     def _start_document(self, event: yaml.DocumentStartEvent) -> None:
         self._documents += 1
+        # directive 在解析之前就已拒絕（_DIRECTIVE）：PyYAML 不會為保留的 directive 產生任何事件。
         if self._documents > 1:
             raise _unsupported(event, "只接受單一份 YAML 文件")
-        if event.version is not None or event.tags:
-            raise _unsupported(event, "不接受 YAML 的 directive（%YAML、%TAG）")
 
     def _count(self, event: yaml.ScalarEvent | yaml.CollectionStartEvent) -> None:
         if event.anchor is not None:

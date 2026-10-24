@@ -23,6 +23,7 @@ from secscan.specs.domain.documents import (
     SpecProblem,
     parse_document,
     pointer_text,
+    printable,
 )
 
 JSON, YAML = SpecFormat.JSON, SpecFormat.YAML
@@ -441,3 +442,74 @@ def test_yaml_parsing_stops_as_soon_as_a_limit_is_exceeded(
 
     assert _rejected(lambda: _yaml(text, SMALL)).problem is INVALID
     assert len(consumed) < 2 * SMALL.max_nodes
+
+
+# --- 審查後補上：成本有上限、不會變成其他例外 ---------------------------------------------------
+
+
+class _CountingText(str):
+    """被逐字讀取時計數：確認 printable 與 pointer_text 不會處理整串很長的 key。"""
+
+    consumed = 0
+
+    def __iter__(self) -> Iterator[str]:
+        for character in str.__iter__(self):
+            _CountingText.consumed += 1
+            yield character
+
+
+@pytest.mark.parametrize("render", ["printable", "pointer_text"])
+def test_position_text_reads_at_most_the_limit(render: str) -> None:
+    """審查發現：先跳脫整串再截斷，長 key 搭配大量參照會讓 CPU 時間平方成長。"""
+    _CountingText.consumed = 0
+    text = _CountingText("é" * 500_000)
+
+    if render == "printable":
+        rendered = printable(text, limit=120)
+    else:
+        rendered = pointer_text(("paths", text))
+
+    assert rendered.endswith("…")
+    assert len(rendered) <= 121
+    # 逐字讀取，而且讀到上限就停（先複製或先整串跳脫的做法，計數會是 0 或 50 萬）。
+    assert 0 < _CountingText.consumed <= 121
+
+
+@pytest.mark.parametrize(
+    "escape",
+    ["\\UFFFFFFFF", "\\U00110000", "\\U7FFFFFFF"],
+)
+def test_yaml_escapes_outside_unicode_are_invalid(escape: str) -> None:
+    """PyYAML 對超出範圍的 \\U 跳脫拋出 ValueError 或 OverflowError，不能變成 500。"""
+    assert _rejected(lambda: _yaml(f'a: "{escape}"\n')).problem is INVALID
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["%FOO bar\n---\na: 1\n", "%RESERVED\n---\na: 1\n", "a: 1\n%TAG ! x\n"],
+    ids=["reserved", "reserved-without-parameters", "after-content"],
+)
+def test_any_yaml_directive_is_unsupported(text: str) -> None:
+    """PyYAML 會默默忽略保留的 directive；行首的 % 一律拒絕。"""
+    assert _rejected(lambda: _yaml(text)).problem is UNSUPPORTED
+
+
+def test_json_node_count_is_estimated_before_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1 MiB 的 [{},{},…] 在 json.loads 時峰值約 70 MiB：先以結構字元估算，太多就不解析。"""
+
+    def must_not_parse(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("節點明顯超過上限時不可以呼叫 json.loads")
+
+    content = ('{"a": [' + ", ".join(["{}"] * (DEFAULT_LIMITS.max_nodes * 2)) + "]}").encode()
+    monkeypatch.setattr(json, "loads", must_not_parse)
+
+    error = _rejected(lambda: parse_document(content, JSON))
+
+    assert error.problem is INVALID
+    assert "節點" in error.message
+
+
+def test_node_estimate_never_rejects_documents_within_the_limit() -> None:
+    """估算的上界最多是實際節點數的兩倍（空容器），所以只在超過兩倍時提早拒絕。"""
+    empty_containers = ", ".join(["[]"] * (SMALL.max_nodes - 3))
+    assert _json('{"a": [' + empty_containers + "]}", SMALL)

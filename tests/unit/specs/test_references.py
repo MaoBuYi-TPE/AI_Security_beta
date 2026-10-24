@@ -1,8 +1,8 @@
 """文件中的參照（docs/DECISIONS.md §11.4）；純函式。
 
 `$ref`、`operationRef` 只接受指得到節點的內部 JSON Pointer；discriminator 的 mapping 只接受
-schema 名稱或內部參照；externalValue 與 JSON Schema 的識別字一律拒絕。「任何位置」包含 example
-與 x- 擴充。錯誤訊息指出位置，但不含參照的值（可能是帶帳密的 URL）。
+`#/components/schemas/<名稱>`；externalValue 與 JSON Schema 的識別字一律拒絕。
+「任何位置」包含 example 與 x- 擴充。錯誤訊息指出位置，但不含參照的值（可能是帶帳密的 URL）。
 """
 
 from collections.abc import Callable
@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from secscan.core.json_types import JsonObject, JsonValue
+from secscan.specs.domain import references
 from secscan.specs.domain.documents import InvalidSpecError, SpecProblem
 from secscan.specs.domain.references import MAX_REF_CHAIN, check_references
 
@@ -55,7 +56,7 @@ def _document(**extra: JsonValue) -> JsonObject:
                     "oneOf": [{"$ref": "#/components/schemas/User"}],
                     "discriminator": {
                         "propertyName": "kind",
-                        "mapping": {"user": "#/components/schemas/User", "named": "User"},
+                        "mapping": {"user": "#/components/schemas/User"},
                     },
                 },
                 "Tags": {"type": "array", "items": {"$ref": "#/components/schemas/Pet/oneOf/0"}},
@@ -208,9 +209,14 @@ def test_reference_chains_are_bounded() -> None:
 @pytest.mark.parametrize(
     ("mapping_value", "problem"),
     [
-        ("Dog.json", EXTERNAL),
+        ("Dog.json", UNSUPPORTED),
+        ("../dog.json", EXTERNAL),
         ("https://example.com/dog.json", EXTERNAL),
+        ("User", UNSUPPORTED),
         ("#/components/schemas/Missing", INVALID),
+        ("#/components/parameters/Id", UNSUPPORTED),
+        ("#/components/schemas/User/properties/friend", UNSUPPORTED),
+        ("#/x-elsewhere", UNSUPPORTED),
         ("#Dog", UNSUPPORTED),
         (3, INVALID),
     ],
@@ -222,12 +228,17 @@ def test_discriminator_mapping_values(mapping_value: JsonValue, problem: SpecPro
     assert _rejected(lambda: check_references(document)).problem is problem
 
 
-def test_discriminator_names_need_a_schemas_object() -> None:
-    pet: JsonObject = {"discriminator": {"mapping": {"a": "Pet"}}}
-    check_references(_bare({"schemas": {"Pet": pet}}))
+def test_discriminator_mapping_names_are_not_accepted() -> None:
+    """審查發現：schema 的名稱本身可以是 URL，工具可能把 mapping 的名稱當成 URI reference。
 
-    without_schemas = _bare({"x-schemas": {"Pet": pet}})
-    assert _rejected(lambda: check_references(without_schemas)).problem is EXTERNAL
+    所以只接受 `#/components/schemas/<名稱>`，即使同名的 schema 存在。
+    """
+    pet: JsonObject = {"discriminator": {"mapping": {"a": "Pet"}}}
+    named = _bare({"schemas": {"Pet": pet}})
+
+    assert _rejected(lambda: check_references(named)).problem is UNSUPPORTED
+    pet["discriminator"] = {"mapping": {"a": "#/components/schemas/Pet"}}
+    check_references(named)
 
 
 @pytest.mark.parametrize(
@@ -257,3 +268,100 @@ def test_references_inside_examples_are_still_references() -> None:
     document["components"]["examples"] = {"e": {"value": {"$ref": SECRET_URL}}}
 
     assert _rejected(lambda: check_references(document)).problem is EXTERNAL
+
+
+# --- 審查後補上：成本有上限、不會變成其他例外 ---------------------------------------------------
+
+
+def test_valid_documents_never_render_positions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """位置字串只在要拋錯時才組：合法的文件不付這個成本（審查發現的 CPU 放大）。"""
+
+    def must_not_render(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("合法的文件不應計算位置字串")
+
+    monkeypatch.setattr(references, "pointer_text", must_not_render)
+    document = _document()
+    document["x-" + "k" * 10_000] = [{"$ref": "#/components/schemas/Pet"}] * 500
+
+    check_references(document)
+
+
+def test_shared_reference_chains_are_walked_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """很多參照指向同一條參照鏈時，已確認的鏈不再重走（審查發現的 CPU 放大）。"""
+    schemas: JsonObject = {
+        f"S{index}": {"$ref": f"#/components/schemas/S{index + 1}"}
+        for index in range(MAX_REF_CHAIN - 1)
+    }
+    schemas[f"S{MAX_REF_CHAIN - 1}"] = {"type": "string"}
+    document = _bare({"schemas": schemas})
+    document["x-uses"] = [{"$ref": "#/components/schemas/S0"}] * 2_000
+    calls = 0
+    original = references._resolve
+
+    def counting(*args: Any, **kwargs: Any) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(references, "_resolve", counting)
+
+    check_references(document)
+
+    assert calls < 3 * (2_000 + MAX_REF_CHAIN)
+
+
+def test_huge_array_indexes_are_invalid_not_a_crash() -> None:
+    """int() 對超過 4,300 位的字串拋出 ValueError，不能變成 500。"""
+    document = _document()
+    document["x-use"] = {"$ref": "#/paths/~1users~1{id}/get/parameters/" + "1" * 5_000}
+
+    assert _rejected(lambda: check_references(document)).problem is INVALID
+
+
+def test_settled_chains_still_count_toward_the_limit() -> None:
+    """接上已確認的鏈時，長度要加上那條鏈剩下的部分（快取不能讓長鏈逃過上限）。
+
+    x-use 放在最前面：走訪時它最後才處理，那時整條鏈都已經確認過了。
+    """
+    schemas: JsonObject = {
+        f"S{index}": {"$ref": f"#/components/schemas/S{index + 1}"}
+        for index in range(MAX_REF_CHAIN)
+    }
+    schemas[f"S{MAX_REF_CHAIN}"] = {"type": "string"}
+    document: JsonObject = {
+        "x-use": {"$ref": "#/components/schemas/S0"},
+        **_bare({"schemas": schemas}),
+    }
+
+    error = _rejected(lambda: check_references(document))
+
+    assert error.problem is INVALID
+    assert "參照鏈" in error.message
+
+
+def test_long_chains_stop_walking_at_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """還沒確認過的長鏈走到上限就停，不走完整條（循環的判斷有錯時也一定會結束）。
+
+    名稱倒著放：走訪時 S0 最先處理，那時整條鏈都還沒確認。
+    """
+    length = 5_000
+    schemas: JsonObject = {
+        f"S{index}": {"$ref": f"#/components/schemas/S{index + 1}"}
+        for index in reversed(range(length))
+    }
+    schemas[f"S{length}"] = {"type": "string"}
+    calls = 0
+    original = references._resolve
+
+    def counting(*args: Any, **kwargs: Any) -> JsonValue:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(references, "_resolve", counting)
+
+    error = _rejected(lambda: check_references(_bare({"schemas": schemas})))
+
+    assert "參照鏈" in error.message
+    # 走訪時每個參照解析一次，之後只多走上限那麼多步。
+    assert calls <= length + MAX_REF_CHAIN

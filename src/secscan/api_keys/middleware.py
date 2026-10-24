@@ -5,7 +5,7 @@ FastAPI 在執行依賴（包括驗證 key）之前，就會先讀完並解析 J
 current_principal 完全相同的 401，一個 byte 的 body 都不讀。
 
 判斷與 current_principal 一致：Bearer 的取法同 FastAPI 的 HTTPBearer，格式同 parse_prefix；
-格式正確的 key 交給 current_principal 查 DB。
+格式正確的 key 交給 current_principal 查 DB。範圍與路由一致：以 root_path 部署時先去掉前綴。
 """
 
 from fastapi.security.utils import get_authorization_scheme_param
@@ -21,6 +21,22 @@ from secscan.core.request_id import request_id_of
 from secscan.security.api_key_tokens import parse_prefix
 
 BEARER_SCHEME = "bearer"
+
+
+def route_path(scope: Scope) -> str:
+    """路由比對用的 path：與 Starlette 的 get_route_path 相同（那是私有函式，不直接 import）。
+
+    path 以 root_path 開頭、而且下一個字元是 / 或結尾時才去掉前綴。
+    """
+    path: str = scope["path"]
+    root_path: str = scope.get("root_path", "")
+    if not root_path or not path.startswith(root_path):
+        return path
+    if path == root_path:
+        return ""
+    if path[len(root_path)] == "/":
+        return path[len(root_path) :]
+    return path
 
 
 def credential_problem(authorization: str | None) -> RejectionReason | None:
@@ -43,7 +59,7 @@ class BearerKeyFormatMiddleware:
         self._prefix = prefix
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not self._covers(scope["path"]):
+        if scope["type"] != "http" or not self._covers(route_path(scope)):
             await self._app(scope, receive, send)
             return
         problem = credential_problem(Headers(scope=scope).get("authorization"))

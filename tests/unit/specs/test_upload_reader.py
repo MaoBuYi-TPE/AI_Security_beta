@@ -11,6 +11,7 @@ from starlette.requests import Request
 from starlette.types import Message
 
 from secscan.core.errors import AppError
+from secscan.specs import dependencies
 from secscan.specs.dependencies import read_spec_upload, spec_format_of
 from secscan.specs.domain.documents import MAX_SPEC_BYTES, SpecFormat
 
@@ -107,3 +108,44 @@ def test_body_at_the_limit_is_read_completely() -> None:
 
     assert upload.spec_format is SpecFormat.YAML
     assert len(upload.content) == MAX_SPEC_BYTES
+
+
+# --- 審查後補上：讀 body 的期間不能無限長、斷線不是 500 -----------------------------------------
+
+
+def test_slow_uploads_are_cut_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """審查發現：讀 body 時已經佔住 DB 連線，很慢的上傳可以耗盡連線池；總讀取時間有上限。"""
+    monkeypatch.setattr(dependencies, "SPEC_READ_TIMEOUT_SECONDS", 0.05)
+
+    async def stalled() -> Message:
+        await asyncio.sleep(10)
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/",
+        "headers": [(b"content-type", b"application/json")],
+    }
+    request = Request(scope, stalled)
+
+    error = _rejected(lambda: asyncio.run(read_spec_upload(request)))
+
+    assert (error.status_code, error.code) == (408, "REQUEST_TIMEOUT")
+
+
+def test_client_disconnect_is_a_client_error() -> None:
+    async def disconnected() -> Message:
+        return {"type": "http.disconnect"}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/",
+        "headers": [(b"content-type", b"application/yaml")],
+    }
+    request = Request(scope, disconnected)
+
+    error = _rejected(lambda: asyncio.run(read_spec_upload(request)))
+
+    assert (error.status_code, error.code) == (400, "INVALID_REQUEST")

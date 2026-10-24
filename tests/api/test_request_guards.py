@@ -15,12 +15,13 @@ from fastapi.security import HTTPBearer
 from fastapi.testclient import TestClient
 from hypothesis import find, given
 from hypothesis import strategies as st
+from starlette._utils import get_route_path
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Message, Receive, Scope, Send
 
 from secscan.api_keys.dependencies import rejection_error
 from secscan.api_keys.domain import RejectionReason
-from secscan.api_keys.middleware import BearerKeyFormatMiddleware, credential_problem
+from secscan.api_keys.middleware import BearerKeyFormatMiddleware, credential_problem, route_path
 from secscan.core.body_limit import MAX_REQUEST_BODY_BYTES, BodyLimitMiddleware
 from secscan.core.errors import register_error_handlers
 from secscan.core.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
@@ -363,3 +364,45 @@ def test_disconnect_messages_pass_through_uncounted() -> None:
     asyncio.run(BodyLimitMiddleware(app, max_bytes=8)(_scope(headers=[]), receive, send))
 
     assert seen == [{"type": "http.disconnect"}]
+
+
+def test_key_check_also_covers_api_v1_behind_a_root_path() -> None:
+    """審查發現：以 --root-path 部署時 scope["path"] 帶有前綴，判斷範圍要和路由一樣先去掉它。"""
+    recorder = _Recorder([b"x"])
+    middleware = BearerKeyFormatMiddleware(recorder.app)
+    scope = {**_scope(path="/secscan/api/v1/projects", headers=[]), "root_path": "/secscan"}
+
+    asyncio.run(middleware(scope, recorder.receive, recorder.send))
+
+    assert recorder.status == 401
+    assert not recorder.app_called
+
+
+@pytest.mark.parametrize(
+    ("root_path", "path"),
+    [
+        ("/secscan", "/secscan/health/live"),
+        ("/secscan", "/other/api/v1/projects"),
+        ("", "/api/v1x"),
+    ],
+)
+def test_paths_outside_the_prefix_are_left_alone(root_path: str, path: str) -> None:
+    recorder = _Recorder([])
+    middleware = BearerKeyFormatMiddleware(recorder.app)
+    scope = {**_scope(path=path, headers=[]), "root_path": root_path}
+
+    asyncio.run(middleware(scope, recorder.receive, recorder.send))
+
+    assert recorder.app_called
+
+
+_PATH_PIECES = st.text(alphabet="/abv1", max_size=12)
+
+
+@given(_PATH_PIECES, _PATH_PIECES, st.booleans())
+def test_route_path_matches_starlette(root_path: str, path: str, prefixed: bool) -> None:
+    """middleware 判斷範圍用的 path 必須和路由用的一樣（Starlette 的 get_route_path 是私有的）。"""
+    full_path = root_path + path if prefixed else path
+    scope: Scope = {"type": "http", "path": full_path, "root_path": root_path}
+
+    assert route_path(scope) == get_route_path(scope)

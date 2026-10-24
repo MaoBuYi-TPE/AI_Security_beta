@@ -7,6 +7,7 @@
 """
 
 import builtins
+import contextlib
 import hashlib
 import json
 import socket
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from secscan.core.json_types import JsonObject
 from secscan.specs.domain.documents import InvalidSpecError, SpecFormat, SpecProblem, parse_document
@@ -523,3 +526,180 @@ def test_document_size_limit_applies_after_normalization() -> None:
         lambda: normalize_spec(content, SpecFormat.JSON, origin=VAMPI, max_document_bytes=size - 1)
     )
     assert error.problem is TOO_LARGE
+
+
+# --- 審查後補上 ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("section", "name"),
+    [
+        ("schemas", f"http://{CANARY_HOST}/x"),
+        ("schemas", "../secret"),
+        ("responses", "a b"),
+        ("parameters", "\u00e9"),
+        ("securitySchemes", "x:y"),
+        ("links", ""),
+    ],
+)
+def test_component_names_follow_the_oas_rule(section: str, name: str) -> None:
+    """OAS 3.0：components 的 key 必須符合 ^[a-zA-Z0-9.\\-_]+$（名稱不能是 URL 或路徑）。"""
+    error = _rejected(lambda: _normalize(_spec(components={section: {name: {}}})))
+
+    assert error.problem is INVALID
+    assert CANARY_HOST not in error.message
+
+
+def test_component_names_may_use_dots_dashes_and_underscores() -> None:
+    components = {"schemas": {"Pet.v1_beta-2": {}}, "x-anything": {"a b": 1}}
+
+    assert _normalize(_spec(components=components)).operations
+
+
+@pytest.mark.parametrize(
+    ("servers", "fragment"),
+    [
+        ([{"url": f"http://[{CANARY_HOST}]/api"}], CANARY_HOST),
+        ([{"url": "http://[::1/api"}], "::1"),
+        ([{"url": f"http://{CANARY_HOST}]/api"}], CANARY_HOST),
+    ],
+)
+def test_malformed_server_hosts_are_invalid_not_a_crash(servers: Any, fragment: str) -> None:
+    """urlsplit 對不合法的 IPv6 括號拋出 ValueError（訊息含 host），不能變成 500。"""
+    error = _rejected(lambda: _normalize(_spec(servers=servers)))
+
+    assert error.problem is INVALID
+    assert fragment not in error.message
+
+
+def test_overlong_openapi_versions_are_unsupported() -> None:
+    """DB 的欄位是 16 個字元：太長的版本號要在 domain 擋下，不能變成 DB 的 DataError。"""
+    assert _normalize(_spec(openapi="3.0." + "9" * 12)).openapi_version == "3.0." + "9" * 12
+    error = _rejected(lambda: _normalize(_spec(openapi="3.0." + "9" * 13)))
+
+    assert error.problem is UNSUPPORTED
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {
+            "paths": {
+                "/a": {
+                    "get": {
+                        "responses": {
+                            "200": {"description": "d", "links": {"l": {"$ref": "#/x-l"}}}
+                        }
+                    }
+                }
+            },
+            "x-l": {"server": {"url": f"http://{CANARY_HOST}"}},
+        },
+        {
+            "paths": {"/a": {"get": {"responses": {"200": {"$ref": "#/x-r"}}}}},
+            "x-r": {"description": "d", "links": {"l": {"server": {"url": "/x"}}}},
+        },
+        {
+            "components": {"securitySchemes": {"o": {"$ref": "#/x-o"}}},
+            "x-o": {"type": "oauth2", "flows": {}},
+        },
+        {
+            "components": {
+                "securitySchemes": {"o": {"$ref": "#/components/examples/e/value"}},
+                "examples": {"e": {"value": {"type": "openIdConnect", "openIdConnectUrl": "x"}}},
+            }
+        },
+        {
+            "components": {
+                "securitySchemes": {
+                    "o": {"$ref": "#/components/securitySchemes/p/x"},
+                    "p": {"type": "http", "scheme": "bearer", "x": {"type": "oauth2"}},
+                }
+            }
+        },
+        {"components": {"links": {"l": {"$ref": "#/x-l"}}}, "x-l": {"server": {"url": "/x"}}},
+        {
+            "components": {"responses": {"r": {"$ref": "#/x-r"}}},
+            "x-r": {"description": "d", "links": {"l": {"server": {"url": "/x"}}}},
+        },
+    ],
+    ids=[
+        "operation-link-ref",
+        "operation-response-ref",
+        "security-scheme-ref",
+        "security-scheme-ref-into-examples",
+        "security-scheme-ref-below-an-entry",
+        "component-link-ref",
+        "component-response-ref",
+    ],
+)
+def test_references_cannot_smuggle_rejected_objects(fields: dict[str, Any]) -> None:
+    """審查發現：透過 $ref 轉一手就能繞過 Link server、oauth2 的拒絕。
+
+    這些位置的 $ref 只能指向 components 中對應的區段（那裡的物件都會被檢查）。
+    """
+    error = _rejected(lambda: _normalize(_spec(**fields)))
+
+    assert error.problem is UNSUPPORTED
+    assert CANARY_HOST not in error.message
+
+
+def test_references_to_the_matching_section_are_accepted() -> None:
+    components = {
+        "securitySchemes": {"a": {"$ref": "#/components/securitySchemes/b"}, "b": {"type": "http"}},
+        "links": {"a": {"$ref": "#/components/links/b"}, "b": {"operationId": "getItem"}},
+        "responses": {"a": {"$ref": "#/components/responses/b"}, "b": {"description": "d"}},
+    }
+    paths = {"/a": {"get": {"responses": {"200": {"$ref": "#/components/responses/a"}}}}}
+
+    assert _normalize(_spec(components=components, paths=paths)).operations
+
+
+def test_non_object_entries_are_left_to_the_tools() -> None:
+    """只檢查平台依賴的部分：不是物件的項目不會讓工具連到別處，交給工具回報格式問題。"""
+    components = {"securitySchemes": {"a": "x"}, "links": {"a": 3}, "responses": {"a": []}}
+
+    assert _normalize(_spec(components=components)).operations
+
+
+def test_valid_documents_never_render_positions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """位置字串只在要拋錯時才組（審查發現的 CPU 放大）。"""
+    from secscan.specs.domain import openapi, references
+
+    def must_not_render(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("合法的文件不應計算位置字串")
+
+    content = _vampi()
+    monkeypatch.setattr(openapi, "pointer_text", must_not_render)
+    monkeypatch.setattr(references, "pointer_text", must_not_render)
+
+    assert len(normalize_spec(content, SpecFormat.YAML, origin=VAMPI).operations) == 14
+
+
+_SERVER_URLS = st.text(alphabet="htps:/[]a1.@x?#%{}-", max_size=24)
+_ARRAY_INDEXES = st.text(alphabet="0123456789-~", max_size=5_000)
+_UNICODE_ESCAPES = st.text(alphabet="0123456789ABCDEF", min_size=8, max_size=8)
+
+
+@settings(max_examples=300)
+@given(_SERVER_URLS, _ARRAY_INDEXES, _UNICODE_ESCAPES, st.sampled_from(list(SpecFormat)))
+def test_hostile_values_only_ever_raise_invalid_spec_error(
+    url: str, index: str, escape: str, spec_format: SpecFormat
+) -> None:
+    """審查發現的 500 都是「拋出了 InvalidSpecError 以外的例外」：任何值都只能被接受或回 4xx。
+
+    在合法的文件中放入變化的 server URL、陣列索引與 YAML 的 \\U 跳脫。
+    """
+    if spec_format is SpecFormat.JSON:
+        document = _spec(
+            servers=[{"url": url}], tags=[{"name": "t"}], **{"x-r": {"$ref": f"#/tags/{index}"}}
+        )
+        content = json.dumps(document).encode()
+    else:
+        content = (
+            'openapi: "3.0.3"\ninfo: {title: t, version: "1"}\npaths: {}\n'
+            f"servers: [{{url: {json.dumps(url)}}}]\n"
+            f'x-s: "\\U{escape}"\n'
+        ).encode()
+    with contextlib.suppress(InvalidSpecError):
+        normalize_spec(content, spec_format, origin=VAMPI)
