@@ -9,6 +9,7 @@ import logging
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -44,13 +45,8 @@ def current_principal(
             raise ApiKeyRejectedError(RejectionReason.MISSING)
         return ApiKeyService(session).authenticate(credentials.credentials, now=datetime.now(UTC))
     except ApiKeyRejectedError as rejected:
-        logger.warning(
-            "api key rejected: reason=%s key_id=%s request_id=%s",
-            rejected.reason.value,
-            rejected.key_id or "-",
-            request_id_of(request),
-        )
-        raise _rejection(rejected.reason) from None
+        log_rejection(rejected.reason, rejected.key_id, request_id_of(request))
+        raise rejection_error(rejected.reason) from None
 
 
 CurrentPrincipal = Annotated[Principal, Depends(current_principal)]
@@ -64,7 +60,18 @@ def authenticated_router(*, prefix: str) -> APIRouter:
     return APIRouter(prefix=prefix, dependencies=[Depends(current_principal)])
 
 
-def _rejection(reason: RejectionReason) -> AppError:
+def log_rejection(reason: RejectionReason, key_id: UUID | None, request_id: str) -> None:
+    """記下拒絕的原因與 request_id；client 送來的值一律不記。api_keys.middleware 也用這個函式。"""
+    logger.warning(
+        "api key rejected: reason=%s key_id=%s request_id=%s",
+        reason.value,
+        key_id or "-",
+        request_id,
+    )
+
+
+def rejection_error(reason: RejectionReason) -> AppError:
+    """401 的回應：只有 EXPIRED 不同，其他原因完全相同（不洩漏 key 是否存在）。"""
     if reason is RejectionReason.EXPIRED:
         return AppError(
             status_code=HTTPStatus.UNAUTHORIZED,

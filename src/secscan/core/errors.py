@@ -43,6 +43,7 @@ class ErrorCode(StrEnum):
     TARGET_DISABLED = "TARGET_DISABLED"
     QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
     HTTP_ERROR = "HTTP_ERROR"
+    REQUEST_TOO_LARGE = "REQUEST_TOO_LARGE"
     INVALID_REQUEST = "INVALID_REQUEST"
     INVALID_TARGET = "INVALID_TARGET"
     SCOPE_OUTSIDE_LAB = "SCOPE_OUTSIDE_LAB"
@@ -69,10 +70,14 @@ class AppError(Exception):
 
 
 NOT_FOUND_MESSAGE = "找不到資源。"
+REQUEST_TOO_LARGE_MESSAGE = "請求內容超過大小上限。"
 
 _HTTP_ERRORS: dict[int, tuple[ErrorCode, str]] = {
     HTTPStatus.NOT_FOUND: (ErrorCode.RESOURCE_NOT_FOUND, NOT_FOUND_MESSAGE),
     HTTPStatus.METHOD_NOT_ALLOWED: (ErrorCode.METHOD_NOT_ALLOWED, "不支援這個 HTTP 方法。"),
+    # core.body_limit 讀 body 時超過上限：在 FastAPI 解析 body 的過程中拋出，
+    # 必須是框架的 HTTPException 才不會被 FastAPI 改成 400。
+    HTTPStatus.REQUEST_ENTITY_TOO_LARGE: (ErrorCode.REQUEST_TOO_LARGE, REQUEST_TOO_LARGE_MESSAGE),
 }
 
 
@@ -105,11 +110,18 @@ def _failure_response(
     )
 
 
+def error_response(request: Request, error: AppError) -> JSONResponse:
+    """AppError 的失敗回應。exception handler 與在路由之前就回應的 middleware 共用。"""
+    return _failure_response(
+        request, error.status_code, error.code, error.message, headers=error.headers
+    )
+
+
 async def app_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """把 AppError 轉成失敗 envelope。只註冊給 AppError；收到其他例外時原樣拋出，不吞掉。"""
     if not isinstance(exc, AppError):
         raise exc
-    return _failure_response(request, exc.status_code, exc.code, exc.message, headers=exc.headers)
+    return error_response(request, exc)
 
 
 async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:

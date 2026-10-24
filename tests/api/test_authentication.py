@@ -2,7 +2,7 @@
 
 - 每個 /api/v1 路由的依賴樹都有 current_principal；OpenAPI 每個操作都要求驗證。
 - 缺少 key、scheme 不對、格式不對：在查 DB 之前就回 401，三者的回應完全相同。
-- 驗證在欄位驗證之前；但 FastAPI 會先解析 JSON，語法錯誤的 JSON 在驗證之前就回 422。
+- 驗證在欄位驗證之前；沒有 key 或格式不符時連 body 都不讀（tests/api/test_request_guards.py）。
 - 伺服器端記下失敗原因與 request_id，但不記 client 送來的值。
 DB 相關的情境（key 不存在、secret 錯誤、撤銷、過期）在 tests/integration/test_api_keys_api.py。
 """
@@ -187,20 +187,3 @@ def test_rejections_are_logged_with_reason_but_without_the_credential(
     assert "reason=malformed" in logged
     assert response.headers[REQUEST_ID_HEADER] in logged
     assert CANARY not in logged
-
-
-@pytest.mark.parametrize("path", ["/api/v1/projects", "/api/v1/projects/{project_id}/keys"])
-def test_malformed_json_is_parsed_before_authentication(client: TestClient, path: str) -> None:
-    """目前的實際行為：FastAPI 在驗證 key 之前就解析 JSON，語法錯誤得到 422（只列位置）。
-
-    在驗證之前先擋下（含 body 大小上限）的 middleware 列入 T07、T23（docs/DECISIONS.md §9.5）。
-    """
-    response = client.post(
-        _concrete(path),
-        content=b'{"name": "canary-body',
-        headers={"Content-Type": "application/json"},
-    )
-
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "INVALID_REQUEST"
-    assert "canary-body" not in response.text
