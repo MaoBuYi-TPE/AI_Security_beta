@@ -9,6 +9,17 @@
   "inputs": {
     "vampi_openapi3.yml_sha256": "35200f354f9c9968182fc19458295ed45bb4c368150348c46d5146a7e40a61c9"
   },
+  "openapi_fixtures": [
+    {
+      "path": "openapi/vampi-openapi3.yml",
+      "sha256": "039f567e37521f960c8bda26b6b38149303b961f3cb5e7bb3f6c1b99d265ab92",
+      "raw_sha256": "35200f354f9c9968182fc19458295ed45bb4c368150348c46d5146a7e40a61c9",
+      "redactions": 1,
+      "masking": "登入回應 example 中的範例 JWT → REDACTED_JWT（與 spikes/t03/mask_fixture.py 相同的樣式），其他位元組不變",
+      "source": "T03 的輸入 runs/spike-t03/inputs/vampi-openapi3.yml（raw_sha256 與 inputs 相同）；上游為 VAmPI 的 openapi_specs/openapi3.yml（MIT，docs/SOURCES.md S26）",
+      "added_by": "T07"
+    }
+  ],
   "nuclei_templates": {
     "release": "v10.5.0",
     "commit": "f8b8b8dcd70d93826c3767e1829ef8243af9f03b",

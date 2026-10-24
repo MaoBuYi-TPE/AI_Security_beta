@@ -45,6 +45,11 @@ V1_ROUTES = {
     ("GET", "/api/v1/scope-grants/{grant_id}"),
     ("POST", "/api/v1/scope-grants/{grant_id}/approve"),
     ("POST", "/api/v1/scope-grants/{grant_id}/revoke"),
+    # T07
+    ("POST", "/api/v1/targets/{target_id}/api-specs"),
+    ("GET", "/api/v1/targets/{target_id}/api-specs"),
+    ("GET", "/api/v1/api-specs/{spec_id}"),
+    ("GET", "/api/v1/api-specs/{spec_id}/operations"),
 }
 CANARY = "canary-credential-0003"
 

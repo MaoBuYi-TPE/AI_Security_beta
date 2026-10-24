@@ -22,6 +22,7 @@ from secscan.grants.router import router as grants_router
 from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
 from secscan.projects.router import router as projects_router
+from secscan.specs.router import router as specs_router
 from secscan.targets.domain import LabNetwork
 from secscan.targets.router import router as targets_router
 
@@ -70,4 +71,5 @@ def _api_v1() -> APIRouter:
     api_v1.include_router(api_keys_router)
     api_v1.include_router(targets_router)
     api_v1.include_router(grants_router)
+    api_v1.include_router(specs_router)
     return api_v1

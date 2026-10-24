@@ -18,9 +18,16 @@ from secscan.grants.domain.scope import GrantRequest
 from secscan.grants.service import ScopeGrantService
 from secscan.projects.domain import Project
 from secscan.projects.service import ProjectService
+from secscan.specs.domain.documents import SpecFormat
+from secscan.specs.domain.model import ApiSpec, SpecUpload
+from secscan.specs.service import ApiSpecService
 from secscan.targets.domain import LabNetwork, Target, TargetKind
 from secscan.targets.service import TargetService
 
+MINIMAL_SPEC = (
+    b'{"openapi": "3.0.3", "info": {"title": "t", "version": "1"},'
+    b' "paths": {"/items/{id}": {"get": {"operationId": "getItem"}}}}'
+)
 # 與 API（create_app 的預設設定）相同的 lab 網段。
 LAB = LabNetwork(DEFAULT_LAB_CIDR)
 LAB_IP = "10.89.7.20"
@@ -124,6 +131,16 @@ class Seeder:
         with self._session() as session:
             return ScopeGrantService(session, lab=LAB).approve(
                 admin.principal, grant.id, note="已核對 lab", now=datetime.now(UTC), request_id=None
+            )
+
+    def spec(self, caller: Caller, target: Target, content: bytes = MINIMAL_SPEC) -> ApiSpec:
+        """以 JSON 上傳一份規格（預設是只有一個 GET 的最小文件）。"""
+        with self._session() as session:
+            return ApiSpecService(session).upload(
+                caller.principal,
+                target.id,
+                SpecUpload(spec_format=SpecFormat.JSON, content=content),
+                request_id=None,
             )
 
     def query(self, statement: str, **params: object) -> Sequence[Row[Any]]:

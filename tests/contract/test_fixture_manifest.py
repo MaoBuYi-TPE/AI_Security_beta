@@ -121,3 +121,41 @@ def test_fixture_has_no_secrets(path: Path) -> None:
             if not re.search(r"[0-9+/=_]", token):
                 continue
             assert _is_placeholder(token), f"{path.name} 含未遮罩的 Bearer/Basic 值：{token[:8]}…"
+
+
+# --- T07 的 OpenAPI 規格 fixture（上傳用的輸入，不是工具輸出）--------------------------------
+
+OPENAPI_DIR = FIXTURES_DIR / "openapi"
+
+
+def _openapi_entries() -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = _manifest()["openapi_fixtures"]  # type: ignore[assignment]
+    return entries
+
+
+def test_every_openapi_fixture_is_listed_with_its_sha256() -> None:
+    listed = {(FIXTURES_DIR / entry["path"]).resolve(): entry for entry in _openapi_entries()}
+    on_disk = {path.resolve() for path in OPENAPI_DIR.iterdir() if path.is_file()}
+
+    assert on_disk == set(listed), (
+        f"未登記：{on_disk - set(listed)}；登記但不存在：{set(listed) - on_disk}"
+    )
+    for path, entry in listed.items():
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"], entry["path"]
+
+
+def test_vampi_spec_is_the_t03_input() -> None:
+    inputs: dict[str, str] = _manifest()["inputs"]  # type: ignore[assignment]
+    [entry] = [e for e in _openapi_entries() if e["path"] == "openapi/vampi-openapi3.yml"]
+
+    assert entry["raw_sha256"] == inputs["vampi_openapi3.yml_sha256"]
+    assert entry["sha256"] != entry["raw_sha256"]
+
+
+@pytest.mark.parametrize("entry", _openapi_entries(), ids=lambda e: e["path"])
+def test_openapi_fixtures_have_no_secrets(entry: dict[str, str]) -> None:
+    text = (FIXTURES_DIR / entry["path"]).read_text(encoding="utf-8")
+
+    assert not JWT_RE.search(text)
+    assert not PRIVATE_KEY_RE.search(text)
+    assert not USERINFO_RE.search(text)
