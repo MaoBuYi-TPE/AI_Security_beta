@@ -398,8 +398,162 @@
       - **T11（M2）**：guard 以 grant 快照逐請求強制 origin、DNS/IP 綁定、path、method 與預算；以 mitmproxy 的 URL 解析做 parser differential；lab 網段內的基礎設施位址（guard、canary）要排除；實際收包證據補齊 SEC-01、SEC-02、SEC-05。
       - **M3**：ZAP web profile 需要的 seed path；依量測調整預算上限（`grants/domain/scope.py` 的常數與 `DECISIONS.md` §10.3）。
       - **T21**：全域的待核准清單與全域 audit 查詢；報告以 `approved_at` 作為授權成立的時間。
-- [ ] T07 建立 OpenAPI 上傳與受限的 operation inventory。
+- [x] T07 建立 OpenAPI 上傳與受限的 operation inventory。
   - DoD：驗證大小、格式、$ref、servers，包含惡意與跨 origin 的測試；不從外部抓取任何東西。
+  - 交付（2026-10-25，done）：
+    - 範圍：
+      - 上傳 OpenAPI 3.0（JSON 或 YAML）、嚴格解析、`servers` 改綁到 target 的 origin、operation inventory，以及依 grant 判斷 operation 是否在範圍內（path 與 method 的比對，T06 留下的工作）。
+      - T05 留下的兩道驗證之前的關卡：沒有 key 或格式不符時不讀 body 就回 401；任何請求超過 2 MiB 回 413。
+      - migration `0003`（api_specs、api_spec_operations 與不可變的 trigger）。
+      - 設計決定見 `DECISIONS.md` §11，API 見 `API_CONTRACT.md` §15。上傳與解析都不發出任何流量：不抓外部參照，也不連 `servers` 指向的位址。
+    - 檔案：
+      - 程式：
+        - `src/secscan/specs/`：`domain/documents`（JSON 與 YAML 的子集與上限）、`domain/references`（參照）、`domain/openapi`（版本、servers 改綁、inventory、canonical 文件）、`domain/model`、`models`、`repository`、`service`、`errors`、`schemas`、`router`、`dependencies`（raw body 的讀取）
+        - `src/secscan/grants/domain/matching.py`：route 層級的 `covers()` 與 `ScopeRules`
+        - `src/secscan/api_keys/middleware.py`、`src/secscan/core/body_limit.py`；`api_keys/dependencies`（401 的回應與日誌改成共用函式）、`core/errors`（新錯誤碼、`error_response`、413 的對應）
+        - `src/secscan/migrations/versions/v0003_api_specs.py`；`main.py`（middleware 的順序、specs router）；`migrations/metadata.py`
+      - 設定：`pyproject.toml`（執行期依賴 pyyaml 6.0.3、開發依賴 types-pyyaml；layers 加入 specs）
+      - 測試：
+        - unit：`tests/unit/specs/`（documents、references、openapi、model、upload_reader）、`tests/unit/grants/test_matching.py`、`tests/api/test_request_guards.py`
+        - integration：`test_spec_schema.py`、`test_spec_repository.py`、`test_spec_service.py`、`test_spec_races.py`、`test_specs_api.py`
+        - 既有測試：`V1_ROUTES`、`test_migrations.py`、`test_schema_constraints.py`（CHECK 27 → 40、索引）、`api_support.py`（`Seeder.spec`）、`test_fixture_manifest.py`；`test_authentication.py` 中記錄舊行為的 `test_malformed_json_is_parsed_before_authentication` 改由新的測試取代
+        - fixture：`tests/fixtures/openapi/vampi-openapi3.yml`（T03 輸入的 VAmPI 規格，登入回應 example 中的範例 JWT 遮罩成 `REDACTED_JWT`；manifest 的 `openapi_fixtures` 記下遮罩前後的 sha256）
+    - 端點：
+      - `POST`、`GET /api/v1/targets/{target_id}/api-specs`（GET 為新增）
+      - `GET /api/v1/api-specs/{spec_id}`（新增）
+      - `GET /api/v1/api-specs/{spec_id}/operations`（可帶 `scope_grant_id`）
+    - DoD 對照：
+      - **驗證大小**：
+        - 規格最多 1 MiB（413 `SPEC_TOO_LARGE`）：先看 Content-Length，chunked 時讀到第一塊超過就停（以 ASGI 測試確認下一塊沒有被讀）；正規化後最多 2 MiB。
+        - 任何請求最多 2 MiB（413 `REQUEST_TOO_LARGE`，middleware）；沒有 key 的大請求回 401、不讀 body。
+        - 巢狀 64 層、10 萬個節點、1,000 個 operation；YAML 超過時立刻停止解析（以 parser 實際產生的事件數確認）。
+      - **驗證格式**：
+        - Content-Type 只接受 `application/json`、`application/yaml`（UTF-8），其他 415。
+        - JSON：重複的 key、NaN／Infinity、溢位的數字、超過 4,300 位的整數、NUL、孤立的 surrogate、BOM、非法的 UTF-8 都拒絕。
+        - YAML：單一文件；directive、anchor、alias、明確的 tag、複合 key、plain 的 `<<`、直接出現的 U+0085／U+2028／U+2029 都拒絕；key 一律是字串，值依 YAML 1.2 core schema（`yes`、日期是字串，`0x1F` 是 31）。
+        - OpenAPI 只接受 3.0.x；頂層欄位、`info`、`paths`、path item、operation、`operationId` 的規則；path 與 grant 的語法相同，只差在佔位名稱的 route 拒絕。
+      - **驗證 `$ref`**：任何位置（含 example 與 `x-`）的 `$ref`、`operationRef` 只接受指得到的 `#/…` JSON Pointer；外部參照（http、https、file、相對檔案、network-path、urn、空字串）回 422 `EXTERNAL_REF_FORBIDDEN`；`#foo`、`%`、懸空、循環、超過 32 層的參照鏈、非法的 `~` 跳脫都拒絕；discriminator 的 mapping、`externalValue`、`$id` 等也檢查。
+      - **驗證 `servers`**：一律改綁成 target 的 origin 加 base path；原本的 host 與帳密不保存、不出現在回應與訊息中；變數、相對 path、query、不一致的 base path，以及 path、operation、link 層級的 server 都拒絕。
+      - **惡意與跨 origin 的測試**：billion laughs、`!!python/object/apply`、20 萬層巢狀、外部參照、指向其他主機或 lab 外 IP 的 servers、link 的 server、oauth2／OIDC 的 URL；錯誤訊息只有原因與位置。
+      - **不從外部抓取任何東西**：
+        - 解析與正規化都是純函式；單元測試在 pytest-socket 之下執行，另把 socket、`urlopen`、`open` 換成會失敗的版本處理惡意規格。
+        - 手動端到端：把本機接收端的 URL 放進各種外部欄位，接收端收到 0 個連線。
+    - 範圍判斷（T06 留下的工作）：
+      - pattern「涵蓋」route：段數相同；佔位涵蓋任何一段，literal 只涵蓋相同的 literal（不涵蓋 route 的佔位）。排除不分大小寫、忽略結尾的斜線；允許必須完全一致；都不從前綴推論。
+      - 原因依序是 `PATH_EXCLUDED`、`METHOD_NOT_AUTHORIZED`（TRACE 一定是）、`PATH_NOT_AUTHORIZED`；被排除的 operation 照樣列出。
+      - grant 預覽：grant 必須屬於同一個 target（422），讀不到的 grant 與不存在的一樣回 404；任何狀態都可以預覽，能不能掃描仍由 gate 判斷。
+    - 實際執行：
+      - TDD：每一步先寫測試並確認失敗，例如：
+        - `ImportError`（`rejection_error`、middleware、`secscan.specs`）、`ModuleNotFoundError`（matching、references、openapi、model）
+        - schema 測試先於 migration：43 failed（`relation "api_specs" does not exist`）
+        - 路由：`V1_ROUTES` 先更新，3 failed；API 整合測試先寫，29 failed、3 passed（那 3 個在實作前就會通過：未知 key 的 401、全域的 413、跨 project 的 404，路由不存在時結果相同）
+        - references（53 個）與 openapi（96 個）的測試第一次執行就全部通過，鑑別力以突變檢查確認。
+        - 審查後的修正也先寫測試並確認失敗：documents 8 failed、references 13 failed、openapi 17 failed、上傳依賴 2 failed、middleware 的 root_path 1 failed。
+          - 「任何值只會拋 InvalidSpecError」的 Hypothesis 測試，第一版（隨機拼接片段）在舊程式上也通過，碰不到會出錯的路徑；改成在合法文件中變化 server URL、陣列索引與 `\U` 跳脫之後，才在舊程式上找到 `OverflowError` 與 `ValueError`。
+          - 計算 `pointer_text` 呼叫成本的測試，第一版在舊程式上也通過（舊程式先 `str()` 複製，計數用的子類別沒被讀到）；改成同時要求 0 < 計數 ≤ 121。
+      - 實作之後才補的測試（不是先寫）：
+        - 上傳依賴的逐塊讀取與 Content-Type 對照（`test_upload_reader.py`）、YAML 解析的提早停止：domain 也會檢查大小與節點數，只看結果抓不到這兩道防線。
+        - 突變檢查找到的兩個（見下方）。
+        - 審查後的修正：
+          - references 的 `test_settled_chains_still_count_toward_the_limit` 與 `test_long_chains_stop_walking_at_the_limit`：第一個補完後，走參照鏈時的長度上限那一行仍沒被測到（它測到的是迴圈後的檢查），才補第二個，計算 `_resolve` 的呼叫次數。
+          - openapi 的「$ref 指向區段底下」、「指向同一區段的參照可以接受」、「不是物件的項目交給工具」：合併重複的條件之後，3 行沒測到才補。
+          - middleware 的 `route_path` 與 Starlette 的 `get_route_path` 以 Hypothesis 比對（含 path 不以 `root_path` 開頭的情形）。
+          - 規則與測試同時改：discriminator mapping 的 `Dog.json` 原本預期 EXTERNAL，新規則下符合 components 名稱規則的值回 UNSUPPORTED（提示改寫成 `#/components/schemas/<名稱>`），另加 `../dog.json` → EXTERNAL。
+      - media type：查核時 IANA 的登記表沒有 `application/vnd.oai.openapi`（只有 `vnd.oai.workflows`），改成只接受 `application/json` 與 `application/yaml`；測試與程式在同一次修改中一起改，沒有先確認失敗。
+      - 測試本身的問題（都已修正）：
+        - 替換 components 的參照測試會讓 paths 的參照懸空，先回 INVALID 而測不到要測的規則（執行前發現）→ 改用只有 components 的最小文件。
+        - repository 的分頁測試第二頁用了不同的 limit，offset 對不上。
+        - 寫了一個什麼都沒檢查的測試（`test_error_codes_are_registered`），已刪除；一個測試的 docstring 與內容不符，已改。
+      - 程式的問題（測試或檢查抓到）：
+        - 參照鏈的長度上限原本用 visited（set）的大小計算：拿掉循環檢查時 set 不會變大，變成無窮迴圈（突變檢查卡住）。改成獨立的計數器，長度上限本身就保證會結束。
+        - `create()` 有一個「寫入後讀不到」的分支測不到也不會發生，改成以 FK 保證存在的查詢。
+        - 一開始漏測的分支：body limit 的 `http.disconnect`、JSON 字串外的反斜線、沒有 anchor 的 alias、沒有位置的 YAML 錯誤、model 的檢查，都已補上。
+        - VAmPI 上游規格的 example 中有一個範例 JWT，被既有的 fixture 防洩密規則抓到 → 依 T03 的慣例遮罩。
+      - 突變檢查（審查前 93 項、審查後 113 項，每一項都讓測試失敗；腳本不進 repo，跑完還原檔案）：
+        - 第一輪：前 40 項全部抓到；第 41 項「不檢查參照循環」讓測試卡住（見上方），腳本逾時中斷。
+        - 修正後重跑其餘 53 項，加上檔案有改動的 4 項：55/57。沒抓到的 2 項都是測試分不出來：
+          - 「JSON Pointer 不檢查 `~` 的跳脫」：原本的案例即使不檢查，也會因指不到節點而回同樣的錯誤 → 補「key 本身就是 `a~2`」的案例。
+          - 「接受不以 `/` 開頭的相對 path」：後面的 `check_path` 也會拒絕，只差在訊息 → 補檢查訊息的測試。
+          - 補測試後 2/2。
+        - 事故：第一輪逾時時只結束了 `uv`，底下卡住的 pytest 持續執行約 42 分鐘，留下 2 個 db-test 的測試資料庫與角色；已結束該程序並清除，db-test 0 殘留。腳本改成以獨立的 process group 執行、逾時時整組結束。
+        - 審查後的重跑：113 項（93 項中改寫目標的 7 項：JSON 深度、directive、懸空、循環、參照鏈上限、Link server、oauth2；刪除「discriminator 接受任何名稱」；新增 21 項：參照鏈快取 3、陣列索引、參照的位置字串、mapping 3、components 名稱、`$ref` 區段 2、`urlsplit`、版本號位數、route 的位置字串、讀取期限、斷線、`root_path` 2、JSON 預估節點數、位置字串上限、`\U` 跳脫）。完整跑完 113/113 被抓到，沒有存活；跑完確認檔案已還原（`tests/unit/specs` 314 passed）。
+        - 大小與關卡：拿掉規格或請求的上限、上限差一格、只看 Content-Length、不看 Content-Length、沒有 key 也放行、拒絕格式正確的 key、只檢查 `/api/v1` 本身、不檢查 charset、不認得的 Content-Type 當成 JSON
+        - JSON：接受重複的 key、NaN、溢位的數字、BOM、NUL、孤立的 surrogate；不檢查深度、深度檢查不跳過跳脫字元、不檢查整數位數、走訪時不檢查節點數
+        - YAML：接受 anchor、alias、tag、多份文件、directive、複合 key、merge key、重複的 key、`.inf`、U+2028；不檢查深度或節點數；plain 與加引號的 scalar 對調；key 依 core schema 解讀；`yes` 當成布林值
+        - 參照：接受外部參照、`#foo`、`%`、懸空的參照、`externalValue`、`$id`；不檢查循環、參照鏈沒有上限、不檢查 `operationRef`、不檢查 discriminator 或接受任何名稱、不檢查 `~` 的跳脫
+        - OpenAPI：servers 不改綁；接受變數、不同的 base path、query、沒有主機的絕對 URL、不以 `/` 開頭的 path、path 或 operation 層級的 servers、callbacks、Link 的 server、oauth2、3.0 以外的版本、未知的頂層欄位、只差在佔位名稱的 route、重複的 operationId；base path 不去結尾的 `/`；operation 沒有上限；完整 path 不含 base path；正規化後不檢查大小；文件的 key 不排序；operationId 不檢查文字規則
+        - 比對：排除區分大小寫或不忽略結尾的斜線、允許不分大小寫或忽略結尾的斜線、literal 涵蓋佔位、以前綴推論、不檢查 method、排除用嚴格比對、allow_all_paths 不先看排除
+        - 權限與 service：viewer 可以上傳、先解析再檢查權限、讀 spec 或預覽 grant 不檢查 project、接受其他 target 的 grant、上傳不鎖 target、沒有版本數上限、上傳不寫 audit、清單不檢查 target 的 project
+        - repository 與 DB：inventory 不依順序、清單舊版本在前、拿掉 row 或 TRUNCATE trigger、sha256 的 CHECK 失效
+      - 檢查結果（審查修正後，2026-10-25）：
+        - `make test`：1661 passed，coverage 100%（3518 statements、730 branches，0 未涵蓋）。
+        - `make lint`：ruff、import-linter（2 kept, 0 broken）；`make typecheck`：mypy strict，157 個檔案無問題；`pre-commit run --all-files` 全部通過。
+        - 沒有執行：`make test-contract`、`make test-live-lab`、`make bench`（Makefile 還沒有這些目標，依 CLAUDE.md §13 分別在 M1–M2、M3、M5 才建立）。T07 不發出任何流量。
+      - 審查 PoC 的重跑（修正後，M1 Pro，單次量測，沒有重複取中位數）：
+        - 參照鏈放大：2 萬個參照共用一條 31 層的鏈（約 0.89 MB）0.16 秒；23,000 個參照、key 長 100 字元、巢狀 4 層（約 1.0 MB）0.18 秒。
+        - 1 MiB 的 YAML：被節點上限拒絕的 1.1–1.7 秒，通過的 0.5–1.1 秒；JSON 的 `{}` 陣列 0.07 秒。
+        - 峰值記憶體（tracemalloc；這組的時間含 tracemalloc 的額外負擔，不拿來比較）：1 MiB 的 `{}` 或 `[]` 陣列 1.0 MiB，不同浮點數的陣列 23.3 MiB；審查報告的修正前峰值約 70 MiB。
+      - 手動端到端（做法同 T05、T06）：
+        - 在 db-test 建立暫時資料庫，API 跑在 127.0.0.1:8765（[::1]:8765 是別的程式，沒有動它）；key 只寫進 0600 的檔案，curl 用 `-H @檔案`；另開只記錄連線的本機接收端 127.0.0.1:18766，把它的 URL 放進惡意規格的各個外部欄位。不啟動 lab，也沒有任何流量送往靶場。
+        - 第一次（審查前）：全部符合預期。
+        - 審查修正後重跑 `t07_e2e_flow.sh`：
+          - VAmPI 以 YAML 上傳：201、14 個 operation、`server_url` 是 `http://vampi-vuln:5000`，`source_sha256` 與本機檔案相同；轉成 JSON 再上傳：version 2，`document_sha256` 相同。
+          - 拒絕的情境：外部參照（http、file、相對檔案）、`operationRef`、discriminator 回 422 `EXTERNAL_REF_FORBIDDEN`；`externalValue`、OIDC、Link server、Swagger 2.0、billion laughs（0.05 秒）、`!!python/object/apply`（沒有建立檔案）回 422 `UNSUPPORTED_SCHEMA`；20 萬層巢狀回 422 `INVALID_SPEC`（0.26 秒）；回應中 canary 與接收端 port 的出現次數都是 0。
+          - 大小與關卡：剛好 1 MiB 為 201；1 MiB + 1 byte 為 413 `SPEC_TOO_LARGE`；3 MiB 為 413 `REQUEST_TOO_LARGE`；沒有 key 的 3 MiB 為 401；`text/plain` 為 415。
+          - `servers` 指向其他主機（含帳密）：201，`server_url` 是 target 的 origin 加上規格的 base path，原本的 host 與帳密 0 次出現。
+          - grant 預覽（只允許 GET，排除 `/users/v1/_debug`）：eligible 3 / 14；`GET /users/v1/_debug` 為 `PATH_EXCLUDED`，`DELETE /users/v1/{username}` 為 `METHOD_NOT_AUTHORIZED`，`GET /me` 為 `PATH_NOT_AUTHORIZED`。
+          - 拒絕存取：viewer 上傳 403；B 的規格 404，回應與不存在的 id 相同；上傳到 B 的 target 404；用其他 target 的 grant 預覽 422。
+          - audit：4 筆 `api_spec.create`，等於 4 次成功的上傳（VAmPI YAML、JSON、剛好 1 MiB、servers 改綁），被拒絕的上傳都沒有紀錄。
+        - 審查修正後執行新增的 `t07_e2e_review.sh`：
+          - 9 個審查後補上的情境：Link 與 OIDC 的 `$ref` 轉手、名稱是 URL 的 component、只寫名稱的 mapping、IPv6 括號、13 位的 patch 版本、5,000 位的陣列索引都回 422（`UNSUPPORTED_SCHEMA` 或 `INVALID_SPEC`）；`\UFFFFFFFF` 與保留的 `%FOO` directive 也是 422；洩漏次數 0。
+          - 1 MiB 的參照鏈放大（23,000 個參照共用 31 層的鏈）：201，0.28 秒；1 MiB 的空物件陣列：422，0.13 秒。
+          - 慢速上傳（200 KB、每秒 10 KB）：408 `REQUEST_TIMEOUT`，10.47 秒。
+          - 上傳途中斷線（已送出 11 bytes 後關閉）：伺服器日誌沒有 500，也沒有未處理的例外。
+        - 接收端收到的連線數 0；伺服器日誌中完整 key 樣式、canary 與接收端 port 的出現次數都是 0；未處理的例外 0；500 為 0。
+        - 結束後：只結束我們自己啟動的 uv、uvicorn 與接收端；刪除暫時資料庫，db-test 殘留 0 個資料庫與角色；刪除 `runs/t07`。
+    - 審查：
+      - 第一次以 Sonnet 啟動的兩個 reviewer 因用量上限中途停止，沒有產出；改用 Opus 重跑。
+      - code-reviewer：REQUEST CHANGES（0 CRITICAL、2 HIGH、2 MEDIUM、5 LOW）。
+        - HIGH：`pointer_text` 先跳脫整串才截斷，又對每個 `$ref`（與參照鏈的每一步）都算一次，CPU 隨 key 長度乘上參照數成長（100 KB 的 key × 1,000 個參照約 10 秒，自行重現）。
+        - HIGH：`urlsplit` 的 `ValueError`、超長的陣列索引、YAML 的 `\UFFFFFFFF` 與 `\U00110000`、超長的 `openapi` 版本（DB `DataError`）都會變成 500（自行重現）。
+        - MEDIUM：透過 `$ref` 轉一手，可繞過 Link server 與 oauth2 的拒絕（自行重現）；讀 body 時已經佔住 DB 連線與 transaction，可以耗盡連線池。
+        - LOW：`ClientDisconnect` 變 500、`%FOO` 這類保留的 directive 被接受（自行重現）、API_CONTRACT §15.2 範例的排序不符、DECISIONS 的 surrogate 範例被寫成 emoji、文件同步。
+      - security-reviewer：REQUEST CHANGES（0 CRITICAL、1 HIGH、4 MEDIUM、4 LOW、INFO）。
+        - HIGH：深巢狀加參照鏈，1 MiB 內推算可達數小時。
+        - MEDIUM：與 code-reviewer 重複的三項（連線被佔住、500、`$ref` 轉手，另含指向 examples 中的 `openIdConnect` 物件）；另有 discriminator mapping 的名稱本身就是 URL 的 schema，工具可能當成外部參照。
+        - LOW：draft-04 的 `id`、route 層級的排除偏窄、middleware 不認 `root_path`、JSON 的節點數在 `json.loads` 之後才檢查（1 MiB 的 `[{},…]` 峰值約 70 MiB）。
+        - INFO：參照炸彈、Host 等 header 參數、CL+TE（h11 的行為）、`api_spec_operations` 的 INSERT 沒擋、`externalDocs` 等說明用的 URL。
+      - 已修正，且每一項都有先失敗的測試與突變檢查：
+        - 位置字串只在拋錯時才組，而且組到長度上限就停；參照鏈的結果共用快取，每個節點只走一次；單條鏈最多 32 層；陣列索引最多 9 位。
+        - `urlsplit` 的錯誤、超長版本（patch 最多 12 位）、`\U` 超出範圍都回 422，訊息不含值。
+        - Link、response、securityScheme 的 `$ref` 只能指向 components 對應的區段，同一個物件中 `$ref` 以外的欄位照樣檢查；component 名稱必須符合 OAS 的規則；discriminator mapping 只接受 `#/components/schemas/<名稱>`，只寫名稱的給改寫提示。
+        - 讀 body 最多 10 秒，超過回 408 `REQUEST_TIMEOUT`；上傳途中斷線回 400 `INVALID_REQUEST`。
+        - 任何行首的 `%` 一律當成 directive 拒絕；JSON 在 `json.loads` 之前迭代預估節點數；middleware 與 Starlette 一樣先去掉 `root_path`。
+        - 文件：API_CONTRACT §12、§13.1、§15，DECISIONS §11.1–§11.8，SOURCES S64（RFC 9110 §15.5.9 的 408 於 2026-10-25 查核原文），README、ARCHITECTURE、SECURITY_AND_TESTING。
+      - 不修正，已記錄（見下方限制與後續任務）：參照炸彈、draft-04 的 `id`、Host 類 header 參數與具體請求中的字面 `{x}`、`api_spec_operations` 的 INSERT 沒擋、route 層級的排除偏窄、CL+TE、說明用的 URL。
+    - 限制：
+      - 不展開參照，所以擋不了參照炸彈；平台本身不展開，工具的實際行為在 M3 以容器的資源上限量測。
+      - 「任何位置的 `$ref`」也包含 example：example 中剛好有 `$ref` 這個 key 的規格會被拒絕。
+      - 不做完整的 OAS schema 驗證：只驗證平台依賴的部分，其他格式問題由工具在 M3 回報。
+      - YAML 1.1 的工具會把 `yes`、`on`、日期解成其他型別；我們依 YAML 1.2 解讀，工具拿到的是我們產生的 JSON。
+      - 純 Python 的 YAML 解析，審查的 PoC 在修正後重跑，1 MiB 的最壞情況約 1.1–1.7 秒 CPU（單次量測）；沒有速率限制（T23），也沒有限制同時解析的數量。
+      - 規格不能刪除，每個 target 最多 20 個版本；目前沒有下載正規化文件的端點（M3 的工具直接從 DB 取）。
+      - 跨段的佔位（`/files/{name}.json`）、servers 的變數、OpenAPI 3.1、Swagger 2.0、oauth2 都不支援。
+      - SEC-02、SEC-11 只完成應用層：工具實際讀到的規格（M3）與 guard 的收包證據（M2）仍待驗證。
+      - 讀 body 的 10 秒期限擋住的是「無限長」，不是「慢速佔用」：一個慢速上傳最多仍會佔住一條 DB 連線 10 秒，同時有很多個時依然會耗盡連線池（T23）。
+      - route 層級的排除偏窄：排除 `/users/v1/{id}` 不涵蓋具體的 `/users/v1/admin`，靠 T11 的 guard 以實際請求比對補上。
+      - draft-04 的 `id` 不檢查（工具可能把它當成基底 URI）；說明用的 URL（`externalDocs`、`license`、`contact`）原樣保留，報告輸出時必須安全編碼。
+      - `api_spec_operations` 的 INSERT 沒有被 trigger 擋下（trigger 只擋 UPDATE、DELETE 與 TRUNCATE）：只防誤改，不防有權限的人補寫。
+      - Content-Length 與 Transfer-Encoding 同時出現的請求由 h11 處理，不在應用層檢查。
+    - 給後續任務：
+      - **T08**：auth profile 的 preflight 若要指定 operation，用 inventory 的 method 與 path。
+      - **T09**：
+        - `POST /scans` 檢查 spec 屬於同一個 target，在 scan 快照中記下 spec 的 id、version 與 `document_sha256`。
+        - 以 `ScopeRules.classify()` 凍結 eligible 的 operation，作為 coverage 的分母。
+        - 每個 target 的版本上限：日後加刪除或封存時，必須保留 scan 引用的版本。
+      - **T11（M2）**：guard 以 `covers()` 比對實際的請求（請求的 path 全是 literal）；比對前先拒絕 `%2e`、`%2f`、`;`、`//`、`/./`；`in: header` 的參數（例如 `Host`）與具體請求中的字面 `{x}` 也在這裡處理。
+      - **T14（M3）**：交給 ZAP 的是只含 eligible operation 的正規化文件；量測參照炸彈與工具處理 discriminator、links 的實際行為；draft-04 的 `id` 與說明用的 URL 也在這裡一併確認。
+      - **T21、T23**：規格文字（title、description 與說明用的 URL）在報告中的安全編碼；上傳的速率限制與同時解析的數量；慢速上傳仍會佔住連線，要在這裡一併處理。
 - [ ] T08 建立 auth profile 與 secret 生命週期。
   - DoD：secret 以 MultiFernet 加密、只寫不讀、支援換版、不寫入 log；preflight 定義有驗證。
 - [ ] T09 建立 scan、scanner_run 工作佇列、idempotency、狀態機與 FakeRunner。
