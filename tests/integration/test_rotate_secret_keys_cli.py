@@ -11,13 +11,12 @@ from uuid import UUID
 import pytest
 from cryptography.fernet import Fernet
 
-from secscan.auth_profiles.domain.model import secret_context
 from secscan.cli import EXIT_FAILURE, EXIT_OK, MAX_LISTED_PROFILES, main
 from secscan.security.secret_cipher import SecretCipher, SecretUnreadableError
 from tests.integration.api_support import Seeder
 from tests.integration.conftest import app_engine, migrate_to_head
 from tests.integration.database import ProvisionedDatabase
-from tests.secret_support import TEST_SECRET_ENCRYPTION_KEYS
+from tests.secret_support import TEST_SECRET_ENCRYPTION_KEYS, bearer_context
 
 pytestmark = pytest.mark.integration
 
@@ -70,7 +69,7 @@ def _tokens(lab: Lab) -> dict[UUID, bytes]:
 
 
 def _reveal(keys: str, profile_id: UUID, token: bytes) -> str:
-    return SecretCipher.from_setting(keys).reveal(token, context=secret_context(profile_id))
+    return SecretCipher.from_setting(keys).reveal(token, context=bearer_context(profile_id))
 
 
 def test_rotation_moves_every_secret_to_the_new_key(

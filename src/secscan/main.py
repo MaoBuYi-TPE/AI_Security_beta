@@ -51,6 +51,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url="/redoc" if docs_enabled else None,
         openapi_url="/openapi.json" if docs_enabled else None,
         lifespan=lifespan,
+        # FastAPI 內建的 OpenTelemetry 會匯出驗證錯誤與例外（可能含請求中的 secret）。平台不使用，
+        # 一律關閉：不隨環境中的 provider 或 FASTAPI_OTEL_AUTO_CONFIGURE 開啟（DECISIONS §12.2）。
+        telemetry={"tracing": False, "metrics": False, "logs": False, "auto_configure": False},
     )
     app.state.db = DatabaseResources(engine=engine, schema_revision=head_revision())
     # LAB_ONLY 時 target 與 grant 的 IP 必須在這個網段內（docs/DECISIONS.md §10.1）。

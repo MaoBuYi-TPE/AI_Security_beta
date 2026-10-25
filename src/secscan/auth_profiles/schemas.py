@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     SecretStr,
     StrictBool,
     StrictInt,
@@ -36,35 +37,29 @@ from secscan.auth_profiles.domain.model import (
     ProfileInput,
     ProfileVersion,
 )
-from secscan.auth_profiles.domain.preflight import (
-    EXPECTED_TEXT_MAX_LENGTH,
-    MAX_EXPECTED_ITEMS,
-    POINTER_MAX_LENGTH,
-    ExpectedValue,
-    Preflight,
-)
+from secscan.auth_profiles.domain.preflight import MAX_EXPECTED_ITEMS, ExpectedValue, Preflight
 from secscan.grants.domain.scope import PATH_MAX_LENGTH
 
 METHOD_TEXT_MAX_LENGTH = 16
 
-Pointer = Annotated[StrictStr, Field(max_length=POINTER_MAX_LENGTH)]
-# 布林放在整數之前：JSON 的 true 不會變成 1（smart mode 也是先比對完全相同的型別）。
-ExpectedIn = (
-    Annotated[StrictStr, Field(max_length=EXPECTED_TEXT_MAX_LENGTH)] | StrictBool | StrictInt
-)
 SecretText = Annotated[SecretStr, Field(max_length=MAX_SECRET_LENGTH)]
 HeaderName = Annotated[StrictStr, Field(max_length=HEADER_NAME_MAX_LENGTH)]
 
 
 class PreflightIn(BaseModel):
-    """preflight 的定義；1 到 16 項的 expected_json 由 domain 檢查（訊息說明為什麼不能是空的）。"""
+    """preflight 的定義。
+
+    expected_json 只限制項數：key 是使用者的輸入，若在這裡檢查 key 或值的型別，錯誤的欄位位置
+    會帶出 key（審查發現）。key 與值的規則由 domain 檢查，訊息只說是第幾項；
+    「至少 1 項」也由 domain 說明為什麼不能是空的。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     method: StrictStr = Field(max_length=METHOD_TEXT_MAX_LENGTH)
     path: StrictStr = Field(max_length=PATH_MAX_LENGTH)
     expected_status: StrictInt
-    expected_json: dict[Pointer, ExpectedIn | None] = Field(max_length=MAX_EXPECTED_ITEMS)
+    expected_json: dict[str, JsonValue] = Field(max_length=MAX_EXPECTED_ITEMS)
 
     def to_input(self) -> PreflightInput:
         return PreflightInput(

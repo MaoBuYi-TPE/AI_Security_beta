@@ -55,11 +55,18 @@ class SecretRotationError(Exception):
 
 
 class AuthProfileService:
-    def __init__(self, session: Session, *, cipher: SecretCipher) -> None:
+    def __init__(self, session: Session, *, cipher: SecretCipher | None = None) -> None:
+        """查詢用不到加密元件（最小權限）：只有建立、新版本與金鑰換版需要 cipher。"""
         self._profiles = AuthProfileRepository(session)
         self._targets = TargetRepository(session)
         self._audit = AuditTrail(session)
-        self._cipher = cipher
+        self._optional_cipher = cipher
+
+    @property
+    def _cipher(self) -> SecretCipher:
+        if self._optional_cipher is None:
+            raise RuntimeError("這個操作需要加密元件：建立 AuthProfileService 時要傳入 cipher")
+        return self._optional_cipher
 
     def create(
         self,
@@ -70,6 +77,7 @@ class AuthProfileService:
         request_id: str | None,
     ) -> AuthProfile:
         """建立 profile 與版本 1；不合規則時回 422，什麼都不寫入。"""
+        cipher = self._cipher  # 在動到 DB 之前確認有加密元件
         self._target(principal, target_id, Permission.PROJECT_WRITE)
         try:
             new_profile, definition = build_profile(
@@ -92,7 +100,8 @@ class AuthProfileService:
                     message="這個 target 已有相同 role_label 的認證設定。",
                 ) from None
             raise
-        token = self._cipher.seal(request.secret.value, context=secret_context(profile_id))
+        context = secret_context(profile_id, definition.credential)
+        token = cipher.seal(request.secret.value, context=context)
         self._profiles.add_version(
             profile_id,
             version=1,
@@ -113,6 +122,7 @@ class AuthProfileService:
         request_id: str | None,
     ) -> AuthProfile:
         """產生新版本；上一版的密文清除。不合規則時回 422，數量已滿回 409。"""
+        cipher = self._cipher  # 在動到 DB 之前確認有加密元件
         self._profile(principal, profile_id, Permission.PROJECT_WRITE)
         try:
             change = request.build()
@@ -128,7 +138,7 @@ class AuthProfileService:
             raise _invalid_request(exc) from None
         if current.version >= MAX_VERSIONS_PER_PROFILE:
             raise _quota_error(f"每個認證設定最多 {MAX_VERSIONS_PER_PROFILE} 個版本。")
-        token = self._token_for(plan, current)
+        token = self._token_for(cipher, plan, current)
         self._profiles.erase_secret(profile_id, version=current.version)
         self._profiles.add_version(
             profile_id,
@@ -168,12 +178,13 @@ class AuthProfileService:
         先全部算好再寫入：有任何一份解不開（金鑰不對，或密文不屬於這個 profile）時拋出
         SecretRotationError，什麼都不寫；呼叫端的 transaction 也應回滾。
         """
+        cipher = self._cipher
         stored = self._profiles.secrets_for_update()
         rotated: list[tuple[UUID, int, bytes]] = []
         unreadable: list[UUID] = []
         for secret in stored:
             try:
-                token = self._cipher.rotate(secret.token, context=secret_context(secret.profile_id))
+                token = cipher.rotate(secret.token, context=secret.context)
             except SecretUnreadableError:
                 unreadable.append(secret.profile_id)
                 continue
@@ -193,11 +204,12 @@ class AuthProfileService:
         )
         return len(rotated)
 
-    def _token_for(self, plan: VersionPlan, current: ProfileVersion) -> bytes:
+    def _token_for(self, cipher: SecretCipher, plan: VersionPlan, current: ProfileVersion) -> bytes:
         """新版本的密文：有新的 secret 就加密；否則鎖住目前的版本列，直接複製它的密文。"""
         profile_id = current.profile_id
         if plan.new_secret is not None:
-            return self._cipher.seal(plan.new_secret.value, context=secret_context(profile_id))
+            context = secret_context(profile_id, plan.definition.credential)
+            return cipher.seal(plan.new_secret.value, context=context)
         token = self._profiles.current_secret_for_update(profile_id, version=current.version)
         if token is None:
             # 只有直接改了 DB 才會發生（trigger 允許清除）：沒有可以沿用的 secret。

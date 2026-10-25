@@ -40,6 +40,8 @@ BEARER = ProfileDefinition(credential=Credential(AuthType.BEARER), preflight=ME)
 API_KEY = ProfileDefinition(
     credential=Credential(AuthType.API_KEY_HEADER, header_name="X-API-Key"), preflight=ME
 )
+# context 最長的送出方式：api_key_header 加上 64 個字元的 header 名稱。
+LONGEST = Credential(AuthType.API_KEY_HEADER, header_name="x" * 64)
 
 
 def _profile(**overrides: object) -> NewAuthProfile:
@@ -95,10 +97,25 @@ def test_names_are_single_line_text(name: str) -> None:
 # --- 密文 -----------------------------------------------------------------------------------
 
 
-def test_secret_context_binds_the_profile() -> None:
+def test_secret_context_binds_the_profile_and_the_credential() -> None:
+    """審查發現：只綁 profile 時，能寫 DB 的人可以把密文改用在別的送出方式（例如另一個 header）。
+    沿用 secret 只發生在送出方式不變時，所以把 type 與 header_name 也綁進去，不影響複製。"""
     profile_id = UUID("00000000-0000-4000-8000-000000000001")
 
-    assert secret_context(profile_id) == "auth_profile:00000000-0000-4000-8000-000000000001"
+    assert secret_context(profile_id, BEARER.credential) == (
+        "auth_profile:00000000-0000-4000-8000-000000000001:bearer:-"
+    )
+    assert secret_context(profile_id, API_KEY.credential) == (
+        "auth_profile:00000000-0000-4000-8000-000000000001:api_key_header:X-API-Key"
+    )
+
+
+def test_the_longest_context_is_accepted_by_the_cipher() -> None:
+    context = secret_context(uuid4(), LONGEST)
+
+    assert (
+        shared_cipher().reveal(shared_cipher().seal("k", context=context), context=context) == "k"
+    )
 
 
 def test_a_new_version_only_accepts_fernet_tokens() -> None:
@@ -118,7 +135,7 @@ def test_a_new_version_only_accepts_fernet_tokens() -> None:
 def test_the_largest_secret_fits_in_the_column() -> None:
     """每個字元都要在 JSON 中跳脫（"）時最長；長度上限由這個情況推算。"""
     cipher: SecretCipher = shared_cipher()
-    token = cipher.seal('"' * 4096, context=secret_context(uuid4()))
+    token = cipher.seal('"' * 4096, context=secret_context(uuid4(), LONGEST))
 
     assert len(token) == MAX_ENCRYPTED_SECRET_BYTES
     NewProfileVersion(definition=API_KEY, encrypted_secret=token, created_by_key_id=KEY_ID)
@@ -136,7 +153,7 @@ def test_the_largest_expected_json_fits_in_the_column() -> None:
 
 
 def test_ciphertext_is_hidden_from_repr() -> None:
-    token = shared_cipher().seal(CANARY, context=secret_context(uuid4()))
+    token = shared_cipher().seal(CANARY, context=secret_context(uuid4(), BEARER.credential))
 
     version = NewProfileVersion(definition=BEARER, encrypted_secret=token, created_by_key_id=KEY_ID)
 

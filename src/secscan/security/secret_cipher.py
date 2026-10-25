@@ -23,7 +23,8 @@ MAX_KEYS = 4
 # 會略過不認得的字元。
 _KEY_TEXT = re.compile(r"[A-Za-z0-9_-]{43}=")
 ENVELOPE_VERSION = 1
-CONTEXT_MAX_LENGTH = 128
+# auth profile 的 context 最長 129 個字元（profile id、type 與 header 名稱），留一些餘裕。
+CONTEXT_MAX_LENGTH = 256
 _CONTEXT = re.compile(rf"[!-~]{{1,{CONTEXT_MAX_LENGTH}}}")
 # 包裝之後的明文上限：Fernet 適合放得進記憶體的小資料；目標的 secret 遠小於這個值。
 MAX_PLAINTEXT_BYTES = 16 * 1024

@@ -147,6 +147,16 @@ source_modules = [
 ]
 forbidden_modules = ["fastapi", "starlette", "sqlalchemy", "alembic", "psycopg", "docker"]
 
+# 加密只經由 security.secret_cipher（docs/DECISIONS.md §12.2）：其他模組不得直接使用 cryptography，
+# 解密只能透過 SecretCipher.reveal（AST 測試確認 src 中沒有呼叫者），不會繞過去自己解。
+# 預設也檢查間接 import，所以只忽略 secret_cipher 自己的那一條。
+[[tool.importlinter.contracts]]
+name = "Only security.secret_cipher uses cryptography"
+type = "forbidden"
+source_modules = ["secscan"]
+forbidden_modules = ["cryptography"]
+ignore_imports = ["secscan.security.secret_cipher -> cryptography"]
+
 [tool.alembic]
 # migration 放在套件內，和其他程式一樣受 ruff、mypy 與 coverage 檢查。
 script_location = "%(here)s/src/secscan/migrations"

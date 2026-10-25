@@ -50,7 +50,7 @@ def _target(session: Session) -> Target:
 def _version(
     profile_id: UUID, key_id: UUID, definition: ProfileDefinition = BEARER, value: str = "t1"
 ) -> NewProfileVersion:
-    token = shared_cipher().seal(value, context=secret_context(profile_id))
+    token = shared_cipher().seal(value, context=secret_context(profile_id, definition.credential))
     return NewProfileVersion(
         definition=definition, encrypted_secret=token, created_by_key_id=key_id
     )
@@ -105,7 +105,9 @@ def test_create_and_read_a_profile_with_its_first_version(db_session: Session) -
     assert current.created_by_key_id == key_id
     token = _stored_secret(db_session, profile_id, 1)
     assert token is not None
-    assert shared_cipher().reveal(token, context=secret_context(profile_id)) == "t1"
+    assert (
+        shared_cipher().reveal(token, context=secret_context(profile_id, BEARER.credential)) == "t1"
+    )
 
 
 def test_expected_values_keep_their_json_types(db_session: Session) -> None:
@@ -240,7 +242,7 @@ def test_replace_secret_stores_the_new_token(db_session: Session) -> None:
     target, key_id = _target(db_session), insert_key(db_session)
     repository = AuthProfileRepository(db_session)
     profile_id = _create(repository, target, key_id)
-    new_token = shared_cipher().seal("t1", context=secret_context(profile_id))
+    new_token = shared_cipher().seal("t1", context=secret_context(profile_id, BEARER.credential))
 
     repository.replace_secret(profile_id, version=1, token=new_token)
 

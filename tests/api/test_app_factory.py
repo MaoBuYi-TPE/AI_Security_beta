@@ -72,3 +72,19 @@ def test_create_app_keeps_the_cipher_in_app_state() -> None:
     app = create_app(_settings(encryption_keys()))
 
     assert isinstance(app.state.secret_cipher, SecretCipher)
+
+
+def test_framework_telemetry_is_disabled() -> None:
+    """審查建議：FastAPI 0.143 內建 OpenTelemetry；一旦有全域 provider 或自動設定，驗證錯誤與
+    例外（可能含請求中的 secret）會被匯出。平台不使用它，三者都明確關閉，自動設定也關閉。"""
+    app = create_app(_settings(encryption_keys()))
+
+    # 公開的設定只在建立時傳入；讀回時只能看 FastAPI 保存的設定。
+    config = app._telemetry
+    assert (config["tracing"], config["metrics"], config["logs"], config["auto_configure"]) == (
+        False,
+        False,
+        False,
+        False,
+    )
+    assert app._native_telemetry.enabled() is False

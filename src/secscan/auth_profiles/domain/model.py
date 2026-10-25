@@ -3,16 +3,19 @@
 - profile：屬於一個 target，有名稱與 role_label，建立後不可修改。
 - 版本：送出方式（Credential）、preflight 與密文。PATCH 產生新版本，上一版的密文清除，
   所以每個 profile 最多一份密文（DB 以部分唯一索引保證）。
-- 密文綁定 profile（secret_context），不綁版本：新版本沿用 secret 時直接複製密文，不必解密。
+- 密文綁定 profile 與送出方式（secret_context），不綁版本：只有送出方式不變時才會沿用 secret，
+  新版本直接複製密文，不必解密；能寫 DB 的人把密文搬到其他 profile 或其他送出方式，就解不開。
 """
 
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 from secscan.auth_profiles.domain.credentials import (
+    HEADER_NAME_MAX_LENGTH,
     MAX_SECRET_LENGTH,
     AuthType,
     Credential,
@@ -37,14 +40,22 @@ EXPECTED_JSON_MAX_BYTES = 64 * 1024
 CHANGE_FIELDS = ("type", "header_name", "secret", "preflight")
 
 
-def secret_context(profile_id: UUID) -> str:
-    """密文綁定的位置：搬到其他 profile 的密文解不開。"""
-    return f"{CONTEXT_PREFIX}{profile_id}"
+def secret_context(profile_id: UUID, credential: Credential) -> str:
+    """密文綁定的位置：profile 與送出方式（type、header 名稱）。
+
+    type 與 header 名稱都不含 :，沒有 header 名稱時以 - 表示（header 名稱不會以 - 開頭）。
+    """
+    header = credential.header_name if credential.header_name is not None else "-"
+    return f"{CONTEXT_PREFIX}{profile_id}:{credential.type.value}:{header}"
 
 
-# 每個字元在 JSON 中都要跳脫時（例如全是 "），值的長度是原本的兩倍；context 的長度固定。
+# 長度上限的推算：最長的 context（api_key_header 加上最長的 header 名稱），以及每個字元在 JSON 中
+# 都要跳脫時（例如全是 "）兩倍長的值。
+_LONGEST_CONTEXT = secret_context(
+    UUID(int=0), Credential(AuthType.API_KEY_HEADER, header_name="x" * HEADER_NAME_MAX_LENGTH)
+)
 MAX_ENCRYPTED_SECRET_BYTES = max_sealed_bytes(
-    context_length=len(secret_context(UUID(int=0))), value_json_bytes=2 * MAX_SECRET_LENGTH
+    context_length=len(_LONGEST_CONTEXT), value_json_bytes=2 * MAX_SECRET_LENGTH
 )
 
 
@@ -133,7 +144,12 @@ class StoredSecret:
 
     profile_id: UUID
     version: int
+    credential: Credential
     token: bytes = field(repr=False)
+
+    @property
+    def context(self) -> str:
+        return secret_context(self.profile_id, self.credential)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,17 +217,20 @@ def _next_credential(current: Credential, change: VersionChange) -> Credential:
 
 @dataclass(frozen=True, slots=True)
 class PreflightInput:
+    """expected_json 是任意的 JSON 值：Preflight 建立時逐一檢查 key 與值。"""
+
     method: str
     path: str
     expected_status: int
-    expected_json: Mapping[str, ExpectedValue]
+    expected_json: Mapping[str, object]
 
     def build(self) -> Preflight:
         return Preflight(
             method=self.method,
             path=self.path,
             expected_status=self.expected_status,
-            expected_json=self.expected_json,
+            # Preflight 建立時逐一檢查型別，不合規則就拋出 InvalidAuthProfileError。
+            expected_json=cast(Mapping[str, ExpectedValue], self.expected_json),
         )
 
 

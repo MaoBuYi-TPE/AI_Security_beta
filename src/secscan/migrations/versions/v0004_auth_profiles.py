@@ -193,7 +193,7 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "encrypted_secret IS NULL OR ("
             "substring(encrypted_secret FROM 1 FOR 6) = 'gAAAAA'::bytea "
-            "AND octet_length(encrypted_secret) <= 11128)",
+            "AND octet_length(encrypted_secret) <= 11236)",
             name=op.f("ck_auth_profile_versions_encrypted_secret_valid"),
         ),
         sa.ForeignKeyConstraint(

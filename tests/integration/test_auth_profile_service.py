@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from secscan.api_keys.domain import Principal
-from secscan.auth_profiles.domain.credentials import AuthType, SecretValue
+from secscan.auth_profiles.domain.credentials import AuthType, Credential, SecretValue
 from secscan.auth_profiles.domain.model import (
     AuthProfile,
     ChangeInput,
@@ -37,7 +37,7 @@ from secscan.targets.domain import Target, TargetKind, TargetUpdate
 from secscan.targets.repository import TargetRepository
 from secscan.targets.service import TargetService
 from tests.integration.scope_support import LAB, VAMPI, Members, app_error, members, same_response
-from tests.secret_support import shared_cipher
+from tests.secret_support import bearer_context, shared_cipher
 
 pytestmark = pytest.mark.integration
 
@@ -151,9 +151,9 @@ def test_create_encrypts_the_secret_bound_to_the_profile(
     token = _ciphertext(db_session, profile.id, 1)
     assert token is not None
     assert CANARY.encode() not in token
-    assert shared_cipher().reveal(token, context=secret_context(profile.id)) == CANARY
+    assert shared_cipher().reveal(token, context=bearer_context(profile.id)) == CANARY
     with pytest.raises(SecretUnreadableError):
-        shared_cipher().reveal(token, context=secret_context(uuid4()))
+        shared_cipher().reveal(token, context=bearer_context(uuid4()))
 
 
 def test_create_records_an_audit_event_without_secrets_or_expected_values(
@@ -316,7 +316,7 @@ def test_a_new_secret_erases_the_previous_one(
     assert _ciphertext(db_session, profile.id, 1) is None
     token = _ciphertext(db_session, profile.id, 2)
     assert token is not None
-    assert shared_cipher().reveal(token, context=secret_context(profile.id)) == "t2"
+    assert shared_cipher().reveal(token, context=bearer_context(profile.id)) == "t2"
     [_, (action, changes)] = _audit(db_session, profile.id)
     assert action == "auth_profile.update"
     assert changes == {"version": 2, "erased_version": 1, "changed": ["secret"]}
@@ -594,7 +594,7 @@ def test_reencrypt_moves_every_live_secret_to_the_first_key(
     for profile_id, version, value in ((first.id, 1, CANARY), (second.id, 2, "t2")):
         token = _ciphertext(db_session, profile_id, version)
         assert token is not None
-        assert only_new.reveal(token, context=secret_context(profile_id)) == value
+        assert only_new.reveal(token, context=bearer_context(profile_id)) == value
     assert _ciphertext(db_session, second.id, 1) is None
     [event] = db_session.execute(
         text(
@@ -645,3 +645,59 @@ def test_reencrypt_detects_a_ciphertext_moved_to_another_profile(
         _service(db_session).reencrypt_secrets()
 
     assert raised.value.profile_ids == (second.id,)
+
+
+def test_reencrypt_detects_a_ciphertext_moved_to_another_credential(
+    db_session: Session, team: Members, target: Target
+) -> None:
+    """審查發現：能寫 DB 的人可以清除 v1、再插入沿用 v1 密文的 v2，改成另一個 header 送出。
+    context 綁定送出方式之後，這份密文在新的送出方式下解不開，換版時就會發現。"""
+    profile = _create(db_session, team.operator_a, target.id)
+    token = _ciphertext(db_session, profile.id, 1)
+    db_session.execute(
+        text(
+            "UPDATE auth_profile_versions SET encrypted_secret = NULL, secret_erased_at = now() "
+            "WHERE profile_id = :id AND version = 1"
+        ),
+        {"id": profile.id},
+    )
+    db_session.execute(
+        text(
+            "INSERT INTO auth_profile_versions (profile_id, version, type, header_name, "
+            "preflight_method, preflight_path, preflight_expected_status, "
+            "preflight_expected_json, encrypted_secret, created_by_key_id) "
+            "VALUES (:id, 2, 'api_key_header', 'X-Echo-Me', 'GET', '/debug/headers', 200, "
+            "'{\"/a\": 1}', :token, :key)"
+        ),
+        {"id": profile.id, "token": token, "key": team.operator_a.key_id},
+    )
+    moved = _ciphertext(db_session, profile.id, 2)
+    assert moved is not None
+    echo = Credential(AuthType.API_KEY_HEADER, header_name="X-Echo-Me")
+
+    with pytest.raises(SecretUnreadableError):
+        shared_cipher().reveal(moved, context=secret_context(profile.id, echo))
+    with pytest.raises(SecretRotationError) as raised:
+        _service(db_session).reencrypt_secrets()
+
+    assert raised.value.profile_ids == (profile.id,)
+
+
+def test_a_read_only_service_cannot_write(
+    db_session: Session, team: Members, target: Target
+) -> None:
+    """查詢的端點不拿 cipher（最小權限）；誤用它來寫入時，在動到 DB 之前就失敗。"""
+    profile = _create(db_session, team.operator_a, target.id)
+    read_only = AuthProfileService(db_session)
+
+    with pytest.raises(RuntimeError, match="cipher"):
+        read_only.create(team.operator_a, target.id, _input(role_label="other"), request_id=None)
+    with pytest.raises(RuntimeError, match="cipher"):
+        read_only.update(
+            team.operator_a, profile.id, ChangeInput(secret=SecretValue("t")), request_id=None
+        )
+    with pytest.raises(RuntimeError, match="cipher"):
+        read_only.reencrypt_secrets()
+
+    assert _profile_count(db_session, target.id) == 1
+    assert read_only.get(team.viewer_a, profile.id).current.version == 1

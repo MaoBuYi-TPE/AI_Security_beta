@@ -16,6 +16,9 @@ LAB_PROFILE_ARGS := $(foreach p,$(LAB_PROFILES),--profile $(p))
 LOCAL_SECRET_KEYS := DB_PASSWORD DB_ADMIN_PASSWORD TEST_DB_PASSWORD
 # 加密目標 secret 的金鑰（docs/DECISIONS.md §12.1）：Fernet 金鑰，url-safe base64 的 32 bytes（44 個字元）。
 ENCRYPTION_KEYS_VAR := SECRET_ENCRYPTION_KEYS
+# .env 中一行的開頭：dotenv 也接受 `export ` 前綴與等號前後的空白，比對時要一樣寬，
+# 否則會再附加一行，而後面的那一行會默默取代原本的值（對加密金鑰而言，舊的 secret 就解不開了）。
+ENV_LINE := ^[[:space:]]*(export[[:space:]]+)?
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	lab-up lab-down lab-verify
@@ -50,10 +53,10 @@ typecheck:
 env:
 	@umask 077; touch .env; chmod 600 .env
 	@for key in $(LOCAL_SECRET_KEYS); do \
-		if grep -q "^$$key=[[:space:]]*$$" .env; then \
+		if grep -Eq "$(ENV_LINE)$$key[[:space:]]*=[[:space:]]*$$" .env; then \
 			echo "錯誤：.env 的 $$key 是空值；請刪除那一行再執行 make env（不會覆寫既有的值）"; exit 1; \
 		fi; \
-		if ! grep -q "^$$key=" .env; then \
+		if ! grep -Eq "$(ENV_LINE)$$key[[:space:]]*=" .env; then \
 			secret=$$(openssl rand -hex 24) || exit 1; \
 			[ "$${#secret}" -eq 48 ] || { echo "錯誤：openssl 沒有產生有效的隨機值"; exit 1; }; \
 			if [ -s .env ] && [ -n "$$(tail -c1 .env)" ]; then echo >> .env; fi; \
@@ -61,10 +64,10 @@ env:
 			echo "已在 .env 產生 $$key（隨機值，只供本機使用）"; \
 		fi; \
 	done
-	@if grep -q "^$(ENCRYPTION_KEYS_VAR)=[[:space:]]*$$" .env; then \
+	@if grep -Eq "$(ENV_LINE)$(ENCRYPTION_KEYS_VAR)[[:space:]]*=[[:space:]]*$$" .env; then \
 		echo "錯誤：.env 的 $(ENCRYPTION_KEYS_VAR) 是空值；請刪除那一行再執行 make env（不會覆寫既有的值）"; exit 1; \
 	fi
-	@if ! grep -q "^$(ENCRYPTION_KEYS_VAR)=" .env; then \
+	@if ! grep -Eq "$(ENV_LINE)$(ENCRYPTION_KEYS_VAR)[[:space:]]*=" .env; then \
 		key=$$(openssl rand -base64 32 | tr '+/' '-_') || exit 1; \
 		[ "$${#key}" -eq 44 ] || { echo "錯誤：openssl 沒有產生有效的金鑰"; exit 1; }; \
 		if [ -s .env ] && [ -n "$$(tail -c1 .env)" ]; then echo >> .env; fi; \

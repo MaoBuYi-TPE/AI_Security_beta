@@ -14,7 +14,12 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from secscan.auth_profiles.domain.model import MAX_ENCRYPTED_SECRET_BYTES, secret_context
+from secscan.auth_profiles.domain.credentials import AuthType, Credential
+from secscan.auth_profiles.domain.model import (
+    EXPECTED_JSON_MAX_BYTES,
+    MAX_ENCRYPTED_SECRET_BYTES,
+    secret_context,
+)
 from tests.integration.sql_support import (
     CHECK_VIOLATION,
     FOREIGN_KEY_VIOLATION,
@@ -25,7 +30,7 @@ from tests.integration.sql_support import (
     returning_id,
     violation,
 )
-from tests.secret_support import shared_cipher
+from tests.secret_support import bearer_context, shared_cipher
 
 pytestmark = pytest.mark.integration
 
@@ -84,7 +89,7 @@ def _insert_profile(session: Session, lab: Lab, **overrides: object) -> UUID:
 
 
 def _token(profile_id: UUID) -> bytes:
-    return shared_cipher().seal("token-for-the-schema-test", context=secret_context(profile_id))
+    return shared_cipher().seal("token-for-the-schema-test", context=bearer_context(profile_id))
 
 
 def _version_params(profile_id: UUID, lab: Lab, **overrides: object) -> dict[str, object]:
@@ -262,7 +267,8 @@ def test_version_checks(
 
 def test_the_largest_token_fits(db_session: Session, lab: Lab) -> None:
     profile_id = _insert_profile(db_session, lab)
-    token = shared_cipher().seal('"' * 4096, context=secret_context(profile_id))
+    longest = Credential(AuthType.API_KEY_HEADER, header_name="x" * 64)
+    token = shared_cipher().seal('"' * 4096, context=secret_context(profile_id, longest))
     assert len(token) == MAX_ENCRYPTED_SECRET_BYTES
 
     db_session.execute(
@@ -423,6 +429,25 @@ def test_a_new_version_must_carry_a_secret(db_session: Session, lab: Lab) -> Non
 
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
     assert "secret" in str(error)
+
+
+@pytest.mark.parametrize(
+    ("constraint", "value"),
+    [
+        ("ck_auth_profile_versions_encrypted_secret_valid", MAX_ENCRYPTED_SECRET_BYTES),
+        ("ck_auth_profile_versions_preflight_expected_json_valid", EXPECTED_JSON_MAX_BYTES),
+    ],
+)
+def test_size_checks_match_the_domain_limits(
+    db_session: Session, constraint: str, value: int
+) -> None:
+    """migration 寫死的上限要和 domain 的常數相同：只比對 CHECK 名稱的測試看不出內容的漂移。"""
+    definition = db_session.execute(
+        text("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :name"),
+        {"name": constraint},
+    ).scalar_one()
+
+    assert f"<= {value}" in definition
 
 
 def test_guard_triggers_exist(db_session: Session) -> None:

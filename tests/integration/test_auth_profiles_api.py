@@ -14,10 +14,9 @@ from fastapi.testclient import TestClient
 from httpx2 import Response
 
 from secscan.api_keys.domain import Role
-from secscan.auth_profiles.domain.model import secret_context
 from secscan.targets.domain import Target
 from tests.integration.api_support import Caller, Seeder, World
-from tests.secret_support import shared_cipher
+from tests.secret_support import bearer_context, shared_cipher
 
 pytestmark = pytest.mark.integration
 
@@ -124,7 +123,7 @@ def test_create_returns_the_profile_without_the_secret(
     )
     assert CANARY.encode() not in row.encrypted_secret
     token = row.encrypted_secret
-    assert shared_cipher().reveal(token, context=secret_context(UUID(data["id"]))) == CANARY
+    assert shared_cipher().reveal(token, context=bearer_context(UUID(data["id"]))) == CANARY
 
 
 def test_api_key_header_and_cookie_profiles(
@@ -211,6 +210,23 @@ def test_malformed_bodies_only_report_field_locations(
     _no_secret(response)
 
 
+def test_expected_json_keys_are_not_echoed(
+    api_client: TestClient, world: World, target: Target
+) -> None:
+    """審查發現：expected_json 的 key 是使用者的輸入，原本會出現在 schema 錯誤的欄位位置中。
+    值的型別改由 domain 檢查，訊息只說是第幾項。"""
+    body = _body(preflight={**ME, "expected_json": {f"/{CANARY}": 1.5}})
+
+    response = api_client.post(_of_target(target.id), json=body, headers=world.operator_a.headers)
+    viewer = api_client.post(_of_target(target.id), json=body, headers=world.viewer_a.headers)
+
+    assert response.status_code == 422
+    assert "第 1 項" in _error(response)["message"]
+    _no_secret(response)
+    assert viewer.status_code == 403
+    _no_secret(viewer)
+
+
 def test_the_same_role_twice_is_a_conflict(
     api_client: TestClient, world: World, target: Target
 ) -> None:
@@ -290,7 +306,7 @@ def test_patch_makes_a_new_version_and_erases_the_old_secret(
     )
     assert [row.encrypted_secret is None for row in rows] == [True, True, False]
     token = rows[2].encrypted_secret
-    assert shared_cipher().reveal(token, context=secret_context(UUID(profile_id))) == f"{CANARY}-2"
+    assert shared_cipher().reveal(token, context=bearer_context(UUID(profile_id))) == f"{CANARY}-2"
 
     versions = api_client.get(f"{PROFILES}/{profile_id}/versions", headers=world.viewer_a.headers)
     listed = _items(versions)

@@ -69,7 +69,11 @@ class AuthProfileRepository:
         flush_or_raise(self._session)
 
     def erase_secret(self, profile_id: UUID, *, version: int) -> None:
-        """清除這一版的密文；清除的時間是 transaction 開始的時間（與新版本的 created_at 相同）。"""
+        """清除這一版的密文；清除的時間是這個 UPDATE 開始的時間（statement_timestamp）。
+
+        不用 now()（transaction 開始的時間）：先開始、後拿到鎖的 PATCH 清除別人剛建立的版本時，
+        清除時間會早於那一版的建立時間。
+        """
         self._session.execute(
             update(AuthProfileVersionModel)
             .where(
@@ -77,12 +81,16 @@ class AuthProfileRepository:
                 AuthProfileVersionModel.version == version,
                 AuthProfileVersionModel.encrypted_secret.is_not(None),
             )
-            .values(encrypted_secret=None, secret_erased_at=func.now())
+            .values(encrypted_secret=None, secret_erased_at=func.statement_timestamp())
             .execution_options(synchronize_session=False)
         )
 
     def current_secret_for_update(self, profile_id: UUID, *, version: int) -> bytes | None:
-        """以 FOR UPDATE 鎖住版本列再讀密文：金鑰換版還沒 commit 時會等它，讀到的是換版後的密文。"""
+        """以 FOR UPDATE 鎖住版本列再讀密文。
+
+        金鑰換版先以 FOR SHARE 鎖住 profile，PATCH 在 lock() 就會等它；這裡是第二道防線：沒有先鎖
+        profile、只改這一列的寫入（例如直接以 SQL 重新加密），也會被等到，不會複製到舊的密文。
+        """
         return self._session.execute(
             select(AuthProfileVersionModel.encrypted_secret)
             .where(
@@ -159,14 +167,24 @@ class AuthProfileRepository:
         return Page(items=tuple(_version(model) for model in models), total=total, request=page)
 
     def secrets_for_update(self) -> tuple[StoredSecret, ...]:
-        """所有還在的密文（金鑰換版用），以 FOR UPDATE 鎖住。
+        """所有還在的密文（金鑰換版用）。
 
-        依 profile 與版本排序：鎖的順序固定。
+        先以 FOR SHARE 鎖住所有 profile，再以 FOR UPDATE 鎖住版本列：順序和 PATCH 相同
+        （profile 再版本列），不會互相等待而死結；兩個 statement 都依 id 排序，鎖的順序固定。
+
+        先鎖 profile 是為了等進行中的 PATCH commit。只鎖版本列時，換版會在 PATCH 清除的舊版本上
+        等待，之後略過它（已清除），卻看不到 PATCH 新增的版本（statement 的快照較早），回報成功
+        卻漏掉一份（審查發現）。鎖完 profile 之後的第二個 statement 是新的快照，看得到它。
         """
+        self._session.execute(
+            select(AuthProfileModel.id).order_by(AuthProfileModel.id).with_for_update(read=True)
+        ).all()
         rows = self._session.execute(
             select(
                 AuthProfileVersionModel.profile_id,
                 AuthProfileVersionModel.version,
+                AuthProfileVersionModel.type,
+                AuthProfileVersionModel.header_name,
                 AuthProfileVersionModel.encrypted_secret,
             )
             .where(AuthProfileVersionModel.encrypted_secret.is_not(None))
@@ -174,8 +192,13 @@ class AuthProfileRepository:
             .with_for_update()
         )
         return tuple(
-            StoredSecret(profile_id=profile_id, version=version, token=token)
-            for profile_id, version, token in rows
+            StoredSecret(
+                profile_id=profile_id,
+                version=version,
+                credential=Credential(AuthType(kind), header_name=header_name),
+                token=token,
+            )
+            for profile_id, version, kind, header_name, token in rows
             if token is not None
         )
 

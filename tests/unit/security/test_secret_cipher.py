@@ -25,7 +25,7 @@ from secscan.security.secret_cipher import (
 CONTEXT = "auth_profile:00000000-0000-4000-8000-000000000001"
 OTHER_CONTEXT = "auth_profile:00000000-0000-4000-8000-000000000002"
 CANARY = "canary-secret-t08-7f3a"
-CONTEXTS = st.from_regex(r"[!-~]{1,128}", fullmatch=True)
+CONTEXTS = st.from_regex(r"[!-~]{1,256}", fullmatch=True)
 
 
 def _key() -> str:
@@ -169,7 +169,7 @@ def test_plaintext_that_is_not_json_is_unreadable() -> None:
         _cipher(key).reveal(token, context=CONTEXT)
 
 
-@pytest.mark.parametrize("context", ["", " ", "auth profile", "設定", "a" * 129, "a\n"])
+@pytest.mark.parametrize("context", ["", " ", "auth profile", "設定", "a" * 257, "a\n"])
 def test_context_must_be_short_visible_ascii(context: str) -> None:
     cipher = _cipher(_key())
 
