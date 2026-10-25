@@ -339,6 +339,26 @@ def test_patch_rejects_null_and_unknown_fields(
     assert response.status_code == 422
 
 
+def test_patch_does_not_ignore_a_null_next_to_a_real_change(
+    api_client: TestClient, seed: Seeder, world: World, target: Target
+) -> None:
+    """突變檢查找到的缺口：null 與真正的變更一起送來時，不能默默忽略 null 而產生新版本。"""
+    profile_id = _data(_create(api_client, world.operator_a, target.id))["id"]
+    new_preflight = {**ME, "expected_json": {"/status": "success"}}
+
+    response = api_client.patch(
+        f"{PROFILES}/{profile_id}",
+        json={"secret": None, "preflight": new_preflight},
+        headers=world.operator_a.headers,
+    )
+
+    assert response.status_code == 422
+    rows = seed.query(
+        "SELECT version FROM auth_profile_versions WHERE profile_id = :id", id=profile_id
+    )
+    assert [row.version for row in rows] == [1]
+
+
 def test_viewers_cannot_patch(api_client: TestClient, world: World, target: Target) -> None:
     profile_id = _data(_create(api_client, world.operator_a, target.id))["id"]
 
