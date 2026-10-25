@@ -23,8 +23,16 @@ APP_TABLES = {
     "scope_grants",
     "api_specs",
     "api_spec_operations",
+    "auth_profiles",
+    "auth_profile_versions",
 }
-TRIGGER_FUNCTIONS = ("audit_events_reject_mutation", "scope_grants_guard", "api_specs_guard")
+TRIGGER_FUNCTIONS = (
+    "audit_events_reject_mutation",
+    "scope_grants_guard",
+    "api_specs_guard",
+    "auth_profiles_guard",
+    "auth_profile_versions_guard",
+)
 
 
 def _migrate(engine: Engine, direction: str, target: str) -> None:

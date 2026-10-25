@@ -1,4 +1,6 @@
-"""本機管理指令 secscan-admin（docs/DECISIONS.md §9.1）。目前只有建立 platform_admin key：
+"""本機管理指令 secscan-admin。
+
+建立 platform_admin key（docs/DECISIONS.md §9.1）：
 
     uv run secscan-admin create-admin-key --name "本機管理員" [--expires-in-days 90] [--output PATH]
 
@@ -6,6 +8,13 @@
 - 完整的 key 只在 commit 成功之後寫出一次：預設寫到 stdout；`--output` 則寫進新建、權限 600
   的檔案（已存在就拒絕，不覆寫）。說明、key id 與 prefix 寫到 stderr。DB 只存 hash。
 - 沒有建立 key（設定錯誤、DB 不可用、commit 失敗）時，不寫出任何東西，也不留下空檔。
+
+加密金鑰換版（docs/DECISIONS.md §12.3）：
+
+    uv run secscan-admin rotate-secret-keys
+
+- 以 SECRET_ENCRYPTION_KEYS 的第一個金鑰，重新加密所有還在的 secret（一個 transaction）。
+- 有任何一份解不開就全部回滾、exit 1，只列出 profile id；說明都寫到 stderr，不輸出 secret。
 """
 
 import argparse
@@ -31,10 +40,12 @@ from secscan.api_keys.domain import (
     IssuedApiKey,
 )
 from secscan.api_keys.service import ApiKeyService
+from secscan.auth_profiles.service import AuthProfileService, SecretRotationError
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
 from secscan.core.text import require_text
 from secscan.migrations import head_revision
+from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
 
 PROGRAM = "secscan-admin"
 CLI_APPLICATION_NAME = "secscan-cli"
@@ -42,6 +53,9 @@ EXIT_OK = 0
 EXIT_FAILURE = 1
 EXIT_USAGE = 2  # argparse 的參數錯誤
 OUTPUT_FILE_MODE = 0o600
+ROTATE_COMMAND = "rotate-secret-keys"
+# 解不開時最多列出幾個 profile id（其餘以數量表示）。
+MAX_LISTED_PROFILES = 10
 
 _NOT_READY = {
     DatabaseStatus.UNAVAILABLE: "無法連線資料庫：請先執行 make db-up，並確認 .env 的 DB_* 設定。",
@@ -96,6 +110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         problems = "；".join(_describe(error) for error in exc.errors())
         _report(f"設定不正確（DB_* 環境變數或 .env）：{problems}")
         return EXIT_FAILURE
+    if args.command == ROTATE_COMMAND:
+        return _rotate_secret_keys(settings)
     output = KeyOutput(args.output)
     try:
         output.prepare()
@@ -142,6 +158,47 @@ def _create_admin_key(
     return EXIT_OK
 
 
+def _rotate_secret_keys(settings: Settings) -> int:
+    keys = settings.secret_encryption_keys
+    try:
+        cipher = SecretCipher.from_setting(keys.get_secret_value() if keys is not None else None)
+    except InvalidEncryptionKeysError as exc:
+        _report(f"{exc}。")
+        return EXIT_FAILURE
+    engine = create_db_engine(settings, application_name=CLI_APPLICATION_NAME, pooled=False)
+    try:
+        status = probe_database(engine, head_revision())
+        if status is not DatabaseStatus.READY:
+            _report(_NOT_READY[status])
+            return EXIT_FAILURE
+        with Session(engine, expire_on_commit=False) as session, session.begin():
+            count = AuthProfileService(session, cipher=cipher).reencrypt_secrets()
+    except SecretRotationError as exc:
+        _report(_unreadable_message(exc.profile_ids))
+        return EXIT_FAILURE
+    except SQLAlchemyError as exc:
+        _report(f"重新加密時資料庫發生錯誤（{type(exc).__name__}），已回滾，沒有改變任何 secret。")
+        return EXIT_FAILURE
+    finally:
+        engine.dispose()
+    _report(
+        f"已以 SECRET_ENCRYPTION_KEYS 的第一個金鑰重新加密 {count} 份 secret。"
+        "現在可以移除其他金鑰；移除後請重啟 API，並再執行一次這個指令確認全部解得開。"
+    )
+    return EXIT_OK
+
+
+def _unreadable_message(profile_ids: Sequence[object]) -> str:
+    listed = "、".join(str(profile_id) for profile_id in profile_ids[:MAX_LISTED_PROFILES])
+    if len(profile_ids) > MAX_LISTED_PROFILES:
+        listed += f" 等 {len(profile_ids)} 個"
+    return (
+        f"有 {len(profile_ids)} 份 secret 無法以目前的金鑰解開（profile：{listed}），"
+        "已回滾，沒有改變任何 secret。請把加密它們的金鑰加回 SECRET_ENCRYPTION_KEYS 再執行；"
+        "密文被搬到其他 profile 時也會解不開。"
+    )
+
+
 def _issue(engine: Engine, *, name: str, lifetime_days: int) -> tuple[IssuedApiKey, datetime]:
     now = datetime.now(UTC)
     expires_at = now + timedelta(days=lifetime_days)
@@ -182,6 +239,14 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="把 key 寫進這個新檔案（權限 600；已存在就拒絕），不寫到 stdout",
+    )
+    commands.add_parser(
+        ROTATE_COMMAND,
+        help="以 SECRET_ENCRYPTION_KEYS 的第一個金鑰重新加密所有的 secret",
+        description=(
+            "以 SECRET_ENCRYPTION_KEYS 的第一個金鑰重新加密所有還在的 secret。"
+            "有任何一份解不開就全部回滾。"
+        ),
     )
     return parser
 

@@ -202,3 +202,27 @@ def test_rejects_lab_cidr_outside_the_allowed_bounds(
         Settings(app_env="test", _env_file=None)
 
     assert [error["loc"] for error in caught.value.errors()] == [("lab_cidr",)]
+
+
+# --- 目標 secret 的加密金鑰（docs/DECISIONS.md §12.1）---------------------------------------
+
+
+def test_secret_encryption_keys_are_optional_in_settings() -> None:
+    """Settings 只負責讀入：需要金鑰的程序（API、金鑰換版的 CLI）自己檢查。
+
+    create-admin-key 不需要金鑰。
+    """
+    assert Settings(app_env="test", _env_file=None).secret_encryption_keys is None
+
+
+def test_secret_encryption_keys_are_read_from_environment_and_masked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SECRET_ENCRYPTION_KEYS", "key-material-for-the-test")
+
+    settings = Settings(app_env="test", _env_file=None)
+
+    assert settings.secret_encryption_keys is not None
+    assert settings.secret_encryption_keys.get_secret_value() == "key-material-for-the-test"
+    assert "key-material-for-the-test" not in repr(settings)
+    assert "key-material-for-the-test" not in str(settings)

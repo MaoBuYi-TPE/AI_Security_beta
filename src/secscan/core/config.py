@@ -55,6 +55,11 @@ class Settings(BaseSettings):
         default=DEFAULT_DB_CONNECT_TIMEOUT_SECONDS, ge=1, le=MAX_DB_CONNECT_TIMEOUT_SECONDS
     )
 
+    # 目標 secret 的加密金鑰（環境變數 SECRET_ENCRYPTION_KEYS，docs/DECISIONS.md §12.1）：逗號分隔的
+    # Fernet 金鑰，第一個用來加密。這裡只讀入；API 與金鑰換版的 CLI 在啟動時檢查格式，
+    # 建立 admin key 的 CLI 不需要它。
+    secret_encryption_keys: SecretStr | None = None
+
     # 掃描範圍的上限（環境變數 LAB_ONLY、LAB_CIDR）。P0 只掃 lab，LAB_ONLY 不能關閉。
     lab_only: bool = True
     lab_cidr: IPv4Network = DEFAULT_LAB_CIDR

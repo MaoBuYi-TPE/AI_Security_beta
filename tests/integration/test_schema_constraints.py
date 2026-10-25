@@ -31,9 +31,10 @@ from tests.integration.sql_support import violation as _violation
 pytestmark = pytest.mark.integration
 
 # projects 1、api_keys 7、audit_events 3、targets 4、scope_grants 12、api_specs 9、
-# api_spec_operations 4；每一個都有對應的行為測試（targets 與 scope_grants 的在
-# test_scope_schema.py，api_specs 與 api_spec_operations 的在 test_spec_schema.py）。
-EXPECTED_CHECK_COUNT = 40
+# api_spec_operations 4、auth_profiles 2、auth_profile_versions 10；每一個都有對應的行為測試
+# （targets 與 scope_grants 的在 test_scope_schema.py，api_specs 與 api_spec_operations 的在
+# test_spec_schema.py，auth_profiles 與 auth_profile_versions 的在 test_auth_profile_schema.py）。
+EXPECTED_CHECK_COUNT = 52
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "
@@ -302,6 +303,9 @@ def test_audit_events_are_append_only(db_session: Session, statement: str) -> No
         ("pk_api_spec_operations", "(spec_id, ordinal)"),
         ("uq_api_spec_operations_spec_id_method_path", "(spec_id, method, path)"),
         ("uq_api_spec_operations_spec_id_operation_id", "(spec_id, operation_id)"),
+        ("uq_auth_profiles_target_id_role_label", "(target_id, role_label)"),
+        ("pk_auth_profile_versions", "(profile_id, version)"),
+        ("uq_auth_profile_versions_live_secret", "WHERE (encrypted_secret IS NOT NULL)"),
     ],
 )
 def test_expected_indexes_exist(db_session: Session, index_name: str, definition: str) -> None:

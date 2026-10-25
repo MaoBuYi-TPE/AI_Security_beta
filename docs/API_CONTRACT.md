@@ -10,7 +10,7 @@ Prefix：`/api/v1`。平台使用 `Authorization: Bearer <platform_api_key>`。�
 
 UUID 為物件 ID，時間為 UTC ISO 8601。跨專案查詢一律加 project 授權過濾。不存在或無權存取的物件通常回 404，避免洩漏存在性；角色不足的已知操作回 403。無效 key 回 401。
 
-T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回應、權限矩陣與端點範例見 §13。T06 的 target 與 scope grant 見 §14，T07 的 API 規格見 §15。
+T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回應、權限矩陣與端點範例見 §13。T06 的 target 與 scope grant 見 §14，T07 的 API 規格見 §15，T08 的認證設定見 §16。
 
 所有回應都使用統一的 envelope：
 
@@ -58,8 +58,11 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/targets/{target_id}/api-specs | 同專案 | 200；target 的所有版本，新版本在前（T07 新增並實作） |
 | GET | /api/v1/api-specs/{spec_id} | 同專案 | 200；不含文件內容（T07 新增並實作） |
 | GET | /api/v1/api-specs/{spec_id}/operations | 同專案 | 200；method/path，帶 `scope_grant_id` 時附上是否在範圍內與原因（T07 已實作） |
-| POST | /api/v1/targets/{target_id}/auth-profiles | operator/admin | 201；secret 只寫不讀 |
-| PATCH | /api/v1/auth-profiles/{profile_id} | operator/admin | 200；產生新版本，舊 scan 快照不修改 |
+| POST | /api/v1/targets/{target_id}/auth-profiles | operator/admin | 201；secret 只寫不讀，以 MultiFernet 加密保存（T08 已實作） |
+| GET | /api/v1/targets/{target_id}/auth-profiles | 同專案 | 200；每個 profile 顯示目前的版本，不含 secret（T08 新增並實作） |
+| GET | /api/v1/auth-profiles/{profile_id} | 同專案 | 200；不含 secret（T08 新增並實作） |
+| PATCH | /api/v1/auth-profiles/{profile_id} | operator/admin | 200；產生新版本，上一版的密文清除，舊 scan 快照不修改（T08 已實作） |
+| GET | /api/v1/auth-profiles/{profile_id}/versions | 同專案 | 200；版本的歷史，新版本在前（T08 新增並實作） |
 | GET | /api/v1/scan-profiles | 同專案 | 200；只列當前 Runner 已驗證支援的 profile |
 | GET | /api/v1/scanners | 已授權 key | 200；各引擎的版本、映像 digest、可用 profile 與 capability probe 結果 |
 | POST | /api/v1/scans | operator/admin | 202 + scan_id；必須 Idempotency-Key |
@@ -160,7 +163,7 @@ Operation 回應示例：
     "method": "GET",
     "path": "/api/me",
     "expected_status": 200,
-    "expected_json": {"role": "user", "username": "lab-user"}
+    "expected_json": {"/role": "user", "/username": "lab-user"}
   }
 }
 ```
@@ -168,6 +171,13 @@ Operation 回應示例：
 `<...>` 是示意 placeholder，不是可用 key。回應只包含 profile_id、version、type、role_label、secret_configured=true。API key header 類型允許受限 header name，拒絕 CR/LF 與覆蓋 Host/Connection 等危險 header；Cookie 同樣禁止換行。
 
 preflight 必須在同 scope、相同 proxy 與 auth 注入機制下執行並計入 budget。JSON 比對僅支援固定簡單 equality，不允許使用者傳任意程式/script。200 且回登入頁不能算認證成功。
+
+T08 的實際規則（理由見 `DECISIONS.md` §12，完整說明見 §16）：
+
+- 類型是 `bearer`、`api_key_header`、`cookie`；secret 只接受各自的嚴格格式，含平台 API key 的樣式也拒絕。
+- `expected_json` 的 key 改成 JSON Pointer（`/data/username`），值只能是字串、整數、布林或 null，1–16 項；method 只有 GET、path 不可有佔位、status 200–299。
+- 回應除了上面的欄位，還有名稱、preflight 與建立的 key 與時間（都不是 secret）；secret 與由它衍生的值都不回傳。
+- T08 只定義與驗證 preflight，不執行（T12 才執行）。
 
 ## 7. 建立 Scan
 
@@ -301,7 +311,7 @@ Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 �
 | 404 | RESOURCE_NOT_FOUND |
 | 405 | METHOD_NOT_ALLOWED |
 | 408 | REQUEST_TIMEOUT |
-| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED |
+| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、AUTH_ROLE_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED |
 | 413 | SPEC_TOO_LARGE、REQUEST_TOO_LARGE、ARTIFACT_TOO_LARGE |
 | 415 | UNSUPPORTED_MEDIA_TYPE |
 | 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、INVALID_SPEC、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
@@ -345,6 +355,13 @@ T07 加入的部分（§15）：
 - 422：`INVALID_SPEC`（壞掉的文件、超過上限、缺少必要欄位、懸空的參照…）、`UNSUPPORTED_SCHEMA`（P0 不支援的功能）、`EXTERNAL_REF_FORBIDDEN`（參照指向文件以外）。訊息說明原因與位置（行與欄，或只由 key 與陣列索引組成的 JSON Pointer），不含任何值。
 - 408 `REQUEST_TIMEOUT`：上傳的規格沒有在 10 秒內讀完。
 - 400 `INVALID_REQUEST`：Content-Length 不是十進位整數，或上傳途中斷線。
+
+T08 加入的部分（§16）：
+
+- 409 `AUTH_ROLE_CONFLICT`：同一個 target 已有相同 `role_label` 的認證設定。
+- 409 `QUOTA_EXCEEDED`：每個 target 最多 10 個認證設定、每個認證設定最多 100 個版本。
+- 409 `INVALID_STATE_TRANSITION`：沿用 secret 的新版本，但目前的版本已經沒有密文（只有直接改了 DB 才會發生）。
+- 422 `INVALID_REQUEST`：secret、header 名稱、preflight、role_label、名稱或 PATCH 的規則不合。訊息以欄位名稱開頭、說明原因，不回顯任何輸入（輸入可能就是 secret）。
 
 ## 13. 平台 API key 與專案（T05 已實作）
 
@@ -717,3 +734,157 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 | `api_spec.create` | `version`、`target_id`、`format`、`size_bytes`、`source_sha256`、`document_sha256`、`operation_count`、`base_path` |
 
 文件本身不寫進 audit：規格不可變，以 hash 對應。被拒絕的上傳不留紀錄。
+
+## 16. 認證設定（T08 已實作）
+
+理由見 `DECISIONS.md` §12。T08 不對 target 發出任何流量：preflight 只定義與驗證，T12 才實際執行。以下的名稱與值都是示例，不是可用的憑證。
+
+### 16.1 建立
+
+`POST /api/v1/targets/{target_id}/auth-profiles`（201）：
+
+```json
+{
+  "name": "VAmPI 一般使用者",
+  "role_label": "standard_user",
+  "type": "bearer",
+  "secret": "<只寫入，不會回傳>",
+  "preflight": {
+    "method": "GET",
+    "path": "/me",
+    "expected_status": 200,
+    "expected_json": {"/status": "success", "/data/username": "name1"}
+  }
+}
+```
+
+回應（查詢時相同；沒有 secret，也沒有由它衍生的值）：
+
+```json
+{
+  "id": "<uuid>",
+  "target_id": "<uuid>",
+  "project_id": "<uuid>",
+  "name": "VAmPI 一般使用者",
+  "role_label": "standard_user",
+  "created_by_key_id": "<uuid>",
+  "created_at": "2026-10-25T08:00:00Z",
+  "version": 1,
+  "type": "bearer",
+  "header_name": null,
+  "preflight": {
+    "method": "GET",
+    "path": "/me",
+    "expected_status": 200,
+    "expected_json": {"/status": "success", "/data/username": "name1"}
+  },
+  "secret_configured": true,
+  "version_created_by_key_id": "<uuid>",
+  "version_created_at": "2026-10-25T08:00:00Z"
+}
+```
+
+| 欄位 | 規則 |
+|---|---|
+| `name` | 1–100 字元，規則同 §14.1 的名稱 |
+| `role_label` | `^[a-z][a-z0-9_]{0,63}$`；`anonymous` 保留給未認證的 scan；同一個 target 內唯一，重複回 409 `AUTH_ROLE_CONFLICT` |
+| `type` | `bearer`、`api_key_header`、`cookie` |
+| `header_name` | 只有 `api_key_header` 要有，也只有它可以有：英數字與 `-`，每段以英數字開頭與結尾，最多 64 字元；拒絕的名稱見下表 |
+| `secret` | 依 type 的格式（下表），1–4,096 字元；含平台 API key 的樣式（`secscan_…`）就拒絕 |
+| `preflight.method` | 只有 `GET` |
+| `preflight.path` | 語法同 §14.2 的 path，但不可有佔位；是相對於 target origin 的完整 path（含 base path），寫法和 inventory 相同（§15.2） |
+| `preflight.expected_status` | 200–299 的整數 |
+| `preflight.expected_json` | 1–16 項。key 是 JSON Pointer：以 `/` 開頭，`~` 寫成 `~0`、`/` 寫成 `~1`，最多 256 字元；值是字串（最多 256 字元，不可有控制字元）、整數（±(2^53 − 1)）、`true`、`false` 或 `null` |
+
+| type | 送出的 header | secret 的格式 |
+|---|---|---|
+| `bearer` | `Authorization: Bearer <secret>` | RFC 6750 的 b64token：英數字與 `-._~+/`，結尾可以有 `=`；不含空白，不要自己加上 `Bearer ` |
+| `api_key_header` | `<header_name>: <secret>` | ASCII 可見字元，中間可以有空白；開頭與結尾不可是空白，不可有 tab 與其他控制字元 |
+| `cookie` | `Cookie: <secret>` | RFC 6265 的 cookie-string，例如 `session=abc; theme=dark`：多個以 `; `（分號加一個空白）分隔，最多 32 個，名稱不可重複；值不可有空白、雙引號、逗號、分號與反斜線（可以整個加上雙引號） |
+
+`header_name` 一律拒絕下列名稱，不分大小寫：
+
+| 類別 | 名稱 |
+|---|---|
+| 連線與訊息框架 | Host、Connection、Keep-Alive、Proxy-Connection、TE、Trailer、Transfer-Encoding、Upgrade、Expect、`Content-*` |
+| 代理 | Proxy、`Proxy-*` |
+| 路由與來源 IP | Forwarded、Via、Max-Forwards、X-Forwarded、`X-Forwarded-*`、X-Real-IP、X-Client-IP、True-Client-IP、X-Cluster-Client-IP、Client-IP、CF-Connecting-IP、X-Originating-IP、X-Remote-IP、X-Remote-Addr |
+| 改寫 host、method 或 path | X-Host、X-HTTP-Host-Override、X-HTTP-Method-Override、X-HTTP-Method、X-Method-Override、X-Original-URL、X-Rewrite-URL、X-Original-URI、X-Envoy-Original-Path |
+| 其他 | Cookie、Set-Cookie（請用 cookie 類型）、`X-Secscan-*`（保留給平台） |
+
+- 每個 target 最多 10 個認證設定：409 `QUOTA_EXCEEDED`。
+- `name` 與 `role_label` 建立後不能改；要改就建立新的認證設定。
+- 停用的 target 仍可設定（設定不會送出任何流量）。
+
+錯誤的先後：
+
+1. 沒有 key 或格式不符：401（middleware，不讀 body）；key 無效：401。
+2. 請求超過 2 MiB：413 `REQUEST_TOO_LARGE`。
+3. 型別或長度不符：422 `INVALID_REQUEST`，訊息只列出欄位位置。`preflight.expected_json` 在這一步只檢查是不是物件與項數：key 是使用者的輸入，欄位位置會帶出它，所以 key 與值的規則在第 5 步。
+4. target 不存在或屬於其他 project：404；viewer：403。
+5. 上表的規則：422 `INVALID_REQUEST`，訊息以欄位名稱開頭、說明原因，不回顯輸入（`expected_json` 只說是第幾項）。
+6. 數量上限與 role_label 重複：409。
+
+內容的驗證一定在權限檢查之後，不替沒有權限的呼叫者驗證內容。
+
+### 16.2 新版本
+
+`PATCH /api/v1/auth-profiles/{profile_id}`（200）：最常見的是換 token。
+
+```json
+{"secret": "<新的 token>"}
+```
+
+| 規則 | 說明 |
+|---|---|
+| 欄位 | `type`、`header_name`、`secret`、`preflight`；都可以省略，但至少要有一個；不接受 `null` 與其他欄位 |
+| 沿用 | 沒給的欄位沿用目前的版本；`preflight` 是整份取代 |
+| secret | `type` 或 `header_name` 改變時必須附上新的 secret；省略時沿用目前的 secret（直接複製密文，伺服器不解密） |
+| 沒有變更 | 沒有 secret，而且定義與目前的版本相同：422 |
+
+- 版本是每個認證設定各自的流水號；每個認證設定最多 100 個版本（409 `QUOTA_EXCEEDED`）。
+- 建立新版本時，上一版的密文清除：每個認證設定最多一份密文。版本清單中只有目前的版本 `secret_configured` 是 true，`secret_erased_at` 是清除的時間。
+- 舊的 scan 快照不受影響（T09）。排隊中、綁定被取代版本的 scan，runner 啟動前就會失敗（M2）。
+- 同時更新同一個認證設定時，後到的等先到的 commit，再以新的版本為基礎；版本號連續。
+
+### 16.3 查詢
+
+- `GET /api/v1/targets/{target_id}/auth-profiles`：依建立時間由舊到新、分頁，每個認證設定顯示目前的版本。
+- `GET /api/v1/auth-profiles/{profile_id}`：回應同 §16.1。
+- `GET /api/v1/auth-profiles/{profile_id}/versions`：新版本在前、分頁。
+
+```json
+[
+  {"version": 2, "type": "bearer", "header_name": null, "preflight": {"method": "GET", "path": "/me", "expected_status": 200, "expected_json": {"/status": "success"}}, "secret_configured": true, "secret_erased_at": null, "created_by_key_id": "<uuid>", "created_at": "2026-10-25T09:00:00Z"},
+  {"version": 1, "type": "bearer", "header_name": null, "preflight": {"method": "GET", "path": "/me", "expected_status": 200, "expected_json": {"/status": "success"}}, "secret_configured": false, "secret_erased_at": "2026-10-25T09:00:00Z", "created_by_key_id": "<uuid>", "created_at": "2026-10-25T08:00:00Z"}
+]
+```
+
+### 16.4 權限
+
+| 操作 | platform_admin | operator（自己的 project） | viewer（自己的 project） | 其他 project |
+|---|---|---|---|---|
+| 建立、產生新版本 | 允許 | 允許 | 403 | 404 |
+| 查詢 | 允許 | 允許 | 允許 | 404 |
+
+不存在的 target 或認證設定也回 404，回應與其他 project 的完全相同。
+
+### 16.5 Audit
+
+| 事件 | `changes` |
+|---|---|
+| `auth_profile.create` | `target_id`、`name`、`role_label`、`version`、`type`、`header_name`、`preflight`（`method`、`path`、`expected_status`、`pointers`） |
+| `auth_profile.update` | `version`、`erased_version`、`changed`（例如 `["secret"]`），以及有改變的 `type`、`header_name`、`preflight` |
+| `auth_secrets.reencrypt` | `reencrypted`（份數）；本機 CLI 執行，沒有 actor 與 project |
+
+- secret 不寫進 audit；`preflight` 只列 JSON Pointer，不列期望值（可能是帳號或 email）。
+
+### 16.6 加密與金鑰換版
+
+- secret 以 `SECRET_ENCRYPTION_KEYS` 的第一個金鑰加密（MultiFernet）；其他金鑰只用來解密。API 沒有金鑰或格式不合時不會啟動。
+- 加密的內容綁定認證設定與送出的方式（context 含 type 與 header 名稱）：密文被搬到其他認證設定，或同一個認證設定中另一種 type、另一個 header 名稱的版本，就解不開。
+- API 從不解密；M2 的 runner 是唯一會解密的程序。
+- 換版：新金鑰放在第一個並重啟 API → `uv run secscan-admin rotate-secret-keys` → 移除舊金鑰並重啟 API → 再執行一次 `rotate-secret-keys` 確認全部解得開。
+- 第 4 步通過之前，另外保留舊金鑰的備份。
+- `rotate-secret-keys` 在一個 transaction 內重新加密所有還在的密文；有任何一份解不開就全部回滾、exit 1，只列出 profile id（最多 10 個）。執行期間的 PATCH 會等它 commit；PATCH 還沒 commit 時，換版也會等 PATCH。
+- 清除舊版本的密文是邏輯上的：DB 的舊 tuple、WAL 與備份中仍有密文（受金鑰保護）。secret 外洩時要到目標系統讓它失效。

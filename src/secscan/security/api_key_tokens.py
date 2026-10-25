@@ -46,6 +46,11 @@ def parse_prefix(value: str) -> str | None:
     return match.group("prefix") if match is not None else None
 
 
+def contains_platform_key(text: str) -> bool:
+    """文字中任何位置有完整的平台 key：目標的 secret 不可含有它（平台 key 不可送往被測網站）。"""
+    return _KEY_PATTERN.search(text) is not None
+
+
 def hash_key(value: str) -> bytes:
     """完整 key 的 SHA-256（32 bytes），存在 api_keys.key_hash。"""
     return hashlib.sha256(value.encode()).digest()

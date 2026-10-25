@@ -5,6 +5,7 @@
 
 from secscan.api_keys.models import ApiKeyModel
 from secscan.audit.models import AuditEventModel
+from secscan.auth_profiles.models import AuthProfileModel, AuthProfileVersionModel
 from secscan.core.db import Base
 from secscan.grants.models import ScopeGrantModel
 from secscan.projects.models import ProjectModel
@@ -19,5 +20,7 @@ MODELS = (
     ScopeGrantModel,
     ApiSpecModel,
     ApiSpecOperationModel,
+    AuthProfileModel,
+    AuthProfileVersionModel,
 )
 target_metadata = Base.metadata

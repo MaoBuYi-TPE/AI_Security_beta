@@ -95,6 +95,13 @@ T07 已涵蓋：
   - 不會變成 500：Hypothesis 在合法的文件中放入變化的 server URL、陣列索引與 YAML 的 `\U` 跳脫，只能被接受或拋出 InvalidSpecError；另有不合法的 IPv6 括號、超長的陣列索引與版本號、超出範圍的 `\U`、`%FOO` directive 的對照表。
   - 上傳讀取 body 超過時間上限回 408、途中斷線回 400；key 格式的 middleware 以 `root_path` 部署時仍涵蓋 `/api/v1`（與 Starlette 的 `get_route_path` 以性質測試比對）。
 
+T08 已涵蓋：
+- **secret 的加密（`SecretCipher`）**：`seal` 與 `reveal` 來回；context 不符、用錯金鑰、改動 token 解碼後的任何一個 byte（Hypothesis），都解不開；token 不含明文；以正確的金鑰加密、但內容不是預期格式的 token 也拒絕。換版（`rotate`）改用第一個金鑰、保留時間戳記、確認 context。金鑰設定的每一種錯誤寫法都拒絕，訊息不含金鑰；token 長度的公式以實際加密的結果核對。
+- **secret 的格式**：bearer、header 的值、cookie-string 的接受與拒絕對照表（CR、LF、NUL、tab、非 ASCII、引號、分號、重複的 cookie 名稱…），以及 Hypothesis 的性質：依文法產生的一定接受，插入任何一個禁止的字元一定拒絕。header 名稱的拒絕清單以 Hypothesis 檢查任何大小寫的組合。secret 含平台 API key 的樣式就拒絕。錯誤訊息不含輸入。
+- **preflight 的定義**：method、path（含佔位）、status 的邊界；expected_json 的 pointer（RFC 6901，編碼後再解析得到相同的 token）與值（布林不等於整數、浮點數、超過 ±(2^53 − 1) 的整數）；只看狀態碼、沒有內容比對的定義被拒絕。
+- **PATCH 的規則**：每種組合都明確決定（沿用 secret、換類型必須附上新的 secret、沒有變更…）。
+- **只寫不讀**：以 AST 確認 src 中沒有任何模組呼叫 `reveal`，`reencrypt_secrets` 只有本機 CLI 呼叫。API 文件中的 secret 是 writeOnly，任何回應的 schema 都沒有 secret。
+
 guard policy 比對與 policy budget，留給 M2。
 
 ### 4.2 Contract / Parser
@@ -126,7 +133,15 @@ T05 已涵蓋 project 層的權限：
 - 遮罩以固定 seed 的隨機輸入檢查 idempotent，並檢查惡意輸入下仍是線性時間。
 - 以突變檢查確認上述測試有鑑別力（`TASKS.md` T05）。
 
-SEC-16 要求的 scan、finding、artifact 跨專案測試，隨這些資源在 T09 與 M3–M5 加入，尚未完成。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。
+SEC-16 要求的 scan、finding、artifact 跨專案測試，隨這些資源在 T09 與 M3–M5 加入，尚未完成。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
+
+T08 已涵蓋認證設定：
+- **secret 不外流（SEC-14 的平台這一側）**：以 canary 確認 secret 不出現在任何回應（含 4xx）與 header、DEBUG 等級的所有日誌、audit、DB 的明文；422 只說明欄位與原因，expected_json 的 key 也不回顯。FastAPI 內建的 telemetry 已關閉；查詢的路由拿不到加密元件。
+- **context 的綁定**：密文搬到其他 profile，或同一個 profile 中另一種 type、另一個 header 名稱的版本，金鑰換版時都會發現。
+- **DB 的最後一道防線**：每個 CHECK、FK、unique 與部分唯一索引都有違反測試；trigger 只允許清除密文與重新加密，其他修改、恢復已清除的密文、DELETE、TRUNCATE、INSERT 不帶密文都被擋下。
+- **版本**：建立新版本時上一版的密文被清除，沿用時密文逐 byte 相同；每個 target 10 個、每個 profile 100 個的上限。
+- **併發**：同時 PATCH 時版本連號、只留一份密文；沿用 secret 的 PATCH 會等金鑰換版 commit，複製到的是換版後的密文；反過來，金鑰換版也會等還沒 commit 的 PATCH，不會漏掉它新增的密文（審查時發現，修正前測試失敗）；先開始、後拿到鎖的 PATCH，清除時間不早於被清除版本的建立時間；同時建立時上限精確、相同的 role_label 回 409（都以 `pg_stat_activity` 確認後到的在等列鎖）。
+- **金鑰換版的 CLI**：每個測試用全新的資料庫；新舊金鑰換版、移除舊金鑰後再確認、少了舊金鑰或 commit 失敗時什麼都不改。
 
 T06 已涵蓋 target 與 scope grant：
 - A 專案讀寫 B 專案的 target 與 grant（含核准、撤銷），回應與不存在的 id、不存在的路徑完全相同。
@@ -141,6 +156,8 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
 - **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；工具輸出的 parser（JSONL、XML、Markdown）在 M3 之後。
+- **SEC-14**：T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；工具的輸出、證據與報告中的 token（以已知的 secret 值精確遮罩）在 M3 之後，不標成完成。
+- **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
 
 ### 4.4 Live E2E
 

@@ -243,7 +243,7 @@ T06 加入 targets 與 grants 兩個模組，更新後的順序見 §10.7。
 - **請求大小上限與「驗證前不讀 body」**：FastAPI 在執行依賴（包括驗證 key）之前，就先讀完並解析 JSON body。所以沒有 key 的請求送壞掉的 JSON 會得到 422（不是 401），送很大的 body 也會被整個讀進記憶體。T05 只把文件與測試改成實際行為。在 `/api/v1` 前加 pure-ASGI middleware（`Authorization` 格式不符就先回 401、累計超過上限就回 413）列入 T07（規格上傳的大小限制）與 T23。
 - **key 的事故應變工具**：列出 key、依 prefix 撤銷、撤銷某把 key 建立過的所有 key，以及 `last_used_at`。目前遺失 key id 時，只能從建立時的 stderr、project 的 audit 或直接查 DB 找回。列入 M2。
 - **dev 的 `/docs`**：FastAPI 預設從 CDN 載入 Swagger UI（沒有 SRI）。README 提醒不要在 `/docs` 貼 admin key；改為自行託管列入 M2/T23。
-- **遮罩的已知缺口**：HAR 那種 name/value 成對的格式、URL 中的帳密與 query 參數、`password=…` 之類的文字還不處理（`security/redaction.py` 的說明）。T08（認證設定）與 M3（證據遮罩）需要時再擴充，並補對應的測試。
+- **遮罩的已知缺口**：HAR 那種 name/value 成對的格式、URL 中的帳密與 query 參數、`password=…` 之類的文字還不處理（`security/redaction.py` 的說明）。T08（認證設定）與 M3（證據遮罩）需要時再擴充，並補對應的測試。T08 不把 secret 放進任何會被遮罩的結構（§12.2），所以沒有擴充，留給 M3。
 
 T23 的硬性條件：速率限制、請求大小上限與安全 header 都完成之前，不發布 API 的 port，也不綁 loopback 以外的位址（目前只靠 `make dev` 綁 127.0.0.1）。
 
@@ -558,6 +558,176 @@ main | cli → migrations → health | specs → grants → targets → projects
 - lab 的規格超過 1 MiB 或 1,000 個 operation：依量測放寬，並在這裡記錄。
 - 規格需要經常修改、20 個版本不夠：加上刪除或封存（必須保留 scan 引用的版本）。
 - 合法的規格因為「任何位置的 `$ref`」或 YAML 的限制被拒絕：記下實例，再決定是否只在特定位置檢查。
+
+T08 加入 auth_profiles 模組，更新後的順序見 §12.7。
+
+## 12. T08 補充決定：auth profile 與 secret 生命週期（2026-10-25）
+
+T08 實作 `PROJECT_PLAN.md` §5.1 的「目標認證」：靜態 Bearer、API key header、既有 Cookie，加密、只寫不讀、以受保護的端點做 preflight。目標的憑證是平台保存的資料中最敏感的一類：DB dump、備份、log、API 回應與 audit 都不能出現明文。以下是規劃文件沒有寫到、實作前才定下的細節。
+
+其中兩項由使用者決定（2026-10-25）：
+- 建立新版本時，清除上一版的密文（§12.3）。
+- 停用 profile 的端點延後到 T21（§12.6）。
+
+T08 不發出任何流量：preflight 只定義、不執行，T12 才會實際執行。
+
+依據：
+- VAmPI 的 `GET /me` 回 `{"data": {"admin", "email", "username"}, "status"}`，是巢狀結構（`tests/fixtures/openapi/vampi-openapi3.yml`）。
+- lab 的 VAmPI token 一小時就過期（`compose.lab.yaml` 的 `tokentimetolive: 3600`，`TOOLS.md` §5），每次掃描前都要換 token：更新 secret 會很頻繁。
+- `cryptography` 50.0.2：2026-09-30 發布，授權 Apache-2.0 OR BSD-3-Clause，有 macOS arm64 的 abi3 wheel，另依賴 cffi ≥ 2.0.0 [S71]。
+
+### 12.1 加密與金鑰
+
+| 項目 | 採用 | 理由 |
+|---|---|---|
+| 加密元件 | `security/secret_cipher.py` 的 `SecretCipher` 包裝 MultiFernet：`seal(value, context)`、`reveal(token, context)`、`rotate(token, context)` | CLAUDE.md §9 指定 MultiFernet。Fernet 是 AES-128-CBC 加 HMAC-SHA256，竄改或用錯金鑰都會被偵測；MultiFernet 以第一個金鑰加密，依序嘗試每個金鑰解密 [S69][S70] |
+| 綁定 | 加密的內容是 `{"context": "auth_profile:<profile id>:<type>:<header_name 或 ->", "v": 1, "value": <secret>}`；解密時 context 不符就拒絕。context 最長 129 字元，`SecretCipher` 的上限是 256 | Fernet 沒有 associated data。能寫 DB 的人把 A 的密文搬到 B，B 會解不開。也綁送出的方式（審查後補上）：同一個 profile 內，把 bearer 版本的密文搬到 cookie 或另一個 header 名稱的版本，也解不開。不綁版本：新版本沿用 secret 時 type 與 header 名稱一定相同（§12.6），直接複製密文，API 不必解密 |
+| 金鑰設定 | `SECRET_ENCRYPTION_KEYS`：逗號分隔的 Fernet 金鑰（url-safe base64 的 32 bytes，44 個字元），1–4 個、不可重複，不可有空白。第一個用來加密，其餘只用來解密 | CLAUDE.md §9「密鑰不放資料庫或 Git」。最多 4 個：換版只需要新舊兩個 |
+| 金鑰放在哪裡 | 和 DB 密碼一樣放在 `.env`：`make env` 在缺少時以 `openssl rand -base64 32` 轉成 url-safe 產生一把（只附加，不印出值、不修改既有的值）；`make dev` 也先執行 `make env` | M1 是單一信任區（§7、§9.1）。加密擋得住 DB dump、備份與 SQL injection 讀到的密文。M2 容器化時改用 compose `secrets:`，把金鑰和 DB 帳密分開 |
+| 在哪裡檢查 | `Settings` 只以 `SecretStr` 讀入、可以沒有；`create_app` 沒有金鑰或格式不合就啟動失敗，訊息不含金鑰。CLI 的 `create-admin-key` 不需要它 | API 沒有金鑰就不能加密，fail fast；只有用得到的程序才要求它 |
+
+取捨：
+- **API 程序持有能解密的金鑰**：Fernet 是對稱加密，能加密就能解密。所以加密擋得住 DB 的外流，擋不住 API 程序本身被入侵，這點不宣稱。程式中沒有解密的路徑（§12.2）；M2 的 runner 會是另一個程序。
+- **token 中的建立時間是明文** [S69]：DB 本來就存了 `created_at`，可以接受。
+- **金鑰遺失，所有 secret 都解不開**：只能重新設定。這些都是 lab 測試帳號的 token，可以重新登入取得；README 提醒備份 `.env` 中的這一行。
+
+### 12.2 只寫不讀與不寫入 log
+
+- **沒有讀回 secret 的方式**：
+  - 回應、audit、log 都沒有 secret，也沒有由它衍生的值。不存 hash：cookie 的值可能是低熵的，hash 會被暴力猜出。
+  - API 從不解密：新版本沿用 secret 時，直接複製密文。
+  - 以 AST 測試固定：src 中沒有任何模組呼叫 `reveal`（做法同 §9.1 的 `issue_admin_key`）。M2 的 runner 會是唯一的例外，屆時更新測試。
+  - 以 import-linter 固定：只有 `security.secret_cipher` 可以 import `cryptography`，其他模組無法繞過 `SecretCipher` 自己解密（含間接 import）。
+- **audit 中的 preflight**：記錄 method、path、expected_status 與 JSON Pointer，不記期望值。path 是實際會送出的請求，T09 要拿它和 grant 比對、事後也要能追查，所以照原樣記錄，和 grant 的 path 相同；它可能含帳號名稱（例如 `/users/v1/name1`，審查時指出）。期望值是用來辨識身分的回應內容（帳號、email），不是請求的一部分，所以不記。
+- **最小權限**（審查後補上）：只有建立與 PATCH 的路由拿到加密元件；查詢的路由與 service 沒有它，在查詢的 service 上呼叫寫入的方法，會在動到 DB 之前就失敗。
+- **不寫入 log**：
+  - 請求中的 `secret` 是 `SecretStr`（API 文件標成 writeOnly），domain 物件的 repr 不含它；版本列帶出的密文（`StoredSecret`）repr 也不含 token。
+  - 驗證錯誤不回顯任何輸入，沿用 T04 的 422 處理與 §10.2 的原則。`expected_json` 的 key 與值在 domain 檢查，不在 schema：Pydantic 檢查 dict 的 key 時，錯誤的欄位位置（`loc`）會帶出那個 key（審查發現），domain 的訊息只說是第幾項。
+  - engine 已設定 `hide_parameters`，SQL 參數不出現在例外與日誌中（`ARCHITECTURE.md` §6.2）。
+  - 關閉 FastAPI 內建的 OpenTelemetry（tracing、metrics、logs 與自動設定）：它會匯出驗證錯誤與例外，可能含請求中的 secret。平台不使用它，也不隨環境中的 provider 或 `FASTAPI_OTEL_AUTO_CONFIGURE` 開啟。
+  - 測試以 canary 檢查回應、DEBUG 等級的所有 log、audit、DB 中的明文與例外訊息。
+
+### 12.3 換版
+
+**加密金鑰**：
+- `secscan-admin rotate-secret-keys`：
+  - 在一個 transaction 內，先依 id 的順序以 `FOR SHARE` 鎖住所有 profile，再以 `FOR UPDATE` 鎖住所有密文（鎖的順序見下面）。
+  - 以 MultiFernet.rotate 改用第一個金鑰重新加密（保留原本的時間戳記 [S69]），並確認 context 仍然相符。
+  - 任何一份解不開就全部回滾、exit 1，訊息只列出 profile id；成功時寫一筆全域 audit。
+- 流程（Fernet 文件的做法：新金鑰放最前面、rotate 既有的 token、再移除舊金鑰 [S69]）：
+  1. 新金鑰放在第一個，重啟 API：新的 secret 改用新金鑰加密，舊的仍解得開。
+  2. 執行 `rotate-secret-keys`。
+  3. 移除舊金鑰，重啟 API。
+  4. 再執行一次 `rotate-secret-keys`，確認全部解得開。
+
+  第 4 步通過之前，另外保留舊金鑰的備份：萬一有一份密文沒換到，還能放回舊金鑰再做一次。
+
+**profile 的版本**：
+- `PATCH` 產生新版本，version 是每個 profile 各自的流水號；舊的 scan 快照不受影響（`API_CONTRACT.md` §2）。
+- **建立新版本時清除上一版的密文**（使用者的決定）：secret 只存在於目前的版本，換掉就消失；token 頻繁更換時，舊 token 不會累積。
+  - DB 以部分唯一索引保證每個 profile 最多一份密文 [S74]。
+  - 舊版本只留定義（type、header 名稱、preflight），回應中是 `secret_configured: false`。
+- trigger：版本列只允許兩種 UPDATE，而且其他欄位都不能改：
+  - 清除：密文變成 NULL，同時記下 `secret_erased_at`。清除之後不能恢復。
+  - 重新加密：密文換成另一份非 NULL 的密文（金鑰換版）。
+  - INSERT 必須帶密文；DELETE 與 TRUNCATE 一律拒絕。profile 本身的列完全不可變。
+- `secret_erased_at` 用 `statement_timestamp()`，不用 `now()`（審查後修正）：`now()` 是 transaction 開始的時間；PATCH 等鎖期間，另一個 PATCH 建立的版本會比它晚建立，清除時間就會早於建立時間。
+- **鎖的順序**：PATCH 與金鑰換版都是先鎖 profile、再鎖版本列，所以不會互相等待而死結，而且兩個方向都互斥：
+  - PATCH 以 `FOR UPDATE` 鎖住 profile（版本號依 commit 的先後遞增），再鎖目前的版本列，才讀它的密文。換版還沒 commit 時，PATCH 在鎖 profile 時就會等它，複製到的就是新金鑰加密的密文。版本列的鎖是第二道防線：沒有先鎖 profile、只改版本列的寫入（例如直接以 SQL 重新加密），PATCH 也會等它，不會複製到舊的密文。
+  - 換版以 `FOR SHARE` 鎖住所有 profile（審查後補上）。PATCH 還沒 commit 時，換版會等它；否則換版看不到 PATCH 新增的版本，那份以舊金鑰加密的密文會留下，移除舊金鑰後就解不開。
+
+取捨：
+- 排隊中、綁定舊版本的 scan：版本被取代後密文已清除，runner 啟動前就會失敗（fail closed），不自動改用新版本（T09、M2）。
+- 能寫 DB 的人仍能清除密文（trigger 允許這個轉換）：結果是 scan 失敗，不會洩密。和其他 trigger 一樣只防程式錯誤造成的誤改（§7）。
+- **清除只是邏輯上的**：PostgreSQL 的 UPDATE 留下舊的 tuple，直到 VACUUM 回收；WAL 與備份中也還有舊的密文。所以清除不等於從磁碟抹除，舊密文仍受加密金鑰保護。secret 真的外洩時，要到目標系統讓它失效（lab 重新登入換 token），不能只靠清除。
+
+### 12.4 認證類型與 secret 的格式
+
+| type | 送出的 header | secret 的規則 |
+|---|---|---|
+| `bearer` | `Authorization: Bearer <secret>` | RFC 6750 的 b64token：英數字與 `-._~+/`，結尾可以有 `=` [S72]；1–4,096 字元。不含空白：不要自己加上 `Bearer ` |
+| `api_key_header` | `<header_name>: <secret>` | ASCII 可見字元，中間可以有空白；1–4,096 字元。RFC 9110 允許的 obs-text 與 tab 都不收 [S64] |
+| `cookie` | `Cookie: <secret>` | RFC 6265 的 cookie-string，例如 `a=1; b=2`：名稱是 token，值是 cookie-octet，可以整個加上雙引號 [S73]；1–32 個，名稱不可重複；最多 4,096 字元 |
+
+- **只接受嚴格的子集**：不同的伺服器與工具對邊緣的寫法解讀不同（例如重複的 cookie 名稱，RFC 6265 §4.2.2 說伺服器不應依賴它們的順序 [S73]）。字元集本身就排除 CR、LF 與 NUL，擋下 header injection [S64]。
+- **平台 key 誤貼**：secret 含平台 API key 的樣式（`secscan_<prefix>_<secret>`）就拒絕。平台 key 不可送往被測網站（`API_CONTRACT.md` §1）。
+- **header 名稱**（只用於 `api_key_header`）：
+  - 只能用英文字母、數字與 `-`，每段以英數字開頭，最多 64 字元。這是 RFC 9110 token 的子集 [S64]，避開 `_`、`.` 這類在某些伺服器會被改寫或丟掉的字元。
+  - 可以用 `Authorization`，給非 Bearer 的 scheme，例如 `Token …`。
+  - 下表的名稱一律拒絕，不分大小寫：
+
+| 類別 | 拒絕的 header | 理由 |
+|---|---|---|
+| 連線與訊息框架 | Host、Connection、Keep-Alive、Proxy-Connection、TE、Trailer、Transfer-Encoding、Upgrade、Expect、`Content-*` | contract §6；RFC 9110 §7.6.1 的 connection-specific 欄位 [S64] |
+| 代理 | Proxy、`Proxy-*`（含 guard 用的 Proxy-Authorization） | 會干擾 guard；`Proxy` 在 CGI 一類的環境變成 `HTTP_PROXY`，讓伺服器把對外的請求送往指定的代理（httpoxy [S77]） |
+| 路由與來源 IP | Forwarded、Via、Max-Forwards、X-Forwarded、`X-Forwarded-*`、X-Real-IP、X-Client-IP、True-Client-IP、X-Cluster-Client-IP、Client-IP、CF-Connecting-IP、X-Originating-IP、X-Remote-IP、X-Remote-Addr | 會干擾 guard 或上游判斷請求的來源（例如以來源 IP 放行的管理介面） |
+| 改寫 host、method 或 path | X-Host、X-HTTP-Host-Override [S78]；X-HTTP-Method-Override、X-HTTP-Method、X-Method-Override [S75]；X-Original-URL、X-Rewrite-URL [S76]、X-Original-URI、X-Envoy-Original-Path | 有些框架或代理照這些 header 改 host、method 或路由，會繞過 grant 的 origin、method 與 path 範圍 |
+| 其他 | Cookie、Set-Cookie；`X-Secscan-*` | Cookie 用 cookie 類型；`X-Secscan-*` 保留給平台 |
+
+審查後補上的：Proxy、X-Forwarded、X-Client-IP 到 X-Remote-Addr 這 8 個來源 IP 的 header、X-Host、X-HTTP-Host-Override、X-Original-URI、X-Envoy-Original-Path。取捨：拒絕清單不保證完整。主要的防線是嚴格的字元集；實際送出的 header 由 M2 的 guard 檢查。
+
+### 12.5 preflight
+
+- **必填**：CLAUDE.md §9 要求掃描前以已知的受保護端點做 auth preflight。
+- **規則**：
+  - `method` 只接受 `GET`：preflight 不可改變靶場的狀態。
+  - `path`：語法同 grant 的 path（§10.3），但不可有 route 佔位：preflight 是實際送出的請求。它是相對於 target origin 的完整 path（含 base path），method 與 path 的寫法和 inventory 相同（§11.6），T09 可以直接拿 grant 的規則判斷它是否在範圍內。
+  - `expected_status`：200–299 的整數。
+  - `expected_json`：1–16 項。key 是 JSON Pointer [S61]，必須以 `/` 開頭、`~` 只能接 `0` 或 `1`、最多 256 字元；值是字串（最多 256 字元）、整數（±(2^53 − 1)，RFC 8259 §6 中各家實作一致的範圍 [S62]）、布林或 null。
+- **為什麼一定要比對內容**：只看狀態碼分不出登入頁（「200 且回登入頁不能算認證成功」，`API_CONTRACT.md` §6）。VAmPI 的 `/me` 是巢狀的，所以 key 用 JSON Pointer，不只比對最外層。
+- **比對的語意**（T08 只定義與驗證，T12 照著實作）：
+  - 嚴格相等，型別也要相同：`true` 不等於 `1`，期望值沒有浮點數。
+  - JSON Pointer 依 RFC 6901 解析，含陣列索引；指不到就不符合。陣列索引有前導 0（如 `01`）或是 `-`（指向最後一個之後、不存在的元素 [S61]）都算指不到。
+  - 回應必須是 JSON；所有項目都符合，而且狀態碼相同，才算成功。
+
+### 12.6 role_label、名稱、上限與權限
+
+- **role_label**：`^[a-z][a-z0-9_]{0,63}$`；`anonymous` 保留給未認證的 scan（`API_CONTRACT.md` §7）。同一個 target 內唯一，重複回 409 `AUTH_ROLE_CONFLICT`。理由：role_label 是 finding fingerprint 中的 auth role（CLAUDE.md §10），兩個 profile 同名，不同身分的結果會混在一起。
+- **名稱**：1–100 字元，規則同 §10.10。
+- **不可修改**：role_label 與名稱建立後都不能改；要改就建立新的 profile。
+- **PATCH 的規則**：
+  - 欄位都可以省略，但至少要有一個；不接受 null（同 target 的 PATCH）。
+  - 沒給的欄位沿用目前的版本；`preflight` 是整份取代。
+  - `type` 或 `header_name` 改變時，必須附上新的 secret；`secret` 省略時直接複製目前的密文。
+  - 完全沒有變更（沒有 secret，定義也相同）回 422。
+- **數量上限**：每個 target 10 個 profile、每個 profile 100 個版本，超過回 409 `QUOTA_EXCEEDED`。理由同 §10.9、§11.5：不能刪除，一把外洩的 operator key 才不能無限寫入。舊版本不含密文，只有定義：preflight 的期望值以字元計算上限，全用 4 bytes 的字元時每列約 33 KB（DB 的 CHECK 上限是 64 KiB），一般不到 1 KB。
+- **權限**：建立與 PATCH 要 `PROJECT_WRITE`（operator、admin），查詢要 `PROJECT_READ`；其他 project 一律和不存在的一樣回 404（§9.2）。停用的 target 仍可設定：設定不會送出任何流量。
+- **停用 profile**（使用者的決定）：T08 不做，延後到 T21。要移除外洩的 secret，就用新版本取代，舊密文立刻清除。
+
+### 12.7 模組與分層（更新 §11.7）
+
+```text
+main | cli → migrations → health | specs | auth_profiles → grants → targets → projects → api_keys → audit → security → core
+```
+
+| 模組 | 為什麼在這一層 |
+|---|---|
+| auth_profiles | 建立 profile 要鎖住 target，並由 target 得知所屬的 project。不需要 specs 與 grants：preflight 是否在 grant 的範圍內由 T09 判斷 |
+
+- security 加入 `cryptography`（MultiFernet）；仍不得依賴 Web 框架、DB 與 Docker。整個 `secscan` 只有 `security.secret_cipher` 可以 import `cryptography`（import-linter 的第三個 contract，§12.2）。
+- CLI 的 `rotate-secret-keys` 用 auth_profiles 的 repository。
+
+### 12.8 錯誤碼
+
+| HTTP | code | 情況 |
+|---|---|---|
+| 409 | `AUTH_ROLE_CONFLICT` | 同一個 target 已有相同 role_label 的 profile |
+| 409 | `QUOTA_EXCEEDED` | 每個 target 的 profile 數，或每個 profile 的版本數已達上限（沿用既有的錯誤碼） |
+| 422 | `INVALID_REQUEST` | secret、header 名稱、preflight、role_label、名稱或 PATCH 的規則不合；訊息說明欄位與原因，不回顯輸入（沿用既有的錯誤碼） |
+
+### 12.9 不在 T08 範圍
+
+- 建立 scan 時綁定 profile 的最新版本、檢查 preflight 是否在 grant 的範圍內、未認證的 scan 標記為 anonymous：T09。
+- runner 解密並注入 secret（環境變數或 0400 檔，run 結束刪除）、綁定的版本已被取代時啟動前就失敗：M2。
+- guard 只把 secret 送往 target 的 origin、跨 origin 的 redirect 移除 Authorization、Cookie 與自訂的 header；執行 preflight 並計入預算：T11、T12。
+- 確認三個工具注入 `api_key_header` 與 `cookie` 的方式；證據與報告中以已知的 secret 值精確遮罩：M3。
+- 停用 profile、舊版本的封存：T21。速率限制、DDL 與 DML 角色分開：T23。
+- OAuth2／OIDC、自動登入與 refresh token、HTTPS 目標：P1 以後。
+
+何時重新檢討：
+- 需要 OAuth2 或自動登入：改成由 runner 取得 token，平台只保存登入用的 secret，並重新設計換版與遮罩。
+- 每個 profile 100 個版本不夠（例如 token 很快過期、掃描次數很多）：先檢討 lab 的 token 有效期，再考慮封存舊版本。
+- 金鑰需要和 API 程序分開（例如 API 對外開放）：改成 runner 才持有解密的金鑰，API 只加密（需要非對稱加密，不再是 MultiFernet）。
 
 ## 來源
 

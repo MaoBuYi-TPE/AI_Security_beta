@@ -5,6 +5,7 @@ description = "Web/API 多引擎動態安全檢測後端（畢業專題）"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.20.0",
+    "cryptography>=50.0.2",
     "fastapi>=0.143.3",
     "psycopg[binary]>=3.3.6",
     "pydantic>=2.14.1",
@@ -100,13 +101,15 @@ root_package = "secscan"
 # forbidden contract 要檢查第三方套件（fastapi、sqlalchemy…），必須把它們納入 import graph。
 include_external_packages = true
 
-# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7）：
+# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7、§11.7、§12.7）：
 # - main 組裝 app，cli 是本機管理指令；兩者都是程序入口。migrations 登記所有 ORM model。
-# - 功能模組依實際呼叫關係排列：specs 要鎖住 target，並以 grant 預覽 inventory；
+# - 功能模組依實際呼叫關係排列：specs 要鎖住 target，並以 grant 預覽 inventory；auth_profiles
+#   要鎖住 target、得知所屬 project（與 specs 同一層、互不依賴）；
 #   grants 要鎖住 target、得知所屬 project；targets 要確認 project
 #   存在；projects 會用 api_keys 的身分驗證與 audit；api_keys 撤銷 key 時寫 audit；
 #   audit 依賴 security 的遮罩。
-# - security 是共用的安全元件（key 雜湊、遮罩），只依賴 core 的純模組。
+# - security 是共用的安全元件（key 雜湊、遮罩、目標 secret 的加密），只依賴 core 的純模組
+#   與 cryptography。
 # - 跨功能的 FK 以資料表名稱引用，不 import 對方的 model。
 # exhaustive：secscan 底下每個頂層模組都必須列在 layers，新模組不會默默繞過檢查；
 # 同一層以 "a | b" 並列（彼此獨立）。runner 與 Docker 的限制在 M2 加入。
@@ -118,7 +121,7 @@ exhaustive = true
 layers = [
     "main | cli",
     "migrations",
-    "health | specs",
+    "health | specs | auth_profiles",
     "grants",
     "targets",
     "projects",
@@ -131,7 +134,8 @@ layers = [
 # domain 規則（狀態機、scope 比對、fingerprint…）與 security 元件不得依賴 Web 框架、DB 或 Docker
 # （CLAUDE.md §5）。規則一律放在 <feature>/domain.py，或拆成 <feature>/domain/ 套件（子模組也受檢查）。
 # 預設也檢查間接 import：只能用標準函式庫、security 與 core 中的純模組（json_types、text）；
-# 例外是 specs 的 domain 以 PyYAML 純 Python 的事件 API 解析 YAML（docs/DECISIONS.md §11.2）。
+# 例外是 specs 的 domain 以 PyYAML 純 Python 的事件 API 解析 YAML（docs/DECISIONS.md §11.2），
+# 以及 security 以 cryptography 的 MultiFernet 加密目標的 secret（§12.1）。
 [[tool.importlinter.contracts]]
 name = "Domain and security modules stay free of frameworks, DB and Docker"
 type = "forbidden"
@@ -142,6 +146,16 @@ source_modules = [
     "secscan.security.**",
 ]
 forbidden_modules = ["fastapi", "starlette", "sqlalchemy", "alembic", "psycopg", "docker"]
+
+# 加密只經由 security.secret_cipher（docs/DECISIONS.md §12.2）：其他模組不得直接使用 cryptography，
+# 解密只能透過 SecretCipher.reveal（AST 測試確認 src 中沒有呼叫者），不會繞過去自己解。
+# 預設也檢查間接 import，所以只忽略 secret_cipher 自己的那一條。
+[[tool.importlinter.contracts]]
+name = "Only security.secret_cipher uses cryptography"
+type = "forbidden"
+source_modules = ["secscan"]
+forbidden_modules = ["cryptography"]
+ignore_imports = ["secscan.security.secret_cipher -> cryptography"]
 
 [tool.alembic]
 # migration 放在套件內，和其他程式一樣受 ruff、mypy 與 coverage 檢查。

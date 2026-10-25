@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from secscan.core.config import AppEnv, Settings
 from secscan.main import create_app
+from tests.secret_support import encryption_keys
 
 type ClientFactory = Callable[[AppEnv], TestClient]
 
@@ -26,6 +27,9 @@ DB_ENV_KEYS = (
     "DB_PASSWORD",
     "DB_CONNECT_TIMEOUT_SECONDS",
 )
+# 目標 secret 的加密金鑰也一樣不沿用（shell 或 .env 裡可能是真的金鑰）；
+# 需要的 fixture 帶測試用的金鑰。
+SECRET_ENV_KEYS = ("SECRET_ENCRYPTION_KEYS",)
 # 127.0.0.1:1 沒有服務：就算有測試誤打需要 DB 的端點，也只會立刻失敗。
 UNREACHABLE_DB_PORT = 1
 
@@ -41,7 +45,7 @@ def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     要測 .env 讀取行為的測試，自行把 env_file 設回來。
     """
     monkeypatch.setitem(Settings.model_config, "env_file", None)
-    for key in DB_ENV_KEYS:
+    for key in (*DB_ENV_KEYS, *SECRET_ENV_KEYS):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -73,6 +77,7 @@ def make_client() -> Iterator[ClientFactory]:
             app_env=app_env,
             db_port=UNREACHABLE_DB_PORT,
             db_password=SecretStr("not-a-real-password"),
+            secret_encryption_keys=encryption_keys(),
             _env_file=None,
         )
         test_client = TestClient(create_app(settings))

@@ -39,6 +39,7 @@ class ErrorCode(StrEnum):
     METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
     PROJECT_NAME_CONFLICT = "PROJECT_NAME_CONFLICT"
     TARGET_ORIGIN_CONFLICT = "TARGET_ORIGIN_CONFLICT"
+    AUTH_ROLE_CONFLICT = "AUTH_ROLE_CONFLICT"
     INVALID_STATE_TRANSITION = "INVALID_STATE_TRANSITION"
     TARGET_DISABLED = "TARGET_DISABLED"
     QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
@@ -141,7 +142,10 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
 
 
 async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """請求驗證失敗：只列出欄位位置（例如 query.page），不回顯 input、ctx 等內容。"""
+    """請求驗證失敗：只列出欄位位置（例如 query.page），不回顯 input、ctx 等內容。
+
+    exc 的 str()、errors() 與 body 都含原始的請求內容（可能是目標的 secret），不可寫進 log。
+    """
     if not isinstance(exc, RequestValidationError):
         raise exc
     locations = [_location(error.get("loc", ())) for error in exc.errors()]

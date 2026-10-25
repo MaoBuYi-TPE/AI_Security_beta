@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from secscan.api_keys.dependencies import authenticated_router, current_principal
+from secscan.auth_profiles.dependencies import secret_cipher
 from secscan.core.api import API_V1_PREFIX
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseResources, create_db_engine
@@ -50,6 +51,12 @@ V1_ROUTES = {
     ("GET", "/api/v1/targets/{target_id}/api-specs"),
     ("GET", "/api/v1/api-specs/{spec_id}"),
     ("GET", "/api/v1/api-specs/{spec_id}/operations"),
+    # T08
+    ("POST", "/api/v1/targets/{target_id}/auth-profiles"),
+    ("GET", "/api/v1/targets/{target_id}/auth-profiles"),
+    ("GET", "/api/v1/auth-profiles/{profile_id}"),
+    ("PATCH", "/api/v1/auth-profiles/{profile_id}"),
+    ("GET", "/api/v1/auth-profiles/{profile_id}/versions"),
 }
 CANARY = "canary-credential-0003"
 
@@ -192,3 +199,24 @@ def test_rejections_are_logged_with_reason_but_without_the_credential(
     assert "reason=malformed" in logged
     assert response.headers[REQUEST_ID_HEADER] in logged
     assert CANARY not in logged
+
+
+def test_only_writes_to_auth_profiles_get_the_cipher(client: TestClient) -> None:
+    """最小權限（審查建議）：查詢的路徑用不到加密元件，就不拿到它。"""
+    routes = {
+        (method, route.path): route
+        for route in _v1_routes(client)
+        for method in route.methods or ()
+        if "auth-profiles" in (route.path or "")
+    }
+    with_cipher = {
+        key
+        for key, route in routes.items()
+        if isinstance(route.dependant, Dependant) and secret_cipher in _calls(route.dependant)
+    }
+
+    assert len(routes) == 5
+    assert with_cipher == {
+        ("POST", "/api/v1/targets/{target_id}/auth-profiles"),
+        ("PATCH", "/api/v1/auth-profiles/{profile_id}"),
+    }

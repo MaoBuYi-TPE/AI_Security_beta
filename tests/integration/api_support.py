@@ -12,6 +12,9 @@ from sqlalchemy.orm import Session
 
 from secscan.api_keys.domain import IssuedApiKey, Principal, Role
 from secscan.api_keys.service import ApiKeyService
+from secscan.auth_profiles.domain.credentials import AuthType, SecretValue
+from secscan.auth_profiles.domain.model import AuthProfile, PreflightInput, ProfileInput
+from secscan.auth_profiles.service import AuthProfileService
 from secscan.core.config import DEFAULT_LAB_CIDR
 from secscan.grants.domain.lifecycle import ScopeGrant
 from secscan.grants.domain.scope import GrantRequest
@@ -23,6 +26,7 @@ from secscan.specs.domain.model import ApiSpec, SpecUpload
 from secscan.specs.service import ApiSpecService
 from secscan.targets.domain import LabNetwork, Target, TargetKind
 from secscan.targets.service import TargetService
+from tests.secret_support import shared_cipher
 
 MINIMAL_SPEC = (
     b'{"openapi": "3.0.3", "info": {"title": "t", "version": "1"},'
@@ -31,6 +35,14 @@ MINIMAL_SPEC = (
 # 與 API（create_app 的預設設定）相同的 lab 網段。
 LAB = LabNetwork(DEFAULT_LAB_CIDR)
 LAB_IP = "10.89.7.20"
+# VAmPI 的 GET /me（tests/fixtures/openapi/vampi-openapi3.yml）：
+# 回應是 {"data": {...}, "status": ...}。
+VAMPI_ME = PreflightInput(
+    method="GET",
+    path="/me",
+    expected_status=200,
+    expected_json={"/data/username": "name1", "/status": "success"},
+)
 
 
 @dataclass(frozen=True)
@@ -140,6 +152,30 @@ class Seeder:
                 caller.principal,
                 target.id,
                 SpecUpload(spec_format=SpecFormat.JSON, content=content),
+                request_id=None,
+            )
+
+    def auth_profile(
+        self,
+        caller: Caller,
+        target: Target,
+        *,
+        role_label: str = "standard_user",
+        value: str = "t1",
+    ) -> AuthProfile:
+        """以 bearer 建立一個認證設定（preflight 是 VAmPI 的 GET /me），secret 以測試的金鑰加密。"""
+        with self._session() as session:
+            return AuthProfileService(session, cipher=shared_cipher()).create(
+                caller.principal,
+                target.id,
+                ProfileInput(
+                    name=unique_name("profile"),
+                    role_label=role_label,
+                    type=AuthType.BEARER,
+                    header_name=None,
+                    secret=SecretValue(value),
+                    preflight=VAMPI_ME,
+                ),
                 request_id=None,
             )
 
