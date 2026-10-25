@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S76 為 2026-10-25。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -80,6 +80,8 @@
 | S74 | [PostgreSQL — Partial Indexes](https://www.postgresql.org/docs/current/indexes-partial.html) | Example 11.3：`CREATE UNIQUE INDEX … WHERE success`，「This enforces uniqueness among the rows that satisfy the index predicate, without constraining those that do not」。T08 以 `WHERE encrypted_secret IS NOT NULL` 保證每個 profile 最多一份密文 |
 | S75 | [OWASP WSTG — Test HTTP Methods](https://github.com/OWASP/wstg/blob/master/document/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management/06-HTTP_Methods.md) | HTTP Method Overriding：有些框架以 `X-HTTP-Method`、`X-HTTP-Method-Override`、`X-Method-Override` 覆寫實際的 method，目的常是繞過擋下特定 method 的中介者；也有框架以 `_method` 參數覆寫。T08 的 api_key_header 拒絕這三個 header；`_method` 留給 guard（T11） |
 | S76 | [PortSwigger Web Security Academy — Access control](https://portswigger.net/web-security/access-control) | 「Broken access control resulting from platform misconfiguration」：有些框架支援以 `X-Original-URL`、`X-Rewrite-URL` 覆寫請求的 URL，前端依 URL 限制時可以被繞過。T08 的 api_key_header 拒絕這兩個 header |
+| S77 | [httpoxy](https://httpoxy.org/) | 「RFC 3875 (CGI) puts the HTTP `Proxy` header from a request into the environment variables as `HTTP_PROXY`」，信任這個環境變數的 HTTP client 就把對外的請求送往攻擊者指定的代理；CVE-2016-5385（PHP）、CVE-2016-5386（Go）、CVE-2016-5387（Apache HTTP Server）、CVE-2016-1000110（Python CGIHandler）等；建議「block `Proxy` request headers as early as possible」，這個 header 不是 IETF 定義的。T08 的 api_key_header 拒絕 `Proxy`（審查後補上） |
+| S78 | [PortSwigger Web Security Academy — Exploiting HTTP Host header vulnerabilities](https://portswigger.net/web-security/host-header/exploiting) | 「Inject host override headers」：除了 `X-Forwarded-Host`，還有 `X-Host`、`X-Forwarded-Server`、`X-HTTP-Host-Override`、`Forwarded` 等作用相同的 header。T08 的 api_key_header 拒絕這些 header（`X-Forwarded-*` 以前綴拒絕） |
 
 ## 需要在 M0–M2 實際確認的事項
 

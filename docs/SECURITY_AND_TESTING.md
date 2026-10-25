@@ -136,10 +136,11 @@ T05 已涵蓋 project 層的權限：
 SEC-16 要求的 scan、finding、artifact 跨專案測試，隨這些資源在 T09 與 M3–M5 加入，尚未完成。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
 
 T08 已涵蓋認證設定：
-- **secret 不外流（SEC-14 的平台這一側）**：以 canary 確認 secret 不出現在任何回應（含 4xx）與 header、DEBUG 等級的所有日誌、audit、DB 的明文；422 只說明欄位與原因。
+- **secret 不外流（SEC-14 的平台這一側）**：以 canary 確認 secret 不出現在任何回應（含 4xx）與 header、DEBUG 等級的所有日誌、audit、DB 的明文；422 只說明欄位與原因，expected_json 的 key 也不回顯。FastAPI 內建的 telemetry 已關閉；查詢的路由拿不到加密元件。
+- **context 的綁定**：密文搬到其他 profile，或同一個 profile 中另一種 type、另一個 header 名稱的版本，金鑰換版時都會發現。
 - **DB 的最後一道防線**：每個 CHECK、FK、unique 與部分唯一索引都有違反測試；trigger 只允許清除密文與重新加密，其他修改、恢復已清除的密文、DELETE、TRUNCATE、INSERT 不帶密文都被擋下。
 - **版本**：建立新版本時上一版的密文被清除，沿用時密文逐 byte 相同；每個 target 10 個、每個 profile 100 個的上限。
-- **併發**：同時 PATCH 時版本連號、只留一份密文；沿用 secret 的 PATCH 會等金鑰換版 commit，複製到的是換版後的密文；同時建立時上限精確、相同的 role_label 回 409（都以 `pg_stat_activity` 確認後到的在等列鎖）。
+- **併發**：同時 PATCH 時版本連號、只留一份密文；沿用 secret 的 PATCH 會等金鑰換版 commit，複製到的是換版後的密文；反過來，金鑰換版也會等還沒 commit 的 PATCH，不會漏掉它新增的密文（審查時發現，修正前測試失敗）；先開始、後拿到鎖的 PATCH，清除時間不早於被清除版本的建立時間；同時建立時上限精確、相同的 role_label 回 409（都以 `pg_stat_activity` 確認後到的在等列鎖）。
 - **金鑰換版的 CLI**：每個測試用全新的資料庫；新舊金鑰換版、移除舊金鑰後再確認、少了舊金鑰或 commit 失敗時什麼都不改。
 
 T06 已涵蓋 target 與 scope grant：

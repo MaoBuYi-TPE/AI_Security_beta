@@ -554,8 +554,121 @@
       - **T11（M2）**：guard 以 `covers()` 比對實際的請求（請求的 path 全是 literal）；比對前先拒絕 `%2e`、`%2f`、`;`、`//`、`/./`；`in: header` 的參數（例如 `Host`）與具體請求中的字面 `{x}` 也在這裡處理。
       - **T14（M3）**：交給 ZAP 的是只含 eligible operation 的正規化文件；量測參照炸彈與工具處理 discriminator、links 的實際行為；draft-04 的 `id` 與說明用的 URL 也在這裡一併確認。
       - **T21、T23**：規格文字（title、description 與說明用的 URL）在報告中的安全編碼；上傳的速率限制與同時解析的數量；慢速上傳仍會佔住連線，要在這裡一併處理。
-- [ ] T08 建立 auth profile 與 secret 生命週期。
+- [x] T08 建立 auth profile 與 secret 生命週期。
   - DoD：secret 以 MultiFernet 加密、只寫不讀、支援換版、不寫入 log；preflight 定義有驗證。
+  - 交付（2026-10-25，done）：
+    - 範圍：
+      - 被測目標的認證設定：bearer、API key header、Cookie 三種（P0 範圍），secret 以 MultiFernet 加密保存、只寫不讀。
+      - 換版：PATCH 產生新版本，建立新版本時清除上一版的密文（每個 profile 最多一份）；加密金鑰換版的本機 CLI `secscan-admin rotate-secret-keys`。
+      - preflight 的定義與驗證（只定義、不執行，T12 才執行）。
+      - migration `0004`（auth_profiles、auth_profile_versions、部分唯一索引與 trigger）。
+      - 兩項由使用者決定（2026-10-25）：清除被取代版本的密文；停用 profile 的端點延後到 T21。
+      - 設計決定見 `DECISIONS.md` §12，API 見 `API_CONTRACT.md` §16。T08 不對 target 發出任何流量。
+    - 檔案：
+      - 程式：
+        - `src/secscan/security/secret_cipher.py`：`SecretCipher`（seal、reveal、rotate；以 context 綁定位置的 JSON envelope；金鑰的解析）；`security/api_key_tokens.py` 的 `contains_platform_key`
+        - `src/secscan/auth_profiles/`：`domain/credentials`（三種類型、header 名稱的拒絕清單、secret 的格式）、`domain/preflight`（preflight 與 JSON Pointer）、`domain/model`（role_label、context、密文欄位的上限、PATCH 的合併規則、尚未驗證的輸入）、`domain/errors`、`models`、`repository`、`service`、`schemas`、`router`、`dependencies`
+        - `src/secscan/migrations/versions/v0004_auth_profiles.py`；`cli.py`（`rotate-secret-keys`）；`main.py`（`app.state.secret_cipher`、router、關閉 FastAPI 內建的 telemetry）；`core/config.py`（`SECRET_ENCRYPTION_KEYS`）；`core/errors.py`（`AUTH_ROLE_CONFLICT`）；`migrations/metadata.py`
+      - 設定：`pyproject.toml`（執行期依賴 cryptography 50.0.2；layers 加入 auth_profiles；import-linter 新增「只有 `security.secret_cipher` 可以用 cryptography」）、`uv.lock`（pycparser 鎖在 3.11）、`Makefile`（`make env` 產生 `SECRET_ENCRYPTION_KEYS`，認得 `export` 與前置空白的寫法；`make dev` 先執行 `make env`）、`.env.example`
+      - 測試：
+        - unit：`tests/unit/security/test_secret_cipher.py`、`tests/unit/auth_profiles/`（credentials、preflight、model）、`test_secret_reveal_callers.py`、`test_cipher_dependency.py`、`test_cli.py`（rotate 的設定錯誤）、`tests/api/test_auth_profile_docs.py`
+        - integration：`test_auth_profile_schema.py`、`test_auth_profile_repository.py`、`test_auth_profile_service.py`、`test_auth_profile_races.py`、`test_auth_profiles_api.py`、`test_rotate_secret_keys_cli.py`
+        - 既有測試：`V1_ROUTES` 與「只有寫入的路由拿到加密元件」（`test_authentication.py`）、`test_migrations.py`、`test_schema_constraints.py`（CHECK 40 → 52、索引）、`test_app_factory.py`（金鑰、telemetry）、`test_config.py`、`test_lab_dependency.py`、`tests/conftest.py` 與 `tests/integration/database.py`（測試金鑰，`tests/secret_support.py`）、`api_support.py`（`Seeder.auth_profile`）；`test_admin_key_callers.py` 的 AST 檢查移到 `tests/unit/source_support.py` 共用
+      - 文件：`DECISIONS.md` §12（含審查後的修正）、`API_CONTRACT.md` §2、§6、§12、§16、`ARCHITECTURE.md`、`SECURITY_AND_TESTING.md`、`SOURCES.md`（S69–S78）、`README.md`、`CLAUDE.md` §1、§13
+    - 端點：
+      - `POST`、`GET /api/v1/targets/{target_id}/auth-profiles`（GET 為新增）
+      - `GET`、`PATCH /api/v1/auth-profiles/{profile_id}`（GET 為新增）
+      - `GET /api/v1/auth-profiles/{profile_id}/versions`（新增）
+    - DoD 對照：
+      - **以 MultiFernet 加密**：
+        - `SecretCipher` 以第一個金鑰加密；加密的是 `{"context": "auth_profile:<id>:<type>:<header_name 或 ->", "v": 1, "value": …}`。密文搬到其他 profile，或同一個 profile 中另一種送出方式的版本，就解不開（換版時也會發現）。
+        - DB 只存 Fernet token：CHECK 確認以 `gAAAAA` 開頭、長度不超過由最大 secret 與最長 context 推算的上限（11,236 bytes）。有測試以實際加密核對公式，並以 `pg_get_constraintdef` 確認 migration 的數字與 domain 的常數一致。
+        - 改動 token 解碼後的任何一個 byte、用錯金鑰、context 不符，都解不開（Hypothesis）。
+      - **只寫不讀**：
+        - 沒有任何端點回傳 secret 或由它衍生的值（不存 hash）；API 文件中的 secret 是 writeOnly。
+        - API 從不解密：沿用 secret 時直接複製密文。AST 測試確認 src 中沒有任何模組呼叫 `reveal`、`reencrypt_secrets` 只有 cli.py 呼叫；import-linter 確認只有 `security.secret_cipher` 用 cryptography；查詢的路由拿不到加密元件。
+      - **支援換版**：
+        - 加密金鑰：新金鑰放第一個之後，新的 secret 用新金鑰、舊的仍解得開；`rotate-secret-keys` 在一個 transaction 內重新加密全部，有任何一份解不開就全部回滾、exit 1；移除舊金鑰後再執行一次確認。換版與 PATCH 互相等待對方 commit（兩個方向都有併發測試）。
+        - profile：PATCH 產生新版本，沿用 secret 時密文逐 byte 相同，上一版的密文清除；DB 以部分唯一索引保證每個 profile 最多一份密文；trigger 只允許清除與重新加密。
+      - **不寫入 log**：請求的 secret 是 `SecretStr`；domain 物件的 repr 不含 secret 與密文；422 只說明欄位與原因（`expected_json` 的 key 也不回顯）；FastAPI 內建的 telemetry 關閉。以 canary 確認：所有回應（含 4xx）與 header、DEBUG 等級的所有日誌、audit、DB 的明文都找不到。
+      - **preflight 定義有驗證**：只有 GET；path 用 grant 的語法但不可有佔位；status 200–299；expected_json 1–16 項（JSON Pointer → 字串、整數、布林、null，型別嚴格）；只看狀態碼的定義被拒絕。比對的語意寫進 DECISIONS §12.5，T12 照著實作。
+    - 實際執行：
+      - TDD：每一步先寫測試並確認失敗，例如：
+        - `ModuleNotFoundError`（`secret_cipher`、`auth_profiles`、repository、service）、`ImportError`（`contains_platform_key`、domain 的輸入）
+        - 設定與啟動：6 failed（沒有欄位、`create_app` 不檢查）；schema 測試先於 migration：49 failed（`relation "auth_profiles" does not exist`）
+        - 路由：`V1_ROUTES` 先更新，3 failed；API 整合測試與 API 文件的測試先寫，37 failed；CLI：5 failed（invalid choice）
+        - 審查後的修正：
+          - 「金鑰換版等還沒 commit 的 PATCH」的併發測試先寫：1 failed（換版沒有等，留下舊金鑰的密文）。
+          - 其餘修正的測試一起先寫：78 failed。其中 header 的拒絕清單 15、context 的綁定與長度 3、密文的 repr 1、telemetry 1、加密元件只給寫入的路由 1、`expected_json` 的 key 不回顯 1、清除時間 1、換版發現搬到另一種送出方式的密文 1 是各自的行為；其他是 `secret_context` 改成兩個參數之後，既有的呼叫一起失敗，不是各自的行為。
+          - 「查詢的 service 不能寫入」：1 failed（拋錯之前已寫入 profile 的列）→ 改成先確認有加密元件，再動 DB。
+      - 實作之後才補的測試（不是先寫）：
+        - coverage 抓到的：只換 API key 的值、沿用 header 名稱（最常見的情況卻漏測）；`parse_pointer` 自己拋錯的那一行；PATCH 帶不合法的 preflight；鎖之前 target 或 profile 消失等防禦分支（monkeypatch）；空的金鑰清單；CLI 的 commit 失敗與超過 10 個 profile 的摘要。
+        - 突變檢查找到的：「PATCH 不可默默忽略與變更一起送來的 null」；審查後「沿用 secret 的 PATCH 也要等只改版本列的寫入」（直接以 SQL 重新加密，沒有先鎖 profile）。
+        - 守門的測試從一開始就通過，鑑別力由突變檢查確認：`reveal` 沒有呼叫者的 AST 測試、第一批併發測試（4 個）、`CurrentCipher` 的 unit test、`pg_get_constraintdef` 核對密文上限的測試。
+      - 測試本身的問題（都已修正）：
+        - 改 base64 文字的字元不一定改到 token（`-` 與 `+` 解出相同的值），改成改解碼後的 byte。
+        - BEFORE trigger 先於 CHECK 執行，「密文 NULL」的 INSERT 改由 trigger 的測試涵蓋；65 個字元的 role_label 先撞到 varchar 的長度，改成 `"user\n"`；同一個 transaction 建立的列 `created_at` 相同，順序改依 (created_at, id) 檢查；`**{field: …}` 與位置參數重複；CLI 的測試漏設 `APP_ENV`。
+        - 工具輸入把 U+2028、U+202E、U+200B、U+3000 寫成實際的字元，改回跳脫序列。
+      - 程式的問題（測試或檢查抓到）：
+        - 錯誤訊息不一致（有的以 type 開頭），改成都以欄位名稱開頭。
+        - DECISIONS 原本寫「每列最多約 9 KB」：非 ASCII 的期望值每個字元最多 4 bytes，實際約 33 KB；已更正，並加上 64 KiB 的 CHECK 與最壞情況的測試。
+        - mypy：jsonb 讀回的型別、audit 的 pointers；ruff：全形字元的寬度、S105 的誤報（改名 `CONTEXT_PREFIX`）。
+      - 依賴：cryptography 50.0.2、cffi 2.1.1；pycparser 3.12 才發布 3 天，鎖在 3.11（2026-10-09）。
+      - 突變檢查（審查前 88 項、審查後共 101 項，每一項都讓測試失敗；腳本不進 repo，跑完還原檔案）：
+        - 第一輪：87/88。存活的是「PATCH 接受 null」：只送 `{"secret": null}` 時 domain 仍回「至少要修改一個欄位」，測不出 schema 的 null 檢查；和真正的變更一起送時，拿掉檢查後會默默忽略 null。補上測試後 1/1。
+        - 審查後的完整重跑：94/95。存活的是「沿用時不鎖版本列」：換版改成先以 `FOR SHARE` 鎖 profile 之後，PATCH 在鎖 profile 時就會等換版，版本列的鎖成了第二道防線，既有的測試分辨不出。補上「只改版本列、沒有先鎖 profile 的寫入」的併發測試，docstring 與 DECISIONS §12.3 說明這道鎖的用途。
+        - 之後新增 6 項：查詢的路由拿到加密元件、寫入前不先確認有加密元件；計畫中列了、先前卻沒有做成突變的 4 項（建立時把 secret 寫進 log、Bearer 的錯誤訊息回顯輸入、422 回顯請求內容、`SecretValue` 的 repr 帶出值）。連同上面存活的那一項，7/7。
+        - 加密：直接存明文、不檢查 context、context 不綁 profile 或送出方式、金鑰順序顛倒、rotate 原樣回傳、換版解不開時仍寫入、金鑰可以重複或沒有數量上限、token 長度公式少算 padding
+        - 只寫不讀與不寫入 log：audit 帶 secret 或期望值、建立時把 secret 寫進 log、錯誤訊息或 422 回顯輸入、schema 檢查 `expected_json` 的 key、`SecretValue` 的 repr 帶出值、查詢的路由拿到加密元件、寫入前不先確認有加密元件、telemetry 沒有關閉、沒有金鑰也啟動。「回應帶 secret」無法以單點突變製造（回應由不含 secret 的 domain 物件產生），由 canary 測試涵蓋。
+        - 換版：不清除舊密文、沿用時不複製密文、type 改變卻允許沿用、拿掉部分唯一索引或 trigger 的檢查、允許恢復已清除的密文、建立新版本時不鎖 profile、沿用時不鎖版本列、換版不先鎖 profile、清除時間用 transaction 開始的時間、migration 的密文上限與 domain 不一致
+        - 類型：bearer 接受空白、header 值接受控制字元或前後的空白、cookie 的值接受分號、空白與引號、cookie 名稱可以重複或數量沒有上限、拒絕清單區分大小寫或少了某一類（Host、Proxy、`Proxy-*`、X-HTTP-Method-Override）、接受平台 key 或只比對開頭
+        - preflight：接受 POST、接受佔位、expected_json 可以空、接受浮點數、布林當成整數、不檢查 `~` 跳脫、status 的範圍差一
+        - 權限與上限：viewer 可以寫、不檢查 project、拿掉 profile 或版本的上限、role_label 可以重複；CLI：換版失敗仍回 0、不寫 audit
+      - 檢查結果（審查修正後，2026-10-25）：
+        - `make test`：2194 passed，coverage 100%（4402 statements、896 branches，0 未涵蓋）。
+        - `make lint`：ruff、import-linter（3 kept, 0 broken）；`make typecheck`：mypy strict，187 個檔案無問題；`pre-commit run --all-files` 全部通過。
+        - `make env`：在 scratchpad 的暫時目錄手動驗證（第一次產生、權限 600、金鑰格式有效；第二次不變；空值 exit 2；沒有結尾換行時先補；`export` 與前置空白的寫法認得出既有的值，不附加第二把）；沒有碰 repo 的 `.env`。
+        - import-linter 的新規則：故意加入違規的 import 時 BROKEN，還原後 KEPT。
+        - 沒有執行：`make test-contract`、`make test-live-lab`、`make bench`（Makefile 還沒有這些目標，依 CLAUDE.md §13 分別在 M1–M2、M3、M5 才建立）。T08 不發出任何流量。
+      - 手動端到端（做法同 T05–T07）：
+        - 在 db-test 建立暫時資料庫，API 跑在 127.0.0.1:8765（[::1]:8765 是別的程式，沒有動它）；金鑰、平台 key 與含 canary 的請求 body 都寫進 0600 的檔案，curl 用 `-H @檔案` 與 `--data-binary @檔案`；不用 repo 的 `.env`。不啟動 lab。
+        - 第一次（審查前）：全部符合預期。
+        - 審查修正後重跑（新的暫時資料庫）：
+          - 建立 201，查詢與清單 200；只改 preflight 得到 v2，密文的 sha256 與 v1 原本相同，v1 已清除；換 secret 得到 v3，版本清單只有 v3 的 `secret_configured` 是 true。
+          - 拒絕的情境 13 種都是 422 且不回顯，包括審查後新增的 Proxy、X-Client-IP，以及 key 是 canary 的 `expected_json`（訊息只說「第 1 項的 key」）。
+          - viewer 寫入 403；B 的 operator 讀取或 PATCH A 的 profile 回 404，回應與不存在的 id 相同；role 重複 409 `AUTH_ROLE_CONFLICT`；第 11 個 409 `QUOTA_EXCEEDED`；audit 有 12 個 `auth_profile.*` 事件。
+          - 金鑰換版：以 `key2,key1` 重啟後，新建的 secret 只有 key2 解得開；`rotate-secret-keys` exit 0（12 份），之後只用 key2 就解得開；只留 key2 再執行一次 exit 0；只放不相干的 key3 時 exit 1，DB 的密文不變。
+          - canary、3 把 Fernet 金鑰與 admin key 在伺服器日誌（77 行）、CLI 輸出、存下的回應、db-test 容器日誌、audit 與 DB 中都出現 0 次；Traceback 0、HTTP 500 0。
+        - 結束後：只停止自己啟動的 uvicorn；刪除暫時資料庫與 `runs/t08`，db-test 沒有殘留的資料庫與角色；127.0.0.1:8765 沒有在聽；[::1]:8765 的程式與其他專案的容器都沒有動。
+    - 審查（兩個 reviewer 都用 Opus）：
+      - code-reviewer：APPROVE（0 CRITICAL、0 HIGH、1 MEDIUM、3 LOW）。
+        - MEDIUM：金鑰換版會漏掉進行中、沿用 secret 的 PATCH 新增的版本，卻回報成功（自行重現）：PATCH 已鎖住舊版本列並複製舊密文，換版等到它 commit 後重新檢查，舊版本已清除而跳過，新版本又在它的 snapshot 之後才出現。移除舊金鑰後這份 secret 就解不開。
+        - LOW：422 會回顯 `expected_json` 的 key；`secret_erased_at` 用 `now()`，同時 PATCH 時清除時間會早於建立時間（自行重現）；migration 寫死的上限與 domain 的常數之間沒有漂移檢查。
+      - security-reviewer：APPROVE（0 CRITICAL、0 HIGH、1 MEDIUM、3 LOW，另有 6 項加固建議）。
+        - MEDIUM：同上的換版競爭（自行重現）。
+        - LOW：拒絕清單漏掉單獨的 `Proxy`（httpoxy）；`.env` 的金鑰行寫成 `export …=` 或等號前有空白時，`make env` 會再附加一把新金鑰並默默取代；context 只綁 profile，能寫 DB 的人可以把密文改用在別的送出方式（都自行重現）。
+        - 加固建議：關閉 FastAPI 0.143 內建的 OpenTelemetry（驗證錯誤含明文的 secret）；以 import-linter 限制 cryptography；audit 記 preflight 的 path 但不記期望值的理由；清除只是邏輯上的；查詢的端點不需要加密元件；給 T12 的 JSON Pointer 備註。
+      - 已修正，每一項都有先失敗的測試（`make env` 與 import-linter 以手動驗證）與突變檢查：
+        - 換版先依 id 的順序以 `FOR SHARE` 鎖住所有 profile，和 PATCH 的順序相同：兩個方向都互斥，也不會死結。
+        - 清除時間改用 `statement_timestamp()`；`expected_json` 的 key 與值改在 domain 檢查，訊息只說是第幾項；以 `pg_get_constraintdef` 核對 CHECK 的上限。
+        - 拒絕清單補上 Proxy、X-Forwarded、來源 IP 類 8 個、X-Host、X-HTTP-Host-Override、X-Original-URI、X-Envoy-Original-Path；context 加上 type 與 header 名稱（密文上限隨之改成 11,236 bytes）；`make env` 認得 `export` 與前置空白。
+        - 加固建議 6 項都採用：telemetry 關閉並有測試（`core/errors.py` 也註明驗證錯誤的內容不可寫進 log）；import-linter 的第三個 contract；audit 的 path 與「清除只是邏輯上的」寫進 DECISIONS §12.2、§12.3 與 README；查詢的路由與 service 不拿加密元件；T12 的備註寫進 §12.5。
+    - 限制：
+      - API 程序持有能解密的金鑰（Fernet 是對稱加密）：加密擋得住 DB dump、備份與 SQL injection 讀到的密文，擋不住 API 程序本身被入侵。
+      - 金鑰和 DB 密碼都在 `.env`（M1 單一信任區）；金鑰遺失時所有 secret 都解不開，只能重新設定（README 提醒備份）。
+      - 清除被取代版本的密文只是邏輯上的：舊的 tuple 要等 VACUUM，WAL 與備份中也還有（受金鑰保護）；secret 外洩時要到目標系統讓它失效。
+      - 被取代版本的密文已清除：排隊中、綁定舊版本的 scan 會在 runner 啟動前失敗，不自動改用新版本（T09、M2）。
+      - header 的拒絕清單不保證完整；主要防線是嚴格的字元集，實際送出的 header 由 M2 的 guard 檢查。
+      - 能寫 DB 的人仍能清除密文或搬動密文（trigger 允許這兩種 UPDATE）：結果是 scan 失敗或換版時發現，不會洩密；和其他 trigger 一樣只防程式錯誤造成的誤改。
+      - 停用 profile 的端點沒有做（使用者決定延後到 T21）：要移除外洩的 secret，就以新版本取代。
+      - 三種類型中只有 bearer 在 T03 驗證過工具的注入方式；api_key_header 與 cookie 在 M3 驗證。
+      - SEC-14、SEC-15 只完成平台這一側；工具輸出與證據的遮罩在 M3，跨 origin 的轉送由 M2 的 guard 證明。
+      - 既有的 T04–T07 測試檔有 4 處實際的 U+3000、1 處 U+202E（`tests/unit/specs/test_openapi.py:321`），不在 T08 範圍，沒有修改。
+    - 給後續任務：
+      - **T09**：建立 scan 時綁定 profile 的最新版本，快照記下 id、version、type、header_name、role_label 與 preflight（不含 secret）；preflight（GET 與 path）必須在 scan 的 grant 範圍內（`ScopeRules.classify`），否則 422；未認證的 scan 標記為 anonymous。
+      - **M2（T10–T12）**：runner 是 `reveal` 唯一的呼叫者（更新 `test_secret_reveal_callers.py`），以環境變數或 0400 檔注入、run 結束刪除；綁定的版本已被取代時啟動前就失敗。guard：secret 只送往 target 的 origin，跨 origin 的 redirect 移除 Authorization、Cookie 與自訂的 header；`_method` 這類以參數覆寫 method 的寫法也在 guard 處理。preflight 計入預算，以純函式實作 DECISIONS §12.5 的比對語意（陣列索引 `01` 與 `-` 算指不到），另以匿名請求執行一次（匿名也符合就標為 inconclusive）。
+      - **M3（T14、T15）**：確認三個工具注入 `api_key_header` 與 `cookie` 的方式；證據與報告以已知的 secret 值精確遮罩，並補上 T05 的 HAR、URL 遮罩缺口；lab 的 token 有效期（VAmPI 的 `tokentimetolive`）若讓版本數不夠用，再調整 lab。
+      - **T21**：停用 profile；舊版本的封存。**T23**：速率限制；DDL 與 DML 角色分開；金鑰改放 compose secrets。
 - [ ] T09 建立 scan、scanner_run 工作佇列、idempotency、狀態機與 FakeRunner。
   - DoD：
     - API 回 202；scan 與 scanner_runs 在同一個 transaction 建立。

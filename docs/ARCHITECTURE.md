@@ -202,10 +202,10 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - path 與 method 的比對在 `grants/domain/matching.py`（`covers()`、`ScopeRules`），M2 的 guard 也用它比對實際的請求。
   - 上傳先檢查權限、再解析，解析完才以 `FOR UPDATE` 鎖 target 取 version，不拖長鎖住 target 的時間。
 - **認證設定與 secret（T08，`DECISIONS.md` §12）**：
-  - `SecretCipher`（`security/secret_cipher.py`，MultiFernet）由 `create_app` 依 `SECRET_ENCRYPTION_KEYS` 建立，放在 `app.state.secret_cipher`，路由以 `CurrentCipher` 取得；沒有金鑰或格式不合時 API 不會啟動。
-  - 加密的內容綁定 `auth_profile:<id>`（context）。API 只加密、不解密：新版本沿用 secret 時直接複製密文；以 AST 測試確認 src 中沒有任何模組呼叫 `reveal`（M2 的 runner 會是唯一的呼叫者）。
+  - `SecretCipher`（`security/secret_cipher.py`，MultiFernet）由 `create_app` 依 `SECRET_ENCRYPTION_KEYS` 建立，放在 `app.state.secret_cipher`，只有建立與 PATCH 的路由以 `CurrentCipher` 取得（查詢的路由沒有它）；沒有金鑰或格式不合時 API 不會啟動。只有 `security.secret_cipher` 可以 import `cryptography`（import-linter）。
+  - 加密的內容綁定 `auth_profile:<id>:<type>:<header_name 或 ->`（context）。API 只加密、不解密：新版本沿用 secret 時直接複製密文；以 AST 測試確認 src 中沒有任何模組呼叫 `reveal`（M2 的 runner 會是唯一的呼叫者）。
   - 認證類型、secret 的格式、preflight 與 PATCH 的規則都在 `auth_profiles/domain/`，不依賴框架與 DB。schema 只限制型別與長度，規則在權限檢查之後驗證。
-  - 鎖的順序：建立以 `FOR UPDATE` 鎖 target（數量上限）；PATCH 先鎖 profile，再鎖目前的版本列才讀密文。金鑰換版（`secscan-admin rotate-secret-keys`，只有 CLI 呼叫）只鎖版本列，與 PATCH 不會互相等待而死結。
+  - 鎖的順序：建立以 `FOR UPDATE` 鎖 target（數量上限）；PATCH 以 `FOR UPDATE` 先鎖 profile，再鎖目前的版本列才讀密文。金鑰換版（`secscan-admin rotate-secret-keys`，只有 CLI 呼叫）同樣先鎖 profile（依 id 的順序、`FOR SHARE`），再鎖版本列：順序相同，所以不會死結，而且兩個方向都互斥（PATCH 等換版，換版也等還沒 commit 的 PATCH）。
 
 建議介面（概念契約，不是已存在的程式）：
 

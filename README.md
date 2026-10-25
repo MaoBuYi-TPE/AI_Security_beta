@@ -191,6 +191,9 @@ rm profile.json new-token.json
   1. 以 `openssl rand -base64 32 | tr '+/' '-_'` 產生新金鑰，放在 `.env` 的 `SECRET_ENCRYPTION_KEYS` 最前面（逗號分隔，例如 `新,舊`），重啟 API。
   2. 執行 `uv run secscan-admin rotate-secret-keys`：以新金鑰重新加密所有的 secret；有任何一份解不開就全部回滾。
   3. 移除舊金鑰、重啟 API，再執行一次 `rotate-secret-keys`，確認全部解得開。
+
+  第 3 步確認之前，另外保留舊金鑰的備份：萬一有一份沒換到，還能放回舊金鑰再做一次。
+- **清除只是邏輯上的**：被取代版本的密文從資料表中清除，但 DB 的舊資料列、WAL 與備份中仍有（受金鑰保護）。secret 外洩時，要到目標系統讓它失效（lab 重新登入換 token）。
 - 完整規則見 `docs/API_CONTRACT.md` §16，設計理由見 `docs/DECISIONS.md` §12。
 
 #### 隔離 lab 靶場（T03）

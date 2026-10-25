@@ -807,8 +807,9 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 | 類別 | 名稱 |
 |---|---|
 | 連線與訊息框架 | Host、Connection、Keep-Alive、Proxy-Connection、TE、Trailer、Transfer-Encoding、Upgrade、Expect、`Content-*` |
-| 代理與路由 | `Proxy-*`、Forwarded、Via、Max-Forwards、`X-Forwarded-*`、X-Real-IP |
-| 改寫 method 或 path | X-HTTP-Method-Override、X-HTTP-Method、X-Method-Override、X-Original-URL、X-Rewrite-URL |
+| 代理 | Proxy、`Proxy-*` |
+| 路由與來源 IP | Forwarded、Via、Max-Forwards、X-Forwarded、`X-Forwarded-*`、X-Real-IP、X-Client-IP、True-Client-IP、X-Cluster-Client-IP、Client-IP、CF-Connecting-IP、X-Originating-IP、X-Remote-IP、X-Remote-Addr |
+| 改寫 host、method 或 path | X-Host、X-HTTP-Host-Override、X-HTTP-Method-Override、X-HTTP-Method、X-Method-Override、X-Original-URL、X-Rewrite-URL、X-Original-URI、X-Envoy-Original-Path |
 | 其他 | Cookie、Set-Cookie（請用 cookie 類型）、`X-Secscan-*`（保留給平台） |
 
 - 每個 target 最多 10 個認證設定：409 `QUOTA_EXCEEDED`。
@@ -819,9 +820,9 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 
 1. 沒有 key 或格式不符：401（middleware，不讀 body）；key 無效：401。
 2. 請求超過 2 MiB：413 `REQUEST_TOO_LARGE`。
-3. 型別或長度不符：422 `INVALID_REQUEST`，訊息只列出欄位位置。
+3. 型別或長度不符：422 `INVALID_REQUEST`，訊息只列出欄位位置。`preflight.expected_json` 在這一步只檢查是不是物件與項數：key 是使用者的輸入，欄位位置會帶出它，所以 key 與值的規則在第 5 步。
 4. target 不存在或屬於其他 project：404；viewer：403。
-5. 上表的規則：422 `INVALID_REQUEST`，訊息以欄位名稱開頭、說明原因，不回顯輸入。
+5. 上表的規則：422 `INVALID_REQUEST`，訊息以欄位名稱開頭、說明原因，不回顯輸入（`expected_json` 只說是第幾項）。
 6. 數量上限與 role_label 重複：409。
 
 內容的驗證一定在權限檢查之後，不替沒有權限的呼叫者驗證內容。
@@ -881,7 +882,9 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 ### 16.6 加密與金鑰換版
 
 - secret 以 `SECRET_ENCRYPTION_KEYS` 的第一個金鑰加密（MultiFernet）；其他金鑰只用來解密。API 沒有金鑰或格式不合時不會啟動。
-- 加密的內容綁定認證設定（context）：密文被搬到其他認證設定就解不開。
+- 加密的內容綁定認證設定與送出的方式（context 含 type 與 header 名稱）：密文被搬到其他認證設定，或同一個認證設定中另一種 type、另一個 header 名稱的版本，就解不開。
 - API 從不解密；M2 的 runner 是唯一會解密的程序。
 - 換版：新金鑰放在第一個並重啟 API → `uv run secscan-admin rotate-secret-keys` → 移除舊金鑰並重啟 API → 再執行一次 `rotate-secret-keys` 確認全部解得開。
-- `rotate-secret-keys` 在一個 transaction 內重新加密所有還在的密文；有任何一份解不開就全部回滾、exit 1，只列出 profile id（最多 10 個）。
+- 第 4 步通過之前，另外保留舊金鑰的備份。
+- `rotate-secret-keys` 在一個 transaction 內重新加密所有還在的密文；有任何一份解不開就全部回滾、exit 1，只列出 profile id（最多 10 個）。執行期間的 PATCH 會等它 commit；PATCH 還沒 commit 時，換版也會等 PATCH。
+- 清除舊版本的密文是邏輯上的：DB 的舊 tuple、WAL 與備份中仍有密文（受金鑰保護）。secret 外洩時要到目標系統讓它失效。
