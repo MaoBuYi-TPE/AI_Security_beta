@@ -181,7 +181,7 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
 
 - **domain 規則放在固定位置**：`<feature>/domain.py`，或拆成 `<feature>/domain/` 套件。import-linter 只檢查這兩種位置，以及共用的 `security/`。
-- **模組之間依呼叫關係分層**：`main | cli → migrations → health | specs → grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06、T07 的更新見 `DECISIONS.md` §10.7、§11.7）。`security/` 放 API key 的產生與雜湊、遮罩（T08 加 MultiFernet），和 domain 一樣不得依賴框架、DB 與 Docker。
+- **模組之間依呼叫關係分層**：`main | cli → migrations → health | specs | auth_profiles → grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06–T08 的更新見 `DECISIONS.md` §10.7、§11.7、§12.7）。`security/` 放 API key 的產生與雜湊、遮罩，以及目標 secret 的加密（MultiFernet，T08），和 domain 一樣不得依賴框架、DB 與 Docker。
 - **跨功能的 FK 以資料表名稱引用**，不 import 對方的 model。所有 model 登記在 `secscan.migrations.metadata`；API（`main`）、CLI（`cli`）、worker、runner 等每個使用 ORM 的程序入口都必須 import 它。
 - **驗證與授權（T05）**：
   - `/api/v1` 在 router 層強制平台 key 驗證（`authenticated_router`），新增的路由不會意外變成公開端點。
@@ -201,6 +201,11 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - 解析與正規化都在 `specs/domain/`，是不做 I/O 的純函式：`documents`（JSON、YAML 的子集與上限；YAML 只用 PyYAML 純 Python 的事件 API，由迭代式 composer 組成資料）、`references`（參照）、`openapi`（servers 改綁、inventory、canonical 文件）。
   - path 與 method 的比對在 `grants/domain/matching.py`（`covers()`、`ScopeRules`），M2 的 guard 也用它比對實際的請求。
   - 上傳先檢查權限、再解析，解析完才以 `FOR UPDATE` 鎖 target 取 version，不拖長鎖住 target 的時間。
+- **認證設定與 secret（T08，`DECISIONS.md` §12）**：
+  - `SecretCipher`（`security/secret_cipher.py`，MultiFernet）由 `create_app` 依 `SECRET_ENCRYPTION_KEYS` 建立，放在 `app.state.secret_cipher`，路由以 `CurrentCipher` 取得；沒有金鑰或格式不合時 API 不會啟動。
+  - 加密的內容綁定 `auth_profile:<id>`（context）。API 只加密、不解密：新版本沿用 secret 時直接複製密文；以 AST 測試確認 src 中沒有任何模組呼叫 `reveal`（M2 的 runner 會是唯一的呼叫者）。
+  - 認證類型、secret 的格式、preflight 與 PATCH 的規則都在 `auth_profiles/domain/`，不依賴框架與 DB。schema 只限制型別與長度，規則在權限檢查之後驗證。
+  - 鎖的順序：建立以 `FOR UPDATE` 鎖 target（數量上限）；PATCH 先鎖 profile，再鎖目前的版本列才讀密文。金鑰換版（`secscan-admin rotate-secret-keys`，只有 CLI 呼叫）只鎖版本列，與 PATCH 不會互相等待而死結。
 
 建議介面（概念契約，不是已存在的程式）：
 
@@ -267,7 +272,8 @@ ExecutionPlan 只能包含：
 | scope_grants | target_id、version、status（pending/approved/revoked；expired 由期限推導）、allowed_origins/ips/paths/methods、excluded_paths、allow_all_paths、預算、authorization_reference、有效期、申請與核准、撤銷的 key 與時間；`LAB_ONLY` 時 allowed_ips 必須在 `LAB_CIDR` 內（T06 已建立；port 由 origin 決定，不另存） |
 | api_specs | id、target_id、version、上傳檔的格式、大小與 sha256、正規化文件（bytea）與它的 sha256、openapi_version、base_path、operation_count、上傳者（T07 已建立；原規劃的受控 storage key 改成存在 DB，理由見 `DECISIONS.md` §11.5） |
 | api_spec_operations | spec_id、ordinal、method、path（含 base path）、operation_id；inventory 的每一列（T07 已建立） |
-| auth_profiles | id、target_id、version、type、role_label、encrypted_secret、preflight_definition |
+| auth_profiles | id、target_id、name、role_label（同一個 target 內唯一）、建立的 key 與時間；建立後不可變（T08 已建立） |
+| auth_profile_versions | profile_id、version、type、header_name、preflight（method、path、expected_status、expected_json）、encrypted_secret（Fernet token，被取代就清除）、secret_erased_at、建立的 key 與時間（T08 已建立；原規劃的單一資料表改成兩張，理由見 `DECISIONS.md` §12.3） |
 | scans | id、project_id、target_id、status、snapshot、idempotency_key/hash、cancel_requested_at、manifest、時間 |
 | scanner_runs | id、scan_id、engine、engine_version、sequence（執行順序）、status、attempt、lease_owner、lease_expires_at、heartbeat_at、container_label、proxy_credential_hash、error、coverage；同時是 runner 與 worker 的工作佇列 |
 | findings | id、target_id、fingerprint、kind、normalized_severity、owasp_2025、owasp_api_2023、mapping_source、mapping_version、triage/lifecycle、first/last_seen |
@@ -317,11 +323,16 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - api_spec_operations：主鍵 `(spec_id, ordinal)`；`(spec_id, method, path)` 與 `(spec_id, operation_id)` 唯一（NULL 不相等，沒有 operationId 的可以有很多個）；CHECK 涵蓋 method 白名單（含 TRACE）、path 以 `/` 開頭、operationId 不空白、ordinal 範圍。
   - trigger `api_specs_guard`：兩張表的 UPDATE、DELETE、TRUNCATE 一律拒絕（只防程式錯誤造成的誤改，同 `DECISIONS.md` §7）。
   - FK 一律 `ON DELETE RESTRICT`；規格所屬的 project 與 origin 由 target 取得。
-- **其餘資料表由各功能任務以自己的 migration 加入**：auth_profiles（T08）、scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
+- **T08（migration `0004`）建立 auth_profiles 與 auth_profile_versions**：
+  - auth_profiles：`(target_id, role_label)` 唯一；CHECK 涵蓋名稱不空白、role_label 的形式（不可是 `anonymous`）。trigger 擋下 UPDATE、DELETE 與 TRUNCATE。
+  - auth_profile_versions：主鍵 `(profile_id, version)`；部分唯一索引 `uq_auth_profile_versions_live_secret`（`WHERE encrypted_secret IS NOT NULL`）保證每個 profile 最多一份密文。CHECK 涵蓋 type 白名單、header_name 與 type 成對、preflight 的 method、path（沒有佔位）、status 與 expected_json（非空的物件、大小上限）、密文與清除時間成對、密文是 Fernet token（`gAAAAA` 開頭）且有長度上限。
+  - trigger `auth_profile_versions_guard`：INSERT 必須帶密文；UPDATE 只允許清除密文與重新加密，其他欄位都不能改；DELETE、TRUNCATE 一律拒絕。和其他 trigger 一樣只防程式錯誤造成的誤改。
+  - 密文欄位以 deferred 載入；FK 一律 `ON DELETE RESTRICT`，所屬的 project 由 target 取得。
+- **其餘資料表由各功能任務以自己的 migration 加入**：scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照
 
-建立 scan 時凍結以下欄位，但 secret 本身不存進一般的 snapshot：
+建立 scan 時凍結以下欄位，但 secret 本身不存進一般的 snapshot（auth profile 只記 id 與版本；被取代的版本已清除密文，排隊中、綁定被取代版本的 scan 在 runner 啟動前就失敗，`DECISIONS.md` §12.3）：
 
 - **目標與授權**：target、grant、spec、auth profile 的 ID 與版本；origin、path、method
 - **引擎與模板**：engine 集合、template commit 與 ID、映像 digest、ZAP add-on 版本

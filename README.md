@@ -31,7 +31,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 | `docs/TOOLS.md` | T03 工具 spike 結果：映像相容性表、digest、授權、網路隔離與各引擎 proxy/auth/output 的實測 |
 | `docs/PROJECT_PLAN.md` | 背景、需求、工具選型、功能範圍、時程與交付成果 |
 | `docs/ARCHITECTURE.md` | 元件、信任邊界、egress guard、資料模型、Adapter/Runner 與狀態機 |
-| `docs/API_CONTRACT.md` | REST API、權限、資料格式與錯誤語意；§13 是 T05 已實作的 key、專案與權限，§14 是 T06 已實作的 target 與 scope grant，§15 是 T07 已實作的 API 規格 |
+| `docs/API_CONTRACT.md` | REST API、權限、資料格式與錯誤語意；§13 是 T05 已實作的 key、專案與權限，§14 是 T06 已實作的 target 與 scope grant，§15 是 T07 已實作的 API 規格，§16 是 T08 已實作的認證設定 |
 | `docs/SECURITY_AND_TESTING.md` | 平台自身的安全要求、測試矩陣與實驗設計 |
 | `docs/TASKS.md` | 依里程碑排列的工作、依賴、驗收條件與降階方案 |
 | `docs/START_HERE.md` | 開發順序，以及給 Claude Code 的第一段任務提示 |
@@ -42,14 +42,16 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成到 M1 的 T07：
+目前完成到 M1 的 T08：
 - **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
 - **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
 - **T05**：平台 API key（DB 只存 hash、一定會過期、可撤銷）、project 與 object-level 權限、`/api/v1` 的 projects、keys 與稽核查詢端點，以及建立初始管理 key 的本機 CLI `secscan-admin`（見下方「平台 API key」與 `docs/API_CONTRACT.md` §13）。
 - **T06**：掃描目標（target）與管理員核准的掃描範圍（scope grant）：origin 的嚴格解析、`LAB_ONLY`／`LAB_CIDR`、pending／approved／revoked／expired 的轉換，以及建立 scan 前要通過的檢查（見下方「掃描目標與授權」與 `docs/API_CONTRACT.md` §14）。
 - **T07**：上傳 OpenAPI 3.0 規格（JSON 或 YAML），嚴格解析、拒絕外部參照，`servers` 一律改綁到 target 的 origin；產生 operation inventory，並依 grant 判斷每個 operation 是否在範圍內。另外在 `/api/v1` 前加上驗證之前的 key 格式檢查與請求大小上限（見下方「API 規格」與 `docs/API_CONTRACT.md` §15）。
 
-還沒有認證設定、掃描任務等其他業務 API（T08 起），也還沒有 runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
+- **T08**：被測目標的認證設定（auth profile）：bearer、API key header、Cookie 三種，secret 以 MultiFernet 加密、只寫不讀；PATCH 產生新版本並清除上一版的密文；preflight 的定義與驗證；加密金鑰換版的 CLI `secscan-admin rotate-secret-keys`（見下方「認證設定」與 `docs/API_CONTRACT.md` §16）。
+
+還沒有掃描任務等其他業務 API（T09 起），也還沒有 runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
 ### 開發環境
 
@@ -83,7 +85,8 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
 | `db` | 55432 | 開發（`make dev`、`make migrate`） | 保存在 volume `secscan_db_data` |
 | `db-test` | 55433 | 整合測試 | tmpfs，停掉就清空 |
 
-- **密碼**：都在 `.env`（權限 600，不進 git）。`make env` 只會補上缺少的隨機值，不會覆寫既有的值；`db-up`、`test-db-up`、`test` 會自動呼叫它。
+- **密碼**：都在 `.env`（權限 600，不進 git）。`make env` 只會補上缺少的隨機值，不會覆寫既有的值；`dev`、`db-up`、`test-db-up`、`test` 會自動呼叫它。
+- **加密金鑰**：`make env` 也會在 `.env` 產生 `SECRET_ENCRYPTION_KEYS`（加密認證設定的 secret；API 沒有它就不會啟動）。**請備份這一行**：遺失之後，已保存的 secret 都解不開，只能重新設定。換版的做法見下方「認證設定」。
 - **連線角色**：應用程式與 migration 用非 superuser 的 `secscan_app`。superuser 只給容器初始化與手動維運。
 - **整合測試**：每次 session 都在 db-test 建立專屬角色與全新資料庫，結束時刪除。只接受 `cluster_name=secscan-test` 的伺服器，不會碰到開發資料庫。
 - **停止**：`make db-down` 停止兩者，但保留開發資料。
@@ -159,6 +162,36 @@ curl -H @operator.header \
 - **範圍判斷**：排除的 path 不分大小寫、忽略結尾的斜線；允許的 path 必須完全一致；都不從前綴推論，要排除 `/api/admin` 底下的 route 必須另外列出（例如 `/api/admin/{id}`）。
 - **版本**：規格不能修改或刪除，要改就重新上傳（每個 target 最多 20 個版本）；同一份內容以 JSON 或 YAML 上傳，`document_sha256` 相同。
 - **驗證之前的關卡**：`/api/v1` 沒有 key 或 key 格式不符時直接回 401，不讀 body；任何請求超過 2 MiB 回 413。
+
+#### 認證設定（T08）
+
+被測網站的憑證（不是平台的 API key）以認證設定保存。secret 只寫入、不會出現在任何回應、日誌或 audit；T08 只保存與檢查，不會送出任何請求（preflight 在 T12 才執行）。請求 body 含 secret，先寫進權限 600 的檔案再送：
+
+```bash
+cd ~/.config/secscan
+umask 077
+cat > profile.json <<'JSON'
+{"name": "VAmPI 一般使用者", "role_label": "standard_user", "type": "bearer",
+ "secret": "<從 VAmPI 登入取得的 token>",
+ "preflight": {"method": "GET", "path": "/me", "expected_status": 200,
+               "expected_json": {"/status": "success", "/data/username": "name1"}}}
+JSON
+curl -H @operator.header -H 'Content-Type: application/json' --data-binary @profile.json \
+  http://127.0.0.1:8000/api/v1/targets/<target_id>/auth-profiles
+# 換 token：產生新版本，上一版的密文清除（body 一樣先寫進檔案）
+curl -X PATCH -H @operator.header -H 'Content-Type: application/json' --data-binary @new-token.json \
+  http://127.0.0.1:8000/api/v1/auth-profiles/<profile_id>
+rm profile.json new-token.json
+```
+
+- **三種類型**：`bearer`（只填 token 本身，不要加 `Bearer `）、`api_key_header`（另外指定 `header_name`，不可以是 Host、Proxy-*、X-HTTP-Method-Override 這類 header）、`cookie`（`name=value; name2=value2`）。secret 不可含平台的 API key。
+- **preflight**：只有 GET、path 不可有佔位、status 200–299；`expected_json` 至少要比對一項回應內容（key 是 JSON Pointer，例如 `/data/username`），只看狀態碼分不出登入頁。
+- **版本**：PATCH 沒給的欄位沿用目前的版本；換 `type` 或 `header_name` 時要附上新的 secret。歷史見 `GET /api/v1/auth-profiles/<profile_id>/versions`（只有目前的版本還有 secret）。每個 target 最多 10 個認證設定、每個 100 個版本。
+- **加密金鑰換版**：
+  1. 以 `openssl rand -base64 32 | tr '+/' '-_'` 產生新金鑰，放在 `.env` 的 `SECRET_ENCRYPTION_KEYS` 最前面（逗號分隔，例如 `新,舊`），重啟 API。
+  2. 執行 `uv run secscan-admin rotate-secret-keys`：以新金鑰重新加密所有的 secret；有任何一份解不開就全部回滾。
+  3. 移除舊金鑰、重啟 API，再執行一次 `rotate-secret-keys`，確認全部解得開。
+- 完整規則見 `docs/API_CONTRACT.md` §16，設計理由見 `docs/DECISIONS.md` §12。
 
 #### 隔離 lab 靶場（T03）
 
