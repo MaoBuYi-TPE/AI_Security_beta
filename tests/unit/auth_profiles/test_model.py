@@ -3,6 +3,7 @@
 role_label、名稱、密文與 PATCH 的規則。
 """
 
+import json
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from secscan.auth_profiles.domain.credentials import AuthType, Credential, SecretValue
 from secscan.auth_profiles.domain.errors import InvalidAuthProfileError
 from secscan.auth_profiles.domain.model import (
+    EXPECTED_JSON_MAX_BYTES,
     MAX_ENCRYPTED_SECRET_BYTES,
     PROFILE_NAME_MAX_LENGTH,
     ROLE_LABEL_MAX_LENGTH,
@@ -116,6 +118,17 @@ def test_the_largest_secret_fits_in_the_column() -> None:
 
     assert len(token) == MAX_ENCRYPTED_SECRET_BYTES
     NewProfileVersion(definition=API_KEY, encrypted_secret=token, created_by_key_id=KEY_ID)
+
+
+def test_the_largest_expected_json_fits_in_the_column() -> None:
+    """16 項、key 與值都用 4 bytes 的字元填滿上限：jsonb 的文字形式仍在 DB 的上限內。"""
+    wide = "\U0001d11e"
+    checks = {f"/{index:02d}{wide * 253}": wide * 256 for index in range(16)}
+    preflight = Preflight(method="GET", path="/me", expected_status=200, expected_json=checks)
+
+    encoded = json.dumps(dict(preflight.expected_json), ensure_ascii=False).encode()
+
+    assert len(encoded) <= EXPECTED_JSON_MAX_BYTES
 
 
 def test_ciphertext_is_hidden_from_repr() -> None:

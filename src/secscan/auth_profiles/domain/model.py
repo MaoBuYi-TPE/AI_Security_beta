@@ -29,6 +29,9 @@ _ROLE_LABEL = re.compile(rf"[a-z][a-z0-9_]{{0,{ROLE_LABEL_MAX_LENGTH - 1}}}")
 # 未認證的 scan 標記為 anonymous（docs/API_CONTRACT.md §7）。
 RESERVED_ROLE_LABELS = frozenset({"anonymous"})
 CONTEXT_PREFIX = "auth_profile:"
+# expected_json 在 DB 中的上限（jsonb 的文字形式）：最多 16 項，key 與字串值各最多 256 個字元，
+# 非 ASCII 的字元最多 4 bytes，最壞約 33 KB（一般不到 1 KB）。DB 的 CHECK 只是最後一道防線。
+EXPECTED_JSON_MAX_BYTES = 64 * 1024
 # PATCH 的欄位，也是 audit 中 changed 的順序。
 CHANGE_FIELDS = ("type", "header_name", "secret", "preflight")
 
@@ -121,6 +124,15 @@ class AuthProfile:
     created_by_key_id: UUID
     created_at: datetime
     current: ProfileVersion
+
+
+@dataclass(frozen=True, slots=True)
+class StoredSecret:
+    """DB 中的一份密文與它的位置（金鑰換版時重新加密用）；密文不出現在 repr。"""
+
+    profile_id: UUID
+    version: int
+    token: bytes = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)

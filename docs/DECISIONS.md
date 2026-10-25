@@ -679,7 +679,7 @@ T08 不發出任何流量：preflight 只定義、不執行，T12 才會實際�
   - 沒給的欄位沿用目前的版本；`preflight` 是整份取代。
   - `type` 或 `header_name` 改變時，必須附上新的 secret；`secret` 省略時直接複製目前的密文。
   - 完全沒有變更（沒有 secret，定義也相同）回 422。
-- **數量上限**：每個 target 10 個 profile、每個 profile 100 個版本，超過回 409 `QUOTA_EXCEEDED`。理由同 §10.9、§11.5：不能刪除，一把外洩的 operator key 才不能無限寫入。舊版本不含密文，每列最多約 9 KB（preflight 的上限）。
+- **數量上限**：每個 target 10 個 profile、每個 profile 100 個版本，超過回 409 `QUOTA_EXCEEDED`。理由同 §10.9、§11.5：不能刪除，一把外洩的 operator key 才不能無限寫入。舊版本不含密文，只有定義：preflight 的期望值以字元計算上限，全用 4 bytes 的字元時每列約 33 KB（DB 的 CHECK 上限是 64 KiB），一般不到 1 KB。
 - **權限**：建立與 PATCH 要 `PROJECT_WRITE`（operator、admin），查詢要 `PROJECT_READ`；其他 project 一律和不存在的一樣回 404（§9.2）。停用的 target 仍可設定：設定不會送出任何流量。
 - **停用 profile**（使用者的決定）：T08 不做，延後到 T21。要移除外洩的 secret，就用新版本取代，舊密文立刻清除。
 
