@@ -52,7 +52,12 @@ class SecretCipher:
         self._key_count = len(keys)
 
     @classmethod
-    def from_setting(cls, setting: str) -> Self:
+    def from_setting(cls, setting: str | None) -> Self:
+        """由 SECRET_ENCRYPTION_KEYS 建立；沒有設定或不合規則時拋出 InvalidEncryptionKeysError。"""
+        if setting is None:
+            raise InvalidEncryptionKeysError(
+                f"缺少 {SETTING_NAME}：請執行 make env，或依 README 設定（以它加密目標的 secret）"
+            )
         return cls(parse_keys(setting))
 
     def __repr__(self) -> str:

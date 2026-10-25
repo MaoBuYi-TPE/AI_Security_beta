@@ -14,6 +14,8 @@ LAB_PROFILES ?= juice-shop vampi
 LAB_PROFILE_ARGS := $(foreach p,$(LAB_PROFILES),--profile $(p))
 # make env 會補齊的本機秘密（隨機 hex，只寫進不進 git 的 .env）。
 LOCAL_SECRET_KEYS := DB_PASSWORD DB_ADMIN_PASSWORD TEST_DB_PASSWORD
+# 加密目標 secret 的金鑰（docs/DECISIONS.md §12.1）：Fernet 金鑰，url-safe base64 的 32 bytes（44 個字元）。
+ENCRYPTION_KEYS_VAR := SECRET_ENCRYPTION_KEYS
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	lab-up lab-down lab-verify
@@ -23,8 +25,9 @@ bootstrap:
 	uv sync --locked
 	$(UV_RUN) pre-commit install
 
-# 啟動 API 開發程序：只綁 127.0.0.1，APP_ENV=dev 才開啟 API 文件。
-dev:
+# 啟動 API 開發程序：只綁 127.0.0.1，APP_ENV=dev 才開啟 API 文件。API 需要 .env 中的加密金鑰，
+# 所以先執行 make env（只補上缺少的值）。
+dev: env
 	APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
 		--host 127.0.0.1 --port 8000 --reload --reload-dir src
 
@@ -58,6 +61,16 @@ env:
 			echo "已在 .env 產生 $$key（隨機值，只供本機使用）"; \
 		fi; \
 	done
+	@if grep -q "^$(ENCRYPTION_KEYS_VAR)=[[:space:]]*$$" .env; then \
+		echo "錯誤：.env 的 $(ENCRYPTION_KEYS_VAR) 是空值；請刪除那一行再執行 make env（不會覆寫既有的值）"; exit 1; \
+	fi
+	@if ! grep -q "^$(ENCRYPTION_KEYS_VAR)=" .env; then \
+		key=$$(openssl rand -base64 32 | tr '+/' '-_') || exit 1; \
+		[ "$${#key}" -eq 44 ] || { echo "錯誤：openssl 沒有產生有效的金鑰"; exit 1; }; \
+		if [ -s .env ] && [ -n "$$(tail -c1 .env)" ]; then echo >> .env; fi; \
+		echo "$(ENCRYPTION_KEYS_VAR)=$$key" >> .env; \
+		echo "已在 .env 產生 $(ENCRYPTION_KEYS_VAR)（加密目標 secret 的金鑰；遺失後已保存的 secret 都解不開，請備份這一行）"; \
+	fi
 
 docker-check:
 	@docker version >/dev/null 2>&1 || { echo "Docker daemon 未執行，請先啟動 OrbStack（orb start）"; exit 1; }

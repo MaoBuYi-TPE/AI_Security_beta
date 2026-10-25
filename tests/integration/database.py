@@ -22,6 +22,7 @@ from sqlalchemy import URL, Connection, create_engine, text
 from sqlalchemy.pool import NullPool
 
 from secscan.core.config import Settings
+from tests.secret_support import encryption_keys
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEST_CLUSTER_NAME = "secscan-test"
@@ -97,6 +98,7 @@ class ProvisionedDatabase:
             db_name=self.name,
             db_user=self.name,
             db_password=SecretStr(self.password),
+            secret_encryption_keys=encryption_keys(),
             _env_file=None,
         )
 

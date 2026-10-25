@@ -300,6 +300,11 @@ def test_duplicates_are_detected_by_the_decoded_key() -> None:
         SecretCipher.from_setting(f"{key},{variant}")
 
 
+def test_a_missing_setting_names_the_variable() -> None:
+    with pytest.raises(InvalidEncryptionKeysError, match="缺少 SECRET_ENCRYPTION_KEYS"):
+        SecretCipher.from_setting(None)
+
+
 def test_a_cipher_needs_at_least_one_key() -> None:
     with pytest.raises(InvalidEncryptionKeysError):
         SecretCipher([])

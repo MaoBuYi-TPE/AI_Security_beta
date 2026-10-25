@@ -22,6 +22,7 @@ from secscan.grants.router import router as grants_router
 from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
 from secscan.projects.router import router as projects_router
+from secscan.security.secret_cipher import SecretCipher
 from secscan.specs.router import router as specs_router
 from secscan.targets.domain import LabNetwork
 from secscan.targets.router import router as targets_router
@@ -53,6 +54,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.db = DatabaseResources(engine=engine, schema_revision=head_revision())
     # LAB_ONLY 時 target 與 grant 的 IP 必須在這個網段內（docs/DECISIONS.md §10.1）。
     app.state.lab = LabNetwork(resolved.lab_cidr)
+    # 目標 secret 的加密（docs/DECISIONS.md §12.1）：沒有或不合法的金鑰，啟動就失敗。
+    keys = resolved.secret_encryption_keys
+    app.state.secret_cipher = SecretCipher.from_setting(
+        keys.get_secret_value() if keys is not None else None
+    )
     # 後加入的在外層。順序：request_id → key 格式 → 大小上限（docs/DECISIONS.md §11.1）：
     # 沒有 key 的請求連 body 都不讀；錯誤回應也都帶 request_id。
     app.add_middleware(BodyLimitMiddleware)

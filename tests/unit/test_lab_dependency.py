@@ -11,6 +11,7 @@ from secscan.core.config import Settings
 from secscan.main import create_app
 from secscan.targets.dependencies import lab_network
 from secscan.targets.domain import LabNetwork
+from tests.secret_support import encryption_keys
 
 
 def _request(state: object) -> Request:
@@ -18,7 +19,12 @@ def _request(state: object) -> Request:
 
 
 def test_app_uses_the_configured_lab_network() -> None:
-    settings = Settings(app_env="test", lab_cidr=IPv4Network("192.168.56.0/24"), _env_file=None)
+    settings = Settings(
+        app_env="test",
+        lab_cidr=IPv4Network("192.168.56.0/24"),
+        secret_encryption_keys=encryption_keys(),
+        _env_file=None,
+    )
 
     app = create_app(settings)
 
