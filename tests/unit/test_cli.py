@@ -99,3 +99,42 @@ def test_existing_output_file_is_never_overwritten(
     assert exit_code == EXIT_FAILURE
     assert target.read_text(encoding="utf-8") == "keep me\n"
     assert "沒有建立任何 key" in capsys.readouterr().err
+
+
+# --- rotate-secret-keys（docs/DECISIONS.md §12.3）：設定錯誤在連 DB 之前就回報 -----------------
+
+
+def test_rotate_takes_no_arguments(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["rotate-secret-keys", "--name", "admin"])
+
+    assert caught.value.code == EXIT_USAGE
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_rotate_needs_the_encryption_keys(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+
+    exit_code = main(["rotate-secret-keys"])
+
+    out, err = capsys.readouterr()
+    assert exit_code == EXIT_FAILURE
+    assert out == ""
+    assert "SECRET_ENCRYPTION_KEYS" in err
+
+
+def test_rotate_reports_invalid_keys_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("SECRET_ENCRYPTION_KEYS", CANARY_PASSWORD)
+
+    exit_code = main(["rotate-secret-keys"])
+
+    out, err = capsys.readouterr()
+    assert exit_code == EXIT_FAILURE
+    assert out == ""
+    assert "SECRET_ENCRYPTION_KEYS" in err
+    assert CANARY_PASSWORD not in err

@@ -9,3 +9,8 @@ from tests.unit.source_support import modules_using
 
 def test_no_module_reveals_target_secrets() -> None:
     assert modules_using("reveal") == set()
+
+
+def test_only_the_local_cli_reencrypts_secrets() -> None:
+    """reencrypt_secrets 沒有呼叫者身分可以檢查（同 issue_admin_key）：只有本機 CLI 呼叫它。"""
+    assert modules_using("reencrypt_secrets") == {"cli.py"}
