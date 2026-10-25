@@ -15,10 +15,14 @@ from secscan.auth_profiles.domain.model import (
     MAX_ENCRYPTED_SECRET_BYTES,
     PROFILE_NAME_MAX_LENGTH,
     ROLE_LABEL_MAX_LENGTH,
+    ChangeInput,
     NewAuthProfile,
     NewProfileVersion,
+    PreflightInput,
     ProfileDefinition,
+    ProfileInput,
     VersionChange,
+    build_profile,
     plan_version,
     secret_context,
 )
@@ -261,3 +265,81 @@ def test_changes_hide_the_secret_from_repr() -> None:
 
     assert CANARY not in repr(change)
     assert CANARY not in repr(plan_version(BEARER, change))
+
+
+# --- 尚未驗證的輸入（service 在檢查權限之後才建立 domain 物件）------------------------------
+
+
+def _input(**overrides: object) -> ProfileInput:
+    params: dict[str, object] = {
+        "name": "VAmPI 一般使用者",
+        "role_label": "standard_user",
+        "type": AuthType.BEARER,
+        "header_name": None,
+        "secret": SecretValue(CANARY),
+        "preflight": PreflightInput(
+            method="GET", path="/me", expected_status=200, expected_json={"/status": "success"}
+        ),
+    }
+    params.update(overrides)
+    return ProfileInput(**params)  # type: ignore[arg-type]
+
+
+def test_build_profile_validates_every_part() -> None:
+    target_id = uuid4()
+
+    profile, definition = build_profile(_input(), target_id=target_id, created_by_key_id=KEY_ID)
+
+    assert (profile.target_id, profile.role_label, profile.created_by_key_id) == (
+        target_id,
+        "standard_user",
+        KEY_ID,
+    )
+    assert definition == ProfileDefinition(credential=Credential(AuthType.BEARER), preflight=ME)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"name": " "}, "name"),
+        ({"role_label": "Admin"}, "role_label"),
+        ({"type": AuthType.API_KEY_HEADER}, "header_name"),
+        ({"secret": SecretValue(f"Bearer {CANARY}")}, "secret"),
+        (
+            {
+                "preflight": PreflightInput(
+                    method="POST", path="/me", expected_status=200, expected_json={"/a": 1}
+                )
+            },
+            "preflight.method",
+        ),
+    ],
+)
+def test_build_profile_rejects_each_part(overrides: dict[str, object], field: str) -> None:
+    with pytest.raises(InvalidAuthProfileError) as raised:
+        build_profile(_input(**overrides), target_id=uuid4(), created_by_key_id=KEY_ID)
+
+    assert str(raised.value).startswith(field)
+    assert CANARY not in str(raised.value)
+
+
+def test_inputs_hide_the_secret_from_repr() -> None:
+    assert CANARY not in repr(_input())
+    assert CANARY not in repr(ChangeInput(secret=SecretValue(CANARY)))
+
+
+def test_change_input_builds_the_preflight() -> None:
+    change = ChangeInput(
+        preflight=PreflightInput(
+            method="GET", path="/me", expected_status=200, expected_json={"/status": "success"}
+        )
+    ).build()
+
+    assert change == VersionChange(preflight=ME)
+    assert ChangeInput(type=AuthType.COOKIE).build() == VersionChange(type=AuthType.COOKIE)
+    with pytest.raises(InvalidAuthProfileError, match=r"preflight\.path"):
+        ChangeInput(
+            preflight=PreflightInput(
+                method="GET", path="me", expected_status=200, expected_json={"/a": 1}
+            )
+        ).build()

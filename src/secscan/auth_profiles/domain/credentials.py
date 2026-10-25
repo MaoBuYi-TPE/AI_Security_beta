@@ -91,10 +91,10 @@ class Credential:
     def __post_init__(self) -> None:
         if self.type is AuthType.API_KEY_HEADER:
             if self.header_name is None:
-                raise InvalidAuthProfileError("api_key_header 必須指定 header_name")
+                raise InvalidAuthProfileError("header_name 是 api_key_header 必填的欄位")
             _check_header_name(self.header_name)
         elif self.header_name is not None:
-            raise InvalidAuthProfileError("只有 api_key_header 可以指定 header_name")
+            raise InvalidAuthProfileError("header_name 只能搭配 api_key_header")
 
 
 def check_secret(credential: Credential, secret: SecretValue) -> None:

@@ -50,6 +50,12 @@ V1_ROUTES = {
     ("GET", "/api/v1/targets/{target_id}/api-specs"),
     ("GET", "/api/v1/api-specs/{spec_id}"),
     ("GET", "/api/v1/api-specs/{spec_id}/operations"),
+    # T08
+    ("POST", "/api/v1/targets/{target_id}/auth-profiles"),
+    ("GET", "/api/v1/targets/{target_id}/auth-profiles"),
+    ("GET", "/api/v1/auth-profiles/{profile_id}"),
+    ("PATCH", "/api/v1/auth-profiles/{profile_id}"),
+    ("GET", "/api/v1/auth-profiles/{profile_id}/versions"),
 }
 CANARY = "canary-credential-0003"
 

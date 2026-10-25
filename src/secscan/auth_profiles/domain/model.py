@@ -7,6 +7,7 @@
 """
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
@@ -19,7 +20,7 @@ from secscan.auth_profiles.domain.credentials import (
     check_secret,
 )
 from secscan.auth_profiles.domain.errors import InvalidAuthProfileError
-from secscan.auth_profiles.domain.preflight import Preflight
+from secscan.auth_profiles.domain.preflight import ExpectedValue, Preflight
 from secscan.core.text import require_text
 from secscan.security.secret_cipher import TOKEN_PREFIX, max_sealed_bytes
 
@@ -165,7 +166,7 @@ def plan_version(current: ProfileDefinition, change: VersionChange) -> VersionPl
         )
     credential = _next_credential(current.credential, change)
     if credential != current.credential and change.secret is None:
-        raise InvalidAuthProfileError("改變 type 或 header_name 時，必須附上新的 secret")
+        raise InvalidAuthProfileError("secret：改變 type 或 header_name 時，必須附上新的 secret")
     if change.secret is not None:
         check_secret(credential, change.secret)
     preflight = change.preflight if change.preflight is not None else current.preflight
@@ -191,4 +192,70 @@ def _next_credential(current: Credential, change: VersionChange) -> Credential:
         return Credential(kind, header_name=change.header_name)
     if current.type is AuthType.API_KEY_HEADER:
         return Credential(kind, header_name=current.header_name)
-    raise InvalidAuthProfileError("改成 api_key_header 時必須指定 header_name")
+    raise InvalidAuthProfileError("header_name：改成 api_key_header 時必須指定")
+
+
+# --- 尚未驗證的輸入 ---------------------------------------------------------------------------
+# schema 只檢查型別與長度；service 在檢查權限之後才建立 domain 物件，不替沒有權限的呼叫者驗證內容。
+
+
+@dataclass(frozen=True, slots=True)
+class PreflightInput:
+    method: str
+    path: str
+    expected_status: int
+    expected_json: Mapping[str, ExpectedValue]
+
+    def build(self) -> Preflight:
+        return Preflight(
+            method=self.method,
+            path=self.path,
+            expected_status=self.expected_status,
+            expected_json=self.expected_json,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileInput:
+    """建立 profile 的輸入；secret 不出現在 repr。"""
+
+    name: str
+    role_label: str
+    type: AuthType
+    header_name: str | None
+    secret: SecretValue
+    preflight: PreflightInput
+
+
+@dataclass(frozen=True, slots=True)
+class ChangeInput:
+    """PATCH 的輸入；None 代表沒有給。"""
+
+    type: AuthType | None = None
+    header_name: str | None = None
+    secret: SecretValue | None = None
+    preflight: PreflightInput | None = None
+
+    def build(self) -> VersionChange:
+        return VersionChange(
+            type=self.type,
+            header_name=self.header_name,
+            secret=self.secret,
+            preflight=self.preflight.build() if self.preflight is not None else None,
+        )
+
+
+def build_profile(
+    request: ProfileInput, *, target_id: UUID, created_by_key_id: UUID
+) -> tuple[NewAuthProfile, ProfileDefinition]:
+    """驗證建立 profile 的輸入：名稱、role_label、送出方式、secret 與 preflight（依這個順序）。"""
+    profile = NewAuthProfile(
+        target_id=target_id,
+        name=request.name,
+        role_label=request.role_label,
+        created_by_key_id=created_by_key_id,
+    )
+    credential = Credential(request.type, header_name=request.header_name)
+    check_secret(credential, request.secret)
+    definition = ProfileDefinition(credential=credential, preflight=request.preflight.build())
+    return profile, definition
