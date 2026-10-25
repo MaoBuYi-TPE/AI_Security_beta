@@ -31,6 +31,9 @@ _ENVELOPE_KEYS = frozenset({"context", "v", "value"})
 # Fernet token 的 bytes：版本（1）、時間戳記（8）、IV（16）、密文（16 的倍數）、HMAC（32），
 # 再以 base64url 編碼。
 _TOKEN_FIXED_BYTES = 1 + 8 + 16 + 32
+# token 的前 6 個字元：版本 0x80 與 64-bit 時間戳記的高 28 位元（2^36 秒以內都是 0，
+# 也就是西元 4147 年以前）。DB 以它確認存進去的是 Fernet token，不是明文。
+TOKEN_PREFIX = b"gAAAAA"
 _BLOCK_BYTES = 16
 
 

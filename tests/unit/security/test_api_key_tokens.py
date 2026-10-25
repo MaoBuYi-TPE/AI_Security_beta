@@ -10,6 +10,7 @@ import pytest
 from secscan.api_keys.domain import KEY_HASH_BYTES
 from secscan.security.api_key_tokens import (
     KEY_LABEL,
+    contains_platform_key,
     generate_key,
     hash_key,
     key_matches,
@@ -120,3 +121,22 @@ def test_key_matches_compares_in_constant_time(monkeypatch: pytest.MonkeyPatch) 
 
     assert not key_matches(SAMPLE_KEY, hash_key(SAMPLE_KEY))
     assert compared == [(hash_key(SAMPLE_KEY), hash_key(SAMPLE_KEY))]
+
+
+# --- 文字中是否含平台 key（docs/DECISIONS.md §12.4：平台 key 不可送往被測網站）---------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [SAMPLE_KEY, f"Bearer {SAMPLE_KEY}", f"session={SAMPLE_KEY}; b=1", f"x{SAMPLE_KEY}x"],
+)
+def test_platform_keys_are_found_anywhere_in_text(text: str) -> None:
+    assert contains_platform_key(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "secscan_", SAMPLE_KEY.upper(), SAMPLE_KEY[:-1], SAMPLE_KEY.replace("_", "-")],
+)
+def test_text_without_a_complete_platform_key(text: str) -> None:
+    assert not contains_platform_key(text)

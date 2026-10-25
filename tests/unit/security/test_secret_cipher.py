@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 from secscan.security.secret_cipher import (
     MAX_KEYS,
     MAX_PLAINTEXT_BYTES,
+    TOKEN_PREFIX,
     InvalidEncryptionKeysError,
     SecretCipher,
     SecretUnreadableError,
@@ -71,10 +72,11 @@ def test_every_seal_uses_a_new_iv() -> None:
 
 
 def test_tokens_are_fernet_tokens() -> None:
-    """DB 的 CHECK 依賴這個前綴：版本 0x80 加上時間戳記的高位元（西元 4000 年以前都是 0）。"""
+    """DB 的 CHECK 依賴這個前綴：版本 0x80 加上時間戳記的高位元（西元 4147 年以前都是 0）。"""
     token = _cipher(_key()).seal(CANARY, context=CONTEXT)
 
-    assert token.startswith(b"gAAAAA")
+    assert token.startswith(TOKEN_PREFIX)
+    assert TOKEN_PREFIX == b"gAAAAA"
 
 
 def test_a_token_moved_to_another_context_cannot_be_revealed() -> None:
