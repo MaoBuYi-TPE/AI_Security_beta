@@ -132,7 +132,8 @@ layers = [
 # domain 規則（狀態機、scope 比對、fingerprint…）與 security 元件不得依賴 Web 框架、DB 或 Docker
 # （CLAUDE.md §5）。規則一律放在 <feature>/domain.py，或拆成 <feature>/domain/ 套件（子模組也受檢查）。
 # 預設也檢查間接 import：只能用標準函式庫、security 與 core 中的純模組（json_types、text）；
-# 例外是 specs 的 domain 以 PyYAML 純 Python 的事件 API 解析 YAML（docs/DECISIONS.md §11.2）。
+# 例外是 specs 的 domain 以 PyYAML 純 Python 的事件 API 解析 YAML（docs/DECISIONS.md §11.2），
+# 以及 security 以 cryptography 的 MultiFernet 加密目標的 secret（§12.1）。
 [[tool.importlinter.contracts]]
 name = "Domain and security modules stay free of frameworks, DB and Docker"
 type = "forbidden"
