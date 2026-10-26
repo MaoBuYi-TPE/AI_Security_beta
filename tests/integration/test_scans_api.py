@@ -22,6 +22,7 @@ from secscan.runner.fake import FakeRunner, FakeScript
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.queue import ScanQueue
+from secscan.targets.domain import TargetKind
 from tests.integration.api_support import LAB, Caller, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 
@@ -131,6 +132,31 @@ def test_an_anonymous_scan_reports_the_anonymous_role(
         None,
         "anonymous",
     )
+
+
+def test_a_web_scan_has_no_operation_counts(
+    api_client: TestClient, seed: Seeder, world: World
+) -> None:
+    target = seed.target(world.operator_a, world.project_a.id, kind=TargetKind.WEB)
+    grant = seed.approve(world.admin, seed.grant(world.operator_a, target))
+    body = {
+        "target_id": str(target.id),
+        "scope_grant_id": str(grant.id),
+        "profile": "web_active_lab",
+        "engines": ["fake"],
+    }
+
+    response = api_client.post(SCANS, json=body, headers=_headers(world.operator_a, str(uuid4())))
+
+    assert response.status_code == 202
+    scan = response.json()["data"]
+    assert (scan["api_spec"], scan["auth"], scan["auth_role"]) == (None, None, "anonymous")
+    assert scan["coverage"] == {
+        "eligible_operations": None,
+        "ineligible_operations": None,
+        "coverage_measured": False,
+        "limitations": ["NO_API_SPEC", "TRAFFIC_TELEMETRY_UNAVAILABLE"],
+    }
 
 
 def test_replaying_the_same_key_returns_the_same_scan(

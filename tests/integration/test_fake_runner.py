@@ -4,7 +4,7 @@ fake 不連任何位址；sleep 與時間可以注入：測試在「停留」期
 每個測試用自己的資料庫（queue_database），runner 只會認領這個測試的 run。
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -18,7 +18,7 @@ from secscan.runner.fake import FakeOutcome, FakeRunner, FakeScript, RunReport
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.catalog import ScanProfile, plan_runs
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
-from secscan.scans.domain.model import NewScan, Scan
+from secscan.scans.domain.model import Lease, NewScan, Scan
 from secscan.scans.queue import LeaseLostError, ScanQueue
 from secscan.scans.repository import ScanRepository
 from secscan.scans.service import ScanService
@@ -297,3 +297,53 @@ def test_drain_first_finishes_runs_left_collected(
     queue.advance(lease, R.COLLECTED)
 
     assert _runner(queue_engine).drain() == [_report(scan, R.SUCCEEDED, S.COMPLETED)]
+
+
+class _CancelAfterClaim(ScanQueue):
+    """在 runner 認領之後、prepare 之前，使用者取消了 scan。"""
+
+    def __init__(self, engine: Engine, world: World) -> None:
+        super().__init__(
+            sessionmaker(engine, expire_on_commit=False), lab=LAB, clock=lambda: datetime.now(UTC)
+        )
+        self._engine = engine
+        self._world = world
+
+    def claim(self, owner: str, engines: Collection[ScanEngine]) -> Lease | None:
+        lease = super().claim(owner, engines)
+        if lease is not None:
+            assert _cancel(self._engine, self._world, lease.scan_id).status is S.CANCELLING
+        return lease
+
+
+class _OtherWorkerParses(ScanQueue):
+    """收集之後，另一個 worker 先認領了這個 collected 的 run。"""
+
+    def claim_collected(
+        self, owner: str, engines: Collection[ScanEngine], *, run_id: UUID | None = None
+    ) -> Lease | None:
+        if run_id is not None:
+            return None
+        return super().claim_collected(owner, engines, run_id=run_id)
+
+
+def test_a_cancel_between_claim_and_prepare_is_confirmed_at_prepare(
+    queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    scan = queue_seed.scan(world.operator_a, scannable)
+    runner = FakeRunner(_CancelAfterClaim(queue_engine, world), owner="runner", script=FakeScript())
+
+    assert runner.run_once() == _report(scan, R.CANCELLED, S.CANCELLED)
+
+
+def test_a_run_parsed_by_another_worker_is_reported_as_collected(
+    queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    scan = queue_seed.scan(world.operator_a, scannable)
+    queue = _OtherWorkerParses(
+        sessionmaker(queue_engine, expire_on_commit=False), lab=LAB, clock=lambda: datetime.now(UTC)
+    )
+
+    assert FakeRunner(queue, owner="runner", script=FakeScript()).run_once() == _report(
+        scan, R.COLLECTED, S.COLLECTING
+    )

@@ -6,6 +6,7 @@
 import dataclasses
 from collections.abc import Callable
 from datetime import UTC, datetime
+from ipaddress import IPv4Network
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -17,6 +18,7 @@ from secscan.auth_profiles.domain.credentials import SecretValue
 from secscan.auth_profiles.domain.model import ChangeInput
 from secscan.auth_profiles.service import AuthProfileService
 from secscan.grants.service import ScopeGrantService
+from secscan.scans import queue as queue_module
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.catalog import ScanProfile, plan_runs
 from secscan.scans.domain.lifecycle import (
@@ -26,6 +28,7 @@ from secscan.scans.domain.lifecycle import (
     ScanStatus,
 )
 from secscan.scans.domain.model import Lease, NewScan
+from secscan.scans.progress import ScanProgress
 from secscan.scans.queue import (
     LEASE_DURATION,
     Heartbeat,
@@ -35,7 +38,7 @@ from secscan.scans.queue import (
     ScanQueue,
 )
 from secscan.scans.repository import ScanRepository
-from secscan.targets.domain import TargetUpdate
+from secscan.targets.domain import LabNetwork, TargetUpdate
 from secscan.targets.service import TargetService
 from tests.integration.api_support import LAB, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
@@ -605,3 +608,146 @@ def test_a_scan_being_claimed_is_skipped_without_waiting(
         race.join()
 
     assert (race.errors, race.results) == ([], [None])
+
+
+# --- 鎖到之後再確認、上限與防線 -------------------------------------------------------------
+
+
+def _change_before_lock(
+    monkeypatch: pytest.MonkeyPatch, seed: Seeder, statement: str, run_id: UUID
+) -> None:
+    """在佇列選出候選、還沒鎖住 scan 之前，另一個連線改了這個 run 並 commit（READ COMMITTED 下
+    候選的資料可能已經過時，[S28]）。只觸發一次。"""
+    original = ScanProgress.lock_scan
+    fired: list[bool] = []
+
+    def lock_scan(self: ScanProgress, scan_id: UUID) -> object:
+        if not fired:
+            fired.append(True)
+            seed.execute(statement, id=run_id)
+        return original(self, scan_id)
+
+    monkeypatch.setattr(ScanProgress, "lock_scan", lock_scan)
+
+
+def test_a_claim_rechecks_the_run_after_locking_the_scan(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scan_id = _fake_scan(queue_seed, world, scannable)
+    [run] = queue_seed.query("SELECT id FROM scanner_runs WHERE scan_id = :id", id=scan_id)
+    _change_before_lock(
+        monkeypatch,
+        queue_seed,
+        "UPDATE scanner_runs SET status = 'cancelled', finished_at = now() WHERE id = :id",
+        run.id,
+    )
+
+    assert queue.claim(OWNER, FAKE_ONLY) is None
+    assert _run(queue_seed, run.id).status == "cancelled"
+
+
+def test_a_claim_gives_up_after_a_few_stale_candidates(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """候選一直過時（別人一直搶先）也不會無限重試：試過上限之後回「沒有工作」。"""
+    monkeypatch.setattr(queue_module, "MAX_CLAIM_ATTEMPTS", 1)
+    first = _fake_scan(queue_seed, world, scannable)
+    _fake_scan(queue_seed, world, queue_seed.scannable(world))
+    [run] = queue_seed.query("SELECT id FROM scanner_runs WHERE scan_id = :id", id=first)
+    _change_before_lock(
+        monkeypatch,
+        queue_seed,
+        "UPDATE scanner_runs SET status = 'cancelled', finished_at = now() WHERE id = :id",
+        run.id,
+    )
+
+    assert queue.claim(OWNER, FAKE_ONLY) is None
+    assert queue.claim(OWNER, FAKE_ONLY) is not None
+
+
+def test_reconcile_rechecks_the_lease_after_locking_the_scan(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_scan(queue_seed, world, scannable)
+    lease = _claimed(queue)
+    _expire(queue_seed, lease.run_id)
+    _change_before_lock(
+        monkeypatch,
+        queue_seed,
+        "UPDATE scanner_runs SET lease_expires_at = now() + interval '1 minute' WHERE id = :id",
+        lease.run_id,
+    )
+
+    assert queue.reconcile_expired(FAKE_ONLY) == 0
+    assert _run(queue_seed, lease.run_id).status == "preparing"
+
+
+def test_reconcile_handles_a_bounded_number_of_runs_per_call(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(queue_module, "MAX_RECONCILED_PER_CALL", 1)
+    for target in (scannable, queue_seed.scannable(world)):
+        _fake_scan(queue_seed, world, target)
+        _expire(queue_seed, _claimed(queue).run_id)
+
+    assert queue.reconcile_expired(FAKE_ONLY) == 1
+    assert queue.reconcile_expired(FAKE_ONLY) == 1
+    assert queue.reconcile_expired(FAKE_ONLY) == 0
+
+
+def test_prepare_fails_when_the_grant_ips_leave_the_lab(
+    queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    """LAB_CIDR 在建立 scan 之後改了：IP 不在目前的 lab 內就不啟動。"""
+    _fake_scan(queue_seed, world, scannable)
+    elsewhere = ScanQueue(
+        sessionmaker(queue_engine, expire_on_commit=False),
+        lab=LabNetwork(IPv4Network("10.99.0.0/24")),
+        clock=_now,
+    )
+    lease = _claimed(elsewhere)
+
+    assert elsewhere.prepare(lease) == Progress(R.FAILED, S.FAILED)
+    assert _run(queue_seed, lease.run_id).error_code == "SCOPE_OUTSIDE_LAB"
+
+
+def test_a_lease_of_an_unknown_scan_is_lost(queue: ScanQueue) -> None:
+    lease = Lease(run_id=uuid4(), scan_id=uuid4(), engine=ScanEngine.FAKE, owner=OWNER)
+
+    with pytest.raises(LeaseLostError):
+        queue.advance(lease, R.RUNNING)
+
+
+def test_claiming_without_an_owner_is_a_programming_error(
+    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    _fake_scan(queue_seed, world, scannable)
+    lease = _claimed(queue)
+    queue.prepare(lease)
+    queue.advance(lease, R.COLLECTING)
+    queue.advance(lease, R.COLLECTED)
+
+    with Session(queue_engine) as session, session.begin():
+        progress = ScanProgress(session)
+        scan = progress.lock_scan(lease.scan_id)
+        run = progress.run(lease.run_id)
+        assert scan is not None
+        assert run is not None
+        with pytest.raises(ValueError, match="lease_owner"):
+            progress.move(scan, run, R.NORMALIZING)

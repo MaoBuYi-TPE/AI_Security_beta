@@ -150,13 +150,20 @@ class Seeder:
             operator_a=self.member(admin, project_a.id, Role.OPERATOR),
         )
 
-    def target(self, caller: Caller, project_id: UUID, base_url: str | None = None) -> Target:
+    def target(
+        self,
+        caller: Caller,
+        project_id: UUID,
+        base_url: str | None = None,
+        *,
+        kind: TargetKind = TargetKind.API,
+    ) -> Target:
         with self._session() as session:
             return TargetService(session, lab=LAB).create(
                 caller.principal,
                 project_id,
                 name=unique_name("target"),
-                kind=TargetKind.API,
+                kind=kind,
                 base_url=base_url or f"http://{unique_name('lab')}:5000",
                 request_id=None,
             )

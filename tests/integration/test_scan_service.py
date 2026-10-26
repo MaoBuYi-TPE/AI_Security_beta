@@ -7,7 +7,7 @@
 
 import dataclasses
 from datetime import timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 
 from secscan.auth_profiles.domain.credentials import SecretValue
 from secscan.auth_profiles.domain.model import ChangeInput, PreflightInput
+from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.auth_profiles.service import AuthProfileService
+from secscan.core.db import ConstraintViolationError
 from secscan.core.errors import ErrorCode
 from secscan.core.pagination import PageRequest
 from secscan.grants.domain.matching import IneligibleReason
@@ -23,8 +25,11 @@ from secscan.grants.service import ScopeGrantService
 from secscan.scans import service as scan_service
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
-from secscan.scans.domain.model import AuthBinding, Coverage, VersionRef
+from secscan.scans.domain.model import AuthBinding, Coverage, NewScan, VersionRef
 from secscan.scans.domain.request import BudgetRequest
+from secscan.scans.progress import ScanProgress
+from secscan.scans.repository import ScanRepository
+from secscan.scans.service import ScanService
 from secscan.specs.service import ApiSpecService
 from secscan.targets.domain import TargetKind, TargetUpdate
 from secscan.targets.service import TargetService
@@ -729,3 +734,62 @@ def test_the_audit_records_the_snapshot_without_secrets_or_keys(
     }
     assert key not in str(row.redacted_changes)
     assert CANARY_SECRET not in str(row.redacted_changes)
+
+
+# --- 只有程式錯誤或直接改了 DB 才會走到的防線：一律失敗，不回一個看似正常的結果 ------------------
+
+
+def test_an_unexpected_constraint_violation_is_raised(
+    db_session: Session, world: ScanWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def violate(_self: ScanRepository, _new_scan: NewScan) -> UUID:
+        raise ConstraintViolationError("ck_scans_something_new", "23514")
+
+    monkeypatch.setattr(ScanRepository, "create", violate)
+
+    with pytest.raises(ConstraintViolationError):
+        create_scan(db_session, world)
+
+
+def test_a_key_violation_without_a_stored_key_is_raised(
+    db_session: Session, world: ScanWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def violate(_self: ScanRepository, _new_scan: NewScan) -> UUID:
+        raise ConstraintViolationError(scan_service.KEY_CONSTRAINT, "23505")
+
+    monkeypatch.setattr(ScanRepository, "create", violate)
+
+    with pytest.raises(ConstraintViolationError):
+        create_scan(db_session, world)
+
+
+def test_a_scan_that_cannot_be_read_back_is_an_error(
+    db_session: Session, world: ScanWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ScanRepository, "get", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="讀不到"):
+        create_scan(db_session, world)
+
+
+def test_a_profile_vanishing_before_its_lock_looks_missing(
+    db_session: Session, world: ScanWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(AuthProfileRepository, "lock", lambda *_args, **_kwargs: None)
+
+    error = app_error(lambda: create_scan(db_session, world))
+
+    assert (error.status_code, error.code) == (404, ErrorCode.RESOURCE_NOT_FOUND)
+
+
+def test_a_scan_vanishing_before_its_lock_looks_missing(
+    db_session: Session, world: ScanWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scan = create_scan(db_session, world)
+    monkeypatch.setattr(ScanProgress, "lock_scan", lambda *_args, **_kwargs: None)
+
+    error = app_error(
+        lambda: ScanService(db_session, lab=LAB).cancel(world.operator, scan.id, request_id=None)
+    )
+
+    assert (error.status_code, error.code) == (404, ErrorCode.RESOURCE_NOT_FOUND)
