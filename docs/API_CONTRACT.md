@@ -53,7 +53,7 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/targets/{target_id}/scope-grants | 同專案 | 200；target 的所有版本，新版本在前（T06 新增並實作） |
 | GET | /api/v1/scope-grants/{grant_id} | 同專案 | 200（T06 新增並實作） |
 | POST | /api/v1/scope-grants/{grant_id}/approve | platform_admin | 200；核對靶場/授權證據後核准（T06 已實作） |
-| POST | /api/v1/scope-grants/{grant_id}/revoke | platform_admin | 200；之後不能再用它建立 scan。停止執行中的 scan 由 T09、T13 處理（T06 已實作撤銷本身） |
+| POST | /api/v1/scope-grants/{grant_id}/revoke | platform_admin | 200；之後不能再用它建立 scan，排隊中的 scan 在 runner 啟動前失敗（T09）。停止執行中的流量由 T13 處理（T06 已實作撤銷本身） |
 | POST | /api/v1/targets/{target_id}/api-specs | operator/admin | 201；raw body 上傳 OpenAPI 3.0（JSON 或 YAML），P0 不接受遠端 URL；servers 改綁到 target 的 origin（T07 已實作；原規劃的 multipart 改掉，理由見 `DECISIONS.md` §11.1） |
 | GET | /api/v1/targets/{target_id}/api-specs | 同專案 | 200；target 的所有版本，新版本在前（T07 新增並實作） |
 | GET | /api/v1/api-specs/{spec_id} | 同專案 | 200；不含文件內容（T07 新增並實作） |
@@ -63,13 +63,13 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/auth-profiles/{profile_id} | 同專案 | 200；不含 secret（T08 新增並實作） |
 | PATCH | /api/v1/auth-profiles/{profile_id} | operator/admin | 200；產生新版本，上一版的密文清除，舊 scan 快照不修改（T08 已實作） |
 | GET | /api/v1/auth-profiles/{profile_id}/versions | 同專案 | 200；版本的歷史，新版本在前（T08 新增並實作） |
-| GET | /api/v1/scan-profiles | 同專案 | 200；只列當前 Runner 已驗證支援的 profile |
-| GET | /api/v1/scanners | 已授權 key | 200；各引擎的版本、映像 digest、可用 profile 與 capability probe 結果 |
-| POST | /api/v1/scans | operator/admin | 202 + scan_id；必須 Idempotency-Key |
-| GET | /api/v1/scans | 同專案 | 200；target/status/time filter |
-| GET | /api/v1/scans/{scan_id} | 同專案 | 200；引擎狀態、進度、coverage、停止理由 |
-| GET | /api/v1/scans/{scan_id}/events | 同專案 | 200；以 after_sequence 輪詢，不先做 WebSocket |
-| POST | /api/v1/scans/{scan_id}/cancel | operator/admin | 202/200；取消中/已終止，不代表已撤銷外部操作 |
+| GET | /api/v1/scan-profiles | 同專案 | 200；只列當前 Runner 已驗證支援的 profile（要有 runner 的 capability probe 才有意義，延到 M3） |
+| GET | /api/v1/scanners | 已授權 key | 200；各引擎的版本、映像 digest、可用 profile 與 capability probe 結果（延到 T10） |
+| POST | /api/v1/scans | operator/admin | 202 + 完整的 scan；必須 Idempotency-Key，已終止的重送回 200（T09 已實作，§17.1；T09 只開放 fake 引擎） |
+| GET | /api/v1/scans | 同專案 | 200；target/status/time filter（T09 已實作） |
+| GET | /api/v1/scans/{scan_id} | 同專案 | 200；引擎狀態、coverage、停止理由（T09 已實作；預算用量在 T12） |
+| GET | /api/v1/scans/{scan_id}/events | 同專案 | 200；以 after_sequence 輪詢，不先做 WebSocket（T09 已實作） |
+| POST | /api/v1/scans/{scan_id}/cancel | operator/admin | 202/200；取消中/已終止，不代表已撤銷外部操作（T09 已實作） |
 | GET | /api/v1/scans/{scan_id}/findings | 同專案 | 200；kind/severity/tool/triage filter |
 | GET | /api/v1/findings/{finding_id} | 同專案 | 200；來源 observations、遮罩證據與歷史 |
 | PATCH | /api/v1/findings/{finding_id}/triage | operator/admin | 200；需 reason；敏感變更留 audit |
@@ -181,6 +181,8 @@ T08 的實際規則（理由見 `DECISIONS.md` §12，完整說明見 §16）：
 
 ## 7. 建立 Scan
 
+T09 已實作，實際的規則、回應與錯誤的先後見 §17；以下是原規劃（回應改成完整的 scan，T09 只開放 fake 引擎）。
+
 Header：`Idempotency-Key: <client-generated-random-key>`。
 
 ```json
@@ -212,6 +214,8 @@ Engine/profile 只能從伺服器已驗證 allowlist 選擇。Budget 不可超�
 同 key 同內容再送，返回相同 scan_id 和當前狀態，不新增 scan；仍未完成可 202，已終止可 200。同 key 不同內容回 409 `IDEMPOTENCY_CONFLICT`。若該 target 已有另一個活躍 scan，初版回 409 `TARGET_BUSY`。
 
 ## 8. 狀態查詢
+
+T09 已實作狀態、引擎與凍結的 operation 數（§17.2）；`budget_usage`、`observed_operations`、`authenticated_operations` 要有 guard 的實際計數（T11、T12）。以下是原規劃的格式示意。
 
 ```json
 {
@@ -362,6 +366,14 @@ T08 加入的部分（§16）：
 - 409 `QUOTA_EXCEEDED`：每個 target 最多 10 個認證設定、每個認證設定最多 100 個版本。
 - 409 `INVALID_STATE_TRANSITION`：沿用 secret 的新版本，但目前的版本已經沒有密文（只有直接改了 DB 才會發生）。
 - 422 `INVALID_REQUEST`：secret、header 名稱、preflight、role_label、名稱或 PATCH 的規則不合。訊息以欄位名稱開頭、說明原因，不回顯任何輸入（輸入可能就是 secret）。
+
+T09 加入的部分（§17）：
+
+- 400 `INVALID_REQUEST`：`Idempotency-Key` 缺少、重複或格式不符（訊息說明規則，不回顯）。
+- 409：`IDEMPOTENCY_CONFLICT`（同一個 key 搭配不同的內容）、`TARGET_BUSY`（這個 target 已有進行中的 scan）、`QUOTA_EXCEEDED`（每個 target 24 小時內最多 50 個 scan）。
+- 422：`ENGINE_UNSUPPORTED`（引擎還沒有整合）、`PROFILE_INCOMPATIBLE`（profile 與 target 的種類、規格不相容，或沒有任何 operation 在範圍內）。
+- 503 `DEPENDENCY_UNAVAILABLE`：等鎖（`lock_timeout` 5 秒）或查詢（`statement_timeout` 30 秒）逾時，加上 `Retry-After: 1`，可以重試；伺服器端只記例外類別與 SQLSTATE（`DECISIONS.md` §13.8）。其他 DB 錯誤仍是 500。
+- 約束對應：`uq_scans_project_id_idempotency_key` → 重查 key（重送或 409 `IDEMPOTENCY_CONFLICT`）；`uq_scans_active_target` → 409 `TARGET_BUSY`；其他 T09 的約束在 service 就已擋下，萬一 DB 回報則是 500。
 
 ## 13. 平台 API key 與專案（T05 已實作）
 
@@ -595,9 +607,9 @@ uv run secscan-admin create-admin-key --name "本機管理員" [--expires-in-day
 
 不存在的 project、target 或 grant 也回 404，回應與其他 project 的完全相同。
 
-### 14.5 掃描 gate（給 T09 使用）
+### 14.5 掃描 gate（T09 使用）
 
-T06 還沒有建立 scan 的 API。`ScopeGrantService.require_usable()` 是「這個 grant 現在能不能用來掃描」的唯一判斷，T09 的 `POST /scans` 會在同一個 transaction 中呼叫它：
+`ScopeGrantService.require_usable()` 是「這個 grant 現在能不能用來掃描」的唯一判斷，`POST /scans`（§17.1）在同一個 transaction 中呼叫它，runner 啟動前也以同樣的規則再判斷一次（`DECISIONS.md` §13.5）：
 
 | 情況 | 回應 |
 |---|---|
@@ -610,7 +622,7 @@ T06 還沒有建立 scan 的 API。`ScopeGrantService.require_usable()` 是「�
 | target 已停用 | 409 `TARGET_DISABLED` |
 | IP 不在目前的 `LAB_CIDR` 內 | 422 `SCOPE_OUTSIDE_LAB` |
 
-它以 `FOR SHARE` 鎖住 target 與 grant：撤銷或停用一旦 commit，之後就不會再通過；正在建立 scan 時，撤銷會等它 commit。
+它以 `FOR SHARE` 鎖住 target 與 grant：撤銷或停用一旦 commit，之後就不會再通過；正在建立 scan 時，撤銷會等它 commit。時間在取得兩個鎖之後才取（T09）：等鎖期間 grant 可能已經過期。
 
 ### 14.6 Audit
 
@@ -844,7 +856,7 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 
 - 版本是每個認證設定各自的流水號；每個認證設定最多 100 個版本（409 `QUOTA_EXCEEDED`）。
 - 建立新版本時，上一版的密文清除：每個認證設定最多一份密文。版本清單中只有目前的版本 `secret_configured` 是 true，`secret_erased_at` 是清除的時間。
-- 舊的 scan 快照不受影響（T09）。排隊中、綁定被取代版本的 scan，runner 啟動前就會失敗（M2）。
+- 舊的 scan 快照不受影響。排隊中、綁定被取代版本的 scan，runner 啟動前就會失敗（`AUTH_PROFILE_SUPERSEDED`，T09 的 prepare；M2 的 runner 沿用）。
 - 同時更新同一個認證設定時，後到的等先到的 commit，再以新的版本為基礎；版本號連續。
 
 ### 16.3 查詢
@@ -888,3 +900,187 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 - 第 4 步通過之前，另外保留舊金鑰的備份。
 - `rotate-secret-keys` 在一個 transaction 內重新加密所有還在的密文；有任何一份解不開就全部回滾、exit 1，只列出 profile id（最多 10 個）。執行期間的 PATCH 會等它 commit；PATCH 還沒 commit 時，換版也會等 PATCH。
 - 清除舊版本的密文是邏輯上的：DB 的舊 tuple、WAL 與備份中仍有密文（受金鑰保護）。secret 外洩時要到目標系統讓它失效。
+
+## 17. Scan（T09 已實作）
+
+理由見 `DECISIONS.md` §13。T09 只開放 `fake` 引擎：它不連任何位址、不啟動容器，結果由 `secscan-admin fake-runner` 產生，回應中 `fixture` 為 true。`zap`、`nuclei`、`schemathesis` 在 Adapter 整合之前回 422。以下的值都是示例，不是實驗結果。
+
+### 17.1 建立
+
+`POST /api/v1/scans`，header `Idempotency-Key` 必填：
+
+```http
+POST /api/v1/scans
+Authorization: Bearer <platform key>
+Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
+```
+
+```json
+{
+  "target_id": "<uuid>",
+  "scope_grant_id": "<uuid>",
+  "api_spec_id": "<uuid；web_active_lab 省略>",
+  "auth_profile_id": "<uuid；省略時是未認證的 scan（anonymous）>",
+  "profile": "api_active_lab",
+  "engines": ["fake"],
+  "budget": {"max_requests": 1000}
+}
+```
+
+| 欄位 | 規則 |
+|---|---|
+| `engines` | 1–4 個，不可重複。T09 只有 `fake` 可用，而且必須單獨使用；其他引擎回 422 `ENGINE_UNSUPPORTED`。執行順序固定為 zap → nuclei → schemathesis，與請求的順序無關 |
+| `profile` | `api_active_lab`：必須有 `api_spec_id`，target 是 api 或 hybrid，至少一個 operation 在 grant 的範圍內。`web_active_lab`：不帶 `api_spec_id`，target 是 web 或 hybrid。不符合回 422 `PROFILE_INCOMPATIBLE` |
+| `scope_grant_id` | 必須是這個 target 目前可用的 grant（§14.5 的 gate） |
+| `api_spec_id` | 必須屬於這個 target |
+| `auth_profile_id` | 必須屬於這個 target；綁定它目前的版本。preflight（GET 與 path）必須在 grant 的範圍內，否則 422（訊息附原因，例如 `PATH_EXCLUDED`，不附 path） |
+| `budget` | 可省略；省略的項目用 grant 的值，每一項不可超過 grant 的值（422） |
+| `Idempotency-Key` | 16–128 個英數字、`-`、`_`（UUID 可用）；可以加上雙引號（Structured Field 的 String），兩者視為同一個 key。缺少、重複或格式不符：400 `INVALID_REQUEST` |
+
+回應（202；查詢時相同）：
+
+```json
+{
+  "id": "<uuid>",
+  "project_id": "<uuid>",
+  "target_id": "<uuid>",
+  "target_origin": "http://vampi-vuln:5000",
+  "status": "queued",
+  "profile": "api_active_lab",
+  "scope_grant": {"id": "<uuid>", "version": 1},
+  "api_spec": {"id": "<uuid>", "version": 1},
+  "auth": {"profile_id": "<uuid>", "version": 3, "role_label": "standard_user"},
+  "auth_role": "standard_user",
+  "budget": {"requests_per_second": 2, "max_requests": 1000, "max_duration_seconds": 1500},
+  "engines": [
+    {"engine": "fake", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null}
+  ],
+  "coverage": {
+    "eligible_operations": 13,
+    "ineligible_operations": 1,
+    "coverage_measured": false,
+    "limitations": ["TRAFFIC_TELEMETRY_UNAVAILABLE"]
+  },
+  "fixture": true,
+  "results_complete": false,
+  "cancel_requested_at": null,
+  "created_by_key_id": "<uuid>",
+  "created_at": "2026-10-26T08:00:00Z",
+  "finished_at": null
+}
+```
+
+- 回應是完整的 scan（§7 原本只回 `scan_id`、`status`、`status_url`；和其他資源的建立一致改成完整的表示）。
+- 快照：`scope_grant`、`api_spec`、`auth` 引用的版本都不可變；`target_origin` 是建立時凍結的 origin。規格中每個 operation 與建立時的判斷（在範圍內，或不在的原因）另外保存，作為 coverage 的分母。
+- `auth` 是 null 時 `auth_role` 是 `anonymous`。`web_active_lab` 的 `api_spec` 與 coverage 的數字是 null，`limitations` 多一個 `NO_API_SPEC`。
+- `coverage_measured` 一律 false：還沒有量測實際的流量（T12）。`eligible_operations` 是建立時在範圍內的 operation 數，不代表實際測到了。
+- `fixture`：有 fake 引擎就是 true，表示結果不是真的掃描。`results_complete` 只有 `completed` 才是 true。
+- scan、每個引擎的 run、凍結的 operation、事件 `scan.created` 與 audit 在同一個 transaction 寫入；中途失敗時什麼都不留下。
+- 一個 target 同時只有一個進行中的 scan：409 `TARGET_BUSY`。每個 target 在 24 小時內最多 50 個 scan：409 `QUOTA_EXCEEDED`。
+
+**Idempotency-Key**：
+
+| 情況 | 回應 |
+|---|---|
+| 同一個 key、同樣的內容 | 原本的 scan 目前的狀態：未終止 202、已終止 200；不重新判斷 gate，也不寫入任何東西 |
+| 同一個 key、不同的內容 | 409 `IDEMPOTENCY_CONFLICT`，什麼都不寫 |
+| 同時送出同一個 key | 後到的等先到的完成，再回同一個 scan（不回 409） |
+
+- key 的範圍是 project，永久保存；不同 project 的相同 key 互不影響。
+- 內容的比對：請求內容的 canonical JSON 的 SHA-256；`engines` 的順序不影響，省略 `budget` 與每一項都是 null 相同。比對的是請求本身，不是伺服器解析出的值（profile 換過版本之後重送仍是同一個 scan）。
+- 權限檢查在查 key 之前：viewer 拿已用過的 key 重送也是 403。
+
+錯誤的先後：
+
+1. 沒有 key 或格式不符：401（middleware）；key 無效：401。請求超過 2 MiB：413。
+2. 型別或長度不符、未知的引擎或 profile 名稱：422 `INVALID_REQUEST`（訊息只列出欄位位置）。
+3. `Idempotency-Key` 缺少、重複或格式不符：400 `INVALID_REQUEST`。
+4. target 不存在或屬於其他 project：404；viewer：403。
+5. key 已用過：重送（202 或 200），或 409 `IDEMPOTENCY_CONFLICT`。
+6. 引擎與 profile 的規則：422 `ENGINE_UNSUPPORTED`、`PROFILE_INCOMPATIBLE`；引擎重複、fake 和其他引擎混用：422 `INVALID_REQUEST`。
+7. gate（§14.5）：grant 不存在或屬於其他 project 404；屬於其他 target 422；尚未核准、已撤銷、尚未生效 403 `SCOPE_NOT_APPROVED`；過期 403 `SCOPE_EXPIRED`；target 停用 409 `TARGET_DISABLED`；IP 不在 `LAB_CIDR` 內 422 `SCOPE_OUTSIDE_LAB`。
+8. 規格：不存在或屬於其他 project 404；屬於其他 target 422；沒有任何 operation 在範圍內 422 `PROFILE_INCOMPATIBLE`。
+9. auth profile：不存在或屬於其他 project 404；屬於其他 target 422；目前的版本沒有 secret 409 `INVALID_STATE_TRANSITION`（只有直接改了 DB 才會發生）；preflight 不在範圍內 422。
+10. 預算超過 grant：422 `INVALID_REQUEST`。
+11. 409 `TARGET_BUSY`、409 `QUOTA_EXCEEDED`。
+
+### 17.2 查詢
+
+- `GET /api/v1/scans`：呼叫者看得到的 scan，新的在前，分頁（`page`、`limit`）。篩選：`target_id`、`status`、`created_after`（含）、`created_before`（不含）；時間必須帶時區。其他 project 的 `target_id` 當成篩選條件時就是沒有結果。
+- `GET /api/v1/scans/{scan_id}`：回應同 §17.1。
+
+scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`、`collecting`、`normalizing`、`cancelling`，終止狀態 `completed`、`partially_completed`、`failed`、`timed_out`、`cancelled`、`interrupted`。由每個引擎的 run 彙總，規則見 `DECISIONS.md` §13.4。run 失敗的原因在 `engines[].error_code`：
+
+| error_code | 情況 |
+|---|---|
+| `SCOPE_REVOKED`、`SCOPE_EXPIRED`、`SCOPE_NOT_APPROVED`、`SCOPE_NOT_YET_VALID`、`TARGET_DISABLED`、`SCOPE_OUTSIDE_LAB` | runner 啟動前重新判斷 gate 不通過（撤銷、過期、停用…之後排隊中的 scan 不會送出流量） |
+| `SCOPE_MISMATCH` | grant 或 target 的 origin 和快照不符（只有直接改了 DB 才會發生） |
+| `AUTH_PROFILE_SUPERSEDED` | 綁定的 profile 版本已被取代（密文已清除）；不會改用新版本 |
+| `ENGINE_FAILED` | 引擎失敗（T09 是 fake 的失敗腳本） |
+| `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止 |
+
+### 17.3 事件
+
+`GET /api/v1/scans/{scan_id}/events?after_sequence=0&limit=100`（200）：sequence 大於 `after_sequence` 的事件，依 sequence 遞增，最多 `limit`（1–100）個；`meta` 是 null。以最後一個事件的 `sequence` 作為下一次的 `after_sequence`。
+
+```json
+[
+  {"sequence": 1, "type": "scan.created", "scanner_run_id": null, "payload": {"status": "queued", "profile": "api_active_lab", "engines": ["fake"]}, "created_at": "…"},
+  {"sequence": 2, "type": "run.status", "scanner_run_id": "<uuid>", "payload": {"engine": "fake", "status": "preparing", "previous_status": "queued", "error_code": null}, "created_at": "…"},
+  {"sequence": 3, "type": "scan.status", "scanner_run_id": null, "payload": {"status": "preparing", "previous_status": "queued"}, "created_at": "…"}
+]
+```
+
+| type | payload |
+|---|---|
+| `scan.created` | `status`、`profile`、`engines` |
+| `scan.status` | `status`、`previous_status` |
+| `scan.cancel_requested` | `previous_status` |
+| `run.status` | `engine`、`status`、`previous_status`、`error_code` |
+
+- 每個 scan 各自的 sequence，從 1 開始、連號，依 commit 的順序：輪詢不會漏掉事件。
+- payload 只由狀態、引擎與錯誤碼組成，沒有 URL、header 或其他使用者的輸入。
+
+### 17.4 取消
+
+`POST /api/v1/scans/{scan_id}/cancel`：
+
+| 情況 | 回應 |
+|---|---|
+| 沒有引擎在執行或解析中（例如還在排隊） | 200，`cancelled` |
+| 有引擎在執行或解析中 | 202，`cancelling`；runner 確認停止之後才是 `cancelled` |
+| 已要求過取消 | 202，不重記事件與 audit |
+| 已終止 | 200，不改變任何東西 |
+
+- 排隊中的 run 直接取消；執行中的 run 由 runner 在心跳或 prepare 時看到取消，停止後確認。已收集、正在解析的引擎繼續解析完（解析不發流量），結果保留。
+- 取消無法撤銷已送出的請求或回復靶場的資料（CLAUDE.md §8）。
+
+### 17.5 FakeRunner
+
+```bash
+uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300] [--once]
+```
+
+- 先對帳 lease 過期的 fake run（標成 `interrupted`，`LEASE_EXPIRED`），再處理排隊中的 fake run，直到沒有工作（`--once` 只處理一個）。
+- 每個 run：認領 → 重新判斷 gate 與綁定的 profile 版本 → running（停留 `--hold-seconds` 秒，每 5 秒心跳並檢查取消）→ 依 `--outcome` 失敗（`ENGINE_FAILED`），或收集、解析之後成功。
+- 不連任何位址，不需要 `SECRET_ENCRYPTION_KEYS`，不解密任何 secret。被強制終止時，scan 停在 `running`，lease（30 秒）過期之後下一次執行會把它標成 `interrupted`。
+
+### 17.6 權限
+
+| 操作 | platform_admin | operator（自己的 project） | viewer（自己的 project） | 其他 project |
+|---|---|---|---|---|
+| 建立、取消 | 允許 | 允許 | 403 | 404 |
+| 查詢、事件 | 允許 | 允許 | 允許 | 404 |
+
+- 以其他 project 的 target、grant、規格或 auth profile 建立，回 404。
+- 不存在的 scan 也回 404，回應與其他 project 的完全相同。
+
+### 17.7 Audit
+
+| 事件 | `changes` |
+|---|---|
+| `scan.create` | `target_id`、`scope_grant`（`id`、`version`）、`api_spec`（`id`、`version`，或 null）、`identity`（auth profile 的 `profile_id`、`version`、`role_label`，或 null）、`scan_profile`、`engines`、`budget`、`eligible_operations` |
+| `scan.cancel` | `previous_status`、`status`（取消之後的狀態） |
+
+- 欄位名稱避開遮罩規則：含 `auth`、`key` 這類片段的欄位整個會被遮掉，所以 auth profile 記為 `identity`。Idempotency-Key 不寫進 audit。
+- runner 的狀態轉換不寫 audit，由事件記錄。

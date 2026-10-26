@@ -42,7 +42,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成到 M1 的 T08：
+目前完成 M0 與 M1（T02–T09）：
 - **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
 - **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
 - **T05**：平台 API key（DB 只存 hash、一定會過期、可撤銷）、project 與 object-level 權限、`/api/v1` 的 projects、keys 與稽核查詢端點，以及建立初始管理 key 的本機 CLI `secscan-admin`（見下方「平台 API key」與 `docs/API_CONTRACT.md` §13）。
@@ -50,8 +50,9 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 - **T07**：上傳 OpenAPI 3.0 規格（JSON 或 YAML），嚴格解析、拒絕外部參照，`servers` 一律改綁到 target 的 origin；產生 operation inventory，並依 grant 判斷每個 operation 是否在範圍內。另外在 `/api/v1` 前加上驗證之前的 key 格式檢查與請求大小上限（見下方「API 規格」與 `docs/API_CONTRACT.md` §15）。
 
 - **T08**：被測目標的認證設定（auth profile）：bearer、API key header、Cookie 三種，secret 以 MultiFernet 加密、只寫不讀；PATCH 產生新版本並清除上一版的密文；preflight 的定義與驗證；加密金鑰換版的 CLI `secscan-admin rotate-secret-keys`（見下方「認證設定」與 `docs/API_CONTRACT.md` §16）。
+- **T09**：建立 scan（Idempotency-Key、不可變的快照、一個 target 同時只有一個進行中的 scan）、以 PostgreSQL `SKIP LOCKED` 認領的工作佇列（lease、心跳、對帳）、run 與 scan 的狀態機、事件輪詢與取消，以及測試用的 fake 引擎與 `secscan-admin fake-runner`；DB 連線加上逾時（見下方「建立 scan」與 `docs/API_CONTRACT.md` §17）。
 
-還沒有掃描任務等其他業務 API（T09 起），也還沒有 runner 或正式的 Adapter／egress guard（M2 起）。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
+還沒有 runner 或正式的 Adapter／egress guard（M2 起）：T09 的 scan 只能用 `fake` 引擎，它不連任何位址，結果在回應中標為 `fixture: true`，不是真的掃描。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
 ### 開發環境
 
@@ -141,7 +142,7 @@ curl -H @admin.header -H 'Content-Type: application/json' \
 - **停止**：admin 以 `POST /api/v1/scope-grants/<grant_id>/revoke`（附 `reason`）撤銷；operator 可以用 `PATCH /api/v1/targets/<target_id>` 送 `{"enabled": false}` 停用 target。兩者都讓之後不能再用它建立 scan。operator 也能重新啟用 target，所以權威的停止是撤銷 grant。
 - **上限**：每個 project 最多 100 個 target；每個 target 最多 10 個待核准的申請（`409 QUOTA_EXCEEDED`）。
 - **期限**：grant 最長 30 天，到期後狀態自動顯示為 `expired`，要重新申請。
-- 建立 scan 的 API 在 T09；規則、錯誤碼與範例見 `docs/API_CONTRACT.md` §14，設計理由見 `docs/DECISIONS.md` §10。
+- 建立 scan 見下方「建立 scan」；規則、錯誤碼與範例見 `docs/API_CONTRACT.md` §14，設計理由見 `docs/DECISIONS.md` §10。
 
 #### API 規格（T07）
 
@@ -195,6 +196,38 @@ rm profile.json new-token.json
   第 3 步確認之前，另外保留舊金鑰的備份：萬一有一份沒換到，還能放回舊金鑰再做一次。
 - **清除只是邏輯上的**：被取代版本的密文從資料表中清除，但 DB 的舊資料列、WAL 與備份中仍有（受金鑰保護）。secret 外洩時，要到目標系統讓它失效（lab 重新登入換 token）。
 - 完整規則見 `docs/API_CONTRACT.md` §16，設計理由見 `docs/DECISIONS.md` §12。
+
+#### 建立 scan（T09）
+
+T09 只開放 `fake` 引擎：它不連任何位址、不啟動容器，結果由 `secscan-admin fake-runner` 產生（`fixture: true`）。`zap`、`nuclei` 在 M3、M4 整合之前回 422 `ENGINE_UNSUPPORTED`。
+
+```bash
+cd ~/.config/secscan
+umask 077
+cat > scan.json <<'JSON'
+{"target_id": "<target_id>", "scope_grant_id": "<grant_id>", "api_spec_id": "<spec_id>",
+ "auth_profile_id": "<profile_id>", "profile": "api_active_lab", "engines": ["fake"]}
+JSON
+# Idempotency-Key 必填：每個新的 scan 用一個新的隨機值；網路中斷時以同一個 key 重送，不會建立第二個
+curl -H @operator.header -H "Idempotency-Key: $(uuidgen)" -H 'Content-Type: application/json' \
+  --data-binary @scan.json http://127.0.0.1:8000/api/v1/scans
+# 處理排隊中的 fake run（另一個終端機；DB 設定同 API）
+uv run secscan-admin fake-runner
+# 查詢狀態與輪詢事件（以最後一個事件的 sequence 當作下一次的 after_sequence）
+curl -H @operator.header http://127.0.0.1:8000/api/v1/scans/<scan_id>
+curl -H @operator.header 'http://127.0.0.1:8000/api/v1/scans/<scan_id>/events?after_sequence=0'
+# 取消：排隊中回 200（cancelled）；執行中回 202（cancelling），runner 確認之後才是 cancelled
+curl -X POST -H @operator.header http://127.0.0.1:8000/api/v1/scans/<scan_id>/cancel
+```
+
+- **profile**：`api_active_lab` 要有規格（target 是 api 或 hybrid，至少一個 operation 在 grant 的範圍內）；`web_active_lab` 不帶規格（target 是 web 或 hybrid）。省略 `auth_profile_id` 就是未認證的 scan（`auth_role` 是 `anonymous`）。
+- **快照**：綁定 grant、規格與 auth profile 目前的版本，並凍結 target 的 origin 與每個 operation 的判斷。之後撤銷 grant、停用 target 或 PATCH profile，排隊中的 scan 在 runner 啟動前就會失敗（例如 `SCOPE_REVOKED`、`AUTH_PROFILE_SUPERSEDED`），不會改用新的設定。
+- **Idempotency-Key**：同一個 key、同樣的內容回原本的 scan（未結束 202、已結束 200）；內容不同回 409。範圍是 project，永久保存。
+- **上限**：一個 target 同時只有一個進行中的 scan（409 `TARGET_BUSY`）；每個 target 在 24 小時內最多 50 個。
+- **fake-runner**：`--outcome fail` 產生失敗的結果、`--hold-seconds 30` 讓它停在 running 30 秒（期間可以試取消）、`--once` 只處理一個。被強制終止（Ctrl-C）時 scan 會停在 running，lease 30 秒過期之後，下一次執行 fake-runner 會把它標成 `interrupted`。
+- **coverage**：`eligible_operations` 是建立時在範圍內的 operation 數；`coverage_measured` 一律 false（T12 才量測實際的流量）。
+- **DB 逾時**：每個連線有 `DB_STATEMENT_TIMEOUT_SECONDS`（30）、`DB_LOCK_TIMEOUT_SECONDS`（5）、`DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`（60）；等鎖或查詢逾時回 503 `DEPENDENCY_UNAVAILABLE` 加 `Retry-After`，稍後重試即可。
+- 完整規則見 `docs/API_CONTRACT.md` §17，設計理由見 `docs/DECISIONS.md` §13。
 
 #### 隔離 lab 靶場（T03）
 

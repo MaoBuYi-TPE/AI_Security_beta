@@ -181,7 +181,7 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
 
 - **domain 規則放在固定位置**：`<feature>/domain.py`，或拆成 `<feature>/domain/` 套件。import-linter 只檢查這兩種位置，以及共用的 `security/`。
-- **模組之間依呼叫關係分層**：`main | cli → migrations → health | specs | auth_profiles → grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06–T08 的更新見 `DECISIONS.md` §10.7、§11.7、§12.7）。`security/` 放 API key 的產生與雜湊、遮罩，以及目標 secret 的加密（MultiFernet，T08），和 domain 一樣不得依賴框架、DB 與 Docker。
+- **模組之間依呼叫關係分層**：`main | cli → migrations → health | runner → scans → specs | auth_profiles → grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06–T09 的更新見 `DECISIONS.md` §10.7、§11.7、§12.7、§13.9）。`security/` 放 API key 的產生與雜湊、遮罩，以及目標 secret 的加密（MultiFernet，T08），和 domain 一樣不得依賴框架、DB 與 Docker。
 - **跨功能的 FK 以資料表名稱引用**，不 import 對方的 model。所有 model 登記在 `secscan.migrations.metadata`；API（`main`）、CLI（`cli`）、worker、runner 等每個使用 ORM 的程序入口都必須 import 它。
 - **驗證與授權（T05）**：
   - `/api/v1` 在 router 層強制平台 key 驗證（`authenticated_router`），新增的路由不會意外變成公開端點。
@@ -206,6 +206,14 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - 加密的內容綁定 `auth_profile:<id>:<type>:<header_name 或 ->`（context）。API 只加密、不解密：新版本沿用 secret 時直接複製密文；以 AST 測試確認 src 中沒有任何模組呼叫 `reveal`（M2 的 runner 會是唯一的呼叫者）。
   - 認證類型、secret 的格式、preflight 與 PATCH 的規則都在 `auth_profiles/domain/`，不依賴框架與 DB。schema 只限制型別與長度，規則在權限檢查之後驗證。
   - 鎖的順序：建立以 `FOR UPDATE` 鎖 target（數量上限）；PATCH 以 `FOR UPDATE` 先鎖 profile，再鎖目前的版本列才讀密文。金鑰換版（`secscan-admin rotate-secret-keys`，只有 CLI 呼叫）同樣先鎖 profile（依 id 的順序、`FOR SHARE`），再鎖版本列：順序相同，所以不會死結，而且兩個方向都互斥（PATCH 等換版，換版也等還沒 commit 的 PATCH）。
+- **scan 與工作佇列（T09，`DECISIONS.md` §13）**：
+  - 規則都在 `scans/domain/`：引擎與 scan profile（`catalog`）、Idempotency-Key 與 fingerprint（`request`）、run 的轉換表與 scan 狀態的彙總（`lifecycle`）、事件的 payload（`model`）。
+  - 建立 scan 的檢查順序固定（`DECISIONS.md` §13.3）；gate 由 `ScopeGrantService.require_usable()` 判斷，時間在取得鎖之後才取（`clock`）。scan 在 savepoint 中寫入：撞到唯一索引時先重查 key，再判斷 `TARGET_BUSY`。
+  - 狀態的轉換集中在 `scans/progress.py`：先以 `FOR UPDATE` 鎖 scan，再改 run，重新彙總 scan 的狀態，事件的 sequence 在持有 scan 的鎖時取得。寫入的時間用 `statement_timestamp()`，判斷 lease 是否過期用 `clock_timestamp()`。
+  - 佇列（`scans/queue.py`）：`QueueOperations` 在呼叫端的 transaction 中執行；`ScanQueue` 每個操作一個短 transaction，runner 與 worker 不經 HTTP，也不在長時間的工作中持有 transaction。
+  - 鎖的順序：建立 scan 是 target → grant → profile（都是 `FOR SHARE`）→ 新增 scan；所有改 scan 或 run 的寫入都是 scan（`FOR UPDATE`）→ run，prepare 之後再加 target、grant 與 profile 版本（`FOR SHARE`）；心跳只改 run 的列。沒有任何 transaction 先鎖 target、grant 再等 scan。
+  - `runner/fake.py` 的 FakeRunner 只經 `ScanQueue` 操作 run；M2 的真 runner 也放在 `runner/`。
+- **DB 逾時（T09，`DECISIONS.md` §13.8）**：每個連線以 libpq 的 options 設定 `statement_timeout`、`lock_timeout`、`idle_in_transaction_session_timeout`；等鎖或查詢逾時回 503 加 `Retry-After`。
 
 建議介面（概念契約，不是已存在的程式）：
 
@@ -274,13 +282,14 @@ ExecutionPlan 只能包含：
 | api_spec_operations | spec_id、ordinal、method、path（含 base path）、operation_id；inventory 的每一列（T07 已建立） |
 | auth_profiles | id、target_id、name、role_label（同一個 target 內唯一）、建立的 key 與時間；建立後不可變（T08 已建立） |
 | auth_profile_versions | profile_id、version、type、header_name、preflight（method、path、expected_status、expected_json）、encrypted_secret（Fernet token，被取代就清除）、secret_erased_at、建立的 key 與時間（T08 已建立；原規劃的單一資料表改成兩張，理由見 `DECISIONS.md` §12.3） |
-| scans | id、project_id、target_id、status、snapshot、idempotency_key/hash、cancel_requested_at、manifest、時間 |
-| scanner_runs | id、scan_id、engine、engine_version、sequence（執行順序）、status、attempt、lease_owner、lease_expires_at、heartbeat_at、container_label、proxy_credential_hash、error、coverage；同時是 runner 與 worker 的工作佇列 |
+| scans | id、queue_position（identity，佇列的先後）、project_id、target_id、凍結的 target_origin、scope_grant_id、api_spec_id、auth_profile_id 與版本、auth_role、scan_profile、預算、status、idempotency_key 與 request_sha256、cancel_requested_at、建立的 key 與時間、finished_at（T09 已建立；快照以複合 FK 引用不可變的資料，不另存 snapshot JSON，理由見 `DECISIONS.md` §13.1；manifest 在 M2） |
+| scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code；同時是 runner 與 worker 的工作佇列（T09 已建立；engine_version、container_label、proxy_credential_hash 在 M2，coverage 在 T12；不自動重跑，所以沒有 attempt） |
+| scan_operations | scan_id、ordinal、method、path、operation_id、ineligible_reason；建立 scan 時凍結的 inventory 與 grant 的判斷，coverage 的分母（T09 新增） |
 | findings | id、target_id、fingerprint、kind、normalized_severity、owasp_2025、owasp_api_2023、mapping_source、mapping_version、triage/lifecycle、first/last_seen |
 | observations | id、finding_id（可以先為 null）、scan_id、scanner_run_id、source_rule、rule_group、位置、auth_role、evidence_ref、raw_severity、raw_confidence、parser_version |
 | artifacts | id、run_id、type、hash、storage_key、size、classification、encrypted、retention |
 | reports | id、scan_id、format（json/markdown；P1 加 sarif）、status、artifact_id、lease 欄位、error；同時是 worker 的工作佇列 |
-| scan_events | id、scan_id、sequence、event_type、sanitized_payload、時間；供輪詢使用 |
+| scan_events | scan_id、sequence（每個 scan 各自連號）、event_type、scanner_run_id、payload（只由 enum 與 id 組成）、時間；供輪詢使用（T09 已建立） |
 | audit_events | actor_key_id、project、action、object_ref、redacted_changes、時間 |
 
 ### 6.1 約束與索引
@@ -288,12 +297,13 @@ ExecutionPlan 只能包含：
 - **project 隔離**：
   - 所有子資源都要能追溯到 project。
   - 查詢時先限制 project 再取物件，不能只用 UUID 查。
-- **scans**：
+- **scans**（T09）：
   - `(project_id, idempotency_key)` 設唯一約束；相同 key 但 request hash 不同時，回 409。
-  - 同一個 target 初版只允許一個進行中的 scan，避免重複改變靶場狀態。
-- **scanner_runs**：
-  - `(scan, engine, attempt)` 唯一。
-  - 用部分索引加速工作認領，例如 `scanner_runs(status, sequence) WHERE status IN ('queued', 'collected')`。
+  - 同一個 target 只允許一個進行中的 scan（部分唯一索引 `uq_scans_active_target`），避免重複改變靶場狀態。
+  - 複合 FK 保證快照引用的 grant、規格、auth profile（含 role_label）與它的版本都屬於 scan 的 target，target 屬於 scan 的 project。
+- **scanner_runs**（T09）：
+  - `(scan_id, sequence)`、`(scan_id, engine)` 唯一；不自動重跑，所以沒有 attempt。
+  - 部分索引 `ix_scanner_runs_claimable (status, engine) WHERE status IN ('queued', 'collected')` 加速認領；`ix_scanner_runs_lease_expires_at WHERE lease_owner IS NOT NULL` 加速對帳。
 - **observations**：
   - `(run, source_event_id)` 設唯一約束。
   - 沒有 source ID 時，用輸出記錄的位置或穩定 hash 產生，避免 Parser 重跑時重複寫入。
@@ -328,7 +338,13 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - auth_profile_versions：主鍵 `(profile_id, version)`；部分唯一索引 `uq_auth_profile_versions_live_secret`（`WHERE encrypted_secret IS NOT NULL`）保證每個 profile 最多一份密文。CHECK 涵蓋 type 白名單、header_name 與 type 成對、preflight 的 method、path（沒有佔位）、status 與 expected_json（非空的物件、大小上限）、密文與清除時間成對、密文是 Fernet token（`gAAAAA` 開頭）且有長度上限。
   - trigger `auth_profile_versions_guard`：INSERT 必須帶密文；UPDATE 只允許清除密文與重新加密，其他欄位都不能改；DELETE、TRUNCATE 一律拒絕。和其他 trigger 一樣只防程式錯誤造成的誤改。
   - 密文欄位以 deferred 載入；FK 一律 `ON DELETE RESTRICT`，所屬的 project 由 target 取得。
-- **其餘資料表由各功能任務以自己的 migration 加入**：scans、scanner_runs、scan_events（T09）。findings、observations、artifacts、reports 在 M3 之後加入。
+- **T09（migration `0005`）建立 scans、scanner_runs、scan_events、scan_operations**：
+  - 既有的 targets、scope_grants、api_specs、auth_profiles 加上唯一約束 `(id, project_id)`、`(id, target_id)`、`(id, target_id, role_label)`，給 scan 的複合 FK 引用。
+  - scans：`queue_position` 是 `GENERATED ALWAYS AS IDENTITY`；CHECK 涵蓋狀態與 scan profile 的白名單、預算大於 0、Idempotency-Key 的格式、hash 長度、auth profile 與版本成對（沒有 profile 時是 `anonymous`）、profile 與規格的搭配、origin 的形式、終止 ⇔ `finished_at`、cancelling／cancelled ⇒ `cancel_requested_at`、時間先後。trigger `scans_guard`：UPDATE 只能改狀態、取消與結束的時間；終止之後不可再改；取消的要求設定之後不能改；DELETE、TRUNCATE 一律拒絕。
+  - scanner_runs：CHECK 涵蓋引擎與狀態的白名單、sequence 範圍、lease 的三個欄位同時有值而且只在持有 lease 的狀態有值、終止 ⇔ `finished_at`、失敗類的狀態 ⇔ `error_code`（只檢查格式）、開始的時間與狀態一致、時間先後。trigger `scanner_runs_guard`：INSERT 必須是 queued、沒有 lease；身分欄位不能改；終止之後不能再改；DELETE、TRUNCATE 一律拒絕。
+  - scan_events：主鍵 `(scan_id, sequence)`；`(scanner_run_id, scan_id)` 引用 run（事件的 run 一定屬於同一個 scan）；CHECK 涵蓋事件類型的白名單、run.status ⇔ 有 run、payload 是物件且最多 1 KiB。scan_operations：主鍵 `(scan_id, ordinal)`、`(scan_id, method, path)` 唯一。兩張表都是 append-only。
+  - 和其他 trigger 一樣只防程式錯誤造成的誤改（`DECISIONS.md` §7）；FK 一律 `ON DELETE RESTRICT`。
+- **其餘資料表由各功能任務以自己的 migration 加入**：findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照
 
@@ -340,6 +356,11 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
 - **靶場**：image 與 data snapshot
 
 執行前要再次檢查：grant 尚未撤銷或過期、target 沒有停用、實際網路仍然一致。授權被撤回時，停止仍在執行的 scan。不能因為快照存在，就繼續使用已失效的授權。
+
+T09 已實作的部分（`DECISIONS.md` §13.1）：
+- 快照以引用不可變的資料為主：複合 FK 指向 target（含 project）、grant、規格、auth profile（含 role_label）與它的版本；另外凍結 target 的 origin（targets 沒有 trigger），並以 `scan_operations` 保存每個 operation 與建立當時的判斷。grant 的範圍、規格與 inventory、profile 的版本都已由 trigger 保證不可變，不另外複製。
+- runner 啟動前（`QueueOperations.prepare`）以 `FOR SHARE` 重新判斷 gate、origin 是否和快照相同、綁定的 profile 版本是否還有密文；不通過就 failed（fail closed）。停止已在執行的 scan 在 T13。
+- 引擎與模板、映像 digest、guard policy hash、parser 與 mapping 的版本在 M2 之後加入。
 
 ## 8. 任務狀態機
 
@@ -370,6 +391,11 @@ queued -> preparing -> running -> collecting -> normalizing
 
 - `queued` 由 runner 認領；runner 收集完畢後標為 `collected`，再由 worker 認領解析。
 - 即使 scan 是 completed，也不代表所有授權的 API operation 都確實測到了。coverage 是另一個維度，必須呈現分母和未測的理由。
+
+T09 已實作（`DECISIONS.md` §13.4）：
+- run 的轉換表在 `scans/domain/lifecycle.py`，表外的轉換一律拒絕，終止狀態不能再轉換；failed、timed_out、interrupted 必須有錯誤碼。
+- scan 的狀態不獨立轉換：每次 run 轉換之後，由所有 run 的狀態與「是否要求過取消」以純函式 `aggregate()` 重新算出，在同一個 transaction 寫入。全部終止時的優先順序：要求過取消 → cancelled；interrupted；timed_out；全部 succeeded → completed；有 succeeded → partially_completed；其他 → failed。
+- 後面的引擎要等前面的引擎都不再送出流量（collected、normalizing 或終止）才能開始；失敗的引擎不擋住後面的引擎。
 
 **例外處理**：
 
@@ -402,6 +428,14 @@ queued -> preparing -> running -> collecting -> normalizing
 - 開始發流量後若崩潰，預設標為 interrupted，由使用者以新的 scan 重跑。
 - 只有 Parser 可以對不可變的 artifact 安全重試。
 - 這套機制不提供目標外部狀態的 transaction rollback。
+
+**T09 已實作**（`DECISIONS.md` §13.5–§13.7）：
+
+- 認領以 `FOR UPDATE OF scans SKIP LOCKED` 先鎖 scan、依 `queue_position` 先進先出，鎖到之後以新的 statement 再確認條件（[S28]：ORDER BY 搭配鎖可能用到舊的資料）。
+- lease 30 秒、每 5 秒心跳；每次轉換都要 owner 相同而且還沒過期（fencing）。過期的 lease 不能延長，也不會被別人認領。
+- 對帳（`reconcile_expired`）只對已確定停止的引擎：T09 只有 fake（不發流量、沒有容器），runner 階段 → interrupted（`LEASE_EXPIRED`），解析中 → collected（可以重試）。容器的對帳、孤兒容器與 guard 封鎖在 T13。
+- 取消：排隊中的 run 直接取消；runner 在心跳或 prepare 時看到取消才停止，之後 scan 才是 cancelled；已收集的引擎繼續解析完。
+- 目前只有 FakeRunner（`secscan-admin fake-runner`），以輪詢處理工作；真的 runner 程序與 docker-socket-proxy 在 T10。
 
 **取消的驗收目標**：
 

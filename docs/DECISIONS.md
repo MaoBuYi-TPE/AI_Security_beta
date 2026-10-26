@@ -774,7 +774,7 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
 2. 400：`Idempotency-Key` 缺少、重複或格式不符。
 3. target：不存在或屬於其他 project 回 404；角色不足回 403。
 4. key 已用過：同內容重送（202 或 200）；不同內容 409 `IDEMPOTENCY_CONFLICT`。
-5. 引擎與 profile 的規則（只需要 target 的種類與請求本身）：`ENGINE_UNSUPPORTED`、`PROFILE_INCOMPATIBLE`；引擎重複、fake 和其他引擎混用是 `INVALID_REQUEST`。都是 422。
+5. 引擎與 profile 的規則（只需要 target 的種類與請求本身）：先判斷引擎重複、fake 和其他引擎混用（`INVALID_REQUEST`），再判斷 `ENGINE_UNSUPPORTED`，最後是 `PROFILE_INCOMPATIBLE`。都是 422。
 6. gate（`require_usable`，§10.6）：依序以 `FOR SHARE` 鎖住 target 與 grant，之後才取時間。grant 不存在或屬於其他 project 回 404；屬於其他 target 回 422；尚未核准、已撤銷、尚未生效回 403 `SCOPE_NOT_APPROVED`；過期回 403 `SCOPE_EXPIRED`；target 停用回 409 `TARGET_DISABLED`；IP 不在 `LAB_CIDR` 內回 422 `SCOPE_OUTSIDE_LAB`。
 7. 規格：不存在或屬於其他 project 回 404；屬於其他 target 回 422；沒有任何 operation 在範圍內回 422 `PROFILE_INCOMPATIBLE`。
 8. auth profile：以 `FOR SHARE` 鎖住 profile 再讀目前的版本。不存在或屬於其他 project 回 404；屬於其他 target 回 422；目前的版本沒有 secret 回 409 `INVALID_STATE_TRANSITION`（只有直接改了 DB 才會發生）；preflight 不在 grant 的範圍內回 422，訊息附原因（例如 `PATH_EXCLUDED`），不附 path。
@@ -830,11 +830,13 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
 |---|---|---|
 | 認領 | runner 認領 queued、worker 認領 collected。都以 `FOR UPDATE OF scans SKIP LOCKED` 先鎖 scan，再改 run。條件：同一個 scan 中前面的 run 都不再送出流量；runner 認領時 scan 沒有被要求取消；引擎在認領者支援的清單中。依 `scans.queue_position`（identity）先進先出。鎖到之後以新的 statement 再確認一次條件，不符就換下一個 | §3、[S28]。所有改 run 的寫入都先鎖 scan，所以持有 scan 的鎖時 run 不會變；`ORDER BY` 搭配鎖可能用到舊的資料，所以要再確認。`created_at` 是 transaction 開始的時間，不能代表 commit 的先後（T04 的交接），所以另用 identity |
 | lease | 認領時寫入 `lease_owner`、`lease_expires_at`（DB 時間加 30 秒）與 `heartbeat_at`；每 5 秒心跳一次延長。每次轉換都要 owner 相同、而且還沒過期（fencing）。過期的 lease 不能延長，也不會被別人接手 | `ARCHITECTURE.md` §9：lease 過期不代表工作已經停止 |
-| 時間 | lease、開始與結束的時間都用 `clock_timestamp()`（實際執行的時間） | 等鎖期間 `now()`（transaction 開始的時間）已經過時（§12.3 的同一個問題） |
+| 時間 | 寫入的時間（lease 的期限、心跳、開始、結束、取消）用 `statement_timestamp()`；判斷 lease 是否過期用 `clock_timestamp()` | 等鎖期間 `now()`（transaction 開始的時間）已經過時（§12.3 的同一個問題）。鎖都在前一個 statement 取得，所以 statement 開始的時間不會早於取得鎖；同一列的幾個欄位用同一個時間，「心跳不早於開始」這類 CHECK 才不會因為微秒的差距失敗 |
 | 每個操作一個短 transaction | `scans/queue.py` 的 `ScanQueue`：claim、claim_collected、heartbeat、prepare、advance、reconcile_expired 各自開始與結束 transaction；長時間的工作（掃描、等待）不持有 transaction | 持有 transaction 會卡住撤銷與取消，也會被 `idle_in_transaction_session_timeout` 終止 |
 | prepare | 鎖 scan 之後：要求過取消 → cancelling；以 `FOR SHARE` 鎖住 target 與 grant，以 `check_usable()` 重新判斷 gate，origin 也必須和快照相同 → 不通過就 failed；以 `FOR SHARE` 鎖住綁定的 profile 版本，密文已清除 → failed；都通過 → running | T06、T08 的交接：撤銷 grant、停用 target、PATCH profile 之後，排隊中的 scan 在送出流量之前就停下（fail closed） |
 | 對帳 | `reconcile_expired(engines)`：lease 過期的 run，runner 階段 → interrupted（`LEASE_EXPIRED`），normalizing → collected（解析可以重試）。T09 只對 fake 的 run 執行 | fake 不發流量、沒有容器，lease 過期就可以確定它已停止；容器的對帳在 T13。只有 parser 可以重試（CLAUDE.md §8） |
 | 事件 | `scan_events`：每個 scan 各自的 sequence，在持有 scan 的鎖時取 max + 1，所以依 commit 的順序而且沒有間隔；以 `after_sequence` 輪詢。類型：`scan.created`、`scan.status`、`scan.cancel_requested`、`run.status`。payload 只由 enum 與 id 組成，最多 1 KiB | 全域的序號會因 commit 的先後而讓輪詢漏掉事件。事件是狀態轉換的紀錄，runner 的轉換不寫 audit |
+
+**測試的隔離**：佇列會認領任何排隊中的 run，所以佇列、FakeRunner 與需要 runner 的 API 測試，每個測試從 migrated 的 template 複製一個自己的資料庫（`CREATE DATABASE … TEMPLATE`，沿用 template 的角色，用完刪除），不會認領到其他測試留下的 run（T04 的交接）。
 
 **鎖的順序**（避免死結）：
 - 建立 scan：target（SHARE）→ grant（SHARE）→ profile（SHARE）→ 新增 scan。PATCH profile 以 `FOR UPDATE` 鎖 profile，所以會等建立 scan 的 transaction commit，不會綁到即將被清除的版本；反過來，建立 scan 等 PATCH commit 之後，讀到的是新版本。
