@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25；S79–S82 為 2026-10-26。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -82,6 +82,10 @@
 | S76 | [PortSwigger Web Security Academy — Access control](https://portswigger.net/web-security/access-control) | 「Broken access control resulting from platform misconfiguration」：有些框架支援以 `X-Original-URL`、`X-Rewrite-URL` 覆寫請求的 URL，前端依 URL 限制時可以被繞過。T08 的 api_key_header 拒絕這兩個 header |
 | S77 | [httpoxy](https://httpoxy.org/) | 「RFC 3875 (CGI) puts the HTTP `Proxy` header from a request into the environment variables as `HTTP_PROXY`」，信任這個環境變數的 HTTP client 就把對外的請求送往攻擊者指定的代理；CVE-2016-5385（PHP）、CVE-2016-5386（Go）、CVE-2016-5387（Apache HTTP Server）、CVE-2016-1000110（Python CGIHandler）等；建議「block `Proxy` request headers as early as possible」，這個 header 不是 IETF 定義的。T08 的 api_key_header 拒絕 `Proxy`（審查後補上） |
 | S78 | [PortSwigger Web Security Academy — Exploiting HTTP Host header vulnerabilities](https://portswigger.net/web-security/host-header/exploiting) | 「Inject host override headers」：除了 `X-Forwarded-Host`，還有 `X-Host`、`X-Forwarded-Server`、`X-HTTP-Host-Override`、`Forwarded` 等作用相同的 header。T08 的 api_key_header 拒絕這些 header（`X-Forwarded-*` 以前綴拒絕） |
+| S79 | [IETF — The Idempotency-Key HTTP Header Field（draft-ietf-httpapi-idempotency-key-header-08，2026-10-22）](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/) | 「Idempotency-Key is an Item Structured Header Field」，值是 String，範例 `Idempotency-Key: "8e03978e-40d5-43e8-bc93-6894a57f9324"`；缺少 key 時「SHOULD reply with an HTTP 400」；同一個 key 搭配不同內容「SHOULD reply with an HTTP 422」；原請求還在處理時「SHOULD reply with an HTTP 409」；「Uniqueness of the key MUST be defined by the resource owner」；期限由資源定義並寫在文件中；「An idempotency fingerprint MAY be used in conjunction with an idempotency key」。仍是草案。T09 的 `POST /scans`（`DECISIONS.md` §13.2） |
+| S80 | [PostgreSQL — Client Connection Defaults](https://www.postgresql.org/docs/current/runtime-config-client.html) | `statement_timeout`、`lock_timeout`、`idle_in_transaction_session_timeout` 預設 0（關閉），沒有單位時是毫秒；前兩者「Setting … in postgresql.conf is not recommended because it would affect all sessions」；`lock_timeout`「applies separately to each lock acquisition attempt」，且「if statement_timeout is nonzero, it is rather pointless to set lock_timeout to the same or larger value」；`idle_in_transaction_session_timeout` 終止整個 session。T09 的連線逾時（`DECISIONS.md` §13.8） |
+| S81 | [PostgreSQL — Error Codes（Appendix A）](https://www.postgresql.org/docs/current/errcodes-appendix.html) | 55P03 `lock_not_available`、57014 `query_canceled`、25P03 `idle_in_transaction_session_timeout`、23505 `unique_violation`、40P01 `deadlock_detected`。T09 把等鎖與查詢逾時對應到 503 |
+| S82 | [PostgreSQL — CREATE TABLE](https://www.postgresql.org/docs/current/sql-createtable.html) | `GENERATED ALWAYS AS IDENTITY`：INSERT 指定的值只在 `OVERRIDING SYSTEM VALUE` 時接受，UPDATE 成 DEFAULT 以外的值一律拒絕；「MATCH SIMPLE allows any of the foreign key columns to be null; if any of them are null, the row is not required to have a match」，MATCH SIMPLE 是預設；`ON DELETE RESTRICT`。T09 的 `queue_position` 與 scan 的複合 FK |
 
 ## 需要在 M0–M2 實際確認的事項
 
