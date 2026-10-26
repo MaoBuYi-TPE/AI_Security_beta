@@ -360,3 +360,25 @@ def test_a_cancel_waits_for_a_claim_and_then_asks_the_runner(
     )
     sequences = [row.sequence for row in rows]
     assert sequences == list(range(1, len(sequences) + 1))
+
+
+def test_a_scan_is_invisible_to_runners_until_it_commits(
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """scan 與 run 在同一個 transaction 寫入：commit 之前 runner 認領不到，commit 之後才有工作。"""
+    race = Race(queue_database, RACER, _claim)
+
+    with Session(queue_engine, expire_on_commit=False) as holder, holder.begin():
+        scan = _create(world, scannable, str(uuid4()))(holder)
+        race.start()
+        race.join()
+
+    assert (race.errors, race.results) == ([], [None])
+    with Session(queue_engine, expire_on_commit=False) as session, session.begin():
+        lease = _claim(session)
+    assert lease is not None
+    assert lease.scan_id == scan.id
