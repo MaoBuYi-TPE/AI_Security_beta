@@ -751,3 +751,34 @@ def test_claiming_without_an_owner_is_a_programming_error(
         assert run is not None
         with pytest.raises(ValueError, match="lease_owner"):
             progress.move(scan, run, R.NORMALIZING)
+
+
+def test_a_claim_skips_a_scan_locked_by_another_worker_without_waiting(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """worker 正在解析前一個引擎（持有 scan 的鎖，沒有鎖下一個 run）：runner 認領下一個引擎時
+    跳過這個 scan、不等待（鎖的是 scan，不是 run；突變檢查找到）。"""
+    _engine_scan(queue_engine, world, scannable, (ScanEngine.ZAP, ScanEngine.NUCLEI))
+    zap = _claimed(queue, engines=EVERY_ENGINE)
+    queue.prepare(zap)
+    queue.advance(zap, R.COLLECTING)
+    queue.advance(zap, R.COLLECTED)
+    race = Race(
+        queue_database,
+        RACER,
+        lambda session: QueueOperations(session, lab=LAB).claim(OTHER_OWNER, EVERY_ENGINE),
+    )
+
+    with Session(queue_engine, expire_on_commit=False) as holder, holder.begin():
+        parsing = QueueOperations(holder, lab=LAB).claim_collected(OWNER, EVERY_ENGINE)
+        assert parsing is not None
+        race.start()
+        race.join()
+
+    assert (race.errors, race.results) == ([], [None])
+    nuclei = _claimed(queue, OTHER_OWNER, EVERY_ENGINE)
+    assert nuclei.engine is ScanEngine.NUCLEI
