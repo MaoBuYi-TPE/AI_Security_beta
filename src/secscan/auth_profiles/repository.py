@@ -109,15 +109,17 @@ class AuthProfileRepository:
         model, project_id = row
         return _profile(model, project_id, self._current(profile_id))
 
-    def lock(self, profile_id: UUID) -> AuthProfile | None:
-        """FOR UPDATE 鎖住 profile（只鎖 profile 的列），並以 DB 的最新值覆蓋已載入的物件。
+    def lock(self, profile_id: UUID, *, shared: bool = False) -> AuthProfile | None:
+        """鎖住 profile（只鎖 profile 的列），並以 DB 的最新值覆蓋已載入的物件。
 
-        建立新版本前呼叫：同時更新同一個 profile 時，version 依 commit 的先後遞增。
+        shared=False 是 FOR UPDATE：建立新版本前呼叫，同時更新同一個 profile 時，version 依 commit
+        的先後遞增。shared=True 是 FOR SHARE：建立 scan 時綁定目前的版本，PATCH 會等 scan 的
+        transaction commit，不會綁到即將被清除的版本（docs/DECISIONS.md §13.5）。
         """
         row = self._session.execute(
             _with_project()
             .where(AuthProfileModel.id == profile_id)
-            .with_for_update(of=AuthProfileModel)
+            .with_for_update(of=AuthProfileModel, read=shared)
             .execution_options(populate_existing=True)
         ).first()
         if row is None:
