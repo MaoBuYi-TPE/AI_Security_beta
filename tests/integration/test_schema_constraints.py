@@ -34,7 +34,7 @@ pytestmark = pytest.mark.integration
 # api_spec_operations 4、auth_profiles 2、auth_profile_versions 10；每一個都有對應的行為測試
 # （targets 與 scope_grants 的在 test_scope_schema.py，api_specs 與 api_spec_operations 的在
 # test_spec_schema.py，auth_profiles 與 auth_profile_versions 的在 test_auth_profile_schema.py）。
-EXPECTED_CHECK_COUNT = 52
+EXPECTED_CHECK_COUNT = 83
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "
@@ -306,6 +306,23 @@ def test_audit_events_are_append_only(db_session: Session, statement: str) -> No
         ("uq_auth_profiles_target_id_role_label", "(target_id, role_label)"),
         ("pk_auth_profile_versions", "(profile_id, version)"),
         ("uq_auth_profile_versions_live_secret", "WHERE (encrypted_secret IS NOT NULL)"),
+        ("uq_targets_id_project_id", "(id, project_id)"),
+        ("uq_scope_grants_id_target_id", "(id, target_id)"),
+        ("uq_api_specs_id_target_id", "(id, target_id)"),
+        ("uq_auth_profiles_id_target_id_role_label", "(id, target_id, role_label)"),
+        ("uq_scans_project_id_idempotency_key", "(project_id, idempotency_key)"),
+        ("uq_scans_queue_position", "(queue_position)"),
+        ("uq_scans_active_target", "UNIQUE INDEX uq_scans_active_target ON public.scans"),
+        ("ix_scans_target_id_created_at", "(target_id, created_at)"),
+        ("ix_scans_project_id_created_at", "(project_id, created_at)"),
+        ("uq_scanner_runs_scan_id_sequence", "(scan_id, sequence)"),
+        ("uq_scanner_runs_scan_id_engine", "(scan_id, engine)"),
+        ("uq_scanner_runs_id_scan_id", "(id, scan_id)"),
+        ("ix_scanner_runs_claimable", "(status, engine) WHERE"),
+        ("ix_scanner_runs_lease_expires_at", "WHERE (lease_owner IS NOT NULL)"),
+        ("pk_scan_events", "(scan_id, sequence)"),
+        ("pk_scan_operations", "(scan_id, ordinal)"),
+        ("uq_scan_operations_scan_id_method_path", "(scan_id, method, path)"),
     ],
 )
 def test_expected_indexes_exist(db_session: Session, index_name: str, definition: str) -> None:
