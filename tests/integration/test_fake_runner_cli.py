@@ -6,8 +6,11 @@
 from uuid import UUID
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from secscan.cli import EXIT_FAILURE, EXIT_OK, main
+from secscan.runner.fake import FakeRunner
+from secscan.scans.queue import LeaseLostError
 from tests.integration.api_support import Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 
@@ -137,3 +140,39 @@ def test_an_unreachable_database_is_reported(
     assert "make db-up" in err
     assert "SECRET_ENCRYPTION_KEYS" not in err
     assert queue_database.password not in err
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (LeaseLostError("lease"), "lease 已失效"),
+        (
+            OperationalError("SELECT 1", None, Exception("canary-db-detail-0005")),
+            "OperationalError",
+        ),
+        (KeyboardInterrupt(), "已中斷"),
+    ],
+    ids=["lease-lost", "database", "interrupted"],
+)
+def test_a_stopped_runner_reports_why_and_exits_1(
+    queue_database: ProvisionedDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: BaseException,
+    message: str,
+) -> None:
+    """runner 停下來的原因寫到 stderr，exit 1；DB 錯誤只報例外類別，不帶訊息。"""
+    _use(monkeypatch, queue_database)
+
+    def stop(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(FakeRunner, "drain", stop)
+
+    exit_code = main(["fake-runner"])
+
+    out, err = capsys.readouterr()
+    assert exit_code == EXIT_FAILURE
+    assert out == ""
+    assert message in err
+    assert "canary-db-detail-0005" not in err

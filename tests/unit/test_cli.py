@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from secscan.cli import EXIT_FAILURE, EXIT_USAGE, main
+from secscan.cli import EXIT_FAILURE, EXIT_USAGE, _parser, main
 
 CANARY_PASSWORD = "canary-db-password-0004"
 
@@ -163,3 +163,10 @@ def test_fake_runner_rejects_invalid_arguments(
 
     assert caught.value.code == EXIT_USAGE
     assert "usage:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("value", "seconds"), [("0", 0.0), ("2.5", 2.5), ("300", 300.0)])
+def test_fake_runner_accepts_hold_seconds_within_bounds(value: str, seconds: float) -> None:
+    args = _parser().parse_args(["fake-runner", "--hold-seconds", value])
+
+    assert (args.hold_seconds, args.outcome, args.once) == (seconds, "succeed", False)
