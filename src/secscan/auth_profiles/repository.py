@@ -100,6 +100,22 @@ class AuthProfileRepository:
             .with_for_update()
         ).scalar_one()
 
+    def version_has_secret(self, profile_id: UUID, *, version: int) -> bool:
+        """以 FOR SHARE 鎖住這一版，回傳它是否還有密文（不讀出密文）。
+
+        runner 啟動前確認 scan 綁定的版本還沒被取代（docs/DECISIONS.md §13.5）：鎖住之後，PATCH 的
+        清除要等這個 transaction 結束。不存在的版本回 False。
+        """
+        row = self._session.execute(
+            select(AuthProfileVersionModel.secret_erased_at)
+            .where(
+                AuthProfileVersionModel.profile_id == profile_id,
+                AuthProfileVersionModel.version == version,
+            )
+            .with_for_update(read=True)
+        ).first()
+        return row is not None and row.secret_erased_at is None
+
     def get(self, profile_id: UUID) -> AuthProfile | None:
         row = self._session.execute(
             _with_project().where(AuthProfileModel.id == profile_id)

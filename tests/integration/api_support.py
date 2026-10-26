@@ -21,6 +21,11 @@ from secscan.grants.domain.scope import GrantRequest
 from secscan.grants.service import ScopeGrantService
 from secscan.projects.domain import Project
 from secscan.projects.service import ProjectService
+from secscan.scans.domain.catalog import Engine as ScanEngine
+from secscan.scans.domain.catalog import ScanProfile
+from secscan.scans.domain.model import Scan
+from secscan.scans.domain.request import BudgetRequest, ScanRequest
+from secscan.scans.service import ScanService
 from secscan.specs.domain.documents import SpecFormat
 from secscan.specs.domain.model import ApiSpec, SpecUpload
 from secscan.specs.service import ApiSpecService
@@ -32,6 +37,8 @@ MINIMAL_SPEC = (
     b'{"openapi": "3.0.3", "info": {"title": "t", "version": "1"},'
     b' "paths": {"/items/{id}": {"get": {"operationId": "getItem"}}}}'
 )
+# 可以掃描的 grant 範圍：MINIMAL_SPEC 的 GET /items/{id} 與 profile 的 preflight GET /me。
+SCANNABLE_PATHS = ("/items/{id}", "/me")
 # 與 API（create_app 的預設設定）相同的 lab 網段。
 LAB = LabNetwork(DEFAULT_LAB_CIDR)
 LAB_IP = "10.89.7.20"
@@ -55,6 +62,29 @@ class Caller:
     @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.key}"}
+
+
+@dataclass(frozen=True)
+class Scannable:
+    """可以建立 scan 的 target：核准的 grant、規格與 bearer profile。"""
+
+    target: Target
+    grant: ScopeGrant
+    spec: ApiSpec
+    profile: AuthProfile
+
+    def request(self, **overrides: object) -> ScanRequest:
+        fields: dict[str, object] = {
+            "target_id": self.target.id,
+            "scope_grant_id": self.grant.id,
+            "api_spec_id": self.spec.id,
+            "auth_profile_id": self.profile.id,
+            "profile": ScanProfile.API_ACTIVE_LAB,
+            "engines": (ScanEngine.FAKE,),
+            "budget": BudgetRequest(),
+        }
+        fields.update(overrides)
+        return ScanRequest(**fields)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -176,6 +206,30 @@ class Seeder:
                     secret=SecretValue(value),
                     preflight=VAMPI_ME,
                 ),
+                request_id=None,
+            )
+
+    def scannable(self, world: "World") -> Scannable:
+        """A 的 operator 建立 target、規格與 profile；admin 核准 grant。"""
+        target = self.target(world.operator_a, world.project_a.id)
+        grant = self.grant(world.operator_a, target, paths=SCANNABLE_PATHS)
+        return Scannable(
+            target=target,
+            grant=self.approve(world.admin, grant),
+            spec=self.spec(world.operator_a, target),
+            profile=self.auth_profile(world.operator_a, target),
+        )
+
+    def scan(
+        self, caller: Caller, scannable: Scannable, *, key: str | None = None, **overrides: object
+    ) -> Scan:
+        """以 service 建立 scan（預設是 fake 引擎、api_active_lab）並 commit。"""
+        with self._session() as session:
+            return ScanService(session, lab=LAB).create(
+                caller.principal,
+                scannable.request(**overrides),
+                idempotency_key=key if key is not None else uuid4().hex,
+                clock=lambda: datetime.now(UTC),
                 request_id=None,
             )
 

@@ -6,6 +6,9 @@
   時直接拒絕。psycopg 經 libpq 連線，pytest-socket 管不到，所以由這裡把關。
 - 每個測試 session 建立專屬的非 superuser 角色與它擁有的全新資料庫，結束時刪除，
   權限和開發／正式環境的應用程式角色一致（不以 superuser 執行 migration 與測試）。
+- 佇列的測試另外從 migrated 的 template 複製（CREATE DATABASE … TEMPLATE）每個測試專用的資料庫：
+  佇列會認領任何排隊中的 run，共用資料庫時會認領到別的測試留下的 run。複製的資料庫沿用
+  template 的角色（資料表的擁有者），刪除時只刪資料庫。
 - 測試角色的預設時區刻意設成 Asia/Taipei：伺服器本身是 UTC 時，看不出應用程式的
   UTC 設定有沒有作用。
 """
@@ -82,12 +85,20 @@ def ensure_test_cluster(cluster_name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class ProvisionedDatabase:
-    """一個測試專用資料庫；角色與資料庫同名，密碼為隨機值。"""
+    """一個測試專用資料庫；密碼為隨機值。
+
+    角色與資料庫同名；從 template 複製的資料庫（role 有值）沿用 template 的角色。
+    """
 
     name: str
     host: str
     port: int
     password: str = field(repr=False)
+    role: str | None = None
+
+    @property
+    def user(self) -> str:
+        return self.role if self.role is not None else self.name
 
     def app_settings(self) -> Settings:
         """以應用程式角色連到這個資料庫的 Settings（不讀 .env）。"""
@@ -96,7 +107,7 @@ class ProvisionedDatabase:
             db_host=self.host,
             db_port=self.port,
             db_name=self.name,
-            db_user=self.name,
+            db_user=self.user,
             db_password=SecretStr(self.password),
             secret_encryption_keys=encryption_keys(),
             _env_file=None,
@@ -112,6 +123,7 @@ class DatabaseProvisioner:
             settings.superuser_url(), isolation_level="AUTOCOMMIT", poolclass=NullPool
         )
         self._created: list[str] = []
+        self._clones: list[str] = []
 
     def verify_server(self) -> None:
         with self._engine.connect() as connection:
@@ -144,23 +156,56 @@ class DatabaseProvisioner:
             name=name, host=self._settings.host, port=self._settings.port, password=password
         )
 
+    def clone(self, template: ProvisionedDatabase) -> ProvisionedDatabase:
+        """以 template（已 migrate、沒有任何連線）複製一個新的資料庫，擁有者是 template 的角色。"""
+        name = DATABASE_PREFIX + secrets.token_hex(6)
+        ident = sql.Identifier(name)
+        with self._engine.connect() as connection:
+            raw = _driver_connection(connection)
+            raw.execute(
+                sql.SQL("CREATE DATABASE {} TEMPLATE {} OWNER {}").format(
+                    ident, sql.Identifier(template.name), sql.Identifier(template.user)
+                )
+            )
+            raw.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(ident))
+        self._clones.append(name)
+        return ProvisionedDatabase(
+            name=name,
+            host=template.host,
+            port=template.port,
+            password=template.password,
+            role=template.user,
+        )
+
     def drop(self, database: ProvisionedDatabase) -> None:
+        if database.role is not None:
+            self._drop_database(database.name)
+            self._clones.remove(database.name)
+            return
         self._drop(database.name)
         self._created.remove(database.name)
 
     def close(self) -> None:
-        """刪除這個 session 建立、還沒刪掉的資料庫與角色，再釋放連線。"""
+        """刪除這個 session 建立、還沒刪掉的資料庫與角色，再釋放連線（複製的資料庫先刪）。"""
+        for name in list(self._clones):
+            self._drop_database(name)
+        self._clones.clear()
         for name in list(self._created):
             self._drop(name)
         self._created.clear()
         self._engine.dispose()
 
     def _drop(self, name: str) -> None:
+        self._drop_database(name)
+        with self._engine.connect() as connection:
+            raw = _driver_connection(connection)
+            raw.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name)))
+
+    def _drop_database(self, name: str) -> None:
         ident = sql.Identifier(name)
         with self._engine.connect() as connection:
             raw = _driver_connection(connection)
             raw.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(ident))
-            raw.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(ident))
 
 
 def _driver_connection(connection: Connection) -> psycopg.Connection[tuple[object, ...]]:
