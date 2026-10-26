@@ -20,6 +20,7 @@ from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.core.db import ConstraintViolationError
 from secscan.core.errors import AppError, ErrorCode, not_found_error
 from secscan.core.json_types import JsonObject
+from secscan.core.pagination import Page, PageRequest
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import Budget
 from secscan.grants.service import ScopeGrantService, UsableGrant
@@ -32,16 +33,19 @@ from secscan.scans.domain.catalog import (
     check_profile,
     plan_runs,
 )
+from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.domain.model import (
     AuthBinding,
     EventType,
     FrozenOperation,
     NewScan,
     Scan,
+    ScanEvent,
     created_payload,
 )
 from secscan.scans.domain.request import ScanRequest, fingerprint, resolve_budget
-from secscan.scans.repository import ScanRepository
+from secscan.scans.progress import ScanProgress
+from secscan.scans.repository import ScanFilters, ScanRepository
 from secscan.specs.repository import ApiSpecRepository
 from secscan.targets.domain import LabNetwork, Target
 from secscan.targets.repository import TargetRepository
@@ -57,6 +61,7 @@ ACTIVE_TARGET_CONSTRAINT = "uq_scans_active_target"
 class ScanService:
     def __init__(self, session: Session, *, lab: LabNetwork) -> None:
         self._scans = ScanRepository(session)
+        self._progress = ScanProgress(session)
         self._targets = TargetRepository(session)
         self._grants = ScopeGrantService(session, lab=lab)
         self._specs = ApiSpecRepository(session)
@@ -126,6 +131,42 @@ class ScanService:
 
     def get(self, principal: Principal, scan_id: UUID) -> Scan:
         return self._scan(principal, scan_id, Permission.PROJECT_READ)
+
+    def list(self, principal: Principal, filters: ScanFilters, page: PageRequest) -> Page[Scan]:
+        """呼叫者看得到的 project 中的 scan：其他 project 的 target 當成篩選條件時就是沒有結果。"""
+        return self._scans.list(principal.project_scope, filters, page)
+
+    def events(
+        self, principal: Principal, scan_id: UUID, *, after_sequence: int, limit: int
+    ) -> tuple[ScanEvent, ...]:
+        """sequence 大於 after_sequence 的事件，依 sequence 遞增，最多 limit 個。"""
+        self._scan(principal, scan_id, Permission.PROJECT_READ)
+        return self._scans.events(scan_id, after_sequence=after_sequence, limit=limit)
+
+    def cancel(self, principal: Principal, scan_id: UUID, *, request_id: str | None) -> Scan:
+        """要求取消（docs/DECISIONS.md §13.6）：排隊中的 run 直接取消；runner 與 worker 階段的
+        run 由它們確認。已終止或已要求過取消時不改變任何東西，也不重記事件與 audit。"""
+        self._scan(principal, scan_id, Permission.PROJECT_WRITE)
+        locked = self._progress.lock_scan(scan_id)
+        if locked is None:
+            raise not_found_error()
+        if locked.is_terminal or locked.cancel_requested:
+            return self._existing(scan_id)
+        requested = self._progress.request_cancel(locked)
+        for run in self._progress.runs(scan_id):
+            if run.status is RunStatus.QUEUED:
+                self._progress.move(requested, run, RunStatus.CANCELLED)
+        status = self._progress.settle(requested)
+        self._audit.record(
+            action="scan.cancel",
+            object_type="scan",
+            object_id=scan_id,
+            actor_key_id=principal.key_id,
+            project_id=locked.project_id,
+            request_id=request_id,
+            changes={"previous_status": locked.status.value, "status": status.value},
+        )
+        return self._existing(scan_id)
 
     def _replay(self, project_id: UUID, idempotency_key: str, digest: bytes) -> Scan | None:
         """這個 key 已建立過 scan：內容相同回它目前的狀態，不同回 409。"""
