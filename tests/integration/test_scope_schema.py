@@ -556,7 +556,8 @@ def test_approving_cannot_record_a_revocation(db_session: Session, lab: Lab) -> 
 
 @pytest.mark.parametrize(
     "statement",
-    ["DELETE FROM scope_grants WHERE id = :id", "TRUNCATE scope_grants"],
+    # scans 以 FK 引用 grant（T09）：不加 CASCADE 的 TRUNCATE 先被 FK 擋下，測不到 trigger。
+    ["DELETE FROM scope_grants WHERE id = :id", "TRUNCATE scope_grants CASCADE"],
     ids=["delete", "truncate"],
 )
 def test_grants_cannot_be_removed(db_session: Session, lab: Lab, statement: str) -> None:

@@ -57,6 +57,12 @@ V1_ROUTES = {
     ("GET", "/api/v1/auth-profiles/{profile_id}"),
     ("PATCH", "/api/v1/auth-profiles/{profile_id}"),
     ("GET", "/api/v1/auth-profiles/{profile_id}/versions"),
+    # T09
+    ("POST", "/api/v1/scans"),
+    ("GET", "/api/v1/scans"),
+    ("GET", "/api/v1/scans/{scan_id}"),
+    ("GET", "/api/v1/scans/{scan_id}/events"),
+    ("POST", "/api/v1/scans/{scan_id}/cancel"),
 }
 CANARY = "canary-credential-0003"
 
@@ -202,12 +208,12 @@ def test_rejections_are_logged_with_reason_but_without_the_credential(
 
 
 def test_only_writes_to_auth_profiles_get_the_cipher(client: TestClient) -> None:
-    """最小權限（審查建議）：查詢的路徑用不到加密元件，就不拿到它。"""
+    """最小權限（審查建議）：查詢的路徑用不到加密元件，就不拿到它。整個 /api/v1 只有建立與
+    PATCH auth profile 拿得到；建立 scan 只綁定版本，不需要解密（docs/DECISIONS.md §13.7）。"""
     routes = {
         (method, route.path): route
         for route in _v1_routes(client)
         for method in route.methods or ()
-        if "auth-profiles" in (route.path or "")
     }
     with_cipher = {
         key
@@ -215,7 +221,7 @@ def test_only_writes_to_auth_profiles_get_the_cipher(client: TestClient) -> None
         if isinstance(route.dependant, Dependant) and secret_cipher in _calls(route.dependant)
     }
 
-    assert len(routes) == 5
+    assert len(routes) == len(V1_ROUTES)
     assert with_cipher == {
         ("POST", "/api/v1/targets/{target_id}/auth-profiles"),
         ("PATCH", "/api/v1/auth-profiles/{profile_id}"),

@@ -194,7 +194,8 @@ def test_profile_references_must_exist(
         "UPDATE auth_profiles SET name = 'renamed' WHERE id = :id",
         "UPDATE auth_profiles SET role_label = role_label WHERE id = :id",
         "DELETE FROM auth_profiles WHERE id = :id",
-        "TRUNCATE auth_profiles, auth_profile_versions",
+        # scans 以 FK 引用 profile 與版本（T09）：不加 CASCADE 時先被 FK 擋下，測不到 trigger。
+        "TRUNCATE auth_profiles, auth_profile_versions CASCADE",
     ],
     ids=["rename", "same-value", "delete", "truncate"],
 )
@@ -372,7 +373,7 @@ def test_reencrypting_the_secret_is_allowed(db_session: Session, lab: Lab) -> No
         "preflight_expected_status = 201 WHERE profile_id = :id",
         "UPDATE auth_profile_versions SET version = 2 WHERE profile_id = :id",
         "DELETE FROM auth_profile_versions WHERE profile_id = :id",
-        "TRUNCATE auth_profile_versions",
+        "TRUNCATE auth_profile_versions CASCADE",
     ],
     ids=[
         "change-preflight",

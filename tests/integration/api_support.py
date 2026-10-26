@@ -37,6 +37,8 @@ MINIMAL_SPEC = (
     b'{"openapi": "3.0.3", "info": {"title": "t", "version": "1"},'
     b' "paths": {"/items/{id}": {"get": {"operationId": "getItem"}}}}'
 )
+# 測試 profile 預設的 secret（測試洩漏時改用 canary）。
+DEFAULT_SECRET = "t1"
 # 可以掃描的 grant 範圍：MINIMAL_SPEC 的 GET /items/{id} 與 profile 的 preflight GET /me。
 SCANNABLE_PATHS = ("/items/{id}", "/me")
 # 與 API（create_app 的預設設定）相同的 lab 網段。
@@ -209,7 +211,7 @@ class Seeder:
                 request_id=None,
             )
 
-    def scannable(self, world: "World") -> Scannable:
+    def scannable(self, world: "World", *, secret: str = DEFAULT_SECRET) -> Scannable:
         """A 的 operator 建立 target、規格與 profile；admin 核准 grant。"""
         target = self.target(world.operator_a, world.project_a.id)
         grant = self.grant(world.operator_a, target, paths=SCANNABLE_PATHS)
@@ -217,7 +219,7 @@ class Seeder:
             target=target,
             grant=self.approve(world.admin, grant),
             spec=self.spec(world.operator_a, target),
-            profile=self.auth_profile(world.operator_a, target),
+            profile=self.auth_profile(world.operator_a, target, value=secret),
         )
 
     def scan(
