@@ -233,6 +233,8 @@ def test_a_lost_lease_stops_the_runner_and_is_reconciled_later(
 
     with pytest.raises(LeaseLostError):
         _runner(queue_engine, FakeScript(hold_seconds=30), clock).run_once()
+    # 第一次心跳失效就停止，不繼續停留到結束。
+    assert clock.sleeps == [5]
     assert _get(queue_engine, world, scan.id).status is S.RUNNING
 
     assert _runner(queue_engine).reconcile() == 1
