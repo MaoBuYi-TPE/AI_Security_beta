@@ -15,21 +15,31 @@
 
 - 以 SECRET_ENCRYPTION_KEYS 的第一個金鑰，重新加密所有還在的 secret（一個 transaction）。
 - 有任何一份解不開就全部回滾、exit 1，只列出 profile id；說明都寫到 stderr，不輸出 secret。
+
+fake 引擎的 runner（docs/DECISIONS.md §13.7）：
+
+    uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300] [--once]
+
+- 先對帳 lease 過期的 fake run、解析留下的 collected，再處理排隊中的 fake run，直到沒有工作
+  （--once 只處理一個）。不連任何位址，不需要 SECRET_ENCRYPTION_KEYS，不解密任何 secret。
+- 每個 run 的結果寫到 stderr；lease 失效、DB 錯誤或被中斷時 exit 1。
 """
 
 import argparse
+import math
 import os
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TextIO
+from uuid import uuid4
 
 from pydantic import ValidationError
 from pydantic_core import ErrorDetails
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 # 和 API 入口一樣載入完整的 ORM model 登記（跨功能 FK 需要；見 secscan.main）。
 import secscan.migrations.metadata  # noqa: F401
@@ -45,7 +55,10 @@ from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
 from secscan.core.text import require_text
 from secscan.migrations import head_revision
+from secscan.runner.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeRunner, FakeScript, RunReport
+from secscan.scans.queue import LeaseLostError, ScanQueue
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
+from secscan.targets.domain import LabNetwork
 
 PROGRAM = "secscan-admin"
 CLI_APPLICATION_NAME = "secscan-cli"
@@ -54,6 +67,8 @@ EXIT_FAILURE = 1
 EXIT_USAGE = 2  # argparse 的參數錯誤
 OUTPUT_FILE_MODE = 0o600
 ROTATE_COMMAND = "rotate-secret-keys"
+FAKE_RUNNER_COMMAND = "fake-runner"
+FAKE_RUNNER_APPLICATION_NAME = "secscan-fake-runner"
 # 解不開時最多列出幾個 profile id（其餘以數量表示）。
 MAX_LISTED_PROFILES = 10
 
@@ -112,6 +127,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_FAILURE
     if args.command == ROTATE_COMMAND:
         return _rotate_secret_keys(settings)
+    if args.command == FAKE_RUNNER_COMMAND:
+        script = FakeScript(outcome=FakeOutcome(args.outcome), hold_seconds=args.hold_seconds)
+        return _run_fake_runner(settings, script, once=args.once)
     output = KeyOutput(args.output)
     try:
         output.prepare()
@@ -188,6 +206,51 @@ def _rotate_secret_keys(settings: Settings) -> int:
     return EXIT_OK
 
 
+def _run_fake_runner(settings: Settings, script: FakeScript, *, once: bool) -> int:
+    engine = create_db_engine(settings, application_name=FAKE_RUNNER_APPLICATION_NAME, pooled=False)
+    try:
+        status = probe_database(engine, head_revision())
+        if status is not DatabaseStatus.READY:
+            _report(_NOT_READY[status])
+            return EXIT_FAILURE
+        queue = ScanQueue(
+            sessionmaker(engine, expire_on_commit=False),
+            lab=LabNetwork(settings.lab_cidr),
+            clock=lambda: datetime.now(UTC),
+        )
+        runner = FakeRunner(queue, owner=f"fake-runner:{os.getpid()}:{uuid4().hex}", script=script)
+        reconciled = runner.reconcile()
+        if reconciled:
+            _report(
+                f"已對帳 {reconciled} 個 lease 過期的 fake run"
+                "（標成 interrupted，或退回 collected）。"
+            )
+        reports = runner.drain(limit=1 if once else None, on_report=_report_run)
+    except LeaseLostError:
+        _report(
+            "lease 已失效（停頓太久）：已停止，lease 過期之後下一次執行會把它標成 interrupted。"
+        )
+        return EXIT_FAILURE
+    except SQLAlchemyError as exc:
+        _report(f"資料庫發生錯誤（{type(exc).__name__}），已停止。")
+        return EXIT_FAILURE
+    except KeyboardInterrupt:
+        _report("已中斷：lease 過期（30 秒）之後，下一次執行 fake-runner 會把它標成 interrupted。")
+        return EXIT_FAILURE
+    finally:
+        engine.dispose()
+    if not reports:
+        _report("沒有排隊中的 fake run。")
+    return EXIT_OK
+
+
+def _report_run(report: RunReport) -> None:
+    _report(
+        f"run {report.run_id}（scan {report.scan_id}）：{report.run_status.value}；"
+        f"scan {report.scan_status.value}。"
+    )
+
+
 def _unreadable_message(profile_ids: Sequence[object]) -> str:
     listed = "、".join(str(profile_id) for profile_id in profile_ids[:MAX_LISTED_PROFILES])
     if len(profile_ids) > MAX_LISTED_PROFILES:
@@ -248,7 +311,38 @@ def _parser() -> argparse.ArgumentParser:
             "有任何一份解不開就全部回滾。"
         ),
     )
+    fake = commands.add_parser(
+        FAKE_RUNNER_COMMAND,
+        help="處理排隊中的 fake run（測試引擎：不連任何位址，結果標為 fixture）",
+        description=(
+            "對帳 lease 過期的 fake run，再處理排隊中的 fake run 直到沒有工作。"
+            "不連任何位址，不需要 SECRET_ENCRYPTION_KEYS。"
+        ),
+    )
+    fake.add_argument(
+        "--outcome",
+        choices=[outcome.value for outcome in FakeOutcome],
+        default=FakeOutcome.SUCCEED.value,
+        help="每個 run 的結果，預設 succeed",
+    )
+    fake.add_argument(
+        "--hold-seconds",
+        type=_hold_seconds,
+        default=0,
+        help=f"在 running 停留的秒數（0 到 {MAX_HOLD_SECONDS}，期間心跳並檢查取消），預設 0",
+    )
+    fake.add_argument("--once", action="store_true", help="只處理一個排隊中的 run")
     return parser
+
+
+def _hold_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("必須是秒數") from None
+    if not (math.isfinite(seconds) and 0 <= seconds <= MAX_HOLD_SECONDS):
+        raise argparse.ArgumentTypeError(f"必須介於 0 與 {MAX_HOLD_SECONDS} 秒之間")
+    return seconds
 
 
 def _key_name(value: str) -> str:

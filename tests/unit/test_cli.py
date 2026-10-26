@@ -138,3 +138,28 @@ def test_rotate_reports_invalid_keys_without_their_values(
     assert out == ""
     assert "SECRET_ENCRYPTION_KEYS" in err
     assert CANARY_PASSWORD not in err
+
+
+# --- fake-runner（docs/DECISIONS.md §13.7）--------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["fake-runner", "--hold-seconds", "-1"],
+        ["fake-runner", "--hold-seconds", "301"],
+        ["fake-runner", "--hold-seconds", "soon"],
+        ["fake-runner", "--hold-seconds", "nan"],
+        ["fake-runner", "--outcome", "maybe"],
+        ["fake-runner", "--engine", "zap"],
+    ],
+    ids=["negative", "beyond-max", "not-a-number", "nan", "unknown-outcome", "unknown-flag"],
+)
+def test_fake_runner_rejects_invalid_arguments(
+    args: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(args)
+
+    assert caught.value.code == EXIT_USAGE
+    assert "usage:" in capsys.readouterr().err
