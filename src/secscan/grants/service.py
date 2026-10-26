@@ -2,11 +2,12 @@
 
 - 申請：PROJECT_WRITE。先以 FOR UPDATE 鎖住 target，再取下一個 version。
 - 核准、撤銷：PLATFORM_MANAGE（admin）。先以 FOR UPDATE 鎖住 grant，再以 DB 的最新狀態判斷轉換。
-- 掃描 gate（require_usable）：T09 建立 scan 時在同一個 transaction 呼叫。
+- 掃描 gate（require_usable）：建立 scan 時在同一個 transaction 呼叫（scans.service）。
 - 其他 project 的 target 與 grant 一律和不存在的一樣回 404；變更寫入 audit。
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from http import HTTPStatus
 from types import MappingProxyType
@@ -91,6 +92,15 @@ UNUSABLE_ERRORS: Mapping[UnusableReason, tuple[HTTPStatus, ErrorCode, str]] = Ma
         ),
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class UsableGrant:
+    """gate 通過的結果：鎖住的 target 與 grant，以及判斷時的時間（取得鎖之後才取）。"""
+
+    grant: ScopeGrant
+    target: Target
+    checked_at: datetime
 
 
 class ScopeGrantService:
@@ -187,12 +197,18 @@ class ScopeGrantService:
         return revoked
 
     def require_usable(
-        self, principal: Principal, *, target_id: UUID, grant_id: UUID, now: datetime
-    ) -> ScopeGrant:
-        """這個 grant 現在能不能用來建立 scan（docs/DECISIONS.md §10.6）。
+        self,
+        principal: Principal,
+        *,
+        target_id: UUID,
+        grant_id: UUID,
+        clock: Callable[[], datetime],
+    ) -> UsableGrant:
+        """這個 grant 現在能不能用來建立 scan（docs/DECISIONS.md §10.6、§13.3）。
 
-        T09 建立 scan 時在同一個 transaction 呼叫。以 FOR SHARE 依序鎖住 target 與 grant：
+        建立 scan 時在同一個 transaction 呼叫。以 FOR SHARE 依序鎖住 target 與 grant：
         撤銷或停用一旦 commit，之後就不可能再通過；反過來，正在建立 scan 時，撤銷會等它 commit。
+        時間在取得兩個鎖之後才取：等鎖期間 grant 可能已經過期。
         """
         self._target(principal, target_id, Permission.PROJECT_WRITE)
         self._grant(principal, grant_id, Permission.PROJECT_WRITE)
@@ -200,6 +216,7 @@ class ScopeGrantService:
         grant = self._grants.lock(grant_id, shared=True)
         if target is None or grant is None:
             raise not_found_error()
+        now = clock()
         try:
             check_usable(grant, target=target, lab=self._lab, now=now)
         except GrantUnusableError as exc:
@@ -207,7 +224,7 @@ class ScopeGrantService:
             raise AppError(status_code=status, code=code, message=message) from None
         except OutsideLabError as exc:
             raise outside_lab_error(exc) from None
-        return grant
+        return UsableGrant(grant=grant, target=target, checked_at=now)
 
     def _target(self, principal: Principal, target_id: UUID, permission: Permission) -> Target:
         """先取出所屬的 project 再檢查權限：其他 project 與不存在的一樣回 404。"""

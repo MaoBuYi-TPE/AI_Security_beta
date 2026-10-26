@@ -59,13 +59,24 @@ def test_database_url_without_password_has_no_password() -> None:
     assert url.password is None
 
 
-def test_engine_sets_timeout_application_name_and_utc() -> None:
-    engine = create_db_engine(_settings(db_connect_timeout_seconds=3), application_name="secscan-x")
+def test_engine_sets_timeouts_application_name_and_utc() -> None:
+    engine = create_db_engine(
+        _settings(
+            db_connect_timeout_seconds=3,
+            db_statement_timeout_seconds=20,
+            db_lock_timeout_seconds=2,
+            db_idle_in_transaction_timeout_seconds=40,
+        ),
+        application_name="secscan-x",
+    )
 
     assert dict(engine.url.query) == {
         "application_name": "secscan-x",
         "connect_timeout": "3",
-        "options": "-c timezone=UTC",
+        "options": (
+            "-c timezone=UTC -c statement_timeout=20000 -c lock_timeout=2000 "
+            "-c idle_in_transaction_session_timeout=40000"
+        ),
     }
 
 

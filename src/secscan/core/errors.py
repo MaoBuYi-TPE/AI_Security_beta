@@ -4,6 +4,7 @@
 - AppError：service 與 route 表示「可預期、可對外說明」的錯誤。
 - 框架產生的 HTTP 錯誤（404 路徑不存在、405 方法不符…）：對應固定錯誤碼與訊息。
 - 請求驗證失敗（422）：只列出欄位位置，不回顯輸入值（可能是秘密）。
+- 等鎖或查詢逾時（503）：可以重試，帶 Retry-After；伺服器端只記例外類別與 SQLSTATE。
 - 未處理的例外（500）：通用訊息；伺服器端記下 request_id 與例外類別，不記例外訊息。
 """
 
@@ -15,6 +16,7 @@ from http import HTTPStatus
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from secscan.core.envelope import Envelope, ErrorDetail
@@ -25,6 +27,10 @@ logger = logging.getLogger(__name__)
 # 422 訊息最多列出幾個欄位、每個位置最多幾個字元（位置可能含 client 送來的欄位名稱）。
 MAX_REPORTED_FIELDS = 5
 MAX_LOCATION_LENGTH = 64
+# 等鎖逾時（55P03 lock_not_available）與查詢逾時（57014 query_canceled，statement_timeout）：
+# 另一個 transaction 暫時持有鎖或 DB 忙碌，稍後重試通常就會成功（docs/DECISIONS.md §13.8）。
+RETRYABLE_SQLSTATES = frozenset({"55P03", "57014"})
+RETRY_AFTER_SECONDS = 1
 
 
 class ErrorCode(StrEnum):
@@ -160,6 +166,31 @@ async def validation_error_handler(request: Request, exc: Exception) -> JSONResp
     )
 
 
+async def database_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """等鎖或查詢逾時回 503 加 Retry-After；其他 DB 錯誤原樣拋出，交給 500 的 handler。
+
+    例外的訊息與 statement 含 SQL（可能有資料值），不回傳也不寫進 log，只記類別與 SQLSTATE。
+    """
+    if not isinstance(exc, DBAPIError):
+        raise exc
+    sqlstate = getattr(exc.orig, "sqlstate", None)
+    if sqlstate not in RETRYABLE_SQLSTATES:
+        raise exc
+    logger.warning(
+        "database timeout: request_id=%s error_type=%s sqlstate=%s",
+        request_id_of(request),
+        type(exc.orig).__name__,
+        sqlstate,
+    )
+    return _failure_response(
+        request,
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        ErrorCode.DEPENDENCY_UNAVAILABLE,
+        "資料庫暫時忙碌（等待鎖或查詢逾時），請稍後重試。",
+        headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+    )
+
+
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """未處理的例外：通用訊息加 request_id。
 
@@ -188,4 +219,5 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
+    app.add_exception_handler(DBAPIError, database_error_handler)
     app.add_exception_handler(Exception, unhandled_error_handler)

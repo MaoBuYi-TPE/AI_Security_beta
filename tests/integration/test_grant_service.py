@@ -318,8 +318,10 @@ def _usable(
     now: datetime = NOW,
     lab: LabNetwork = LAB,
 ) -> ScopeGrant:
-    return _service(session, lab).require_usable(
-        principal, target_id=target_id, grant_id=grant_id, now=now
+    return (
+        _service(session, lab)
+        .require_usable(principal, target_id=target_id, grant_id=grant_id, clock=lambda: now)
+        .grant
     )
 
 

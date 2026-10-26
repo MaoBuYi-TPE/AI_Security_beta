@@ -128,6 +128,56 @@ def test_rejects_out_of_range_connect_timeout(timeout: int) -> None:
         Settings(app_env="test", db_connect_timeout_seconds=timeout, _env_file=None)
 
 
+def test_database_timeouts_default_to_bounded_values() -> None:
+    """statement 30 秒、等鎖 5 秒、transaction 中閒置 60 秒（docs/DECISIONS.md §13.8）。"""
+    settings = Settings(app_env="test", _env_file=None)
+
+    assert settings.db_statement_timeout_seconds == 30
+    assert settings.db_lock_timeout_seconds == 5
+    assert settings.db_idle_in_transaction_timeout_seconds == 60
+
+
+def test_reads_database_timeouts_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_STATEMENT_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("DB_LOCK_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS", "90")
+
+    settings = Settings(app_env="test", _env_file=None)
+
+    assert settings.db_statement_timeout_seconds == 20
+    assert settings.db_lock_timeout_seconds == 2
+    assert settings.db_idle_in_transaction_timeout_seconds == 90
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("db_statement_timeout_seconds", 0),
+        ("db_statement_timeout_seconds", 601),
+        ("db_lock_timeout_seconds", 0),
+        ("db_lock_timeout_seconds", 61),
+        ("db_idle_in_transaction_timeout_seconds", 0),
+        ("db_idle_in_transaction_timeout_seconds", 3601),
+    ],
+)
+def test_rejects_out_of_range_database_timeouts(field: str, value: int) -> None:
+    """0 代表關閉逾時（PostgreSQL 的預設），不允許。"""
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"app_env": "test", field: value})
+
+
+@pytest.mark.parametrize(("lock", "statement"), [(30, 30), (31, 30)])
+def test_lock_timeout_must_be_shorter_than_statement_timeout(lock: int, statement: int) -> None:
+    """lock_timeout 大於或等於 statement_timeout 時，等鎖永遠先被 statement_timeout 中止。"""
+    with pytest.raises(ValidationError, match="DB_LOCK_TIMEOUT_SECONDS"):
+        Settings(
+            app_env="test",
+            db_lock_timeout_seconds=lock,
+            db_statement_timeout_seconds=statement,
+            _env_file=None,
+        )
+
+
 @pytest.mark.parametrize("field", ["db_host", "db_name", "db_user"])
 def test_rejects_blank_database_identifiers(field: str) -> None:
     with pytest.raises(ValidationError):

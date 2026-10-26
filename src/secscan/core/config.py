@@ -18,6 +18,13 @@ DEFAULT_DB_NAME = "secscan"
 DEFAULT_DB_USER = "secscan_app"
 DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 5
 MAX_DB_CONNECT_TIMEOUT_SECONDS = 60
+# 每個連線的逾時（docs/DECISIONS.md §13.8）。PostgreSQL 預設都關閉（0），這裡不允許關閉。
+DEFAULT_DB_STATEMENT_TIMEOUT_SECONDS = 30
+MAX_DB_STATEMENT_TIMEOUT_SECONDS = 600
+DEFAULT_DB_LOCK_TIMEOUT_SECONDS = 5
+MAX_DB_LOCK_TIMEOUT_SECONDS = 60
+DEFAULT_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
+MAX_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 3_600
 MAX_TCP_PORT = 65535
 
 # 靶場網段（docs/DECISIONS.md §10.1）：預設是 compose.lab.yaml 的 lab_net。只接受 RFC 1918
@@ -54,6 +61,18 @@ class Settings(BaseSettings):
     db_connect_timeout_seconds: int = Field(
         default=DEFAULT_DB_CONNECT_TIMEOUT_SECONDS, ge=1, le=MAX_DB_CONNECT_TIMEOUT_SECONDS
     )
+    # 一個 statement 最長執行多久、每次等鎖最長多久、transaction 中閒置多久就終止 session。
+    db_statement_timeout_seconds: int = Field(
+        default=DEFAULT_DB_STATEMENT_TIMEOUT_SECONDS, ge=1, le=MAX_DB_STATEMENT_TIMEOUT_SECONDS
+    )
+    db_lock_timeout_seconds: int = Field(
+        default=DEFAULT_DB_LOCK_TIMEOUT_SECONDS, ge=1, le=MAX_DB_LOCK_TIMEOUT_SECONDS
+    )
+    db_idle_in_transaction_timeout_seconds: int = Field(
+        default=DEFAULT_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS,
+        ge=1,
+        le=MAX_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS,
+    )
 
     # 目標 secret 的加密金鑰（環境變數 SECRET_ENCRYPTION_KEYS，docs/DECISIONS.md §12.1）：逗號分隔的
     # Fernet 金鑰，第一個用來加密。這裡只讀入；API 與金鑰換版的 CLI 在啟動時檢查格式，
@@ -85,6 +104,13 @@ class Settings(BaseSettings):
         """要掃描 lab 以外的目標，必須先完成 docs/DECISIONS.md §6 的條件；P0 不提供這個開關。"""
         if not self.lab_only:
             raise ValueError("P0 只支援 LAB_ONLY=true（見 docs/DECISIONS.md §10.1）")
+        return self
+
+    @model_validator(mode="after")
+    def _lock_timeout_is_shorter_than_statement_timeout(self) -> Self:
+        """等鎖的上限不比 statement 的上限短，就永遠先被 statement_timeout 中止，等於沒有設定。"""
+        if self.db_lock_timeout_seconds >= self.db_statement_timeout_seconds:
+            raise ValueError("DB_LOCK_TIMEOUT_SECONDS 必須小於 DB_STATEMENT_TIMEOUT_SECONDS")
         return self
 
     @model_validator(mode="after")
