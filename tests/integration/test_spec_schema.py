@@ -254,7 +254,8 @@ def test_operation_spec_must_exist(db_session: Session) -> None:
         "UPDATE api_spec_operations SET path = '/x' WHERE spec_id = :id",
         "DELETE FROM api_spec_operations WHERE spec_id = :id",
         "TRUNCATE api_spec_operations",
-        "TRUNCATE api_specs, api_spec_operations",
+        # scans 以 FK 引用規格（T09）：不加 CASCADE 時先被 FK 擋下，測不到 trigger。
+        "TRUNCATE api_specs, api_spec_operations CASCADE",
     ],
     ids=[
         "update-spec",

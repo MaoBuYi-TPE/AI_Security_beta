@@ -25,6 +25,8 @@ class TargetModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     __table_args__ = (
         # 同一個 project 內 origin 不重複；這個唯一索引也用來依 project 查詢。
         UniqueConstraint("project_id", "canonical_origin"),
+        # scan 以 (target_id, project_id) 引用 target：scan 的 project 一定是 target 的 project。
+        UniqueConstraint("id", "project_id"),
         CheckConstraint("char_length(btrim(name)) > 0", name="name_not_blank"),
         CheckConstraint(f"kind IN ({_KIND_VALUES})", name="kind_valid"),
         CheckConstraint(f"environment IN ({_ENVIRONMENT_VALUES})", name="environment_valid"),

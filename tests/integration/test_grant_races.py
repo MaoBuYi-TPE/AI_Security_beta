@@ -46,7 +46,7 @@ def _approved(seed: Seeder, world: World) -> tuple[Target, ScopeGrant]:
     return target, seed.approve(world.admin, seed.grant(world.operator_a, target))
 
 
-def _only_error(race: Race[ScopeGrant]) -> AppError:
+def _only_error[T](race: Race[T]) -> AppError:
     assert race.results == []
     [error] = race.errors
     assert isinstance(error, AppError)
@@ -188,13 +188,13 @@ def test_revocation_waits_for_a_scan_being_created(
 
     with Session(engine, expire_on_commit=False) as holder, holder.begin():
         usable = _grants(holder).require_usable(
-            world.operator_a.principal, target_id=target.id, grant_id=grant.id, now=_now()
+            world.operator_a.principal, target_id=target.id, grant_id=grant.id, clock=_now
         )
         race.start()
         wait_until_waiting_for_a_lock(seed, RACER)
     race.join()
 
-    assert usable.id == grant.id
+    assert usable.grant.id == grant.id
     assert race.errors == []
     assert race.results[0].status is GrantStatus.REVOKED
 
@@ -207,7 +207,7 @@ def test_gate_refuses_once_a_concurrent_revocation_commits(
         api_database,
         RACER,
         lambda session: _grants(session).require_usable(
-            world.operator_a.principal, target_id=target.id, grant_id=grant.id, now=_now()
+            world.operator_a.principal, target_id=target.id, grant_id=grant.id, clock=_now
         ),
     )
 
@@ -231,7 +231,7 @@ def test_gate_refuses_once_a_concurrent_disable_commits(
         api_database,
         RACER,
         lambda session: _grants(session).require_usable(
-            world.operator_a.principal, target_id=target.id, grant_id=grant.id, now=_now()
+            world.operator_a.principal, target_id=target.id, grant_id=grant.id, clock=_now
         ),
     )
 
@@ -245,3 +245,34 @@ def test_gate_refuses_once_a_concurrent_disable_commits(
 
     error = _only_error(race)
     assert (error.status_code, error.code) == (409, ErrorCode.TARGET_DISABLED)
+
+
+def test_gate_reads_the_clock_after_acquiring_its_locks(
+    engine: Engine, api_database: ProvisionedDatabase, seed: Seeder, world: World
+) -> None:
+    """等鎖期間 grant 可能已經過期：gate 必須在取得 FOR SHARE 之後才取時間（T06 的交接）。
+
+    clock 在對手開始等鎖之後才前進到 valid_until 之後；先取時間的實作會拿到過期前的時間而通過。
+    """
+    target, grant = _approved(seed, world)
+    moments = [_now()]
+    race = Race(
+        api_database,
+        RACER,
+        lambda session: _grants(session).require_usable(
+            world.operator_a.principal,
+            target_id=target.id,
+            grant_id=grant.id,
+            clock=lambda: moments[-1],
+        ),
+    )
+
+    with Session(engine, expire_on_commit=False) as holder, holder.begin():
+        holder.execute(text("SELECT id FROM targets WHERE id = :id FOR UPDATE"), {"id": target.id})
+        race.start()
+        wait_until_waiting_for_a_lock(seed, RACER)
+        moments.append(grant.window.valid_until)
+    race.join()
+
+    error = _only_error(race)
+    assert (error.status_code, error.code) == (403, ErrorCode.SCOPE_EXPIRED)

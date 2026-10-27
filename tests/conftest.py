@@ -26,6 +26,9 @@ DB_ENV_KEYS = (
     "DB_USER",
     "DB_PASSWORD",
     "DB_CONNECT_TIMEOUT_SECONDS",
+    "DB_STATEMENT_TIMEOUT_SECONDS",
+    "DB_LOCK_TIMEOUT_SECONDS",
+    "DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS",
 )
 # 目標 secret 的加密金鑰也一樣不沿用（shell 或 .env 裡可能是真的金鑰）；
 # 需要的 fixture 帶測試用的金鑰。

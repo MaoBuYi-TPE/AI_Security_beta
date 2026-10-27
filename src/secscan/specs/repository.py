@@ -96,6 +96,18 @@ class ApiSpecRepository:
         )
         return Page(items=tuple(_from_row(row) for row in rows), total=total, request=page)
 
+    def all_operations(self, spec_id: UUID) -> tuple[SpecOperation, ...]:
+        """整個 inventory（最多 MAX_OPERATIONS 個），依 inventory 的順序；建立 scan 時凍結用。"""
+        models = self._session.scalars(
+            select(ApiSpecOperationModel)
+            .where(ApiSpecOperationModel.spec_id == spec_id)
+            .order_by(ApiSpecOperationModel.ordinal)
+        )
+        return tuple(
+            SpecOperation(method=model.method, path=model.path, operation_id=model.operation_id)
+            for model in models
+        )
+
     def list_operations(self, spec_id: UUID, page: PageRequest) -> Page[SpecOperation]:
         """inventory 的順序（依 path、method 排序後的位置）。"""
         of_spec = ApiSpecOperationModel.spec_id == spec_id

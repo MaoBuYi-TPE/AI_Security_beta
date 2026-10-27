@@ -669,15 +669,146 @@
       - **M2（T10–T12）**：runner 是 `reveal` 唯一的呼叫者（更新 `test_secret_reveal_callers.py`），以環境變數或 0400 檔注入、run 結束刪除；綁定的版本已被取代時啟動前就失敗。guard：secret 只送往 target 的 origin，跨 origin 的 redirect 移除 Authorization、Cookie 與自訂的 header；`_method` 這類以參數覆寫 method 的寫法也在 guard 處理。preflight 計入預算，以純函式實作 DECISIONS §12.5 的比對語意（陣列索引 `01` 與 `-` 算指不到），另以匿名請求執行一次（匿名也符合就標為 inconclusive）。
       - **M3（T14、T15）**：確認三個工具注入 `api_key_header` 與 `cookie` 的方式；證據與報告以已知的 secret 值精確遮罩，並補上 T05 的 HAR、URL 遮罩缺口；lab 的 token 有效期（VAmPI 的 `tokentimetolive`）若讓版本數不夠用，再調整 lab。
       - **T21**：停用 profile；舊版本的封存。**T23**：速率限制；DDL 與 DML 角色分開；金鑰改放 compose secrets。
-- [ ] T09 建立 scan、scanner_run 工作佇列、idempotency、狀態機與 FakeRunner。
+- [x] T09 建立 scan、scanner_run 工作佇列、idempotency、狀態機與 FakeRunner。
   - DoD：
     - API 回 202；scan 與 scanner_runs 在同一個 transaction 建立。
     - SKIP LOCKED 認領與 lease 有測試，包含兩個 consumer 同時認領的情境。
     - 相同 Idempotency-Key 與相同內容不會重複建立；相同 key 不同內容回 409。
     - FakeRunner 能跑完、失敗、被取消。
     - scan_events 可以輪詢。
+  - 交付（2026-10-27，done）：
+    - 範圍：
+      - 建立 scan（`POST /api/v1/scans`）：Idempotency-Key、建立時的檢查順序、不可變的快照（複合 FK 引用 grant、規格、auth profile 與它的版本；凍結 origin 與每個 operation 的判斷）、一個 target 同時只有一個進行中的 scan、每個 target 24 小時 50 個的上限。
+      - PostgreSQL 工作佇列：`FOR UPDATE OF scans SKIP LOCKED` 認領、lease 與心跳、fencing、runner 啟動前的重新檢查（prepare）、lease 過期的對帳。
+      - run 的狀態轉換表與 scan 狀態的彙總；事件（`scan_events`）與輪詢；取消。
+      - 測試用的 fake 引擎與 `secscan-admin fake-runner`（不連任何位址，結果標為 fixture）。
+      - DB 連線的逾時（statement、lock、idle in transaction）與逾時時的 503；`require_usable()` 在取得鎖之後才取時間。
+      - migration `0005`（scans、scanner_runs、scan_events、scan_operations，既有資料表補上複合 FK 需要的唯一約束）。
+      - 使用者的決定（2026-10-26）：只開放 fake 引擎；zap、nuclei、schemathesis 在 Adapter 整合之前回 422 `ENGINE_UNSUPPORTED`。
+      - 設計決定見 `DECISIONS.md` §13，API 見 `API_CONTRACT.md` §17。T09 不對任何位址發出流量。
+    - 檔案：
+      - 程式：
+        - `src/secscan/scans/`：`domain/catalog`（引擎、執行順序、scan profile 的規則）、`domain/request`（Idempotency-Key、fingerprint、預算）、`domain/lifecycle`（run 的轉換表、scan 狀態的彙總、錯誤碼）、`domain/model`（domain model、事件的 payload）、`models`、`repository`、`progress`（先鎖 scan 再改 run、彙總、事件）、`queue`（`QueueOperations`、`ScanQueue`）、`service`、`schemas`、`router`
+        - `src/secscan/runner/fake.py`（FakeRunner）；`cli.py`（`fake-runner`）
+        - `src/secscan/migrations/versions/v0005_scans.py`；`migrations/metadata.py`
+        - `core/config.py`（三個 DB 逾時）、`core/db.py`（`session_options`）、`core/errors.py`（新錯誤碼、`database_error_handler`）；`grants/service.py`（`require_usable(clock=…)`、`UsableGrant`）；`auth_profiles/repository.py`（`lock(shared=True)`、`version_has_secret`）；`specs/repository.py`（`all_operations`）；targets、grants、specs、auth_profiles 的 models（複合 FK 需要的唯一約束）；`main.py`
+      - 設定：`pyproject.toml`（layers 加入 `health | runner`、`scans`）、`.env.example`（DB 逾時）
+      - 測試：
+        - unit：`tests/unit/scans/`（catalog、request、lifecycle、model）、`test_fake_script.py`、`test_cli.py`（fake-runner 的參數）、`core/test_config.py`、`core/test_db.py`、`tests/api/test_errors.py`（503）
+        - integration：`test_scan_schema.py`、`test_scan_service.py`、`test_scan_queue.py`、`test_scan_cancel.py`、`test_scan_queries.py`、`test_scan_races.py`、`test_fake_runner.py`、`test_fake_runner_cli.py`、`test_scans_api.py`、`test_db_timeouts.py`、`test_database_clones.py`；共用的 `scan_support.py`
+        - 既有測試：`V1_ROUTES` 與「整個 `/api/v1` 只有兩個路由拿到加密元件」（擴大到所有路由）、`test_migrations.py`、`test_schema_constraints.py`（CHECK 52 → 83、索引）、`test_grant_races.py` 與 `test_grant_service.py`（改傳 `clock`）、TRUNCATE 的 trigger 測試改成 `CASCADE`（scope、spec、auth profile）、`tests/conftest.py`（不沿用 DB 逾時的環境變數）、`database.py`（`DatabaseProvisioner.clone()`）、`conftest.py`（`queue_template`、`queue_database`、`queue_engine`、`queue_seed`）、`api_support.py`（`Seeder.scannable`、`Seeder.scan`、target 的 kind）
+      - 文件：`DECISIONS.md` §13（另更新 §7、§10.8）、`API_CONTRACT.md` §2、§7、§8、§12、§14.5、§16.2、§17、`ARCHITECTURE.md` §4、§6、§6.1、§6.2、§7、§8、§9、`SECURITY_AND_TESTING.md` §4.1、§4.3、§4.5、`SOURCES.md`（S79–S82，S28、S57）、`START_HERE.md` §7、`README.md`、`CLAUDE.md` §1、§13
+    - 端點（都是新增）：`POST`、`GET /api/v1/scans`；`GET /api/v1/scans/{scan_id}`；`GET /api/v1/scans/{scan_id}/events`；`POST /api/v1/scans/{scan_id}/cancel`。`GET /scan-profiles` 與 `GET /scanners` 要有 runner 的 capability probe，延到 M3、T10。
+    - DoD 對照：
+      - **API 回 202；同一個 transaction**：新建立與未終止的重送回 202、已終止的重送回 200。scan、run、凍結的 operation、事件 `scan.created` 與 audit 一起寫入；寫入之後才失敗（audit 拋錯）時什麼都不留下；commit 之前 runner 認領不到它的 run。
+      - **SKIP LOCKED 與 lease**：兩個 consumer 同時認領兩個 scan 時各拿一個、一個 scan 時另一個立刻得到「沒有工作」（不等待）；取消中、worker 正在解析前一個引擎的 scan 直接跳過；候選過時時鎖到之後再確認，試過上限就放棄。lease：心跳延長、回報取消；過期或別人的 lease 不能延長、不能轉換，也不會被別人認領；對帳只處理過期的 fake run。
+      - **Idempotency**：同一個 key、同樣的內容回同一個 scan，各資料表的筆數與 audit 不變；有雙引號的 key 視為相同；每一個欄位不同都回 409；不同 project 的相同 key 互不影響；重送不重新判斷 gate；viewer 重送是 403；同時送出同一個 key 得到同一個 scan，不同內容 409（併發測試）。缺少、重複、格式不符的 key 回 400，不回顯。
+      - **FakeRunner**：跑完（completed、`fixture` true、`results_complete` true）；失敗（腳本 `ENGINE_FAILED`；撤銷 grant 之後 `SCOPE_REVOKED`；停用 target、PATCH profile、grant 過期、`LAB_CIDR` 改了、origin 被改，都在 prepare 時 failed，不送出流量）；取消（排隊中、認領與 prepare 之間、running 中、解析中）；lease 失效時在第一次心跳就停止，之後對帳成 interrupted；只認領 fake 的 run。
+      - **scan_events 可以輪詢**：每個 scan 各自的 sequence，從 1 開始、連號（取消與認領同時發生時也是）；`after_sequence` 的邊界（0、最後一個、超過）與 `limit`；payload 只由 enum 與 id 組成。
+      - **M1 的里程碑證據**：手動端到端（下方）以 API 建立 scan、以 fake-runner 執行、查詢狀態與事件，回應中 `fixture` 為 true；`make test` 全部通過，包含 T05–T09 所有的權限測試。
+    - 實際執行：
+      - TDD：每一步先寫測試並確認失敗，例如：
+        - DB 逾時：14 failed（設定的欄位與界線 10、連線參數 1、`SHOW` 3）；等鎖的 API 測試在沒有 `lock_timeout` 時無限期卡住（這本身就是要修的問題；手動停止之後清掉被中斷的測試留下的 2 個暫時資料庫與角色）。
+        - `require_usable(clock=…)`：10 failed（含新的「取得鎖之後才取時間」）。
+        - domain、service、佇列、FakeRunner：先寫測試，collection error（`ModuleNotFoundError`）；取消、清單與事件：16 failed、2 passed（已實作的單筆查詢）；CLI：integration 5 failed、unit 1 failed；API：`V1_ROUTES` 4 failed、API 測試 31 failed。
+        - 審查後的修正：
+          - 修正的測試先寫：18 failed（彙總的對照表 3、性質 3、`test_scan_guards.py` 6、併發 2、建立 1、API 3）。
+          - 「已終止的 scan 的 run 不會被認領」第一次執行就通過：當時以取消讓 scan 結束，被「要求過取消」的條件先排除了；改成以 failed 結束，鑑別力由突變檢查（Q13）確認。
+          - 把 target 改成 `FOR NO KEY UPDATE` 之後，既有的 2 個併發測試失敗：同一個 key 同時送出時，後到的改在 target 的鎖上等，取得鎖之後被當成 `TARGET_BUSY`。補上「取得鎖之後先重查 key」才通過（這是修正造成的回歸，由既有的測試抓到）。
+          - `test_scan_queue.py` 中以 `advance(RUNNING)` 測「不存在的 lease」的測試，在 `advance` 拒絕 running 之後失敗；測試的重點是 lease，改用 collecting。
+          - coverage 抓到的：target 排隊之後，「寫入時撞到唯一索引」的防守路徑不再被既有的測試走到。補上同一個 key 用在兩個 target（不在同一把鎖上排隊，在 key 的索引上等）、以及直接寫 DB（不鎖 target）的併發測試；程式本來就有這段，所以第一次執行就通過，鑑別力由突變檢查（I6、I9）確認。
+      - TDD 沒有做到的地方（如實記錄）：
+        - migration `0005` 與 model 寫好之後才更新 `test_migrations.py`、`test_schema_constraints.py`，也沒有先跑一次看它們失敗；`test_scan_schema.py`（88 個）在 migration 之後才寫。鑑別力由突變檢查（C10、S7）與漂移、CHECK 數量的測試確認。
+        - 併發測試（`test_scan_races.py`）在實作之後才寫，第一次執行就全部通過。
+        - fake-runner 的參數錯誤測試在實作之前就通過（當時是「未知的子命令」造成的 exit 2，不是各自的規則）。
+      - 實作之後才補的測試：
+        - coverage 抓到的：認領與對帳「鎖到之後再確認」（以另一個連線在鎖之前改掉 run 模擬）、認領試過上限就放棄、對帳每次的上限、`LAB_CIDR` 改了之後的 prepare、不明的 lease、認領時漏給 owner 的程式錯誤、在認領與 prepare 之間取消、收集的 run 被別的 worker 解析、web scan 的 coverage、service 的防線（monkeypatch）、CLI 的三個例外分支與合法的 `--hold-seconds`。
+        - 突變檢查找到的：認領時跳過「worker 正在解析前一個引擎」而鎖著的 scan（Q2）。
+        - 寫文件時發現的：SECURITY_AND_TESTING 寫了「commit 之前 runner 認領不到」，卻沒有測試，補上。
+        - 為了讓突變檢查分得出來而加強的：lease 失效時在第一次心跳就停止（只看 `LeaseLostError` 的話，後面的 fencing 也會拋出同樣的例外）。
+      - 測試本身的問題（都已修正）：
+        - CHECK 依約束名稱的字母順序檢查：「auth_role 的格式」先撞到 `auth_consistent`、「狀態不在白名單」先撞到 `started_matches_status`，改成只違反一個約束的資料；`SET scope_grant_id = scope_grant_id` 不是修改，trigger 本來就允許，改成真的修改。
+        - 既有的 TRUNCATE 測試在 scans 以 FK 引用那些資料表之後，先被 FK 擋下（0A000），改成 `CASCADE` 才測得到 trigger。
+        - ruff：測試中以 f-string 組 SQL（S608）改成完整的語句；預設的 secret 參數（S107）改成常數；全形數字改成跳脫序列。
+      - 程式的問題（測試或檢查抓到）：
+        - 不相容的 profile 訊息原本依字母排序列出 target 的種類（「hybrid 或 web」），改成依宣告的順序。
+        - mypy：`list[str]` 不是 `list[JsonValue]`（invariance）、SQLAlchemy 2.1 的 `Select` 型別。
+      - 突變檢查（審查前 56 項、審查後共 71 項；腳本不進 repo，跑完還原檔案，執行期間不修改 src 與 tests）：
+        - 第一輪 55/56。存活的是「認領時鎖 run 而不是 scan」：認領之後的再確認本來就會鎖 scan，既有的測試分不出；差別只在別人鎖著 scan、沒鎖 run 時（worker 解析前一個引擎），認領應該跳過、不等待。補上測試之後 1/1。
+        - 審查修正後的完整重跑：71/71。審查前的項目中，8 項的原文隨修正改變（認領的取消條件、prepare 的兩項、重送與 gate 的先後、gate 的取鎖、彙總的三項），改成對應新的寫法；其中「取消不優先」改成審查前的順序「cancelled 優先於 interrupted」。新增 15 項：
+          - 彙總：取消不優先於 timed_out、沒有要求取消也因 cancelling 的 run 彙總成 cancelling
+          - 佇列：`advance` 可以轉到 running、沒有要求取消也能轉到 cancelling、prepare 不檢查建立者的 key、撤銷的 key 也當成有效、認領不排除已終止的 scan、trigger 允許事後加入 run 或 operation
+          - 建立：target 又改回 `FOR SHARE`、拿掉取鎖之前的忙碌預查、取得 target 的鎖之後不重查 key、撞到 target 的索引時不回 `TARGET_BUSY`
+          - API：時間篩選不先換算成 UTC、API 文件的 key pattern 允許不成對的引號
+        - 佇列：拿掉 SKIP LOCKED、鎖 run 而不是 scan、不檢查前面的 run、不檢查取消、不檢查引擎、鎖到之後不再確認、心跳可以延長過期的 lease、轉換不檢查 owner 或期限、collected 與終止時不清除 lease、對帳把 runner 階段退回 queued、對帳碰到其他引擎
+        - Idempotency：重送不比對內容、fingerprint 少了一個欄位、fingerprint 和 engines 的順序有關、key 不分 project、重送時重新判斷 gate、撞到唯一索引時不重查 key、缺少 key 也接受
+        - 建立：不呼叫 gate、在取得鎖之前取時間、接受其他 target 的規格或 profile、不凍結 operation、不在範圍內的 operation 標成 eligible、不檢查 preflight 的範圍、綁定第一個版本、預算可以超過 grant、拿掉 TARGET_BUSY 的索引、拿掉上限、接受 zap、fake 可以混用、拿掉 profile 的規則
+        - 狀態機：彙總的優先順序互換（3 種）、轉換表多一條或少一條、終止之後還能轉換、trigger 允許終止之後再改
+        - 取消：running 的 run 直接標成 cancelled、不取消排隊中的 run、重複取消再記一次、viewer 可以取消
+        - 事件與權限：漏記 run 的轉換、`after_sequence` 差一、清單不依 project 篩選、查詢不呼叫 authorize
+        - prepare 與 FakeRunner：不重新判斷 gate、不檢查綁定的版本、忽略取消、心跳看到取消也不停、心跳失效也不停、認領其他引擎
+        - DB 逾時：連線沒有設定逾時、拿掉 503 的 handler
+      - 檢查結果（審查修正後，2026-10-27）：
+        - `make test`：2811 passed，coverage 100%（5808 statements、1148 branches，0 未涵蓋）；`scans` 與 `runner` 1222 statements、230 branches 全部涵蓋。
+        - `make lint`：ruff、import-linter（3 kept, 0 broken）；`make typecheck`：mypy strict，222 個檔案無問題；`pre-commit run --all-files` 全部通過。
+        - 沒有執行：`make test-contract`、`make test-live-lab`、`make bench`（Makefile 還沒有這些目標，依 CLAUDE.md §13 分別在 M1–M2、M3、M5 才建立）。T09 不發出任何流量。
+      - 手動端到端（做法同 T05–T08）：
+        - 在 db-test 建立暫時資料庫並 migrate，API 跑在 127.0.0.1:8765（[::1]:8765 是別的程式，沒有動它）；平台 key、加密金鑰與含 canary 的請求 body 都在 `runs/t09` 的 0600 檔案，curl 用 `-H @檔案` 與 `--data-binary @檔案`；fake-runner 用同一個暫時資料庫；不用 repo 的 `.env`，不啟動 lab。
+        - 建立：202 queued、`fixture` true、`auth_role` standard_user、VAmPI 規格 14 個 operation 中 5 個在範圍內；同一個 key 與加上雙引號的 key 都回同一個 scan；不同內容 409 `IDEMPOTENCY_CONFLICT`；沒有 key 400；同一個 target 再建一個 409 `TARGET_BUSY`。
+        - `fake-runner --once`：completed；事件以 `limit=5` 與 `after_sequence=5` 兩次讀完，sequence 1–12 連號；取消 completed 的 scan 回 200、事件數不變。`--outcome fail`：failed `ENGINE_FAILED`。
+        - 取消：排隊中 200 cancelled，之後 fake-runner 沒有工作；`--hold-seconds 30` 在背景執行時取消回 202 cancelling（run 仍是 running），runner 確認之後 cancelled。
+        - 中斷：`--hold-seconds 60` 執行中送 SIGINT，exit 1 並說明；scan 停在 running、同一個 target 仍是 409 `TARGET_BUSY`；等 31 秒後再執行 fake-runner，對帳成 interrupted（`LEASE_EXPIRED`）。
+        - fail closed：PATCH profile 之後排隊中的 scan failed `AUTH_PROFILE_SUPERSEDED`（綁定的仍是版本 1）；撤銷 grant 之後 failed `SCOPE_REVOKED`，再用撤銷的 grant 建立回 403 `SCOPE_NOT_APPROVED`。
+        - 拒絕：zap 422 `ENGINE_UNSUPPORTED`；api 的 target 用 web profile 422 `PROFILE_INCOMPATIBLE`；preflight 被排除 422（訊息有 `PATH_EXCLUDED`、沒有 path）；viewer 建立與取消 403；B 的 operator 讀取、看事件、取消 A 的 scan 都是 404，回應與不存在的 id 相同；B 以 A 的 target 建立 404，以 A 的 target 篩選清單 0 筆。
+        - audit 有 7 個 `scan.create`、2 個 `scan.cancel`（取消 completed 的 scan 沒有記錄）；dev 的 API 文件中 `POST /scans` 列出必填的 `Idempotency-Key` header 與 200、202 兩種回應。
+        - canary 的 target secret（兩個版本）、Idempotency-Key 的 canary、平台 key、加密金鑰與 DB 密碼：伺服器日誌（75 行）、CLI 的 stderr、db-test 容器日誌、audit 與 `scan_events` 中都出現 0 次；回應中只有建立 key 的 3 個回應各含一次自己的 key（T05 的設計：只在建立時回傳一次）。Traceback 0、HTTP 500 0。
+        - 結束後：只停止自己啟動的 uvicorn；刪除暫時資料庫與 `runs/t09`，db-test 沒有殘留的資料庫與角色；127.0.0.1:8765 沒有在聽；[::1]:8765 的程式與其他專案的容器都沒有動。
+        - 審查修正後重跑（新的暫時資料庫，同樣的做法）：
+          - 上面的步驟結果都相同（audit 同樣是 7 個 `scan.create`、2 個 `scan.cancel`）。
+          - 取消之後 runner 遺失：running 時先以 SIGSTOP 凍結 runner 再取消（202 cancelling），接著 SIGKILL，runner 沒有機會確認；31 秒後對帳成 interrupted（`LEASE_EXPIRED`，`cancel_requested_at` 有值），不是 cancelled。
+          - 另一把 operator key 建立 scan 之後，admin 撤銷這把 key（204）：它的請求回 401；fake-runner 讓排隊中的 scan failed（`CREATOR_KEY_REVOKED`）。
+          - `created_after=9999-12-31T23:00:00-05:00`、`created_before=0001-01-01T00:30:00+05:00` 都是 422（原本 500）；正常帶時區的篩選 200。
+          - API 文件中 Idempotency-Key 的 pattern：沒有引號、成對的引號符合，只有前引號或只有後引號不符合。
+          - 秘密的檢查同上：伺服器日誌（95 行）、CLI 的輸出、db-test 容器日誌、audit 與 `scan_events` 中都出現 0 次；回應中只有建立 key 的 4 個回應各含一次自己的 key。Traceback 0、HTTP 500 0。結束後同樣清理，db-test 沒有殘留。
+    - 審查（M1 結束，兩個 reviewer 都用 Opus）：
+      - code-reviewer：APPROVE（0 CRITICAL、0 HIGH、1 MEDIUM、2 LOW）。
+        - MEDIUM：已要求取消、但 runner 遺失（lease 過期）的 scan 彙總成 cancelled（自行重現）。CLAUDE.md §8 規定確認停止之後才是 cancelled。
+        - LOW：沒有要求取消時 run 轉到 cancelling，`aggregate` 回 cancelling、DB 的 CHECK 拒絕，變成沒有轉換的 `IntegrityError`（自行重現；目前沒有合法的路徑會觸發）；`TASKS.md` 的 T09 還沒勾選，CLAUDE.md 與 README 卻已寫 M1 完成。
+        - 交接：normalizing 退回 collected 沒有次數上限；M2 的 runner 要在 prepare 的 transaction 中取得注入用的密文。
+      - security-reviewer：APPROVE（0 CRITICAL、0 HIGH、1 MEDIUM、4 LOW，另有 6 項加固建議）。
+        - MEDIUM：外洩的 operator key 平行送出註定失敗的建立請求（例如 `TARGET_BUSY`），撤銷 grant、停用 target 就一直等不到鎖，30 秒後被 `statement_timeout` 中止；同時 runner 的 prepare 照樣通過 gate（自行重現：16、32 條連線各試 3 次都失敗）。原因：新的 `FOR SHARE` 只要和持有者相容就直接取得，不排在等候中的 `FOR UPDATE` 後面。
+        - LOW：`advance(RUNNING)` 可以跳過 prepare 的 gate（自行重現）；時間篩選帶極端的時區時回 500（自行重現）；trigger 允許事後插入 run 與 operation，已終止的 scan 的 run 會卡住佇列；建立 scan 的 key 被撤銷之後，它排隊中的 scan 仍會執行。
+        - 加固建議：prepare 不確認掃描會在 `valid_until` 之前結束；事件輪詢與清單的授權載入整個 scan 與 coverage 的彙總；預算以 target 為單位（同一個 origin 或 IP 可以同時掃描）；gate 被拒沒有寫安全日誌；DB 角色可以 `DISABLE TRIGGER`；API 文件的 key pattern 接受不成對的引號。
+      - 已修正（MEDIUM 與 LOW 全部），每一項都有測試與突變檢查（測試大多先失敗，例外記在上方的「實際執行」）：
+        - 彙總：interrupted 優先於 cancelled；只有要求過取消才是 cancelling；`ScanProgress.move` 拒絕沒有取消要求的 cancelling。
+        - 撤銷不被餓死：建立 scan 以 `FOR NO KEY UPDATE` 鎖 target，同一個 target 的建立彼此排隊（本來就因 `uq_scans_active_target` 而依序），grant 的 `FOR SHARE` 同時最多只有一個建立請求持有；忙碌與上限在取鎖之前先查一次。取得 target 的鎖之後先重查 Idempotency-Key。
+        - `advance` 拒絕轉到 running；時間篩選在驗證時換算成 UTC，超出範圍回 422；trigger 只允許在建立 scan 的 transaction 中插入 run 與 operation，認領排除已終止的 scan；prepare 以 `FOR SHARE` 鎖住建立者的 key，已撤銷就 failed（`CREATOR_KEY_REVOKED`）；API 文件的 pattern 要求引號成對。
+        - 修正後以 security-reviewer 的重現腳本（改成 16、32 條連線各試 3 次）再跑一次：
+          - target 忙碌、建立請求都是 409 `TARGET_BUSY`：撤銷 6 次都在 0.04–0.16 秒完成（修正前同樣的條件 30 秒後失敗）；停用 target 0.03 秒完成。
+          - target 不忙、建立請求都在取得鎖之後才失敗（預算超過 grant 的 422）：請求在 target 的鎖上排隊，撤銷 6 次都在 0.02 秒完成，之後的請求都是 403 `SCOPE_NOT_APPROVED`。
+          - 腳本只用測試建立的暫時資料庫，不進 repo。
+        - 其他加固建議與交接列入下方的後續任務（`DECISIONS.md` §13.11）。
+    - 限制：
+      - 只有 fake 可用：多個引擎的依序執行與 `partially_completed` 只在佇列層以直接建立的 zap、nuclei 資料列測試，要到 M3、M4 才能從 API 走一遍。
+      - 撤銷 grant 或停用 target 之後，只在 runner 的 prepare 擋下；已在 running 的 run 不會被停止（fake 不送流量）。停止真正的流量在 M2、T13。
+      - 對帳只處理 fake 的 run：真的引擎 lease 過期不代表容器已停止，要先核對容器並封鎖 guard（T13）。
+      - FakeRunner 被強制終止時，scan 停在 running 直到 lease 過期、下一次執行 fake-runner。
+      - 彙總的規則是 T09 的定義（`DECISIONS.md` §13.4），M2、T13 有真實的預算與中斷之後可能調整。
+      - `coverage_measured` 一律 false；`budget_usage` 與實際的 operation 覆蓋要有 guard 的計數（T11、T12）。
+      - Idempotency-Key 的範圍是 project、永久保存；同一個 key 搭配不同內容依專案的契約回 409（IETF 草案建議 422，`DECISIONS.md` §13.2）。
+      - 和其他 trigger 一樣只防程式錯誤造成的誤改，擋不住有 DDL 權限的人（T23 分開 DDL 與 DML 角色）。
+    - 給後續任務：
+      - **T10**：真的 runner 程序與 docker-socket-proxy；沿用 `ScanQueue` 的認領、lease 與 fencing；`GET /scanners` 與 capability probe；`reveal` 的唯一呼叫者（更新 `test_secret_reveal_callers.py`）。
+      - **T11**：由 scan 的快照與 grant 產生 guard 的 policy；取消時先封鎖 guard 再停容器。
+      - **T12**：預算的實際計數與 `budget_usage`、preflight 的實際執行、coverage 的量測（以 `scan_operations` 為分母）。
+      - **T13**：容器的心跳與對帳（非 fake 的 lease 過期）、timeout、孤兒容器；撤銷或停用之後停止執行中的 scan。
+      - **M3（T14）**：開放 zap、`GET /scan-profiles`，依 ZAP 實際的設定調整 scan profile；M4 開放 nuclei。
+      - **M2**：runner 在 prepare 的 transaction 中取得注入用的密文；guard 逐個請求檢查 grant 的 `valid_until`，預算以 origin／IP 合計。**M2／M4**：worker 對帳（normalizing 退回 collected）加上次數上限，超過就 failed。之後的強化：gate 被拒寫入安全日誌；事件輪詢的授權只查 `project_id`、coverage 的數字在建立時寫進 scans。
+      - **T21**：報告中標示 `fixture` 的結果；T31 的實驗排除 fixture。**T23**：速率限制與每把 key 的同時請求上限；DDL 與 DML 角色分開（目前 DB 角色可以 `DISABLE TRIGGER`）。**M2**：`sslmode`；需要時加 LISTEN/NOTIFY（目前輪詢）。
 
 里程碑證據：不用真工具，也能從 API 建立受控任務、查詢狀態，並得到假 runner 明確標記的測試結果；所有權限測試都通過。
+
+- 達成（M1，2026-10-27）：不用真工具，以 API 建立受控的 scan（gate、快照、Idempotency-Key）、查詢狀態與事件，並得到 fake runner 明確標記為 `fixture` 的結果（手動端到端與 `test_scans_api.py`）；`make test` 全部通過，包含 T05–T09 所有的權限測試（跨 project 一律 404 且與不存在相同、viewer 不能寫入）。
 
 ## M2｜12/14 – 01/24：Runner 與強制安全邊界（期末考期間，排輕一點）
 

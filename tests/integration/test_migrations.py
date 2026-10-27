@@ -25,6 +25,10 @@ APP_TABLES = {
     "api_spec_operations",
     "auth_profiles",
     "auth_profile_versions",
+    "scans",
+    "scanner_runs",
+    "scan_events",
+    "scan_operations",
 }
 TRIGGER_FUNCTIONS = (
     "audit_events_reject_mutation",
@@ -32,6 +36,10 @@ TRIGGER_FUNCTIONS = (
     "api_specs_guard",
     "auth_profiles_guard",
     "auth_profile_versions_guard",
+    "scans_guard",
+    "scanner_runs_guard",
+    "scan_records_guard",
+    "scan_operations_insert_guard",
 )
 
 

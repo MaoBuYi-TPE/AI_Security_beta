@@ -39,8 +39,7 @@ NAMING_CONVENTION = {
 
 DRIVER = "postgresql+psycopg"
 DEFAULT_APPLICATION_NAME = "secscan-api"
-# 每個連線固定以 UTC 解讀 timestamptz（CLAUDE.md §11：時間一律 UTC）。
-_SESSION_OPTIONS = "-c timezone=UTC"
+MILLISECONDS_PER_SECOND = 1_000
 
 
 class UtcDateTime(TypeDecorator[datetime]):
@@ -103,6 +102,24 @@ def database_url(settings: Settings) -> URL:
     )
 
 
+def session_options(settings: Settings) -> str:
+    """每個連線的 session 設定（libpq 的 options）。
+
+    - timezone=UTC：固定以 UTC 解讀 timestamptz（CLAUDE.md §11）。
+    - 逾時（docs/DECISIONS.md §13.8）：statement 與等鎖都有上限，transaction 中閒置太久就終止
+      session，不會無限期持有鎖、卡住撤銷或取消。不寫在 postgresql.conf，只影響應用程式的連線。
+    """
+    timeouts = {
+        "statement_timeout": settings.db_statement_timeout_seconds,
+        "lock_timeout": settings.db_lock_timeout_seconds,
+        "idle_in_transaction_session_timeout": settings.db_idle_in_transaction_timeout_seconds,
+    }
+    return " ".join(
+        ["-c timezone=UTC"]
+        + [f"-c {name}={seconds * MILLISECONDS_PER_SECOND}" for name, seconds in timeouts.items()]
+    )
+
+
 def create_db_engine(
     settings: Settings,
     *,
@@ -117,7 +134,7 @@ def create_db_engine(
         {
             "application_name": application_name,
             "connect_timeout": str(settings.db_connect_timeout_seconds),
-            "options": _SESSION_OPTIONS,
+            "options": session_options(settings),
         }
     )
     if pooled:

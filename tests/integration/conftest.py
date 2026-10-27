@@ -5,6 +5,8 @@
 - API 與 CLI 測試：另一個全新資料庫（api_database）。這些測試走正式的 request transaction，
   資料會真正 commit；如果和 migrated_database 共用，repository 測試對資料表總筆數的斷言就會
   被打壞。測試之間以唯一名稱區隔，不依賴全域筆數。
+- 佇列與 FakeRunner 的測試：每個測試從 queue_template 複製一份（queue_database），
+  不會認領到其他測試的 run。
 """
 
 from collections.abc import Iterator
@@ -95,6 +97,37 @@ def api_database(provisioner: DatabaseProvisioner) -> ProvisionedDatabase:
     database = provisioner.create()
     migrate_to_head(database)
     return database
+
+
+@pytest.fixture(scope="session")
+def queue_template(provisioner: DatabaseProvisioner) -> ProvisionedDatabase:
+    """佇列測試的 template：migrate 之後不再連線（CREATE DATABASE … TEMPLATE 的條件）。"""
+    database = provisioner.create()
+    migrate_to_head(database)
+    return database
+
+
+@pytest.fixture
+def queue_database(
+    provisioner: DatabaseProvisioner, queue_template: ProvisionedDatabase
+) -> Iterator[ProvisionedDatabase]:
+    """每個測試專用、會 commit 的資料庫：佇列只會認領這個測試建立的 run。"""
+    database = provisioner.clone(queue_template)
+    yield database
+    provisioner.drop(database)
+
+
+@pytest.fixture
+def queue_engine(queue_database: ProvisionedDatabase) -> Iterator[Engine]:
+    engine = app_engine(queue_database)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def queue_seed(queue_engine: Engine) -> Seeder:
+    """在這個測試專用的資料庫準備資料（見 queue_database）。"""
+    return Seeder(queue_engine)
 
 
 @pytest.fixture(scope="session")

@@ -45,10 +45,22 @@ class TargetRepository:
         """鎖住 target，並以 DB 的最新值覆蓋已載入的物件。
 
         shared=False 是 FOR UPDATE（要修改它，或依它決定 grant 的 version）；
-        shared=True 是 FOR SHARE（建立 scan 時，避免同時被停用；docs/DECISIONS.md §10.6）。
+        shared=True 是 FOR SHARE（runner 啟動前重新判斷，避免同時被停用；docs/DECISIONS.md §10.6）。
         """
         model = self._session.get(
             TargetModel, target_id, with_for_update={"read": shared}, populate_existing=True
+        )
+        return _to_domain(model) if model is not None else None
+
+    def lock_for_scan(self, target_id: UUID) -> Target | None:
+        """建立 scan 時以 FOR NO KEY UPDATE 鎖住 target（docs/DECISIONS.md §13.5）。
+
+        同一個 target 的建立彼此排隊，不會同時持有 grant 的 FOR SHARE：一直有新的 FOR SHARE
+        時，撤銷 grant 的 FOR UPDATE 會永遠等不到（安全審查發現）。停用 target 同樣要等它。
+        NO KEY 和 FK 檢查的 KEY SHARE 相容，不擋其他資料表引用這個 target。
+        """
+        model = self._session.get(
+            TargetModel, target_id, with_for_update={"key_share": True}, populate_existing=True
         )
         return _to_domain(model) if model is not None else None
 

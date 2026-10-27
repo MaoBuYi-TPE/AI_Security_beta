@@ -101,9 +101,10 @@ root_package = "secscan"
 # forbidden contract 要檢查第三方套件（fastapi、sqlalchemy…），必須把它們納入 import graph。
 include_external_packages = true
 
-# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7、§11.7、§12.7）：
+# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7、§11.7、§12.7、§13.9）：
 # - main 組裝 app，cli 是本機管理指令；兩者都是程序入口。migrations 登記所有 ORM model。
-# - 功能模組依實際呼叫關係排列：specs 要鎖住 target，並以 grant 預覽 inventory；auth_profiles
+# - 功能模組依實際呼叫關係排列：scans 建立 scan 時要用 gate（grants）、inventory（specs）與
+#   profile 的版本（auth_profiles）；runner 只經 scans 的佇列操作 run；specs 要鎖住 target，並以 grant 預覽 inventory；auth_profiles
 #   要鎖住 target、得知所屬 project（與 specs 同一層、互不依賴）；
 #   grants 要鎖住 target、得知所屬 project；targets 要確認 project
 #   存在；projects 會用 api_keys 的身分驗證與 audit；api_keys 撤銷 key 時寫 audit；
@@ -121,7 +122,9 @@ exhaustive = true
 layers = [
     "main | cli",
     "migrations",
-    "health | specs | auth_profiles",
+    "health | runner",
+    "scans",
+    "specs | auth_profiles",
     "grants",
     "targets",
     "projects",

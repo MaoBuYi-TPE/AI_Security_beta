@@ -32,6 +32,8 @@ class ApiSpecModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     __table_args__ = (
         # version 是每個 target 各自的流水號；這個唯一索引也用來依 target 查詢。
         UniqueConstraint("target_id", "version"),
+        # scan 以 (api_spec_id, target_id) 引用規格：規格一定屬於 scan 的 target。
+        UniqueConstraint("id", "target_id"),
         CheckConstraint("version > 0", name="version_positive"),
         CheckConstraint(f"source_format IN ({_FORMAT_VALUES})", name="format_valid"),
         CheckConstraint(

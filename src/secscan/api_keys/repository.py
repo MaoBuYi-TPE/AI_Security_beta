@@ -32,6 +32,16 @@ class ApiKeyRepository:
         model = self._session.get(ApiKeyModel, key_id)
         return _to_domain(model) if model is not None else None
 
+    def lock_shared(self, key_id: UUID) -> ApiKey | None:
+        """以 FOR SHARE 鎖住 key 並讀最新的值：撤銷（FOR UPDATE）要等呼叫端的 transaction 結束。
+
+        runner 啟動 scan 前確認建立者的 key 沒有被撤銷（docs/DECISIONS.md §13.5）。
+        """
+        model = self._session.get(
+            ApiKeyModel, key_id, with_for_update={"read": True}, populate_existing=True
+        )
+        return _to_domain(model) if model is not None else None
+
     def get_by_prefix(self, prefix: str) -> ApiKey | None:
         """驗證請求時以 prefix 查詢（unique index），再由 service 以常數時間比對 hash。"""
         model = self._session.scalar(select(ApiKeyModel).where(ApiKeyModel.prefix == prefix))

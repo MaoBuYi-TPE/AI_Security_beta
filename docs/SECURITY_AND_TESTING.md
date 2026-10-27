@@ -102,6 +102,12 @@ T08 已涵蓋：
 - **PATCH 的規則**：每種組合都明確決定（沿用 secret、換類型必須附上新的 secret、沒有變更…）。
 - **只寫不讀**：以 AST 確認 src 中沒有任何模組呼叫 `reveal`，`reencrypt_secrets` 只有本機 CLI 呼叫。API 文件中的 secret 是 writeOnly，任何回應的 schema 都沒有 secret。
 
+T09 已涵蓋：
+- **request hash 與 Idempotency-Key**：key 的格式（每個字元類別、長度的邊界、雙引號的寫法、CR、LF 與非 ASCII 被拒絕，訊息不回顯）；fingerprint 對每一個欄位與預算的每一項都敏感、和 engines 的順序無關（Hypothesis 對所有排列）、省略 budget 與每一項都是 null 相同；預算的界線（不超過 grant、正整數、布林不是整數）。
+- **狀態轉移**：run 的 12 × 12 轉換全部明確決定；failed、timed_out、interrupted 必須有錯誤碼。scan 狀態的彙總：對照表，以及 Hypothesis 的性質（和 run 的順序無關、全部終止時一定是終止狀態、要求過取消而且還有沒終止的 run 時一定是 cancelling）。
+- **引擎與 profile**：只開放 fake、執行順序固定、fake 必須單獨使用、profile 與 target 種類、規格的相容性。
+- **事件的 payload**：只有白名單中的欄位，最大的 payload 也在 1 KiB 以內。
+
 guard policy 比對與 policy budget，留給 M2。
 
 ### 4.2 Contract / Parser
@@ -133,7 +139,7 @@ T05 已涵蓋 project 層的權限：
 - 遮罩以固定 seed 的隨機輸入檢查 idempotent，並檢查惡意輸入下仍是線性時間。
 - 以突變檢查確認上述測試有鑑別力（`TASKS.md` T05）。
 
-SEC-16 要求的 scan、finding、artifact 跨專案測試，隨這些資源在 T09 與 M3–M5 加入，尚未完成。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
+SEC-16 要求的 finding、artifact 跨專案測試，隨這些資源在 M3–M5 加入，尚未完成；scan 已在 T09 涵蓋（見下）。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
 
 T08 已涵蓋認證設定：
 - **secret 不外流（SEC-14 的平台這一側）**：以 canary 確認 secret 不出現在任何回應（含 4xx）與 header、DEBUG 等級的所有日誌、audit、DB 的明文；422 只說明欄位與原因，expected_json 的 key 也不回顯。FastAPI 內建的 telemetry 已關閉；查詢的路由拿不到加密元件。
@@ -142,6 +148,25 @@ T08 已涵蓋認證設定：
 - **版本**：建立新版本時上一版的密文被清除，沿用時密文逐 byte 相同；每個 target 10 個、每個 profile 100 個的上限。
 - **併發**：同時 PATCH 時版本連號、只留一份密文；沿用 secret 的 PATCH 會等金鑰換版 commit，複製到的是換版後的密文；反過來，金鑰換版也會等還沒 commit 的 PATCH，不會漏掉它新增的密文（審查時發現，修正前測試失敗）；先開始、後拿到鎖的 PATCH，清除時間不早於被清除版本的建立時間；同時建立時上限精確、相同的 role_label 回 409（都以 `pg_stat_activity` 確認後到的在等列鎖）。
 - **金鑰換版的 CLI**：每個測試用全新的資料庫；新舊金鑰換版、移除舊金鑰後再確認、少了舊金鑰或 commit 失敗時什麼都不改。
+
+T09 已涵蓋 scan 與工作佇列（佇列、FakeRunner 與需要 runner 的 API 測試，每個測試從 migrated template 複製自己的資料庫）：
+- **交易一致性**：scan、run、凍結的 operation、事件與 audit 一起寫入；在寫入之後失敗時什麼都不留下；commit 之前其他連線認領不到它的 run。
+- **SKIP LOCKED 與 lease**：兩個 consumer 同時認領時各拿一個 scan、不等待；別人鎖著的 scan（取消中、worker 解析前一個引擎）直接跳過（突變檢查找到後補上）；候選過時時鎖到之後再確認；前面的引擎還在送流量、要求過取消、其他引擎的 run 都不認領。心跳延長 lease、回報取消；過期或別人的 lease 不能延長、不能轉換，也不會被別人接手；對帳只處理過期的 fake run（runner 階段 → interrupted，解析中 → collected 之後再解析）。
+- **target 互斥**：同時以不同的 key 為同一個 target 建立，一個成功、一個 409 `TARGET_BUSY`；同一個 key 回同一個 scan，不同內容回 409。
+- **runner 啟動前的檢查**：撤銷 grant、停用 target、PATCH profile、grant 過期、`LAB_CIDR` 改了、origin 被改，排隊中的 scan 在 prepare 時 failed，不送出流量。
+- **建立與撤銷、停用、PATCH profile 的先後**：兩個方向都以 `pg_stat_activity` 確認後到的在等列鎖；PATCH 等建立 scan 的 transaction，scan 綁定版本 1；PATCH 先拿到鎖時，scan 綁定版本 2。
+- **取消與認領**：取消持有鎖時認領跳過它；認領持有鎖時取消等它，之後是 cancelling；事件的 sequence 連號。
+- **權限（SEC-16 的 scan 部分）**：A 專案的 key 讀取、看事件、取消 B 專案的 scan，回應與不存在的 id、不存在的路徑完全相同；以 B 的 target、grant、規格、profile 建立回 404；viewer 不能建立與取消；清單只列自己 project 的 scan。
+- **不洩漏**：canary 的 target secret、平台 key 與 Idempotency-Key 不出現在 scan 的回應、清單、事件與 audit。
+- **DB 的最後一道防線**：四張表的每個 CHECK、複合 FK（引用其他 target、其他 project、不符的 role_label 與版本）、unique 與部分唯一索引都有違反測試；trigger 只允許改 scan 的狀態、取消與結束的時間，終止之後不可再改，run 的身分不可改，事件與凍結的 operation 不可修改。
+- **DB 逾時**：每個連線的設定值；另一個 transaction 持有鎖時，API 等 1 秒後回 503 加 `Retry-After`，不是 500。
+- **M1 審查後補上的測試**（code-reviewer 與 security-reviewer 的發現，修正前都先失敗）：
+  - 撤銷不被持續的建立請求餓死：同一個 target 的第二個建立停在 target 的鎖上、還沒走到 gate；target 忙碌時，建立請求不取任何鎖就回 409。改成排隊之後，同一個 key 同時送出仍回同一個 scan、內容不同仍回 409 `IDEMPOTENCY_CONFLICT`（取得鎖之後先重查 key）。
+  - 已要求取消、但 runner 遺失的 scan 是 interrupted；沒有要求取消就不能轉到 cancelling；只有 prepare 能讓 run 開始（`advance` 不能跳過 gate）。
+  - 建立 scan 的 key 被撤銷之後，它排隊中的 scan 在 prepare 時 failed（`CREATOR_KEY_REVOKED`）。
+  - run 與凍結的 operation 不能在其他 transaction 事後加入；已終止的 scan 的 run 不會被認領。
+  - 清單的時間篩選換算成 UTC 會超出範圍時回 422（原本 500）；API 文件中 Idempotency-Key 的 pattern 要求引號成對。
+- 以突變檢查確認上述測試有鑑別力（`TASKS.md` T09）。
 
 T06 已涵蓋 target 與 scope grant：
 - A 專案讀寫 B 專案的 target 與 grant（含核准、撤銷），回應與不存在的 id、不存在的路徑完全相同。
@@ -152,7 +177,7 @@ T06 已涵蓋 target 與 scope grant：
 - `LAB_CIDR`：設定驗證，以及建立 target、申請、核准、掃描 gate 四個時點的檢查。
 
 仍未完成的部分：
-- **SEC-01**：「建立或開始掃描被拒」的判斷（gate）已實作並測試，但建立 scan 的 API 要到 T09 才有；「已執行者停止新出站」要到 M2/T13。
+- **SEC-01**：「建立或開始掃描被拒」已在 T09 實作並測試：建立 scan 時以 gate 拒絕，排隊中的 scan 在 runner 啟動前（prepare）重新判斷、不通過就 failed。「已執行者停止新出站」要到 M2/T13（guard 的 policy 改成 blocked），T09 的 fake 不送出任何流量。
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
 - **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；工具輸出的 parser（JSONL、XML、Markdown）在 M3 之後。
@@ -175,6 +200,8 @@ T06 已涵蓋 target 與 scope grant：
 - Token 到期、手動取消
 
 結果要求：無重複同 run 活躍容器；未證明舊 run 停止前不啟動新 run；partial evidence 不被刪除；狀態不能永久顯示 running；不將錯誤轉為「0 漏洞」。
+
+T09 已涵蓋（fake 引擎，沒有容器）：兩個 consumer 同時認領；lease 過期之後不被接手，由對帳標成 interrupted（runner 階段）或退回 collected（解析中）；runner 停太久、lease 失效時在第一次心跳就停止；DB 等鎖逾時回 503；手動取消（排隊中、prepare 前、執行中、解析中）。容器、guard、磁碟、OOM 與 Token 到期在 M2 之後。
 
 ## 5. 實驗資料與靶場
 

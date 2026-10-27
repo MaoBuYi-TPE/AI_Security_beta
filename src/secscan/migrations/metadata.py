@@ -9,6 +9,12 @@ from secscan.auth_profiles.models import AuthProfileModel, AuthProfileVersionMod
 from secscan.core.db import Base
 from secscan.grants.models import ScopeGrantModel
 from secscan.projects.models import ProjectModel
+from secscan.scans.models import (
+    ScanEventModel,
+    ScanModel,
+    ScannerRunModel,
+    ScanOperationModel,
+)
 from secscan.specs.models import ApiSpecModel, ApiSpecOperationModel
 from secscan.targets.models import TargetModel
 
@@ -22,5 +28,9 @@ MODELS = (
     ApiSpecOperationModel,
     AuthProfileModel,
     AuthProfileVersionModel,
+    ScanModel,
+    ScannerRunModel,
+    ScanEventModel,
+    ScanOperationModel,
 )
 target_metadata = Base.metadata

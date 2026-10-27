@@ -51,6 +51,9 @@ class AuthProfileModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     __table_args__ = (
         # role_label 是 finding fingerprint 中的 auth role：同一個 target 內不可重複。
         UniqueConstraint("target_id", "role_label"),
+        # scan 以 (auth_profile_id, target_id, auth_role) 引用 profile：profile 屬於 scan 的
+        # target，scan 的 auth role 就是 profile 的 role_label。
+        UniqueConstraint("id", "target_id", "role_label"),
         CheckConstraint("char_length(btrim(name)) > 0", name="name_not_blank"),
         CheckConstraint(
             rf"role_label ~ '^[a-z][a-z0-9_]{{0,{ROLE_LABEL_MAX_LENGTH - 1}}}$' "

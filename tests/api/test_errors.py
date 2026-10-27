@@ -10,18 +10,21 @@ import re
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from secscan.core.errors import (
     AppError,
     ErrorCode,
     app_error_handler,
+    database_error_handler,
     http_exception_handler,
     not_found_error,
     register_error_handlers,
@@ -32,6 +35,7 @@ from secscan.core.request_id import REQUEST_ID_HEADER, RequestIdMiddleware, curr
 REQUEST_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SECRET_INPUT = "Bearer canary-secret-input-0001"
 SECRET_EXCEPTION_DETAIL = "canary-exception-detail-0002"
+SECRET_SQL = "SELECT canary_column_0003 FROM targets FOR UPDATE"
 
 type Handler = Callable[[Request, Exception], Coroutine[Any, Any, Response]]
 
@@ -97,6 +101,24 @@ def _app(*, with_request_id: bool = True) -> FastAPI:
     @app.get("/things/{thing_id}")
     def thing(thing_id: str) -> None:
         raise not_found_error()
+
+    @app.get("/lock-timeout")
+    def lock_timeout() -> None:
+        raise OperationalError(
+            SECRET_SQL,
+            {"value": SECRET_EXCEPTION_DETAIL},
+            psycopg.errors.LockNotAvailable(SECRET_SQL),
+        )
+
+    @app.get("/statement-timeout")
+    def statement_timeout() -> None:
+        raise OperationalError(
+            SECRET_SQL, {"value": SECRET_EXCEPTION_DETAIL}, psycopg.errors.QueryCanceled(SECRET_SQL)
+        )
+
+    @app.get("/missing-table")
+    def missing_table() -> None:
+        raise ProgrammingError(SECRET_SQL, None, psycopg.errors.UndefinedTable(SECRET_SQL))
 
     @app.get("/whoami")
     def whoami() -> dict[str, str | None]:
@@ -267,6 +289,40 @@ def test_unhandled_exception_is_a_generic_envelope_with_request_id(
     assert all(SECRET_EXCEPTION_DETAIL not in line for line in logged)
 
 
+@pytest.mark.parametrize(
+    ("path", "sqlstate"), [("/lock-timeout", "55P03"), ("/statement-timeout", "57014")]
+)
+def test_lock_and_statement_timeouts_are_retryable_503s(
+    path: str, sqlstate: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """等鎖或查詢逾時（docs/DECISIONS.md §13.8）：503 加 Retry-After；不回顯、不記 SQL。"""
+    with (
+        caplog.at_level(logging.DEBUG),
+        TestClient(_app(), raise_server_exceptions=False) as client,
+    ):
+        response = client.get(path)
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+    error = _error(response.json())
+    assert error["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert error["request_id"] == response.headers[REQUEST_ID_HEADER]
+    logged = [record.getMessage() for record in caplog.records]
+    assert any(sqlstate in line and str(error["request_id"]) in line for line in logged)
+    for canary in ("canary_column_0003", SECRET_EXCEPTION_DETAIL):
+        assert canary not in response.text
+        assert all(canary not in line for line in logged)
+
+
+def test_other_database_errors_stay_internal_errors() -> None:
+    with TestClient(_app(), raise_server_exceptions=False) as client:
+        response = client.get("/missing-table")
+
+    assert response.status_code == 500
+    assert _error(response.json())["code"] == "INTERNAL_ERROR"
+    assert "canary_column_0003" not in response.text
+
+
 def test_real_app_uses_the_same_error_envelope(client: TestClient) -> None:
     response = client.get("/nope")
 
@@ -276,8 +332,8 @@ def test_real_app_uses_the_same_error_envelope(client: TestClient) -> None:
 
 @pytest.mark.parametrize(
     "handler",
-    [app_error_handler, http_exception_handler, validation_error_handler],
-    ids=["app_error", "http_exception", "validation_error"],
+    [app_error_handler, http_exception_handler, validation_error_handler, database_error_handler],
+    ids=["app_error", "http_exception", "validation_error", "database_error"],
 )
 def test_specific_handlers_reraise_unrelated_exceptions(handler: Handler) -> None:
     """各 handler 只處理自己的例外型別；收到其他例外時原樣拋出，不包裝成看似正常的回應。"""
@@ -295,3 +351,4 @@ def test_handler_types_match_registration() -> None:
     assert app.exception_handlers[AppError] is app_error_handler
     assert app.exception_handlers[StarletteHTTPException] is http_exception_handler
     assert app.exception_handlers[RequestValidationError] is validation_error_handler
+    assert app.exception_handlers[DBAPIError] is database_error_handler

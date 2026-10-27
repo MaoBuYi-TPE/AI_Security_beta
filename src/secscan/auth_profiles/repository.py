@@ -100,6 +100,22 @@ class AuthProfileRepository:
             .with_for_update()
         ).scalar_one()
 
+    def version_has_secret(self, profile_id: UUID, *, version: int) -> bool:
+        """以 FOR SHARE 鎖住這一版，回傳它是否還有密文（不讀出密文）。
+
+        runner 啟動前確認 scan 綁定的版本還沒被取代（docs/DECISIONS.md §13.5）：鎖住之後，PATCH 的
+        清除要等這個 transaction 結束。不存在的版本回 False。
+        """
+        row = self._session.execute(
+            select(AuthProfileVersionModel.secret_erased_at)
+            .where(
+                AuthProfileVersionModel.profile_id == profile_id,
+                AuthProfileVersionModel.version == version,
+            )
+            .with_for_update(read=True)
+        ).first()
+        return row is not None and row.secret_erased_at is None
+
     def get(self, profile_id: UUID) -> AuthProfile | None:
         row = self._session.execute(
             _with_project().where(AuthProfileModel.id == profile_id)
@@ -109,15 +125,17 @@ class AuthProfileRepository:
         model, project_id = row
         return _profile(model, project_id, self._current(profile_id))
 
-    def lock(self, profile_id: UUID) -> AuthProfile | None:
-        """FOR UPDATE 鎖住 profile（只鎖 profile 的列），並以 DB 的最新值覆蓋已載入的物件。
+    def lock(self, profile_id: UUID, *, shared: bool = False) -> AuthProfile | None:
+        """鎖住 profile（只鎖 profile 的列），並以 DB 的最新值覆蓋已載入的物件。
 
-        建立新版本前呼叫：同時更新同一個 profile 時，version 依 commit 的先後遞增。
+        shared=False 是 FOR UPDATE：建立新版本前呼叫，同時更新同一個 profile 時，version 依 commit
+        的先後遞增。shared=True 是 FOR SHARE：建立 scan 時綁定目前的版本，PATCH 會等 scan 的
+        transaction commit，不會綁到即將被清除的版本（docs/DECISIONS.md §13.5）。
         """
         row = self._session.execute(
             _with_project()
             .where(AuthProfileModel.id == profile_id)
-            .with_for_update(of=AuthProfileModel)
+            .with_for_update(of=AuthProfileModel, read=shared)
             .execution_options(populate_existing=True)
         ).first()
         if row is None:
