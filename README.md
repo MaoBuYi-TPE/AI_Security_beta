@@ -221,10 +221,10 @@ curl -X POST -H @operator.header http://127.0.0.1:8000/api/v1/scans/<scan_id>/ca
 ```
 
 - **profile**：`api_active_lab` 要有規格（target 是 api 或 hybrid，至少一個 operation 在 grant 的範圍內）；`web_active_lab` 不帶規格（target 是 web 或 hybrid）。省略 `auth_profile_id` 就是未認證的 scan（`auth_role` 是 `anonymous`）。
-- **快照**：綁定 grant、規格與 auth profile 目前的版本，並凍結 target 的 origin 與每個 operation 的判斷。之後撤銷 grant、停用 target 或 PATCH profile，排隊中的 scan 在 runner 啟動前就會失敗（例如 `SCOPE_REVOKED`、`AUTH_PROFILE_SUPERSEDED`），不會改用新的設定。
+- **快照**：綁定 grant、規格與 auth profile 目前的版本，並凍結 target 的 origin 與每個 operation 的判斷。之後撤銷 grant、停用 target 或 PATCH profile，排隊中的 scan 在 runner 啟動前就會失敗（例如 `SCOPE_REVOKED`、`AUTH_PROFILE_SUPERSEDED`），不會改用新的設定。建立 scan 的平台 key 被撤銷時，它排隊中的 scan 也會失敗（`CREATOR_KEY_REVOKED`）。
 - **Idempotency-Key**：同一個 key、同樣的內容回原本的 scan（未結束 202、已結束 200）；內容不同回 409。範圍是 project，永久保存。
 - **上限**：一個 target 同時只有一個進行中的 scan（409 `TARGET_BUSY`）；每個 target 在 24 小時內最多 50 個。
-- **fake-runner**：`--outcome fail` 產生失敗的結果、`--hold-seconds 30` 讓它停在 running 30 秒（期間可以試取消）、`--once` 只處理一個。被強制終止（Ctrl-C）時 scan 會停在 running，lease 30 秒過期之後，下一次執行 fake-runner 會把它標成 `interrupted`。
+- **fake-runner**：`--outcome fail` 產生失敗的結果、`--hold-seconds 30` 讓它停在 running 30 秒（期間可以試取消）、`--once` 只處理一個。被強制終止（Ctrl-C）時 scan 會停在 running，lease 30 秒過期之後，下一次執行 fake-runner 會把它標成 `interrupted`。已經要求取消、runner 卻在確認之前被終止時也是 `interrupted`：沒有確認停止，就不會是 `cancelled`。
 - **coverage**：`eligible_operations` 是建立時在範圍內的 operation 數；`coverage_measured` 一律 false（T12 才量測實際的流量）。
 - **DB 逾時**：每個連線有 `DB_STATEMENT_TIMEOUT_SECONDS`（30）、`DB_LOCK_TIMEOUT_SECONDS`（5）、`DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`（60）；等鎖或查詢逾時回 503 `DEPENDENCY_UNAVAILABLE` 加 `Retry-After`，稍後重試即可。
 - 完整規則見 `docs/API_CONTRACT.md` §17，設計理由見 `docs/DECISIONS.md` §13。
