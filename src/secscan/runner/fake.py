@@ -7,24 +7,14 @@
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
-from uuid import UUID
 
 from secscan.scanners.domain.fake import FakeOutcome, FakeScript
 from secscan.scans.domain.catalog import Engine
-from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
+from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.model import Lease
-from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, Progress, ScanQueue
+from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, Progress, RunReport, ScanQueue
 
 ENGINES = frozenset({Engine.FAKE})
-
-
-@dataclass(frozen=True, slots=True)
-class RunReport:
-    run_id: UUID
-    scan_id: UUID
-    run_status: RunStatus
-    scan_status: ScanStatus
 
 
 class FakeRunner:
@@ -120,9 +110,4 @@ class FakeRunner:
 
 
 def _report(lease: Lease, progress: Progress) -> RunReport:
-    return RunReport(
-        run_id=lease.run_id,
-        scan_id=lease.scan_id,
-        run_status=progress.run_status,
-        scan_status=progress.scan_status,
-    )
+    return RunReport.of(lease, progress)

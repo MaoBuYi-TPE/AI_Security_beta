@@ -55,9 +55,9 @@ from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
 from secscan.core.text import require_text
 from secscan.migrations import head_revision
-from secscan.runner.fake import FakeRunner, RunReport
+from secscan.runner.fake import FakeRunner
 from secscan.scanners.domain.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
-from secscan.scans.queue import LeaseLostError, ScanQueue
+from secscan.scans.queue import LeaseLostError, RunReport, ScanQueue
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
 from secscan.targets.domain import LabNetwork
 

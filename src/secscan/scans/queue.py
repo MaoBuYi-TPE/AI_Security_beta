@@ -51,6 +51,7 @@ __all__ = [
     "LeaseLostError",
     "Progress",
     "QueueOperations",
+    "RunReport",
     "ScanQueue",
 ]
 
@@ -76,6 +77,25 @@ class Progress:
 
     run_status: RunStatus
     scan_status: ScanStatus
+
+
+@dataclass(frozen=True, slots=True)
+class RunReport:
+    """runner 或 worker 處理完一個 run 之後的狀態（CLI 與測試用）。"""
+
+    run_id: UUID
+    scan_id: UUID
+    run_status: RunStatus
+    scan_status: ScanStatus
+
+    @classmethod
+    def of(cls, lease: Lease, progress: Progress) -> "RunReport":
+        return cls(
+            run_id=lease.run_id,
+            scan_id=lease.scan_id,
+            run_status=progress.run_status,
+            scan_status=progress.scan_status,
+        )
 
 
 @dataclass(frozen=True, slots=True)
