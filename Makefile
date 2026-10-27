@@ -37,7 +37,7 @@ dev: env
 # unit/contract/integration 測試與 coverage 門檻（分支覆蓋），不做 live scan。
 # 測試程序本身不連網、也不碰 Docker；整合測試用的 db-test 由這裡先啟動。
 test: test-db-up
-	$(UV_RUN) pytest --cov --cov-report=term-missing --cov-fail-under=80
+	$(UV_RUN) pytest -m "not live" --cov --cov-report=term-missing --cov-fail-under=80
 
 # ruff lint、format 檢查與 import-linter 依賴方向檢查。
 lint:

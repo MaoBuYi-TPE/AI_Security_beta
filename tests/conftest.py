@@ -10,6 +10,9 @@ from secscan.core.config import AppEnv, Settings
 from secscan.main import create_app
 from tests.secret_support import encryption_keys
 
+# tests.isolation：測試程序連不到 Docker daemon（docs/DECISIONS.md §14.9）。
+pytest_plugins = ("pytester", "tests.isolation")
+
 type ClientFactory = Callable[[AppEnv], TestClient]
 
 # Hypothesis 的 property test：亂數由測試內容決定（derandomize），每次執行的輸入都相同，
