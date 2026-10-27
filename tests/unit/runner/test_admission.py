@@ -10,7 +10,12 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from secscan.runner.domain.admission import PlanRejectedError, PlanRejection, admit
-from secscan.runner.domain.policy import ENGINE_POLICIES, ArgumentPattern, CommandTemplate
+from secscan.runner.domain.policy import (
+    ENGINE_POLICIES,
+    ArgumentPattern,
+    CommandTemplate,
+    ContainerPolicy,
+)
 from secscan.scanners.domain.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
 from secscan.scanners.domain.plan import ExecutionPlan, ImageReference, InputFile, ResourceLimits
 from secscan.scans.domain.catalog import Engine
@@ -167,6 +172,12 @@ def test_templates_match_whole_arguments_only() -> None:
     assert not template.matches(("/bin/sleep",), ("a12",))
     assert not template.matches(("/bin/sleep",), ())
     assert not template.matches(("/bin/sleep", "x"), ("12",))
+
+
+@pytest.mark.parametrize("name", ["", "bad name", "-leading", "a/b", "x" * 129])
+def test_container_policy_names_are_docker_names(name: str) -> None:
+    with pytest.raises(ValueError, match="名稱"):
+        ContainerPolicy(scan_network=name, runs_volume="runs", secrets_volume="secrets")
 
 
 def test_resource_limits_type_is_shared() -> None:

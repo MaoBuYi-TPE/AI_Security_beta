@@ -224,8 +224,28 @@ def test_proxies_from_the_environment_are_ignored(
     assert not runtime.trusts_environment
 
 
+@pytest.mark.parametrize("url", ["tcp://socket-proxy:2375", "unix:///var/run/docker.sock"])
+def test_connecting_does_not_call_the_daemon(url: str) -> None:
+    """版本固定：建立 client 不呼叫 daemon（unit 測試連不到任何 daemon）。"""
+    runtime = DockerRuntime.connect(url)
+
+    assert not runtime.trusts_environment
+
+
 @pytest.mark.parametrize(
-    "url", ["", "http://socket-proxy:2375", "ssh://host", "npipe:////./pipe/docker", "tcp://"]
+    "url",
+    [
+        "",
+        "http://socket-proxy:2375",
+        "ssh://host",
+        "npipe:////./pipe/docker",
+        "tcp://",
+        "tcp://host",
+        "tcp://host:port",
+        "tcp://a/b:1",
+        "unix:///",
+        "unix://relative.sock",
+    ],
 )
 def test_only_tcp_and_unix_urls_are_accepted(url: str) -> None:
     with pytest.raises(ValueError, match="tcp"):

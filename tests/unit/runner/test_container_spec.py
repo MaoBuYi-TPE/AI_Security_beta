@@ -230,6 +230,9 @@ _UNSAFE: dict[str, Callable[[Body], None]] = {
     "tmpfs": _set("HostConfig.Tmpfs", {"/run": "exec"}),
     "cgroup_parent": _set("HostConfig.CgroupParent", "/"),
     "runtime": _set("HostConfig.Runtime", "runc-unsafe"),
+    "host_config_not_an_object": _set("HostConfig", ["Privileged"]),
+    "mounts_not_a_list": _set("HostConfig.Mounts", {"Type": "volume"}),
+    "mount_not_an_object": lambda body: body["HostConfig"]["Mounts"].__setitem__(0, "volume"),
 }
 
 
