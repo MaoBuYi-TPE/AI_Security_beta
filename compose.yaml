@@ -14,9 +14,9 @@
 name: secscan
 
 x-app: &app
+  # 本機建立的映像（make build，只由 api 建立一次）；不從 registry pull。
   image: secscan:${SECSCAN_IMAGE_TAG:-dev}
-  build:
-    context: .
+  pull_policy: never
   profiles: [app]
   user: "10001:10001"
   read_only: true
@@ -112,6 +112,8 @@ services:
 
   api:
     <<: *app
+    build:
+      context: .
     command:
       ["uvicorn", "--factory", "secscan.main:create_app", "--host", "0.0.0.0", "--port", "8000"]
     environment:

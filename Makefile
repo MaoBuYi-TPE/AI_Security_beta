@@ -139,7 +139,7 @@ lab-down:
 
 # 建立 secscan 的應用程式映像（api、runner、worker 共用）。
 build: docker-check
-	$(COMPOSE) -f $(DB_FILE) --profile app build
+	$(COMPOSE) -f $(DB_FILE) --profile app build api
 
 # 以 digest pull 核准的掃描器映像與 socket-proxy（runner 本身不 pull）。
 images: docker-check

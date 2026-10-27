@@ -5,8 +5,8 @@ Unix socket 因此連得到。這個 plugin（由 tests/conftest.py 載入）在
 
 - 只允許 connect 到 pytest 暫存目錄底下的 AF_UNIX 路徑（解析 symlink 與相對路徑之後判斷）；
 - 把 DOCKER_HOST 指向不存在的 socket，清掉其他 Docker 設定（子程序的 docker CLI 也連不到）；
-- 沒有標記 live 的測試不能用 enable_socket；live 測試要 ENABLE_LIVE_LAB_TESTS=1 才執行，
-  只有它們解除上述限制（CLAUDE.md §12）。
+- 沒有標記 live 的測試不能用 enable_socket；live 測試要 ENABLE_LIVE_LAB_TESTS=1 才執行（否則在
+  收集時就 skip），只有它們解除上述限制（CLAUDE.md §12）。
 """
 
 import os
@@ -34,7 +34,10 @@ class UnixSocketBlockedError(RuntimeError):
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """沒有標記 live 卻要求開放網路的測試：整個 session 以使用錯誤結束。"""
+    """沒有標記 live 卻要求開放網路的測試：整個 session 以使用錯誤結束。
+
+    沒有開關時，live 測試在收集時就標成 skip（連它們的 fixture 都不執行，不會碰到 Docker）。
+    """
     offenders = [
         item.nodeid
         for item in items
@@ -44,6 +47,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         raise pytest.UsageError(
             f"只有標記 {LIVE_MARKER} 的測試可以使用 enable_socket：" + "、".join(offenders)
         )
+    if os.environ.get(LIVE_SWITCH) == "1":
+        return
+    skip = pytest.mark.skip(reason=f"live 測試要設定 {LIVE_SWITCH}=1")
+    for item in items:
+        if item.get_closest_marker(LIVE_MARKER) is not None:
+            item.add_marker(skip)
 
 
 def _wants_socket(item: pytest.Item) -> bool:
@@ -60,8 +69,6 @@ def _isolate_from_docker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     if request.node.get_closest_marker(LIVE_MARKER) is not None:
-        if os.environ.get(LIVE_SWITCH) != "1":
-            pytest.skip(f"live 測試要設定 {LIVE_SWITCH}=1")
         return
     monkeypatch.setenv("DOCKER_HOST", BLOCKED_DOCKER_HOST)
     for key in DOCKER_ENV_KEYS:

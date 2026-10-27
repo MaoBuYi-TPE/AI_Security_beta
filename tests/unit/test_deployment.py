@@ -70,10 +70,17 @@ def test_app_services_have_no_host_paths(name: str) -> None:
 @pytest.mark.parametrize("name", sorted(SERVICES))
 def test_images_are_pinned_or_built_here(name: str) -> None:
     service = SERVICES[name]
-    if "build" in service:
-        assert str(service["image"]).startswith("secscan:")
+    if str(service["image"]).startswith("secscan:"):
+        # 本機建立的映像：不從 registry pull（同名的映像不會被換成別人的）。
+        assert service["pull_policy"] == "never"
     else:
         assert "@sha256:" in service["image"]
+
+
+def test_the_app_image_is_built_once() -> None:
+    builders = [name for name, service in SERVICES.items() if "build" in service]
+
+    assert builders == ["api"]
 
 
 def test_networks_separate_the_processes() -> None:
