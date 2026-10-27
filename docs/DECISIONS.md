@@ -765,7 +765,7 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
 | 內容的比對 | fingerprint 是請求內容的 canonical JSON（key 排序、沒有空白）的 SHA-256。engines 先排序；省略 budget 與 budget 的每一項都是 null 相同。比對的是請求的內容，不是伺服器解析出的值（例如 profile 的最新版本） | 同樣的請求重送，不會因為 profile 換過版本就變成 409 |
 | 重送 | 同 key、同內容：回原本的 scan，未終止回 202、已終止回 200；不重新判斷 gate，也不寫入任何東西 | contract §7。重送是要知道「當初那一次的結果」，不是再建立一次 |
 | 不同內容 | 409 `IDEMPOTENCY_CONFLICT`，什麼都不寫 | CLAUDE.md §8 與 T09 的 DoD 指定 409；草案建議 422 [S79]，這裡依專案的契約 |
-| 同時送出 | 後到的在唯一索引上等先到的 commit，再回同一個 scan（重送），不回 409 | DB 會把它們排成先後，建立只要幾毫秒；比草案的 409 好用，client 不必重試 |
+| 同時送出 | 後到的在 target 的鎖上等先到的 commit（§13.3 第 7 步），取得鎖之後先重查 key，再回同一個 scan（重送），不回 409；萬一 target 的鎖沒有排隊（例如直接寫 DB），仍以唯一索引為準 | DB 會把它們排成先後，建立只要幾毫秒；比草案的 409 好用，client 不必重試 |
 | 先後 | 權限檢查之後才查 key：viewer 拿已用過的 key 重送也是 403 | 不替沒有權限的呼叫者回傳 scan |
 
 ### 13.3 建立時的檢查順序
@@ -775,12 +775,19 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
 3. target：不存在或屬於其他 project 回 404；角色不足回 403。
 4. key 已用過：同內容重送（202 或 200）；不同內容 409 `IDEMPOTENCY_CONFLICT`。
 5. 引擎與 profile 的規則（只需要 target 的種類與請求本身）：先判斷引擎重複、fake 和其他引擎混用（`INVALID_REQUEST`），再判斷 `ENGINE_UNSUPPORTED`，最後是 `PROFILE_INCOMPATIBLE`。都是 422。
-6. gate（`require_usable`，§10.6）：依序以 `FOR SHARE` 鎖住 target 與 grant，之後才取時間。grant 不存在或屬於其他 project 回 404；屬於其他 target 回 422；尚未核准、已撤銷、尚未生效回 403 `SCOPE_NOT_APPROVED`；過期回 403 `SCOPE_EXPIRED`；target 停用回 409 `TARGET_DISABLED`；IP 不在 `LAB_CIDR` 內回 422 `SCOPE_OUTSIDE_LAB`。
-7. 規格：不存在或屬於其他 project 回 404；屬於其他 target 回 422；沒有任何 operation 在範圍內回 422 `PROFILE_INCOMPATIBLE`。
-8. auth profile：以 `FOR SHARE` 鎖住 profile 再讀目前的版本。不存在或屬於其他 project 回 404；屬於其他 target 回 422；目前的版本沒有 secret 回 409 `INVALID_STATE_TRANSITION`（只有直接改了 DB 才會發生）；preflight 不在 grant 的範圍內回 422，訊息附原因（例如 `PATH_EXCLUDED`），不附 path。
-9. 預算超過 grant：422。
-10. 409 `TARGET_BUSY`、409 `QUOTA_EXCEEDED`。
-11. 寫入時撞到唯一索引（在 savepoint 中寫入）：先重查 key（重送或 409），再判斷 `TARGET_BUSY`。
+6. 409 `TARGET_BUSY`、409 `QUOTA_EXCEEDED`：在取得任何鎖之前先查一次（審查後補上，見下）。
+7. gate（`require_usable`，§10.6）：依序鎖住 target（`FOR NO KEY UPDATE`）與 grant（`FOR SHARE`），之後才取時間。grant 不存在或屬於其他 project 回 404；屬於其他 target 回 422；尚未核准、已撤銷、尚未生效回 403 `SCOPE_NOT_APPROVED`；過期回 403 `SCOPE_EXPIRED`；target 停用回 409 `TARGET_DISABLED`；IP 不在 `LAB_CIDR` 內回 422 `SCOPE_OUTSIDE_LAB`。
+   取得鎖之後重查一次 key（同第 4 步）：等鎖期間，同一個 key 的另一個請求可能已經 commit，這時回重送或 409，而不是被第 11 步當成 `TARGET_BUSY`。取捨：等鎖期間 grant 剛好被撤銷時，這個同時送出的請求得到 gate 的錯誤；之後以同一個 key 重送，第 4 步就會回原本的 scan（重送不判斷 gate）。
+8. 規格：不存在或屬於其他 project 回 404；屬於其他 target 回 422；沒有任何 operation 在範圍內回 422 `PROFILE_INCOMPATIBLE`。
+9. auth profile：以 `FOR SHARE` 鎖住 profile 再讀目前的版本。不存在或屬於其他 project 回 404；屬於其他 target 回 422；目前的版本沒有 secret 回 409 `INVALID_STATE_TRANSITION`（只有直接改了 DB 才會發生）；preflight 不在 grant 的範圍內回 422，訊息附原因（例如 `PATH_EXCLUDED`），不附 path。
+10. 預算超過 grant：422。
+11. 持有鎖時再查一次 `TARGET_BUSY`、`QUOTA_EXCEEDED`（這一次才是準的）。
+12. 寫入時撞到唯一索引（在 savepoint 中寫入）：先重查 key（重送或 409），再判斷 `TARGET_BUSY`。
+
+**撤銷不會被持續的建立請求餓死**（安全審查發現，已重現）：PostgreSQL 的列鎖中，新的 `FOR SHARE` 只要和目前的持有者相容就直接取得，不排在已在等候的 `FOR UPDATE` 後面。原本建立 scan 以 `FOR SHARE` 鎖 target 與 grant，一把外洩的 operator key 平行送出註定失敗的建立請求（例如 `TARGET_BUSY`），就能讓撤銷 grant、停用 target 一直等不到鎖，最後被 `statement_timeout` 中止。改成：
+- target 以 `FOR NO KEY UPDATE` 鎖住：同一個 target 的建立彼此排隊（它們本來就因 `uq_scans_active_target` 而依序），grant 的 `FOR SHARE` 同時最多只有一個建立請求持有，撤銷與停用在鎖的佇列中依序取得。NO KEY 和 FK 檢查的 KEY SHARE 相容，不擋其他資料表引用這個 target。
+- 忙碌與上限先在取鎖之前查一次：target 忙碌時，請求不持有任何鎖就失敗。
+- 速率限制與每把 key 的同時請求上限仍在 T23；在那之前，先撤銷外洩的 key（驗證 key 時不鎖 key 的列，撤銷之後請求立刻得到 401）。
 
 ### 13.4 狀態機
 
@@ -798,21 +805,22 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
 | succeeded、failed、timed_out、cancelled、interrupted | 終止，不能再轉換 |
 
 - failed、timed_out、interrupted 必須有錯誤碼，其他狀態不能有。
+- 只有 prepare 能讓 run 轉到 running（`advance` 拒絕這個轉換）：誤用時也不會跳過 gate 的重新判斷（審查後補上）。只有要求過取消的 scan，run 才能轉到 cancelling（和 DB 的 CHECK 一致）。
 - runner 階段：preparing、running、collecting、cancelling。worker 階段：collected、normalizing。
-- 「不再送出流量」：collected、normalizing 或終止。後面的 run 要等前面的 run 都到這個狀態才能被認領：失敗的引擎不擋住後面的引擎，部分結果仍然保留。
+- 「不再送出流量」：collected、normalizing 或終止。後面的 run 要等前面的 run 都到這個狀態才能被認領：失敗的引擎不擋住後面的引擎，部分結果仍然保留。interrupted 也算：只有確定已停止才能標成 interrupted（T09 的 fake 不發流量；T13 的對帳要先封鎖 guard、確認容器已終止）。
 
 **scan 的狀態**由 runs 的狀態與「是否要求過取消」彙總（純函式 `aggregate()`），和 run 的轉換在同一個 transaction 寫入：
 - 還有沒終止的 run：
-  1. 要求過取消，或有 run 在 cancelling → cancelling。
+  1. 要求過取消 → cancelling。
   2. 全部 queued → queued。
   3. 只有 queued 與 preparing（第一個引擎準備中）→ preparing。
   4. 有 run 在 preparing 或 running → running。
   5. 有 run 在 collecting 或 collected → collecting。
   6. 有 run 在 normalizing → normalizing。
   7. 其他（有引擎已經結束、其餘還在排隊）→ running。
-- 全部終止：要求過取消 → cancelled；否則有 interrupted → interrupted；有 timed_out → timed_out；全部 succeeded → completed；有 succeeded → partially_completed；其他 → failed。
+- 全部終止：有 interrupted → interrupted；否則要求過取消 → cancelled；有 timed_out → timed_out；全部 succeeded → completed；有 succeeded → partially_completed；其他 → failed。
 
-順序的理由：interrupted 排在 timed_out 之前，因為它無法證明工作已正常停止；要求取消之後，解析中的引擎仍會解析完，結果保留，但 scan 是 cancelled（使用者要求停止，結果不完整）。以 Hypothesis 檢查：結果和 runs 的排列順序無關；全部終止時一定是終止狀態，否則一定不是；要求過取消、還有沒終止的 run 時一定是 cancelling。
+順序的理由：interrupted 排在最前面，因為它無法證明工作已正常停止。要求過取消、但 runner 沒有確認就遺失（lease 過期）時，也不能說是 cancelled：確認之後才是 cancelled（CLAUDE.md §8；審查發現，原本是 cancelled）。要求取消之後，解析中的引擎仍會解析完，結果保留，但 scan 是 cancelled（使用者要求停止，結果不完整）。以 Hypothesis 檢查：結果和 runs 的排列順序無關；全部終止時一定是終止狀態，否則一定不是；要求過取消、還有沒終止的 run 時一定是 cancelling；cancelling 與 cancelled 一定有取消的要求（和 DB 的 `ck_scans_cancel_matches_status` 一致）；全部終止而且有 interrupted 時一定是 interrupted。
 
 **run 的錯誤碼**（DB 只檢查格式：大寫英文字母、數字與底線；清單在 domain，M2 新增時不必改 migration）：
 
@@ -821,6 +829,7 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
 | `SCOPE_REVOKED`、`SCOPE_EXPIRED`、`SCOPE_NOT_APPROVED`、`SCOPE_NOT_YET_VALID`、`TARGET_DISABLED`、`SCOPE_OUTSIDE_LAB` | runner 啟動前重新判斷 gate 不通過（對應 §10.6 的原因） |
 | `SCOPE_MISMATCH` | grant 不屬於這個 target，或 target 的 origin 和快照不同（只有直接改了 DB 才會發生） |
 | `AUTH_PROFILE_SUPERSEDED` | 綁定的 profile 版本已被取代、密文已清除（§12.3） |
+| `CREATOR_KEY_REVOKED` | 建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不會開始（審查後補上；key 到期不算） |
 | `ENGINE_FAILED` | 引擎失敗（T09 只有 fake 的失敗腳本） |
 | `LEASE_EXPIRED` | lease 過期，無法證明工作已正常停止 |
 
@@ -828,19 +837,21 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
 
 | 項目 | 採用 | 理由 |
 |---|---|---|
-| 認領 | runner 認領 queued、worker 認領 collected。都以 `FOR UPDATE OF scans SKIP LOCKED` 先鎖 scan，再改 run。條件：同一個 scan 中前面的 run 都不再送出流量；runner 認領時 scan 沒有被要求取消；引擎在認領者支援的清單中。依 `scans.queue_position`（identity）先進先出。鎖到之後以新的 statement 再確認一次條件，不符就換下一個 | §3、[S28]。所有改 run 的寫入都先鎖 scan，所以持有 scan 的鎖時 run 不會變；`ORDER BY` 搭配鎖可能用到舊的資料，所以要再確認。`created_at` 是 transaction 開始的時間，不能代表 commit 的先後（T04 的交接），所以另用 identity |
+| 認領 | runner 認領 queued、worker 認領 collected。都以 `FOR UPDATE OF scans SKIP LOCKED` 先鎖 scan，再改 run。條件：scan 還沒終止；同一個 scan 中前面的 run 都不再送出流量；runner 認領時 scan 沒有被要求取消；引擎在認領者支援的清單中。依 `scans.queue_position`（identity）先進先出。鎖到之後以新的 statement 再確認一次條件，不符就換下一個 | §3、[S28]。所有改 run 的寫入都先鎖 scan，所以持有 scan 的鎖時 run 不會變；`ORDER BY` 搭配鎖可能用到舊的資料，所以要再確認。`created_at` 是 transaction 開始的時間，不能代表 commit 的先後（T04 的交接），所以另用 identity |
 | lease | 認領時寫入 `lease_owner`、`lease_expires_at`（DB 時間加 30 秒）與 `heartbeat_at`；每 5 秒心跳一次延長。每次轉換都要 owner 相同、而且還沒過期（fencing）。過期的 lease 不能延長，也不會被別人接手 | `ARCHITECTURE.md` §9：lease 過期不代表工作已經停止 |
 | 時間 | 寫入的時間（lease 的期限、心跳、開始、結束、取消）用 `statement_timestamp()`；判斷 lease 是否過期用 `clock_timestamp()` | 等鎖期間 `now()`（transaction 開始的時間）已經過時（§12.3 的同一個問題）。鎖都在前一個 statement 取得，所以 statement 開始的時間不會早於取得鎖；同一列的幾個欄位用同一個時間，「心跳不早於開始」這類 CHECK 才不會因為微秒的差距失敗 |
 | 每個操作一個短 transaction | `scans/queue.py` 的 `ScanQueue`：claim、claim_collected、heartbeat、prepare、advance、reconcile_expired 各自開始與結束 transaction；長時間的工作（掃描、等待）不持有 transaction | 持有 transaction 會卡住撤銷與取消，也會被 `idle_in_transaction_session_timeout` 終止 |
-| prepare | 鎖 scan 之後：要求過取消 → cancelling；以 `FOR SHARE` 鎖住 target 與 grant，以 `check_usable()` 重新判斷 gate，origin 也必須和快照相同 → 不通過就 failed；以 `FOR SHARE` 鎖住綁定的 profile 版本，密文已清除 → failed；都通過 → running | T06、T08 的交接：撤銷 grant、停用 target、PATCH profile 之後，排隊中的 scan 在送出流量之前就停下（fail closed） |
+| prepare | 鎖 scan 之後：要求過取消 → cancelling；以 `FOR SHARE` 鎖住 target 與 grant，以 `check_usable()` 重新判斷 gate，origin 也必須和快照相同 → 不通過就 failed；以 `FOR SHARE` 鎖住綁定的 profile 版本，密文已清除 → failed；以 `FOR SHARE` 鎖住建立者的 key，已撤銷 → failed（審查後補上）；都通過 → running。這是唯一能讓 run 開始執行的路徑 | T06、T08 的交接：撤銷 grant、停用 target、PATCH profile、撤銷外洩的 key 之後，排隊中的 scan 在送出流量之前就停下（fail closed） |
 | 對帳 | `reconcile_expired(engines)`：lease 過期的 run，runner 階段 → interrupted（`LEASE_EXPIRED`），normalizing → collected（解析可以重試）。T09 只對 fake 的 run 執行 | fake 不發流量、沒有容器，lease 過期就可以確定它已停止；容器的對帳在 T13。只有 parser 可以重試（CLAUDE.md §8） |
 | 事件 | `scan_events`：每個 scan 各自的 sequence，在持有 scan 的鎖時取 max + 1，所以依 commit 的順序而且沒有間隔；以 `after_sequence` 輪詢。類型：`scan.created`、`scan.status`、`scan.cancel_requested`、`run.status`。payload 只由 enum 與 id 組成，最多 1 KiB | 全域的序號會因 commit 的先後而讓輪詢漏掉事件。事件是狀態轉換的紀錄，runner 的轉換不寫 audit |
 
 **測試的隔離**：佇列會認領任何排隊中的 run，所以佇列、FakeRunner 與需要 runner 的 API 測試，每個測試從 migrated 的 template 複製一個自己的資料庫（`CREATE DATABASE … TEMPLATE`，沿用 template 的角色，用完刪除），不會認領到其他測試留下的 run（T04 的交接）。
 
+**run 與凍結的 operation 只在建立 scan 時寫入**（審查後補上）：trigger 拒絕在其他 transaction 為既有的 scan 新增 run 或 operation（以 scan 的 `created_at` 等於目前 transaction 開始的時間判斷）。事後加入的 run 會被認領，對已終止的 scan 還會卡住佇列；加入的 operation 會改變 coverage 的分母。認領也排除已終止的 scan。和其他 trigger 一樣只防程式錯誤造成的誤改（§7）。
+
 **鎖的順序**（避免死結）：
-- 建立 scan：target（SHARE）→ grant（SHARE）→ profile（SHARE）→ 新增 scan。PATCH profile 以 `FOR UPDATE` 鎖 profile，所以會等建立 scan 的 transaction commit，不會綁到即將被清除的版本；反過來，建立 scan 等 PATCH commit 之後，讀到的是新版本。
-- 所有改 scan 或 run 的寫入：先鎖 scan（`FOR UPDATE`），再改 run。prepare 之後再加 target、grant 與 profile 版本（SHARE）。
+- 建立 scan：target（NO KEY UPDATE）→ grant（SHARE）→ profile（SHARE）→ 新增 scan。PATCH profile 以 `FOR UPDATE` 鎖 profile，所以會等建立 scan 的 transaction commit，不會綁到即將被清除的版本；反過來，建立 scan 等 PATCH commit 之後，讀到的是新版本。
+- 所有改 scan 或 run 的寫入：先鎖 scan（`FOR UPDATE`），再改 run。prepare 之後再加 target、grant、profile 版本與建立者的 key（SHARE）。
 - 心跳只改 run 的列，不等 scan 的鎖。
 - 沒有任何 transaction 先鎖 target、grant 再等 scan，所以不會形成循環。
 
@@ -877,7 +888,8 @@ main | cli → migrations → health | runner → scans → specs | auth_profile
 | runner | 只經 scans 的佇列操作 run；M2 的 Docker SDK 也只在這裡（CLAUDE.md §5） |
 
 - `scans/domain/` 放引擎與 profile 的規則、Idempotency-Key 與 fingerprint、狀態機與彙總、事件的 payload，受「不得依賴框架、DB、Docker」的檢查。
-- `ScopeGrantService.require_usable()` 改成收 `clock`，取得兩個 `FOR SHARE` 之後才取時間（§10.8 的交接）。
+- `ScopeGrantService.require_usable()` 改成收 `clock`，取得 target 與 grant 的鎖之後才取時間（§10.8 的交接）；target 改以 `FOR NO KEY UPDATE` 鎖住（§13.3）。
+- scans 依賴 api_keys 的 repository：prepare 確認建立者的 key 沒有被撤銷（分層本來就允許）。
 
 ### 13.10 錯誤碼
 
@@ -905,7 +917,13 @@ main | cli → migrations → health | runner → scans → specs | auth_profile
 - T12：預算的實際計數與 `budget_usage`、preflight 的實際執行、coverage 的量測（`coverage_measured` 目前一律 false）。
 - T13：容器的心跳與對帳（非 fake 的 lease 過期）、timeout、孤兒容器、撤銷或停用之後停止執行中的 scan。
 - M3（T14）：zap 可用、`GET /scan-profiles`、依 ZAP 實際的設定調整 profile。M4：nuclei 可用；observation 與 finding。
-- T21：報告標示 fixture 的結果。T23：速率限制；DDL 與 DML 角色分開。M2：`sslmode`；需要時加 LISTEN/NOTIFY（目前輪詢）。
+- T21：報告標示 fixture 的結果。T23：速率限制與每把 key 的同時請求上限；DDL 與 DML 角色分開（應用程式的角色目前能 `DISABLE TRIGGER`）。M2：`sslmode`；需要時加 LISTEN/NOTIFY（目前輪詢）。
+
+審查留給後續的事項（T09 不會觸發）：
+- 解析的重試沒有次數上限：lease 過期時 normalizing 退回 collected，會讓解析 crash 的 artifact 一直重試，target 也一直忙碌。M2、M4 的 worker 加上嘗試次數，超過就 failed。
+- prepare 對綁定版本的 `FOR SHARE` 只保護 commit 之前：M2 的 runner 要在 prepare 的同一個 transaction 中取得注入用的密文，或在注入時發現密文已清除就失敗。
+- guard 逐個請求檢查 grant 的期限（`max_duration_seconds` 可能超過 `valid_until`），並以 origin／IP 合計預算（不同 project 的 target 可能指向同一個 origin）：M2。
+- gate 拒絕（403 `SCOPE_*`、409 `TARGET_DISABLED`）寫進安全日誌；事件輪詢的授權只查 project、coverage 的數字在建立時寫進 scans（效能）：之後的加固。
 
 何時重新檢討：
 - 同一個 target 需要同時跑多個 scan（例如不同的 auth role）：改成以 (target, auth role) 為單位的忙碌判斷，並檢討共用預算。

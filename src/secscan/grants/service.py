@@ -206,13 +206,15 @@ class ScopeGrantService:
     ) -> UsableGrant:
         """這個 grant 現在能不能用來建立 scan（docs/DECISIONS.md §10.6、§13.3）。
 
-        建立 scan 時在同一個 transaction 呼叫。以 FOR SHARE 依序鎖住 target 與 grant：
-        撤銷或停用一旦 commit，之後就不可能再通過；反過來，正在建立 scan 時，撤銷會等它 commit。
+        建立 scan 時在同一個 transaction 呼叫。依序鎖住 target（FOR NO KEY UPDATE）與 grant
+        （FOR SHARE）：撤銷或停用一旦 commit，之後就不可能再通過；反過來，正在建立 scan 時，撤銷
+        與停用會等它 commit。target 的鎖讓同一個 target 的建立彼此排隊，持續送出的建立請求不會
+        一直佔著 grant 的 FOR SHARE、讓撤銷等不到鎖（docs/DECISIONS.md §13.5）。
         時間在取得兩個鎖之後才取：等鎖期間 grant 可能已經過期。
         """
         self._target(principal, target_id, Permission.PROJECT_WRITE)
         self._grant(principal, grant_id, Permission.PROJECT_WRITE)
-        target = self._targets.lock(target_id, shared=True)
+        target = self._targets.lock_for_scan(target_id)
         grant = self._grants.lock(grant_id, shared=True)
         if target is None or grant is None:
             raise not_found_error()

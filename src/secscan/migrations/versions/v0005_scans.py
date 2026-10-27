@@ -15,9 +15,11 @@ Create Date: 2026-10-26 09:00:00+00:00
   - trigger（docs/DECISIONS.md §13）：
     - scans：UPDATE 只能改 status、cancel_requested_at、finished_at；終止之後不能再改；
       cancel_requested_at 設定之後不能改；DELETE 與 TRUNCATE 一律拒絕。
-    - scanner_runs：INSERT 必須是 queued、沒有 lease；id、scan_id、engine、sequence、created_at
-      不能改；終止之後不能再改；DELETE 與 TRUNCATE 一律拒絕。
-    - scan_events、scan_operations：UPDATE、DELETE 與 TRUNCATE 一律拒絕（append-only）。
+    - scanner_runs：INSERT 必須是 queued、沒有 lease，而且只能在建立 scan 的 transaction 中；
+      id、scan_id、engine、sequence、created_at 不能改；終止之後不能再改；DELETE 與 TRUNCATE
+      一律拒絕。
+    - scan_events、scan_operations：UPDATE、DELETE 與 TRUNCATE 一律拒絕（append-only）；
+      scan_operations 的 INSERT 也只能在建立 scan 的 transaction 中。
 - downgrade：刪除這四張資料表、trigger 函式與上述唯一約束，**所有 scan、run、事件與凍結的
   operation 都會消失**。只用於開發與測試，正式環境不要 downgrade。
 """
@@ -117,19 +119,33 @@ END;
 $$
 """
 
+# run 與凍結的 operation 只能在建立 scan 的 transaction 中新增（審查後補上）：scan 的 created_at
+# 是建立它的 transaction 開始的時間（now()），之後的 transaction 的 now() 不同。事後加入的 run
+# 會被認領、加入的 operation 會改變 coverage 的分母。search_path 固定為 pg_catalog，
+# 所以寫明 public。
+_CREATED_IN_THIS_TRANSACTION = (
+    "EXISTS (SELECT 1 FROM public.scans AS parent "
+    "WHERE parent.id = NEW.scan_id AND parent.created_at = now())"
+)
+
 _CREATE_RUNS_GUARD = f"""
 CREATE FUNCTION scanner_runs_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        IF NEW.status = 'queued' AND NEW.lease_owner IS NULL AND NEW.started_at IS NULL
-            AND NEW.finished_at IS NULL AND NEW.error_code IS NULL
+        IF NOT (NEW.status = 'queued' AND NEW.lease_owner IS NULL AND NEW.started_at IS NULL
+            AND NEW.finished_at IS NULL AND NEW.error_code IS NULL)
         THEN
-            RETURN NEW;
+            RAISE EXCEPTION USING
+                ERRCODE = 'integrity_constraint_violation',
+                MESSAGE = 'scanner_runs: a new run must be queued without a lease';
         END IF;
-        RAISE EXCEPTION USING
-            ERRCODE = 'integrity_constraint_violation',
-            MESSAGE = 'scanner_runs: a new run must be queued without a lease';
+        IF NOT {_CREATED_IN_THIS_TRANSACTION} THEN
+            RAISE EXCEPTION USING
+                ERRCODE = 'integrity_constraint_violation',
+                MESSAGE = 'scanner_runs: runs can only be added while creating their scan';
+        END IF;
+        RETURN NEW;
     END IF;
     IF TG_OP = 'UPDATE'
         AND {_row("NEW", _RUN_COLUMNS)} IS NOT DISTINCT FROM {_row("OLD", _RUN_COLUMNS)}
@@ -156,6 +172,20 @@ END;
 $$
 """
 
+_CREATE_OPERATIONS_INSERT_GUARD = f"""
+CREATE FUNCTION scan_operations_insert_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF {_CREATED_IN_THIS_TRANSACTION} THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION USING
+        ERRCODE = 'integrity_constraint_violation',
+        MESSAGE = 'scan_operations: operations can only be added while creating their scan';
+END;
+$$
+"""
+
 _EVERY_WRITE = "BEFORE INSERT OR UPDATE OR DELETE"
 _CHANGES = "BEFORE UPDATE OR DELETE"
 _TRUNCATE = "BEFORE TRUNCATE"
@@ -168,6 +198,13 @@ _TRIGGERS = (
     ("scan_events_immutable", "scan_events", _CHANGES, "ROW", "scan_records_guard"),
     ("scan_events_no_truncate", "scan_events", _TRUNCATE, "STATEMENT", "scan_records_guard"),
     ("scan_operations_immutable", "scan_operations", _CHANGES, "ROW", "scan_records_guard"),
+    (
+        "scan_operations_added_with_scan",
+        "scan_operations",
+        "BEFORE INSERT",
+        "ROW",
+        "scan_operations_insert_guard",
+    ),
     (
         "scan_operations_no_truncate",
         "scan_operations",
@@ -188,6 +225,7 @@ def upgrade() -> None:
     op.execute(_CREATE_SCANS_GUARD)
     op.execute(_CREATE_RUNS_GUARD)
     op.execute(_CREATE_RECORDS_GUARD)
+    op.execute(_CREATE_OPERATIONS_INSERT_GUARD)
     for name, table, timing, level, function in _TRIGGERS:
         op.execute(
             f"CREATE TRIGGER {name} {timing} ON {table} "
@@ -201,6 +239,7 @@ def downgrade() -> None:
     op.drop_table("scan_events")
     op.drop_table("scanner_runs")
     op.drop_table("scans")
+    op.execute("DROP FUNCTION scan_operations_insert_guard()")
     op.execute("DROP FUNCTION scan_records_guard()")
     op.execute("DROP FUNCTION scanner_runs_guard()")
     op.execute("DROP FUNCTION scans_guard()")

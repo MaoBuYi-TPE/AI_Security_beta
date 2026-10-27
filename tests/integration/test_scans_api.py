@@ -4,6 +4,7 @@
 用自己的資料庫與 API（queue_client）：runner 會認領任何排隊中的 fake run。
 """
 
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -378,9 +379,12 @@ def test_scans_are_listed_with_filters_and_a_total(
         {"status": "paused"},
         {"target_id": "not-a-uuid"},
         {"created_after": "2026-10-26T08:00:00"},
+        # 換算成 UTC 會超出 datetime 的範圍：原本是 500（安全審查發現）
+        {"created_after": "9999-12-31T23:00:00-05:00"},
+        {"created_before": "0001-01-01T00:30:00+05:00"},
         {"limit": 101},
     ],
-    ids=["status", "target", "naive-time", "limit"],
+    ids=["status", "target", "naive-time", "beyond-max", "before-min", "limit"],
 )
 def test_invalid_list_filters_are_a_422(
     api_client: TestClient, world: World, params: dict[str, str | int]
@@ -440,6 +444,13 @@ def test_the_post_documents_the_idempotency_key_header(api_client: TestClient) -
         True,
     )
     assert set(schema["paths"][SCANS]["post"]["responses"]) >= {"200", "202"}
+    # 文件的 pattern 和伺服器的規則一致：引號要成對（安全審查發現）。
+    pattern = re.compile(parameter["schema"]["pattern"])
+    key = str(uuid4())
+    for accepted in (key, f'"{key}"'):
+        assert pattern.fullmatch(accepted)
+    for rejected in (f'"{key}', f'{key}"', "short"):
+        assert pattern.fullmatch(rejected) is None
 
 
 # --- 用自己的資料庫走完整的流程（runner 會認領任何排隊中的 fake run）--------------------------

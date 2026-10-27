@@ -63,7 +63,8 @@ LEASED_RUN_STATUSES = frozenset(
 RUNNER_STAGE_RUN_STATUSES = frozenset(
     {RunStatus.PREPARING, RunStatus.RUNNING, RunStatus.COLLECTING, RunStatus.CANCELLING}
 )
-# 不再送出流量：後面的引擎可以開始（失敗的引擎不擋住後面的引擎）。
+# 不再送出流量：後面的引擎可以開始（失敗的引擎不擋住後面的引擎）。interrupted 也算：只有確定
+# 已停止才標成 interrupted（T09 的 fake 不發流量；T13 的對帳要先封鎖 guard、確認容器已終止）。
 TRAFFIC_STOPPED_RUN_STATUSES = TERMINAL_RUN_STATUSES | {RunStatus.COLLECTED, RunStatus.NORMALIZING}
 ERROR_REQUIRED_RUN_STATUSES = frozenset(
     {RunStatus.FAILED, RunStatus.TIMED_OUT, RunStatus.INTERRUPTED}
@@ -92,6 +93,8 @@ class RunErrorCode(StrEnum):
     SCOPE_OUTSIDE_LAB = "SCOPE_OUTSIDE_LAB"
     SCOPE_MISMATCH = "SCOPE_MISMATCH"
     AUTH_PROFILE_SUPERSEDED = "AUTH_PROFILE_SUPERSEDED"
+    # 建立 scan 的平台 key 已被撤銷（外洩時排進佇列的 scan 也不會開始）。
+    CREATOR_KEY_REVOKED = "CREATOR_KEY_REVOKED"
     ENGINE_FAILED = "ENGINE_FAILED"
     LEASE_EXPIRED = "LEASE_EXPIRED"
 
@@ -170,11 +173,12 @@ def aggregate(runs: Iterable[RunStatus], *, cancel_requested: bool) -> ScanStatu
 
 
 def _finished(present: Collection[RunStatus], *, cancel_requested: bool) -> ScanStatus:
-    # interrupted 排在 timed_out 之前：它無法證明工作已正常停止。
-    if cancel_requested:
-        return ScanStatus.CANCELLED
+    # interrupted 排在最前面：它無法證明工作已正常停止。要求過取消、但 runner 沒有確認就遺失時，
+    # 也不能說是 cancelled（確認之後才是 cancelled，CLAUDE.md §8；審查發現）。
     if RunStatus.INTERRUPTED in present:
         return ScanStatus.INTERRUPTED
+    if cancel_requested:
+        return ScanStatus.CANCELLED
     if RunStatus.TIMED_OUT in present:
         return ScanStatus.TIMED_OUT
     if present == {RunStatus.SUCCEEDED}:
@@ -185,7 +189,9 @@ def _finished(present: Collection[RunStatus], *, cancel_requested: bool) -> Scan
 
 
 def _in_progress(present: frozenset[RunStatus], *, cancel_requested: bool) -> ScanStatus:
-    if cancel_requested or RunStatus.CANCELLING in present:
+    # 只有要求過取消才是 cancelling（和 DB 的 ck_scans_cancel_matches_status 一致）；
+    # run 轉到 cancelling 也要求 scan 已被要求取消（scans.progress）。
+    if cancel_requested:
         return ScanStatus.CANCELLING
     if present == {RunStatus.QUEUED}:
         return ScanStatus.QUEUED

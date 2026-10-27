@@ -160,7 +160,13 @@ T09 已涵蓋 scan 與工作佇列（佇列、FakeRunner 與需要 runner 的 AP
 - **不洩漏**：canary 的 target secret、平台 key 與 Idempotency-Key 不出現在 scan 的回應、清單、事件與 audit。
 - **DB 的最後一道防線**：四張表的每個 CHECK、複合 FK（引用其他 target、其他 project、不符的 role_label 與版本）、unique 與部分唯一索引都有違反測試；trigger 只允許改 scan 的狀態、取消與結束的時間，終止之後不可再改，run 的身分不可改，事件與凍結的 operation 不可修改。
 - **DB 逾時**：每個連線的設定值；另一個 transaction 持有鎖時，API 等 1 秒後回 503 加 `Retry-After`，不是 500。
-- 以突變檢查確認上述測試有鑑別力：56 個突變全部被抓到（`TASKS.md` T09）。
+- **M1 審查後補上的測試**（code-reviewer 與 security-reviewer 的發現，修正前都先失敗）：
+  - 撤銷不被持續的建立請求餓死：同一個 target 的第二個建立停在 target 的鎖上、還沒走到 gate；target 忙碌時，建立請求不取任何鎖就回 409。改成排隊之後，同一個 key 同時送出仍回同一個 scan、內容不同仍回 409 `IDEMPOTENCY_CONFLICT`（取得鎖之後先重查 key）。
+  - 已要求取消、但 runner 遺失的 scan 是 interrupted；沒有要求取消就不能轉到 cancelling；只有 prepare 能讓 run 開始（`advance` 不能跳過 gate）。
+  - 建立 scan 的 key 被撤銷之後，它排隊中的 scan 在 prepare 時 failed（`CREATOR_KEY_REVOKED`）。
+  - run 與凍結的 operation 不能在其他 transaction 事後加入；已終止的 scan 的 run 不會被認領。
+  - 清單的時間篩選換算成 UTC 會超出範圍時回 422（原本 500）；API 文件中 Idempotency-Key 的 pattern 要求引號成對。
+- 以突變檢查確認上述測試有鑑別力（`TASKS.md` T09）。
 
 T06 已涵蓋 target 與 scope grant：
 - A 專案讀寫 B 專案的 target 與 grant（含核准、撤銷），回應與不存在的 id、不存在的路徑完全相同。

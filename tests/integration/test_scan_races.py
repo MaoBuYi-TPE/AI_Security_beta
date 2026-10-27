@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from secscan.auth_profiles.domain.credentials import SecretValue
@@ -103,7 +103,7 @@ def test_concurrent_creates_for_one_target_let_only_one_through(
     world: World,
     scannable: Scannable,
 ) -> None:
-    """後到的在部分唯一索引上等先到的 commit，之後得到清楚的 409，而不是 500。"""
+    """後到的在 target 的鎖上等先到的 commit，持有鎖時再查一次忙碌，得到清楚的 409。"""
     first, race = _hold_then_race(
         queue_engine,
         queue_database,
@@ -161,6 +161,150 @@ def test_concurrent_creates_with_the_same_key_and_other_content_conflict(
 
     error = _only_error(race)
     assert (error.status_code, error.code) == (409, ErrorCode.IDEMPOTENCY_CONFLICT)
+
+
+def test_one_key_used_for_two_targets_at_once_conflicts(
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """key 的範圍是 project：兩個 target 的建立不在同一把鎖上排隊，後到的在 key 的唯一索引上
+    等先到的 commit；撞到索引之後重查 key，得到 409（不是 500）。"""
+    other = queue_seed.scannable(world)
+    key = str(uuid4())
+    _, race = _hold_then_race(
+        queue_engine,
+        queue_database,
+        queue_seed,
+        _create(world, scannable, key),
+        _create(world, other, key),
+    )
+
+    error = _only_error(race)
+    assert (error.status_code, error.code) == (409, ErrorCode.IDEMPOTENCY_CONFLICT)
+    assert len(queue_seed.query("SELECT id FROM scans WHERE idempotency_key = :k", k=key)) == 1
+
+
+# 直接寫入一個進行中的 scan（不經 service，所以不鎖 target），複製已終止的 scan 的快照。
+_ACTIVE_COPY = """
+INSERT INTO scans (project_id, target_id, target_origin, scope_grant_id, api_spec_id,
+    auth_profile_id, auth_profile_version, auth_role, scan_profile, requests_per_second,
+    max_requests, max_duration_seconds, status, idempotency_key, request_sha256,
+    created_by_key_id)
+SELECT project_id, target_id, target_origin, scope_grant_id, api_spec_id,
+    auth_profile_id, auth_profile_version, auth_role, scan_profile, requests_per_second,
+    max_requests, max_duration_seconds, 'queued', :key, request_sha256, created_by_key_id
+FROM scans WHERE id = :id
+"""
+
+
+@pytest.mark.parametrize("same_key", [False, True], ids=["other-key", "same-key"])
+def test_a_scan_written_without_the_target_lock_is_still_caught_by_the_index(
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    same_key: bool,
+) -> None:
+    """target 的鎖沒有排隊時（例如直接寫 DB），仍以唯一索引為準：後到的在索引上等，撞到之後
+    先重查 key（同一個 key、同樣的內容：回那個 scan），否則回 409 TARGET_BUSY（不是 500）。"""
+    finished = queue_seed.scan(world.operator_a, scannable)
+    with Session(queue_engine, expire_on_commit=False) as session, session.begin():
+        ScanService(session, lab=LAB).cancel(
+            world.operator_a.principal, finished.id, request_id=None
+        )
+    key = str(uuid4())
+
+    def insert_directly(session: Session) -> object:
+        scan_id = session.execute(
+            text(_ACTIVE_COPY + " RETURNING id"),
+            {"key": key if same_key else str(uuid4()), "id": finished.id},
+        ).scalar_one()
+        session.execute(
+            text(
+                "INSERT INTO scanner_runs (scan_id, engine, sequence, status) "
+                "VALUES (:id, 'fake', 1, 'queued')"
+            ),
+            {"id": scan_id},
+        )
+        return scan_id
+
+    inserted, race = _hold_then_race(
+        queue_engine, queue_database, queue_seed, insert_directly, _create(world, scannable, key)
+    )
+
+    if same_key:
+        assert race.errors == []
+        assert [scan.id for scan in race.results] == [inserted]
+    else:
+        error = _only_error(race)
+        assert (error.status_code, error.code) == (409, ErrorCode.TARGET_BUSY)
+
+
+def test_creates_for_one_target_queue_on_the_target_before_the_gate(
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """同一個 target 的建立彼此排隊（target 以 FOR NO KEY UPDATE 鎖住），不同時持有 grant 的
+    FOR SHARE：持續送出的建立請求不能讓撤銷一直等不到鎖（安全審查發現）。
+
+    後到的停在 target 的鎖上，還沒走到 gate：clock 只被取得鎖之前的忙碌預查讀過一次，
+    gate 在取得鎖之後才讀時間。
+    """
+    read_at: list[datetime] = []
+
+    def recording_clock() -> datetime:
+        read_at.append(_now())
+        return read_at[-1]
+
+    def second(session: Session) -> Scan:
+        return ScanService(session, lab=LAB).create(
+            world.operator_a.principal,
+            scannable.request(),
+            idempotency_key=str(uuid4()),
+            clock=recording_clock,
+            request_id=None,
+        )
+
+    race = Race(queue_database, RACER, second)
+    with Session(queue_engine, expire_on_commit=False) as holder, holder.begin():
+        _create(world, scannable, str(uuid4()))(holder)
+        race.start()
+        wait_until_waiting_for_a_lock(queue_seed, RACER)
+        assert len(read_at) == 1
+    race.join()
+
+    error = _only_error(race)
+    assert (error.status_code, error.code) == (409, ErrorCode.TARGET_BUSY)
+
+
+def test_a_busy_target_is_refused_without_taking_any_lock(
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """target 已有進行中的 scan：在取得任何鎖之前就回 409，不和撤銷、停用搶鎖
+    （安全審查發現）。"""
+    queue_seed.scan(world.operator_a, scannable)
+    race = Race(queue_database, RACER, _create(world, scannable, str(uuid4())))
+
+    with Session(queue_engine, expire_on_commit=False) as holder, holder.begin():
+        holder.execute(
+            text("SELECT id FROM targets WHERE id = :id FOR UPDATE"), {"id": scannable.target.id}
+        )
+        race.start()
+        race.join()  # 等鎖的話會逾時：holder 在 join 之後才 commit
+
+    error = _only_error(race)
+    assert (error.status_code, error.code) == (409, ErrorCode.TARGET_BUSY)
 
 
 # --- 建立與撤銷、停用 ----------------------------------------------------------------------

@@ -374,6 +374,7 @@ T09 加入的部分（§17）：
 - 422：`ENGINE_UNSUPPORTED`（引擎還沒有整合）、`PROFILE_INCOMPATIBLE`（profile 與 target 的種類、規格不相容，或沒有任何 operation 在範圍內）。
 - 503 `DEPENDENCY_UNAVAILABLE`：等鎖（`lock_timeout` 5 秒）或查詢（`statement_timeout` 30 秒）逾時，加上 `Retry-After: 1`，可以重試；伺服器端只記例外類別與 SQLSTATE（`DECISIONS.md` §13.8）。其他 DB 錯誤仍是 500。
 - 約束對應：`uq_scans_project_id_idempotency_key` → 重查 key（重送或 409 `IDEMPOTENCY_CONFLICT`）；`uq_scans_active_target` → 409 `TARGET_BUSY`；其他 T09 的約束在 service 就已擋下，萬一 DB 回報則是 500。
+- query 中的時間換算成 UTC 之後超出可表示的範圍：422 `INVALID_REQUEST`（審查發現原本是 500）。
 
 ## 13. 平台 API key 與專案（T05 已實作）
 
@@ -622,7 +623,7 @@ uv run secscan-admin create-admin-key --name "本機管理員" [--expires-in-day
 | target 已停用 | 409 `TARGET_DISABLED` |
 | IP 不在目前的 `LAB_CIDR` 內 | 422 `SCOPE_OUTSIDE_LAB` |
 
-它以 `FOR SHARE` 鎖住 target 與 grant：撤銷或停用一旦 commit，之後就不會再通過；正在建立 scan 時，撤銷會等它 commit。時間在取得兩個鎖之後才取（T09）：等鎖期間 grant 可能已經過期。
+它以 `FOR SHARE` 鎖住 grant，T09 起以 `FOR NO KEY UPDATE` 鎖住 target（同一個 target 的建立彼此排隊，撤銷與停用不會被餓死；`DECISIONS.md` §13.3）：撤銷或停用一旦 commit，之後就不會再通過；正在建立 scan 時，撤銷與停用會等它 commit。時間在取得兩個鎖之後才取（T09）：等鎖期間 grant 可能已經過期。
 
 ### 14.6 Audit
 
@@ -984,7 +985,7 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 |---|---|
 | 同一個 key、同樣的內容 | 原本的 scan 目前的狀態：未終止 202、已終止 200；不重新判斷 gate，也不寫入任何東西 |
 | 同一個 key、不同的內容 | 409 `IDEMPOTENCY_CONFLICT`，什麼都不寫 |
-| 同時送出同一個 key | 後到的等先到的完成，再回同一個 scan（不回 409） |
+| 同時送出同一個 key | 後到的等先到的完成，再回同一個 scan（不回 409）；內容不同時是 409 `IDEMPOTENCY_CONFLICT` |
 
 - key 的範圍是 project，永久保存；不同 project 的相同 key 互不影響。
 - 內容的比對：請求內容的 canonical JSON 的 SHA-256；`engines` 的順序不影響，省略 `budget` 與每一項都是 null 相同。比對的是請求本身，不是伺服器解析出的值（profile 換過版本之後重送仍是同一個 scan）。
@@ -998,15 +999,18 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 4. target 不存在或屬於其他 project：404；viewer：403。
 5. key 已用過：重送（202 或 200），或 409 `IDEMPOTENCY_CONFLICT`。
 6. 引擎與 profile 的規則：422 `ENGINE_UNSUPPORTED`、`PROFILE_INCOMPATIBLE`；引擎重複、fake 和其他引擎混用：422 `INVALID_REQUEST`。
-7. gate（§14.5）：grant 不存在或屬於其他 project 404；屬於其他 target 422；尚未核准、已撤銷、尚未生效 403 `SCOPE_NOT_APPROVED`；過期 403 `SCOPE_EXPIRED`；target 停用 409 `TARGET_DISABLED`；IP 不在 `LAB_CIDR` 內 422 `SCOPE_OUTSIDE_LAB`。
-8. 規格：不存在或屬於其他 project 404；屬於其他 target 422；沒有任何 operation 在範圍內 422 `PROFILE_INCOMPATIBLE`。
-9. auth profile：不存在或屬於其他 project 404；屬於其他 target 422；目前的版本沒有 secret 409 `INVALID_STATE_TRANSITION`（只有直接改了 DB 才會發生）；preflight 不在範圍內 422。
-10. 預算超過 grant：422 `INVALID_REQUEST`。
-11. 409 `TARGET_BUSY`、409 `QUOTA_EXCEEDED`。
+7. 409 `TARGET_BUSY`、409 `QUOTA_EXCEEDED`（不取任何鎖就先檢查，註定失敗的請求不和撤銷、停用搶鎖）。
+8. gate（§14.5）：grant 不存在或屬於其他 project 404；屬於其他 target 422；尚未核准、已撤銷、尚未生效 403 `SCOPE_NOT_APPROVED`；過期 403 `SCOPE_EXPIRED`；target 停用 409 `TARGET_DISABLED`；IP 不在 `LAB_CIDR` 內 422 `SCOPE_OUTSIDE_LAB`。gate 取得鎖之後再查一次 key（同第 5 步）：等鎖期間同一個 key 的請求已經 commit 時，回重送或 409，不回 `TARGET_BUSY`。
+9. 規格：不存在或屬於其他 project 404；屬於其他 target 422；沒有任何 operation 在範圍內 422 `PROFILE_INCOMPATIBLE`。
+10. auth profile：不存在或屬於其他 project 404；屬於其他 target 422；目前的版本沒有 secret 409 `INVALID_STATE_TRANSITION`（只有直接改了 DB 才會發生）；preflight 不在範圍內 422。
+11. 預算超過 grant：422 `INVALID_REQUEST`。
+12. 持有鎖時再檢查一次 409 `TARGET_BUSY`、`QUOTA_EXCEEDED`（以不同的 key 同時建立時，後到的得到 `TARGET_BUSY`）。
+
+同一個 target 的建立彼此排隊（target 以 `FOR NO KEY UPDATE` 鎖住），持續送出的建立請求不會讓撤銷 grant、停用 target 一直等不到鎖（`DECISIONS.md` §13.3）。
 
 ### 17.2 查詢
 
-- `GET /api/v1/scans`：呼叫者看得到的 scan，新的在前，分頁（`page`、`limit`）。篩選：`target_id`、`status`、`created_after`（含）、`created_before`（不含）；時間必須帶時區。其他 project 的 `target_id` 當成篩選條件時就是沒有結果。
+- `GET /api/v1/scans`：呼叫者看得到的 scan，新的在前，分頁（`page`、`limit`）。篩選：`target_id`、`status`、`created_after`（含）、`created_before`（不含）；時間必須帶時區，換算成 UTC 之後超出可表示的範圍（例如 `9999-12-31T23:00:00-05:00`）回 422。其他 project 的 `target_id` 當成篩選條件時就是沒有結果。
 - `GET /api/v1/scans/{scan_id}`：回應同 §17.1。
 
 scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`、`collecting`、`normalizing`、`cancelling`，終止狀態 `completed`、`partially_completed`、`failed`、`timed_out`、`cancelled`、`interrupted`。由每個引擎的 run 彙總，規則見 `DECISIONS.md` §13.4。run 失敗的原因在 `engines[].error_code`：
@@ -1016,8 +1020,9 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `SCOPE_REVOKED`、`SCOPE_EXPIRED`、`SCOPE_NOT_APPROVED`、`SCOPE_NOT_YET_VALID`、`TARGET_DISABLED`、`SCOPE_OUTSIDE_LAB` | runner 啟動前重新判斷 gate 不通過（撤銷、過期、停用…之後排隊中的 scan 不會送出流量） |
 | `SCOPE_MISMATCH` | grant 或 target 的 origin 和快照不符（只有直接改了 DB 才會發生） |
 | `AUTH_PROFILE_SUPERSEDED` | 綁定的 profile 版本已被取代（密文已清除）；不會改用新版本 |
+| `CREATOR_KEY_REVOKED` | 建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不會開始（key 到期不算） |
 | `ENGINE_FAILED` | 引擎失敗（T09 是 fake 的失敗腳本） |
-| `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止 |
+| `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止；已要求取消的 scan 也是 `interrupted`，不是 `cancelled`（沒有確認停止） |
 
 ### 17.3 事件
 

@@ -1,8 +1,9 @@
 """scan 的業務規則（docs/DECISIONS.md §13）：建立、查詢、事件與取消。
 
 建立（PROJECT_WRITE）的檢查順序見 §13.3：target 的權限 → Idempotency-Key → 引擎與 profile →
-gate（依序以 FOR SHARE 鎖住 target 與 grant，之後才取時間）→ 規格 → auth profile（FOR SHARE）→
-預算 → 忙碌與上限 → 寫入。scan、run、凍結的 operation、事件與 audit 在同一個 transaction。
+忙碌與上限（不取鎖）→ gate（target FOR NO KEY UPDATE、grant FOR SHARE，之後才取時間）→ 規格 →
+auth profile（FOR SHARE）→ 預算 → 忙碌與上限（持有鎖時再查一次）→ 寫入。scan、run、凍結的
+operation、事件與 audit 在同一個 transaction。
 其他 project 的資源一律和不存在的一樣回 404。
 """
 
@@ -84,9 +85,16 @@ class ScanService:
         if replayed is not None:
             return replayed
         runs = _planned_runs(request, target)
+        # 先在取得任何鎖之前查一次忙碌與上限：註定失敗的請求不和撤銷、停用搶鎖（安全審查發現）。
+        # 取得鎖之後再查一次才是準的（同時建立時另以唯一索引為準）。
+        self._check_capacity(target.id, now=clock())
         usable = self._grants.require_usable(
             principal, target_id=target.id, grant_id=request.scope_grant_id, clock=clock
         )
+        # 等 target 的鎖時，同一個 key 的另一個請求可能已經 commit：先重查 key，才不會被當成忙碌。
+        replayed = self._replay(target.project_id, idempotency_key, digest)
+        if replayed is not None:
+            return replayed
         rules = ScopeRules.of(usable.grant.scope)
         operations = self._operations(principal, request, usable.target, rules)
         auth = self._auth(principal, request, usable.target, rules)

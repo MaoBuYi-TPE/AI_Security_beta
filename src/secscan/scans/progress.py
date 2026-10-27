@@ -51,6 +51,7 @@ class LockedScan:
     scope_grant_id: UUID
     auth_profile_id: UUID | None
     auth_profile_version: int | None
+    created_by_key_id: UUID
     status: ScanStatus
     cancel_requested: bool
 
@@ -88,6 +89,7 @@ class ScanProgress:
                 ScanModel.scope_grant_id,
                 ScanModel.auth_profile_id,
                 ScanModel.auth_profile_version,
+                ScanModel.created_by_key_id,
                 ScanModel.status,
                 ScanModel.cancel_requested_at,
             )
@@ -104,6 +106,7 @@ class ScanProgress:
             scope_grant_id=row.scope_grant_id,
             auth_profile_id=row.auth_profile_id,
             auth_profile_version=row.auth_profile_version,
+            created_by_key_id=row.created_by_key_id,
             status=ScanStatus(row.status),
             cancel_requested=row.cancel_requested_at is not None,
         )
@@ -153,9 +156,12 @@ class ScanProgress:
         """依 domain 的轉換表改變 run，並寫入事件。
 
         lease_owner 只在認領時給：寫入新的 lease。轉到不需要 lease 的狀態（collected、終止）時清除
-        lease；其他轉換保留原本的 lease。
+        lease；其他轉換保留原本的 lease。只有要求過取消的 scan，run 才能轉到 cancelling
+        （DB 的 ck_scans_cancel_matches_status 也這樣要求；審查發現）。
         """
         plan_run_transition(run.status, to, error_code=error_code)
+        if to is RunStatus.CANCELLING and not scan.cancel_requested:
+            raise ValueError("只有要求過取消的 scan，run 才能轉到 cancelling")
         values: dict[str, object] = {
             "status": to.value,
             "error_code": error_code.value if error_code is not None else None,

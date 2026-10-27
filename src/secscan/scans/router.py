@@ -11,10 +11,9 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
-from pydantic import AwareDatetime
 
 from secscan.api_keys.dependencies import CurrentPrincipal
-from secscan.core.api import PageQuery, ok_page
+from secscan.core.api import PageQuery, UtcDatetime, ok_page
 from secscan.core.db import DbSession
 from secscan.core.envelope import MAX_PAGE_LIMIT, Envelope, ok
 from secscan.core.errors import AppError, ErrorCode
@@ -48,7 +47,13 @@ _KEY_PARAMETER = {
         "英數字、- 或 _（UUID 可用；可以加上雙引號）。同一個 key、同樣的內容回原本的 scan；"
         "內容不同回 409。範圍是 project，永久保存。"
     ),
-    "schema": {"type": "string", "pattern": '^"?[A-Za-z0-9_-]{' + _KEY_LENGTHS + '}"?$'},
+    # 引號要成對，和伺服器的規則（parse_idempotency_key）一致。
+    "schema": {
+        "type": "string",
+        "pattern": (
+            '^(?:"[A-Za-z0-9_-]{' + _KEY_LENGTHS + '}"|[A-Za-z0-9_-]{' + _KEY_LENGTHS + "})$"
+        ),
+    },
 }
 
 
@@ -92,10 +97,10 @@ def list_scans(
     target_id: Annotated[UUID | None, Query(description="只列這個 target 的 scan")] = None,
     status: Annotated[ScanStatus | None, Query(description="只列這個狀態的 scan")] = None,
     created_after: Annotated[
-        AwareDatetime | None, Query(description="建立時間不早於（含時區）")
+        UtcDatetime | None, Query(description="建立時間不早於（含時區）")
     ] = None,
     created_before: Annotated[
-        AwareDatetime | None, Query(description="建立時間早於（含時區）")
+        UtcDatetime | None, Query(description="建立時間早於（含時區）")
     ] = None,
 ) -> Envelope[list[ScanOut]]:
     """呼叫者看得到的 scan，新的在前。"""

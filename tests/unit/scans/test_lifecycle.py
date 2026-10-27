@@ -113,11 +113,15 @@ def test_status_groups() -> None:
         # 取消
         ([R.QUEUED], True, S.CANCELLING),
         ([R.RUNNING], True, S.CANCELLING),
-        ([R.CANCELLING], False, S.CANCELLING),
         ([R.NORMALIZING], True, S.CANCELLING),
         ([R.CANCELLED], True, S.CANCELLED),
         ([R.SUCCEEDED], True, S.CANCELLED),
         ([R.CANCELLED, R.SUCCEEDED], True, S.CANCELLED),
+        # runner 遺失（lease 過期）：無法證明已停止，不是 cancelled（審查發現）
+        ([R.INTERRUPTED], True, S.INTERRUPTED),
+        ([R.CANCELLED, R.INTERRUPTED], True, S.INTERRUPTED),
+        # 沒有要求取消卻有 cancelling 的 run：DB 不允許 scan 是 cancelling（審查發現）
+        ([R.CANCELLING], False, S.RUNNING),
         # 多個引擎依序執行
         ([R.PREPARING, R.QUEUED], False, S.PREPARING),
         ([R.RUNNING, R.QUEUED], False, S.RUNNING),
@@ -175,10 +179,35 @@ def test_scan_is_terminal_exactly_when_every_run_is(
 def test_a_cancel_request_with_unfinished_runs_is_always_cancelling(runs: list[RunStatus]) -> None:
     status = aggregate(runs, cancel_requested=True)
 
-    if all(run in TERMINAL_RUN_STATUSES for run in runs):
-        assert status is S.CANCELLED
-    else:
+    if not all(run in TERMINAL_RUN_STATUSES for run in runs):
         assert status is S.CANCELLING
+    elif R.INTERRUPTED in runs:
+        assert status is S.INTERRUPTED
+    else:
+        assert status is S.CANCELLED
+
+
+@given(RUN_LISTS, st.booleans())
+def test_cancelling_and_cancelled_need_a_cancel_request(
+    runs: list[RunStatus], cancel_requested: bool
+) -> None:
+    """和 DB 的 ck_scans_cancel_matches_status 一致：沒有要求取消，就不會是 cancelling
+    或 cancelled。"""
+    status = aggregate(runs, cancel_requested=cancel_requested)
+
+    if status in {S.CANCELLING, S.CANCELLED}:
+        assert cancel_requested
+
+
+@given(RUN_LISTS, st.booleans())
+def test_an_interrupted_run_is_never_reported_as_a_confirmed_stop(
+    runs: list[RunStatus], cancel_requested: bool
+) -> None:
+    """interrupted 無法證明工作已正常停止：全部終止時優先於 cancelled 與其他結果。"""
+    status = aggregate(runs, cancel_requested=cancel_requested)
+
+    if R.INTERRUPTED in runs and all(run in TERMINAL_RUN_STATUSES for run in runs):
+        assert status is S.INTERRUPTED
 
 
 # --- runner 啟動前的 gate -----------------------------------------------------------------

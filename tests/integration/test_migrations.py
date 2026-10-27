@@ -39,6 +39,7 @@ TRIGGER_FUNCTIONS = (
     "scans_guard",
     "scanner_runs_guard",
     "scan_records_guard",
+    "scan_operations_insert_guard",
 )
 
 

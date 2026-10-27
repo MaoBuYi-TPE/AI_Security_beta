@@ -731,7 +731,7 @@ def test_a_lease_of_an_unknown_scan_is_lost(queue: ScanQueue) -> None:
     lease = Lease(run_id=uuid4(), scan_id=uuid4(), engine=ScanEngine.FAKE, owner=OWNER)
 
     with pytest.raises(LeaseLostError):
-        queue.advance(lease, R.RUNNING)
+        queue.advance(lease, R.COLLECTING)
 
 
 def test_claiming_without_an_owner_is_a_programming_error(

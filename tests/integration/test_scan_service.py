@@ -662,6 +662,18 @@ def test_the_budget_cannot_exceed_the_grant(
     assert field in error.message
 
 
+def test_a_busy_target_is_reported_before_the_gate(db_session: Session, world: ScanWorld) -> None:
+    """忙碌與上限在取得鎖之前先查一次（安全審查後調整的先後）：不持有鎖就失敗。"""
+    create_scan(db_session, world)
+    ScopeGrantService(db_session, lab=LAB).revoke(
+        world.team.admin, world.grant.id, reason="停止", now=NOW, request_id=None
+    )
+
+    error = app_error(lambda: create_scan(db_session, world))
+
+    assert (error.status_code, error.code) == (409, ErrorCode.TARGET_BUSY)
+
+
 def test_a_target_runs_one_scan_at_a_time(db_session: Session, world: ScanWorld) -> None:
     first = create_scan(db_session, world)
 

@@ -211,7 +211,8 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - 建立 scan 的檢查順序固定（`DECISIONS.md` §13.3）；gate 由 `ScopeGrantService.require_usable()` 判斷，時間在取得鎖之後才取（`clock`）。scan 在 savepoint 中寫入：撞到唯一索引時先重查 key，再判斷 `TARGET_BUSY`。
   - 狀態的轉換集中在 `scans/progress.py`：先以 `FOR UPDATE` 鎖 scan，再改 run，重新彙總 scan 的狀態，事件的 sequence 在持有 scan 的鎖時取得。寫入的時間用 `statement_timestamp()`，判斷 lease 是否過期用 `clock_timestamp()`。
   - 佇列（`scans/queue.py`）：`QueueOperations` 在呼叫端的 transaction 中執行；`ScanQueue` 每個操作一個短 transaction，runner 與 worker 不經 HTTP，也不在長時間的工作中持有 transaction。
-  - 鎖的順序：建立 scan 是 target → grant → profile（都是 `FOR SHARE`）→ 新增 scan；所有改 scan 或 run 的寫入都是 scan（`FOR UPDATE`）→ run，prepare 之後再加 target、grant 與 profile 版本（`FOR SHARE`）；心跳只改 run 的列。沒有任何 transaction 先鎖 target、grant 再等 scan。
+  - 鎖的順序：建立 scan 是 target（`FOR NO KEY UPDATE`：同一個 target 的建立彼此排隊，撤銷與停用不會被持續的建立請求餓死）→ grant → profile（`FOR SHARE`）→ 新增 scan；忙碌與上限在取鎖之前先查一次。所有改 scan 或 run 的寫入都是 scan（`FOR UPDATE`）→ run，prepare 之後再加 target、grant、profile 版本與建立者的 key（`FOR SHARE`）；心跳只改 run 的列。沒有任何 transaction 先鎖 target、grant 再等 scan。
+  - 只有 prepare 能讓 run 開始執行；run 與凍結的 operation 只能在建立 scan 的 transaction 中新增（trigger）。
   - `runner/fake.py` 的 FakeRunner 只經 `ScanQueue` 操作 run；M2 的真 runner 也放在 `runner/`。
 - **DB 逾時（T09，`DECISIONS.md` §13.8）**：每個連線以 libpq 的 options 設定 `statement_timeout`、`lock_timeout`、`idle_in_transaction_session_timeout`；等鎖或查詢逾時回 503 加 `Retry-After`。
 

@@ -13,15 +13,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, exists, func, select, update
+from sqlalchemy import ColumnElement, Select, exists, func, or_, select, update
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
+from secscan.api_keys.repository import ApiKeyRepository
 from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.grants.domain.lifecycle import GrantUnusableError, check_usable
 from secscan.grants.repository import ScopeGrantRepository
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import (
     GATE_ERROR_CODES,
+    TERMINAL_SCAN_STATUSES,
     TRAFFIC_STOPPED_RUN_STATUSES,
     RunErrorCode,
     RunStatus,
@@ -74,6 +76,7 @@ class QueueOperations:
         self._targets = TargetRepository(session)
         self._grants = ScopeGrantRepository(session)
         self._profiles = AuthProfileRepository(session)
+        self._keys = ApiKeyRepository(session)
         self._lab = lab
 
     def claim(self, owner: str, engines: Collection[Engine]) -> Lease | None:
@@ -105,12 +108,15 @@ class QueueOperations:
         return Heartbeat(valid=True, cancel_requested=cancel_requested_at is not None)
 
     def prepare(self, lease: Lease, *, clock: Callable[[], datetime]) -> Progress:
-        """runner 啟動前：要求過取消 → cancelling；gate 或綁定的 profile 版本不再有效 → failed；
-        都通過 → running。target、grant 與 profile 的版本以 FOR SHARE 鎖住（在 scan 之後）。"""
+        """runner 啟動前：要求過取消 → cancelling；gate、綁定的 profile 版本或建立者的 key
+        不再有效 → failed；都通過 → running（唯一能讓 run 開始執行的路徑）。
+
+        target、grant、profile 的版本與建立者的 key 以 FOR SHARE 鎖住（在 scan 之後）。
+        """
         scan, run = self._fenced(lease)
         if scan.cancel_requested:
             return self._move(scan, run, RunStatus.CANCELLING)
-        error_code = self._gate(scan, clock) or self._binding(scan)
+        error_code = self._gate(scan, clock) or self._binding(scan) or self._creator(scan)
         if error_code is not None:
             return self._move(scan, run, RunStatus.FAILED, error_code)
         return self._move(scan, run, RunStatus.RUNNING)
@@ -118,7 +124,13 @@ class QueueOperations:
     def advance(
         self, lease: Lease, to: RunStatus, *, error_code: RunErrorCode | None = None
     ) -> Progress:
-        """持有 lease 的 run 依轉換表轉換；collected 與終止時清除 lease。"""
+        """持有 lease 的 run 依轉換表轉換；collected 與終止時清除 lease。
+
+        不能轉到 running：只有 prepare 重新判斷 gate 之後才能開始執行，誤用 advance 也不會
+        跳過檢查（fail closed；審查發現）。
+        """
+        if to is RunStatus.RUNNING:
+            raise ValueError("run 只能由 prepare 開始執行（先重新判斷 gate）")
         scan, run = self._fenced(lease)
         return self._move(scan, run, to, error_code)
 
@@ -226,6 +238,17 @@ class QueueOperations:
             return None
         return RunErrorCode.AUTH_PROFILE_SUPERSEDED
 
+    def _creator(self, scan: LockedScan) -> RunErrorCode | None:
+        """建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不開始（審查發現）。
+
+        以 FOR SHARE 鎖住 key：撤銷 key 要等這個 transaction 結束。到期不算：到期是例行的，
+        不代表 key 外洩。
+        """
+        key = self._keys.lock_shared(scan.created_by_key_id)
+        if key is None or key.revoked_at is not None:
+            return RunErrorCode.CREATOR_KEY_REVOKED
+        return None
+
 
 class ScanQueue:
     """每個操作在自己的短 transaction 中完成（runner 與 worker 不經 HTTP）。"""
@@ -282,13 +305,20 @@ def _join_runs() -> Select[UUID, UUID]:
 def _claimable(
     waiting: RunStatus, engines: Collection[Engine], run_id: UUID | None
 ) -> list[ColumnElement[bool]]:
-    """可以認領的 run：狀態、引擎；runner 認領時 scan 沒有被要求取消、前面的 run 都不再送出流量。"""
+    """可以認領的 run：狀態、引擎、scan 還沒終止；runner 認領時 scan 也沒有被要求取消、
+    前面的 run 都不再送出流量。
+
+    已終止的 scan 不會有等待中的 run（trigger 只允許在建立 scan 時新增 run）；萬一有，也不能
+    認領：之後的 settle 會被 scans_guard 擋下，FIFO 每次又選到同一個 run，卡住佇列（審查發現）。
+    """
     conditions: list[ColumnElement[bool]] = [
         ScannerRunModel.status == waiting.value,
         ScannerRunModel.engine.in_(_values(engines)),
     ]
     if run_id is not None:
         conditions.append(ScannerRunModel.id == run_id)
+    stopped = aliased(ScanModel)
+    reasons: list[ColumnElement[bool]] = [stopped.status.in_(_values(TERMINAL_SCAN_STATUSES))]
     if waiting is RunStatus.QUEUED:
         earlier = aliased(ScannerRunModel)
         conditions.append(
@@ -298,12 +328,8 @@ def _claimable(
                 earlier.status.not_in(_values(TRAFFIC_STOPPED_RUN_STATUSES)),
             )
         )
-        cancelled = aliased(ScanModel)
-        conditions.append(
-            ~exists().where(
-                cancelled.id == ScannerRunModel.scan_id, cancelled.cancel_requested_at.is_not(None)
-            )
-        )
+        reasons.append(stopped.cancel_requested_at.is_not(None))
+    conditions.append(~exists().where(stopped.id == ScannerRunModel.scan_id, or_(*reasons)))
     return conditions
 
 
@@ -317,5 +343,7 @@ def _holds(lease: Lease) -> tuple[ColumnElement[bool], ...]:
     )
 
 
-def _values(items: Collection[Engine] | Collection[RunStatus]) -> list[str]:
+def _values(
+    items: Collection[Engine] | Collection[RunStatus] | Collection[ScanStatus],
+) -> list[str]:
     return sorted(item.value for item in items)
