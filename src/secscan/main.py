@@ -23,6 +23,7 @@ from secscan.grants.router import router as grants_router
 from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
 from secscan.projects.router import router as projects_router
+from secscan.scanners.router import router as scanners_router
 from secscan.scans.router import router as scans_router
 from secscan.security.secret_cipher import SecretCipher
 from secscan.specs.router import router as specs_router
@@ -85,4 +86,5 @@ def _api_v1() -> APIRouter:
     api_v1.include_router(specs_router)
     api_v1.include_router(auth_profiles_router)
     api_v1.include_router(scans_router)
+    api_v1.include_router(scanners_router)
     return api_v1

@@ -9,6 +9,9 @@ from typing import Protocol
 
 from secscan.runner.domain.admission import ContainerSpec
 
+# Engine API 的版本：1.45 起支援 volume 的 Subpath（docs/DECISIONS.md §14.2）。
+DOCKER_API_VERSION = "1.45"
+
 
 class RuntimeUnavailableError(Exception):
     """Docker 不可用、拒絕請求或回應錯誤。訊息只有動作與狀態碼，不含回應的內容。"""

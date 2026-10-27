@@ -18,6 +18,7 @@ from requests.adapters import BaseAdapter
 
 from secscan.runner.domain.admission import ContainerSpec
 from secscan.runner.domain.runtime import (
+    DOCKER_API_VERSION,
     ContainerConflictError,
     ContainerState,
     EngineVersion,
@@ -25,7 +26,7 @@ from secscan.runner.domain.runtime import (
     RuntimeUnavailableError,
 )
 
-API_VERSION = "1.45"
+API_VERSION = DOCKER_API_VERSION
 DEFAULT_TIMEOUT_SECONDS = 30
 _GATEWAY_MODE = "com.docker.network.bridge.gateway_mode_ipv4"
 _FINISHED = frozenset({"exited", "dead"})
