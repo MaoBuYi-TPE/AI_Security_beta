@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from secscan.core.config import AppEnv, Settings
 from secscan.main import create_app
+from secscan.runner.config import RunnerSettings
 from tests.secret_support import encryption_keys
 
 # tests.isolation：測試程序連不到 Docker daemon（docs/DECISIONS.md §14.9）。
@@ -36,6 +37,18 @@ DB_ENV_KEYS = (
 # 目標 secret 的加密金鑰也一樣不沿用（shell 或 .env 裡可能是真的金鑰）；
 # 需要的 fixture 帶測試用的金鑰。
 SECRET_ENV_KEYS = ("SECRET_ENCRYPTION_KEYS",)
+# runner 的設定（RUNNER_*）同樣不沿用：可能指向真的 Docker 或掛載的目錄。
+RUNNER_ENV_KEYS = (
+    "RUNNER_DOCKER_URL",
+    "RUNNER_SCAN_NETWORK",
+    "RUNNER_RUNS_VOLUME",
+    "RUNNER_SECRETS_VOLUME",
+    "RUNNER_RUNS_DIR",
+    "RUNNER_SECRETS_DIR",
+    "RUNNER_POLL_SECONDS",
+    "RUNNER_FAKE_OUTCOME",
+    "RUNNER_FAKE_HOLD_SECONDS",
+)
 # 127.0.0.1:1 沒有服務：就算有測試誤打需要 DB 的端點，也只會立刻失敗。
 UNREACHABLE_DB_PORT = 1
 
@@ -46,12 +59,14 @@ class DatabaseAccessBlockedError(RuntimeError):
 
 @pytest.fixture(autouse=True)
 def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Settings 不讀 .env（pytest 在 repo 根目錄執行，那裡有真實的本機密碼），也不讀 DB_* 環境變數。
+    """Settings 與 RunnerSettings 不讀 .env（pytest 在 repo 根目錄執行，那裡有真實的本機密碼），
+    也不讀 DB_*、RUNNER_* 等環境變數。
 
     要測 .env 讀取行為的測試，自行把 env_file 設回來。
     """
     monkeypatch.setitem(Settings.model_config, "env_file", None)
-    for key in (*DB_ENV_KEYS, *SECRET_ENV_KEYS):
+    monkeypatch.setitem(RunnerSettings.model_config, "env_file", None)
+    for key in (*DB_ENV_KEYS, *SECRET_ENV_KEYS, *RUNNER_ENV_KEYS):
         monkeypatch.delenv(key, raising=False)
 
 

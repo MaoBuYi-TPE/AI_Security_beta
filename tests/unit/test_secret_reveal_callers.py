@@ -13,4 +13,4 @@ def test_only_the_container_runner_reveals_target_secrets() -> None:
 
 def test_only_the_local_cli_reencrypts_secrets() -> None:
     """reencrypt_secrets 沒有呼叫者身分可以檢查（同 issue_admin_key）：只有本機 CLI 呼叫它。"""
-    assert modules_using("reencrypt_secrets") == {"cli.py"}
+    assert modules_using("reencrypt_secrets") == {"cli/__init__.py"}
