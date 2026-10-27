@@ -33,8 +33,10 @@ pytestmark = pytest.mark.integration
 # projects 1、api_keys 7、audit_events 3、targets 4、scope_grants 12、api_specs 9、
 # api_spec_operations 4、auth_profiles 2、auth_profile_versions 10；每一個都有對應的行為測試
 # （targets 與 scope_grants 的在 test_scope_schema.py，api_specs 與 api_spec_operations 的在
-# test_spec_schema.py，auth_profiles 與 auth_profile_versions 的在 test_auth_profile_schema.py）。
-EXPECTED_CHECK_COUNT = 83
+# test_spec_schema.py，auth_profiles 與 auth_profile_versions 的在 test_auth_profile_schema.py）；
+# scans、scanner_runs、scan_events、scan_operations 共 31（test_scan_schema.py）；
+# T10 的 scanner_runs 容器 4 與 runner_instances 5（test_runner_schema.py）。
+EXPECTED_CHECK_COUNT = 92
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "
@@ -323,6 +325,8 @@ def test_audit_events_are_append_only(db_session: Session, statement: str) -> No
         ("pk_scan_events", "(scan_id, sequence)"),
         ("pk_scan_operations", "(scan_id, ordinal)"),
         ("uq_scan_operations_scan_id_method_path", "(scan_id, method, path)"),
+        ("uq_runner_instances_owner", "(owner)"),
+        ("ix_runner_instances_role_heartbeat_at", "(role, heartbeat_at)"),
     ],
 )
 def test_expected_indexes_exist(db_session: Session, index_name: str, definition: str) -> None:

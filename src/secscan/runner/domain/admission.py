@@ -19,8 +19,8 @@ from secscan.core.json_types import JsonObject, JsonValue
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.scanners.domain.plan import ExecutionPlan
 from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.model import CONTAINER_NAME_PREFIX
 
-CONTAINER_NAME_PREFIX = "secscan-run-"
 # 掃描容器內的固定路徑：in/ 唯讀、out/ 可寫、secret 唯讀。
 IN_DIR = "/scan/in"
 OUT_DIR = "/scan/out"

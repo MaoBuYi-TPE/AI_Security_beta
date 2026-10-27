@@ -9,6 +9,7 @@ from secscan.auth_profiles.models import AuthProfileModel, AuthProfileVersionMod
 from secscan.core.db import Base
 from secscan.grants.models import ScopeGrantModel
 from secscan.projects.models import ProjectModel
+from secscan.scanners.models import RunnerInstanceModel
 from secscan.scans.models import (
     ScanEventModel,
     ScanModel,
@@ -32,5 +33,6 @@ MODELS = (
     ScannerRunModel,
     ScanEventModel,
     ScanOperationModel,
+    RunnerInstanceModel,
 )
 target_metadata = Base.metadata

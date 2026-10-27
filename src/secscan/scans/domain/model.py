@@ -26,6 +26,8 @@ from secscan.targets.domain import Origin
 ANONYMOUS_ROLE = "anonymous"
 # 事件的 payload 只由 enum 與 id 組成，DB 的 CHECK 是 1 KiB。
 MAX_EVENT_PAYLOAD_BYTES = 1_024
+# 容器版 runner 的容器名稱（docs/DECISIONS.md §14.2）：一個 run 只可能有一個容器。
+CONTAINER_NAME_PREFIX = "secscan-run-"
 
 
 @dataclass(frozen=True, slots=True)
