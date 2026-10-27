@@ -20,8 +20,23 @@ ENCRYPTION_KEYS_VAR := SECRET_ENCRYPTION_KEYS
 # 否則會再附加一行，而後面的那一行會默默取代原本的值（對加密金鑰而言，舊的 secret 就解不開了）。
 ENV_LINE := ^[[:space:]]*(export[[:space:]]+)?
 
+# app stack（docs/DECISIONS.md §14.8）。掃描容器的網路由這裡建立，compose 只引用（external）。
+SCAN_NET ?= secscan_scan_net
+SCAN_SUBNET ?= 10.89.8.0/24
+# runner 不 pull 映像：核准的掃描器映像由這裡以 digest pull（和 runner/domain/policy.py 一致，
+# tests/unit/test_deployment.py 會核對）。
+SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+# live 測試用的獨立 stack：自己的 DB volume、網路與 volume 名稱；API 只綁 127.0.0.1:8765。
+LIVE_PROJECT := secscan-live
+LIVE_SCAN_NET := secscan_live_scan_net
+LIVE_SCAN_SUBNET := 10.89.9.0/24
+LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_runs \
+	SECSCAN_SECRETS_VOLUME=secscan_live_run_secrets API_PORT=8765 DB_PORT=55434 \
+	RUNNER_FAKE_HOLD_SECONDS=15
+LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
+
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
-	lab-up lab-down lab-verify
+	lab-up lab-down lab-verify build images scan-net up down test-live-runner
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -34,8 +49,8 @@ dev: env
 	APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
 		--host 127.0.0.1 --port 8000 --reload --reload-dir src
 
-# unit/contract/integration 測試與 coverage 門檻（分支覆蓋），不做 live scan。
-# 測試程序本身不連網、也不碰 Docker；整合測試用的 db-test 由這裡先啟動。
+# unit/contract/integration 測試與 coverage 門檻（分支覆蓋），不做 live scan、不跑 live 測試。
+# 測試程序本身不連網、也不碰 Docker（tests/isolation.py）；整合測試用的 db-test 由這裡先啟動。
 test: test-db-up
 	$(UV_RUN) pytest -m "not live" --cov --cov-report=term-missing --cov-fail-under=80
 
@@ -121,3 +136,46 @@ lab-verify:
 # 停止並移除 lab。注意：spike（spikes/t03）若仍接在 $(LAB_NET) 上，網路會刪不掉，需先停 spike。
 lab-down:
 	$(COMPOSE) -f $(LAB_FILE) --profile juice-shop --profile vampi down --remove-orphans
+
+# 建立 secscan 的應用程式映像（api、runner、worker 共用）。
+build: docker-check
+	$(COMPOSE) -f $(DB_FILE) --profile app build
+
+# 以 digest pull 核准的掃描器映像與 socket-proxy（runner 本身不 pull）。
+images: docker-check
+	@for image in $(SCANNER_IMAGES); do docker pull --quiet "$$image" >/dev/null || exit 1; done
+	$(COMPOSE) -f $(DB_FILE) --profile app pull --quiet socket-proxy
+
+# 掃描容器的網路：internal＋gateway isolated＋固定網段；已存在時只檢查。
+scan-net: docker-check
+	@docker network inspect $(SCAN_NET) >/dev/null 2>&1 || docker network create --internal \
+		--opt com.docker.network.bridge.gateway_mode_ipv4=isolated \
+		--subnet $(SCAN_SUBNET) $(SCAN_NET) >/dev/null
+	@docker network inspect $(SCAN_NET) --format '{{.Internal}}' | grep -qx true \
+		|| { echo "錯誤：$(SCAN_NET) 不是 internal network"; exit 1; }
+	@test "$$(docker network inspect $(SCAN_NET) --format '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}}')" = isolated \
+		|| { echo "錯誤：$(SCAN_NET) 不是 isolated gateway"; exit 1; }
+
+# 啟動 app stack（db、api、runner、worker、socket-proxy）。API 只綁 127.0.0.1:$${API_PORT:-8000}。
+# 第一次使用先執行 make migrate（db 的 schema）與 create-admin-key。
+up: env docker-check scan-net images build
+	$(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
+
+# 停止 app stack 與 db（資料保留在 volume）。
+down:
+	$(COMPOSE) -f $(DB_FILE) --profile app down
+
+# live 測試：真的 Docker、socket-proxy 與 fake 容器（不連 lab，不送掃描流量）。需要自己設定
+# ENABLE_LIVE_LAB_TESTS=1；在獨立的 compose 專案建立、測試、一律拆除（含它的 volume 與網路）。
+test-live-runner: env docker-check images build
+	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }
+	@$(MAKE) --no-print-directory scan-net SCAN_NET=$(LIVE_SCAN_NET) SCAN_SUBNET=$(LIVE_SCAN_SUBNET)
+	@status=0; \
+		$(LIVE_COMPOSE) up -d --wait db \
+		&& DB_PORT=55434 $(UV_RUN) alembic upgrade head >/dev/null \
+		&& $(LIVE_COMPOSE) up -d --wait \
+		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(UV_RUN) pytest -m live -p no:cacheprovider tests/live \
+		|| status=$$?; \
+		$(LIVE_COMPOSE) down -v --remove-orphans; \
+		docker network rm $(LIVE_SCAN_NET) >/dev/null 2>&1; \
+		exit $$status

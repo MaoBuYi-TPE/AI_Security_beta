@@ -1,0 +1,7 @@
+# 映像只需要 pyproject.toml、uv.lock 與 src/；秘密、測試、文件與執行產物一律排除。
+*
+!pyproject.toml
+!uv.lock
+!src/
+**/__pycache__/
+**/*.py[cod]
