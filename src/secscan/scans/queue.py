@@ -17,6 +17,7 @@ from sqlalchemy import ColumnElement, Select, exists, func, or_, select, update
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from secscan.api_keys.repository import ApiKeyRepository
+from secscan.auth_profiles.domain.model import StoredSecret
 from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.grants.domain.lifecycle import GrantUnusableError, check_usable
 from secscan.grants.repository import ScopeGrantRepository
@@ -29,9 +30,16 @@ from secscan.scans.domain.lifecycle import (
     RunStatus,
     ScanStatus,
 )
-from secscan.scans.domain.model import Lease
+from secscan.scans.domain.model import CONTAINER_NAME_PREFIX, Lease
 from secscan.scans.models import ScanModel, ScannerRunModel
-from secscan.scans.progress import LEASE_DURATION, LockedScan, RunState, ScanProgress, now
+from secscan.scans.progress import (
+    LEASE_DURATION,
+    ContainerAssignment,
+    LockedScan,
+    RunState,
+    ScanProgress,
+    now,
+)
 from secscan.targets.domain import LabNetwork, OutsideLabError
 from secscan.targets.repository import TargetRepository
 
@@ -39,6 +47,7 @@ __all__ = [
     "HEARTBEAT_INTERVAL",
     "LEASE_DURATION",
     "Heartbeat",
+    "Launch",
     "LeaseLostError",
     "Progress",
     "QueueOperations",
@@ -67,6 +76,19 @@ class Progress:
 
     run_status: RunStatus
     scan_status: ScanStatus
+
+
+@dataclass(frozen=True, slots=True)
+class Launch:
+    """容器版 runner 的 prepare 結果（docs/DECISIONS.md §14.6）。
+
+    run 轉到 running 時，已記下容器名稱與映像；secret 是綁定版本的密文（沒有 auth profile、或沒有
+    開始執行時是 None），由 runner 在建立容器前才解密。
+    """
+
+    progress: Progress
+    max_duration_seconds: int
+    secret: StoredSecret | None
 
 
 class QueueOperations:
@@ -113,13 +135,43 @@ class QueueOperations:
 
         target、grant、profile 的版本與建立者的 key 以 FOR SHARE 鎖住（在 scan 之後）。
         """
+        return self._prepare(lease, clock=clock, image_ref=None).progress
+
+    def prepare_launch(
+        self, lease: Lease, *, clock: Callable[[], datetime], image_ref: str
+    ) -> Launch:
+        """容器版的 prepare：通過時在同一個 transaction 中記下容器與映像（先記下、才建立容器），
+        並以 FOR SHARE 讀出綁定版本的密文（T09 的交接：密文在 commit 之前不會被清除）。
+        """
+        return self._prepare(lease, clock=clock, image_ref=image_ref)
+
+    def _prepare(
+        self, lease: Lease, *, clock: Callable[[], datetime], image_ref: str | None
+    ) -> Launch:
         scan, run = self._fenced(lease)
         if scan.cancel_requested:
-            return self._move(scan, run, RunStatus.CANCELLING)
-        error_code = self._gate(scan, clock) or self._binding(scan) or self._creator(scan)
+            return self._launch(scan, self._move(scan, run, RunStatus.CANCELLING))
+        error_code = self._gate(scan, clock)
+        secret: StoredSecret | None = None
+        if error_code is None:
+            error_code, secret = self._binding(scan, read_secret=image_ref is not None)
+        error_code = error_code or self._creator(scan)
         if error_code is not None:
-            return self._move(scan, run, RunStatus.FAILED, error_code)
-        return self._move(scan, run, RunStatus.RUNNING)
+            return self._launch(scan, self._move(scan, run, RunStatus.FAILED, error_code))
+        container = (
+            ContainerAssignment(name=f"{CONTAINER_NAME_PREFIX}{run.id}", image_ref=image_ref)
+            if image_ref is not None
+            else None
+        )
+        self._progress.move(scan, run, RunStatus.RUNNING, container=container)
+        progress = Progress(run_status=RunStatus.RUNNING, scan_status=self._progress.settle(scan))
+        return self._launch(scan, progress, secret)
+
+    @staticmethod
+    def _launch(scan: LockedScan, progress: Progress, secret: StoredSecret | None = None) -> Launch:
+        return Launch(
+            progress=progress, max_duration_seconds=scan.max_duration_seconds, secret=secret
+        )
 
     def advance(
         self, lease: Lease, to: RunStatus, *, error_code: RunErrorCode | None = None
@@ -137,11 +189,24 @@ class QueueOperations:
     def reconcile_expired(self, engines: Collection[Engine]) -> int:
         """lease 過期的 run：runner 階段 → interrupted（LEASE_EXPIRED）；normalizing → collected。
 
-        只能用在確定已經停止的引擎（T09 只有 fake：不發流量、沒有容器）；容器的對帳在 T13。
+        runner 階段只處理沒有容器的 run（in-process 的 fake：不發流量，lease 過期就確定已停止）。
+        有容器的 run，lease 過期不代表容器已經停止（ARCHITECTURE.md §9），留給 T13 的容器對帳。
         """
+        stage = or_(
+            ScannerRunModel.status == RunStatus.NORMALIZING.value,
+            ScannerRunModel.container_name.is_(None),
+        )
+        return self._reconcile(engines, stage)
+
+    def reconcile_expired_parsing(self, engines: Collection[Engine]) -> int:
+        """worker 用：只把 lease 過期的 normalizing 退回 collected（解析不送流量，可以重試）。"""
+        return self._reconcile(engines, ScannerRunModel.status == RunStatus.NORMALIZING.value)
+
+    def _reconcile(self, engines: Collection[Engine], stage: ColumnElement[bool]) -> int:
         expired = (
             ScannerRunModel.lease_owner.is_not(None),
             ScannerRunModel.lease_expires_at <= func.clock_timestamp(),
+            stage,
         )
         reconciled = 0
         for _ in range(MAX_RECONCILED_PER_CALL):
@@ -228,15 +293,24 @@ class QueueOperations:
             return RunErrorCode.SCOPE_OUTSIDE_LAB
         return None
 
-    def _binding(self, scan: LockedScan) -> RunErrorCode | None:
-        """綁定的 profile 版本被取代、密文已清除：不改用新版本，直接失敗（§12.3）。"""
+    def _binding(
+        self, scan: LockedScan, *, read_secret: bool
+    ) -> tuple[RunErrorCode | None, StoredSecret | None]:
+        """綁定的 profile 版本被取代、密文已清除：不改用新版本，直接失敗（§12.3）。
+
+        兩種都以 FOR SHARE 鎖住版本列；read_secret 時一併讀出密文（容器版的 runner 要注入）。
+        """
         if scan.auth_profile_id is None or scan.auth_profile_version is None:
-            return None
-        if self._profiles.version_has_secret(
-            scan.auth_profile_id, version=scan.auth_profile_version
-        ):
-            return None
-        return RunErrorCode.AUTH_PROFILE_SUPERSEDED
+            return None, None
+        profile_id, version = scan.auth_profile_id, scan.auth_profile_version
+        if read_secret:
+            secret = self._profiles.sealed_secret(profile_id, version=version)
+            if secret is None:
+                return RunErrorCode.AUTH_PROFILE_SUPERSEDED, None
+            return None, secret
+        if self._profiles.version_has_secret(profile_id, version=version):
+            return None, None
+        return RunErrorCode.AUTH_PROFILE_SUPERSEDED, None
 
     def _creator(self, scan: LockedScan) -> RunErrorCode | None:
         """建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不開始（審查發現）。
@@ -282,6 +356,12 @@ class ScanQueue:
         with self._sessions.begin() as session:
             return self._operations(session).prepare(lease, clock=self._clock)
 
+    def prepare_launch(self, lease: Lease, *, image_ref: str) -> Launch:
+        with self._sessions.begin() as session:
+            return self._operations(session).prepare_launch(
+                lease, clock=self._clock, image_ref=image_ref
+            )
+
     def advance(
         self, lease: Lease, to: RunStatus, *, error_code: RunErrorCode | None = None
     ) -> Progress:
@@ -291,6 +371,10 @@ class ScanQueue:
     def reconcile_expired(self, engines: Collection[Engine]) -> int:
         with self._sessions.begin() as session:
             return self._operations(session).reconcile_expired(engines)
+
+    def reconcile_expired_parsing(self, engines: Collection[Engine]) -> int:
+        with self._sessions.begin() as session:
+            return self._operations(session).reconcile_expired_parsing(engines)
 
     def _operations(self, session: Session) -> QueueOperations:
         return QueueOperations(session, lab=self._lab)

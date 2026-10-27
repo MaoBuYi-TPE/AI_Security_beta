@@ -116,6 +116,33 @@ class AuthProfileRepository:
         ).first()
         return row is not None and row.secret_erased_at is None
 
+    def sealed_secret(self, profile_id: UUID, *, version: int) -> StoredSecret | None:
+        """以 FOR SHARE 鎖住這一版並讀出密文（runner 注入用，docs/DECISIONS.md §14.5）。
+
+        和 version_has_secret 相同的鎖：PATCH 的清除要等這個 transaction 結束，所以讀到的密文在
+        commit 之前一定還有效。不存在或已清除回 None。
+        """
+        row = self._session.execute(
+            select(
+                AuthProfileVersionModel.type,
+                AuthProfileVersionModel.header_name,
+                AuthProfileVersionModel.encrypted_secret,
+            )
+            .where(
+                AuthProfileVersionModel.profile_id == profile_id,
+                AuthProfileVersionModel.version == version,
+            )
+            .with_for_update(read=True)
+        ).first()
+        if row is None or row.encrypted_secret is None:
+            return None
+        return StoredSecret(
+            profile_id=profile_id,
+            version=version,
+            credential=Credential(AuthType(row.type), header_name=row.header_name),
+            token=row.encrypted_secret,
+        )
+
     def get(self, profile_id: UUID) -> AuthProfile | None:
         row = self._session.execute(
             _with_project().where(AuthProfileModel.id == profile_id)
