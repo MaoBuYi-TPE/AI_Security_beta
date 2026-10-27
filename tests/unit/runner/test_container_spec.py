@@ -269,3 +269,14 @@ def test_building_an_unadmitted_plan_fails_before_any_body() -> None:
         build_container(replace(PLAN, arguments=("5", "6")), policy=POLICY)
 
     assert caught.value.reason is PlanRejection.COMMAND_NOT_ALLOWED
+
+
+@pytest.mark.parametrize("user", ["0:0", "0:10001", "10001:0", "root", "10001"])
+def test_a_root_or_malformed_user_in_the_policy_is_refused(user: str) -> None:
+    """組 body 的程式照政策填 user；就算政策被改成 root，送出前的檢查也會擋下。"""
+    policy = replace(POLICY, user=user)
+
+    with pytest.raises(PlanRejectedError) as caught:
+        build_container(PLAN, policy=policy)
+
+    assert caught.value.reason is PlanRejection.UNSAFE_CONTAINER

@@ -347,3 +347,18 @@ def test_the_rejection_names_no_path(workspace: Workspace, dirs: tuple[Path, Pat
 
     assert "secret-looking-name" not in str(caught.value)
     assert "/etc" not in str(caught.value)
+
+
+def test_an_existing_manifest_is_never_overwritten(
+    workspace: Workspace, dirs: tuple[Path, Path]
+) -> None:
+    """收集的結果不可變：manifest 已經存在（例如上一次收集留下的）就失敗，不覆寫。"""
+    _prepared(workspace, dirs)
+    manifest = dirs[0] / str(RUN) / MANIFEST_FILE
+    manifest.write_bytes(b"{}")
+    manifest.chmod(0o600)
+
+    with pytest.raises(FileExistsError):
+        workspace.collect(RUN)
+
+    assert manifest.read_bytes() == b"{}"

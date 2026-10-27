@@ -92,3 +92,21 @@ def test_the_worker_ignores_engines_it_cannot_parse(
     _collected(queue, queue_seed, world)
 
     assert Worker(queue, owner="worker-1", engines=frozenset({ScanEngine.ZAP})).drain() == []
+
+
+def test_the_worker_leaves_expired_runner_stages_alone(
+    queue: ScanQueue, queue_seed: Seeder, world: World
+) -> None:
+    """runner 階段的 run 是否停止只有 runner 知道：worker 不把它們標成 interrupted。"""
+    queue_seed.scan(world.operator_a, queue_seed.scannable(world))
+    lease = queue.claim("runner-1", FAKE)
+    assert lease is not None
+    queue.prepare(lease)
+    queue_seed.execute(
+        "UPDATE scanner_runs SET lease_expires_at = now() - interval '1 second' WHERE id = :id",
+        id=lease.run_id,
+    )
+
+    assert Worker(queue, owner="worker-1").drain() == []
+    [row] = queue_seed.query("SELECT status FROM scanner_runs WHERE id = :id", id=lease.run_id)
+    assert row.status == "running"
