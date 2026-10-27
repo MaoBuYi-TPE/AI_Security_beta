@@ -1,0 +1,232 @@
+"""經 socket-proxy 操作容器（docs/DECISIONS.md §14.2）：送出的請求逐一正確、從不 pull。
+
+以假的 adapter 取代 Docker SDK 的 HTTP 傳輸，確認實際的 method、path、query 與 body。
+"""
+
+import pytest
+import requests
+
+from secscan.runner.docker_runtime import API_VERSION, DockerRuntime
+from secscan.runner.domain.admission import build_container
+from secscan.runner.domain.runtime import (
+    ContainerConflictError,
+    ContainerState,
+    EngineVersion,
+    NetworkState,
+    RuntimeUnavailableError,
+)
+from tests.unit.runner.docker_stub import StubDocker
+from tests.unit.runner.plans import POLICY, RUN_ID, fake_plan
+
+NAME = f"secscan-run-{RUN_ID}"
+PREFIX = f"/v{API_VERSION}"
+IMAGE = str(fake_plan().image)
+
+
+@pytest.fixture
+def docker_api() -> StubDocker:
+    return StubDocker()
+
+
+@pytest.fixture
+def runtime(docker_api: StubDocker) -> DockerRuntime:
+    return DockerRuntime.connect("tcp://socket-proxy.invalid:2375", adapter=docker_api)
+
+
+def test_the_api_version_is_pinned() -> None:
+    assert API_VERSION == "1.45"
+
+
+def test_create_sends_the_checked_body_as_is(
+    runtime: DockerRuntime, docker_api: StubDocker
+) -> None:
+    spec = build_container(fake_plan(target_auth=True), policy=POLICY)
+    docker_api.reply("POST", f"{PREFIX}/containers/create", 201, {"Id": "abc", "Warnings": []})
+
+    runtime.create(spec)
+
+    (request,) = docker_api.requests_seen
+    assert (request.method, request.path) == ("POST", f"{PREFIX}/containers/create")
+    assert request.query == {"name": NAME}
+    assert request.body == spec.body
+
+
+def test_a_name_conflict_is_reported(runtime: DockerRuntime, docker_api: StubDocker) -> None:
+    docker_api.reply("POST", f"{PREFIX}/containers/create", 409, {"message": "Conflict"})
+
+    with pytest.raises(ContainerConflictError):
+        runtime.create(build_container(fake_plan(), policy=POLICY))
+
+
+def test_a_missing_image_is_not_pulled(runtime: DockerRuntime, docker_api: StubDocker) -> None:
+    docker_api.reply("POST", f"{PREFIX}/containers/create", 404, {"message": "No such image"})
+
+    with pytest.raises(RuntimeUnavailableError):
+        runtime.create(build_container(fake_plan(), policy=POLICY))
+
+    assert docker_api.paths == [("POST", f"{PREFIX}/containers/create")]
+
+
+def test_start_stop_and_remove_address_the_container_by_name(
+    runtime: DockerRuntime, docker_api: StubDocker
+) -> None:
+    docker_api.reply("POST", f"{PREFIX}/containers/{NAME}/start", 204)
+    docker_api.reply("POST", f"{PREFIX}/containers/{NAME}/stop", 204)
+    docker_api.reply("DELETE", f"{PREFIX}/containers/{NAME}", 204)
+
+    runtime.start(NAME)
+    runtime.stop(NAME, grace_seconds=5)
+    runtime.remove(NAME)
+
+    assert docker_api.paths == [
+        ("POST", f"{PREFIX}/containers/{NAME}/start"),
+        ("POST", f"{PREFIX}/containers/{NAME}/stop"),
+        ("DELETE", f"{PREFIX}/containers/{NAME}"),
+    ]
+    assert docker_api.requests_seen[1].query == {"t": "5"}
+    assert docker_api.requests_seen[2].query["force"] == "True"
+
+
+@pytest.mark.parametrize("status", [304, 404])
+def test_stopping_a_stopped_or_missing_container_is_fine(
+    runtime: DockerRuntime, docker_api: StubDocker, status: int
+) -> None:
+    docker_api.reply("POST", f"{PREFIX}/containers/{NAME}/stop", status)
+
+    runtime.stop(NAME, grace_seconds=5)
+
+
+def test_removing_a_missing_container_is_fine(runtime: DockerRuntime) -> None:
+    runtime.remove(NAME)
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ({"Status": "created"}, ContainerState(running=True, exit_code=None, oom_killed=False)),
+        ({"Status": "running"}, ContainerState(running=True, exit_code=None, oom_killed=False)),
+        (
+            {"Status": "exited", "ExitCode": 0, "OOMKilled": False},
+            ContainerState(running=False, exit_code=0, oom_killed=False),
+        ),
+        (
+            {"Status": "exited", "ExitCode": 137, "OOMKilled": True},
+            ContainerState(running=False, exit_code=137, oom_killed=True),
+        ),
+        (
+            {"Status": "dead", "ExitCode": 1, "OOMKilled": False},
+            ContainerState(running=False, exit_code=1, oom_killed=False),
+        ),
+    ],
+)
+def test_state(
+    runtime: DockerRuntime,
+    docker_api: StubDocker,
+    state: dict[str, object],
+    expected: ContainerState,
+) -> None:
+    docker_api.reply("GET", f"{PREFIX}/containers/{NAME}/json", 200, {"State": state})
+
+    assert runtime.state(NAME) == expected
+
+
+def test_state_of_a_missing_container(runtime: DockerRuntime) -> None:
+    assert runtime.state(NAME) is None
+
+
+def test_version(runtime: DockerRuntime, docker_api: StubDocker) -> None:
+    docker_api.reply(
+        "GET",
+        f"{PREFIX}/version",
+        200,
+        {"ApiVersion": "1.54", "MinAPIVersion": "1.40", "Os": "linux", "Arch": "arm64"},
+    )
+
+    assert runtime.version() == EngineVersion(
+        api_version="1.54", min_api_version="1.40", os="linux", arch="arm64"
+    )
+
+
+def test_image_architecture(runtime: DockerRuntime, docker_api: StubDocker) -> None:
+    docker_api.reply("GET", f"{PREFIX}/images/{IMAGE}/json", 200, {"Architecture": "arm64"})
+
+    assert runtime.image_architecture(IMAGE) == "arm64"
+    assert runtime.image_architecture("busybox:9.9@sha256:" + "0" * 64) is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            {
+                "Internal": True,
+                "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+            },
+            NetworkState(internal=True, isolated_gateway=True),
+        ),
+        ({"Internal": True, "Options": {}}, NetworkState(internal=True, isolated_gateway=False)),
+        ({"Internal": False}, NetworkState(internal=False, isolated_gateway=False)),
+    ],
+)
+def test_network(
+    runtime: DockerRuntime,
+    docker_api: StubDocker,
+    payload: dict[str, object],
+    expected: NetworkState,
+) -> None:
+    docker_api.reply("GET", f"{PREFIX}/networks/secscan_scan_net", 200, payload)
+
+    assert runtime.network("secscan_scan_net") == expected
+    assert runtime.network("other_net") is None
+
+
+def test_volume_exists(runtime: DockerRuntime, docker_api: StubDocker) -> None:
+    docker_api.reply("GET", f"{PREFIX}/volumes/secscan_runs", 200, {"Name": "secscan_runs"})
+
+    assert runtime.volume_exists("secscan_runs")
+    assert not runtime.volume_exists("secscan_run_secrets")
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_refusals_and_errors_become_runtime_unavailable(
+    runtime: DockerRuntime, docker_api: StubDocker, status: int
+) -> None:
+    docker_api.reply("POST", f"{PREFIX}/containers/{NAME}/start", status, {"message": "secret?"})
+
+    with pytest.raises(RuntimeUnavailableError) as caught:
+        runtime.start(NAME)
+
+    assert "secret?" not in str(caught.value)
+    assert str(status) in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "error", [requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout]
+)
+def test_connection_failures_become_runtime_unavailable(
+    runtime: DockerRuntime, docker_api: StubDocker, error: type[Exception]
+) -> None:
+    docker_api.fail_with = error
+
+    with pytest.raises(RuntimeUnavailableError):
+        runtime.state(NAME)
+    with pytest.raises(RuntimeUnavailableError):
+        runtime.version()
+
+
+def test_proxies_from_the_environment_are_ignored(
+    monkeypatch: pytest.MonkeyPatch, docker_api: StubDocker
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://attacker.invalid:3128")
+    runtime = DockerRuntime.connect("tcp://socket-proxy.invalid:2375", adapter=docker_api)
+
+    assert runtime.state(NAME) is None
+    assert not runtime.trusts_environment
+
+
+@pytest.mark.parametrize(
+    "url", ["", "http://socket-proxy:2375", "ssh://host", "npipe:////./pipe/docker", "tcp://"]
+)
+def test_only_tcp_and_unix_urls_are_accepted(url: str) -> None:
+    with pytest.raises(ValueError, match="tcp"):
+        DockerRuntime.connect(url)
