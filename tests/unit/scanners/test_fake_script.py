@@ -2,7 +2,7 @@
 
 import pytest
 
-from secscan.runner.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
+from secscan.scanners.domain.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
 
 
 def test_the_default_script_succeeds_at_once() -> None:

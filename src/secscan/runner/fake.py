@@ -5,37 +5,18 @@
 每一步都經過佇列的轉換與事件；回應中這些 scan 的 fixture 為 true。
 """
 
-import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import StrEnum
 from uuid import UUID
 
+from secscan.scanners.domain.fake import FakeOutcome, FakeScript
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, Progress, ScanQueue
 
 ENGINES = frozenset({Engine.FAKE})
-MAX_HOLD_SECONDS = 300
-
-
-class FakeOutcome(StrEnum):
-    SUCCEED = "succeed"
-    FAIL = "fail"
-
-
-@dataclass(frozen=True, slots=True)
-class FakeScript:
-    """結果與在 running 停留的秒數。"""
-
-    outcome: FakeOutcome = FakeOutcome.SUCCEED
-    hold_seconds: float = 0
-
-    def __post_init__(self) -> None:
-        if not (math.isfinite(self.hold_seconds) and 0 <= self.hold_seconds <= MAX_HOLD_SECONDS):
-            raise ValueError(f"hold_seconds 必須介於 0 與 {MAX_HOLD_SECONDS} 秒之間")
 
 
 @dataclass(frozen=True, slots=True)

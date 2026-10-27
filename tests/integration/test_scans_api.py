@@ -19,7 +19,8 @@ from sqlalchemy.orm import sessionmaker
 from secscan.api_keys.domain import Role
 from secscan.audit.service import AuditTrail
 from secscan.main import create_app
-from secscan.runner.fake import FakeRunner, FakeScript
+from secscan.runner.fake import FakeRunner
+from secscan.scanners.domain.fake import FakeScript
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.queue import ScanQueue

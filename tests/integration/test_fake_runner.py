@@ -14,7 +14,8 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.grants.service import ScopeGrantService
-from secscan.runner.fake import FakeOutcome, FakeRunner, FakeScript, RunReport
+from secscan.runner.fake import FakeRunner, RunReport
+from secscan.scanners.domain.fake import FakeOutcome, FakeScript
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.catalog import ScanProfile, plan_runs
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus

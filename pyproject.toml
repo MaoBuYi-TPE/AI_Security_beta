@@ -125,7 +125,8 @@ exhaustive = true
 layers = [
     "main | cli",
     "migrations",
-    "health | runner",
+    "health | runner | worker",
+    "scanners",
     "scans",
     "specs | auth_profiles",
     "grants",
