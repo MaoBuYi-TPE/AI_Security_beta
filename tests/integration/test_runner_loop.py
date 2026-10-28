@@ -23,6 +23,7 @@ from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.queue import ScanQueue
 from secscan.worker.loop import WorkerLoop
 from secscan.worker.service import Worker
+from tests.guard_support import ENDPOINT, GuardDouble
 from tests.integration.api_support import LAB, Scannable, Seeder, World
 from tests.runner_fakes import FakeClock, FakeContainerRuntime
 from tests.secret_support import shared_cipher
@@ -72,6 +73,11 @@ def workspace(tmp_path: Path) -> Workspace:
     return Workspace(tmp_path / "runs", tmp_path / "secrets")
 
 
+@pytest.fixture
+def guard(tmp_path: Path) -> GuardDouble:
+    return GuardDouble.create(tmp_path)
+
+
 def _fleet(engine: Engine, role: InstanceRole) -> Fleet:
     return Fleet(
         sessionmaker(engine, expire_on_commit=False),
@@ -88,15 +94,18 @@ def _runner_loop(
     workspace: Workspace,
     clock: FakeClock,
     *,
+    guard: GuardDouble,
     stop_after: float = 1_000,
 ) -> RunnerLoop:
     def stop_requested() -> bool:
         return clock.now >= stop_after
 
+    channel = guard.channel()
     loop = RunnerLoop(
         _fleet(queue_engine, InstanceRole.RUNNER),
         runtime=runtime,
         workspace=workspace,
+        guard=channel,
         policy=POLICY,
         stop_requested=stop_requested,
         sleep=clock.sleep,
@@ -112,6 +121,8 @@ def _runner_loop(
             policy=POLICY,
             script=FakeScript(hold_seconds=1),
             cipher=shared_cipher(),
+            guard=channel,
+            endpoint=ENDPOINT,
             stop_requested=stop_requested,
             on_heartbeat=loop.beat,
             sleep=clock.sleep,
@@ -137,12 +148,15 @@ def test_the_runner_loop_processes_queued_runs_until_stopped(
     workspace: Workspace,
     clock: FakeClock,
     tmp_path: Path,
+    guard: GuardDouble,
 ) -> None:
     (tmp_path / "secrets" / "left-over").mkdir()
     queue_seed.scan(world.operator_a, scannable)
     queue_seed.scan(world.operator_a, queue_seed.scannable(world))
 
-    reports = _runner_loop(queue, queue_engine, runtime, workspace, clock, stop_after=30).run()
+    reports = _runner_loop(
+        queue, queue_engine, runtime, workspace, clock, stop_after=30, guard=guard
+    ).run()
 
     assert [report.run_status for report in reports] == [RunStatus.COLLECTED] * 2
     assert list((tmp_path / "secrets").iterdir()) == []
@@ -160,10 +174,11 @@ def test_once_processes_at_most_one_run(
     runtime: FakeContainerRuntime,
     workspace: Workspace,
     clock: FakeClock,
+    guard: GuardDouble,
 ) -> None:
     queue_seed.scan(world.operator_a, scannable)
     queue_seed.scan(world.operator_a, queue_seed.scannable(world))
-    loop = _runner_loop(queue, queue_engine, runtime, workspace, clock)
+    loop = _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard)
 
     assert len(loop.run(once=True)) == 1
     assert len(loop.run(once=True)) == 1
@@ -179,12 +194,15 @@ def test_an_unready_environment_claims_nothing_and_probes_again(
     runtime: FakeContainerRuntime,
     workspace: Workspace,
     clock: FakeClock,
+    guard: GuardDouble,
 ) -> None:
     queue_seed.scan(world.operator_a, scannable)
     runtime.volumes.clear()
     clock.at(30, lambda: runtime.volumes.update({"secscan_runs", "secscan_run_secrets"}))
 
-    reports = _runner_loop(queue, queue_engine, runtime, workspace, clock, stop_after=90).run()
+    reports = _runner_loop(
+        queue, queue_engine, runtime, workspace, clock, stop_after=90, guard=guard
+    ).run()
 
     # 第 60 秒重新 probe 之後才認領。
     assert len(reports) == 1
@@ -203,12 +221,13 @@ def test_a_lost_lease_or_docker_failure_does_not_stop_the_loop(
     runtime: FakeContainerRuntime,
     workspace: Workspace,
     clock: FakeClock,
+    guard: GuardDouble,
 ) -> None:
     queue_seed.scan(world.operator_a, scannable)
     runtime.failing.update({"state", "remove"})
     clock.at(5, runtime.failing.clear)
 
-    loop = _runner_loop(queue, queue_engine, runtime, workspace, clock, stop_after=20)
+    loop = _runner_loop(queue, queue_engine, runtime, workspace, clock, stop_after=20, guard=guard)
     reports = loop.run()
 
     assert reports == []
@@ -224,9 +243,10 @@ def test_the_worker_loop_completes_collected_runs(
     runtime: FakeContainerRuntime,
     workspace: Workspace,
     clock: FakeClock,
+    guard: GuardDouble,
 ) -> None:
     queue_seed.scan(world.operator_a, scannable)
-    _runner_loop(queue, queue_engine, runtime, workspace, clock).run(once=True)
+    _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(once=True)
     worker_clock = FakeClock()
 
     reports = WorkerLoop(
@@ -257,12 +277,13 @@ def test_the_worker_loop_once(queue: ScanQueue, queue_engine: Engine) -> None:
 
 
 def test_a_loop_needs_a_runner(
-    queue_engine: Engine, runtime: FakeContainerRuntime, workspace: Workspace
+    queue_engine: Engine, runtime: FakeContainerRuntime, workspace: Workspace, guard: GuardDouble
 ) -> None:
     loop = RunnerLoop(
         _fleet(queue_engine, InstanceRole.RUNNER),
         runtime=runtime,
         workspace=workspace,
+        guard=guard.channel(),
         policy=POLICY,
         stop_requested=lambda: False,
         poll_seconds=2,
@@ -281,10 +302,11 @@ def test_reports_are_passed_on_and_a_lost_lease_is_counted(
     runtime: FakeContainerRuntime,
     workspace: Workspace,
     clock: FakeClock,
+    guard: GuardDouble,
 ) -> None:
     queue_seed.scan(world.operator_a, scannable)
     seen: list[RunStatus] = []
-    loop = _runner_loop(queue, queue_engine, runtime, workspace, clock)
+    loop = _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard)
 
     loop.run(once=True, on_report=lambda report: seen.append(report.run_status))
     queue_seed.scan(world.operator_a, queue_seed.scannable(world))
@@ -309,6 +331,7 @@ def test_secrets_are_not_swept_while_another_runner_is_alive(
     workspace: Workspace,
     clock: FakeClock,
     tmp_path: Path,
+    guard: GuardDouble,
 ) -> None:
     """第二個 runner（例如手動的 --once）不能刪掉正在執行的 run 的 secret（審查發現）。"""
     Fleet(
@@ -319,7 +342,7 @@ def test_secrets_are_not_swept_while_another_runner_is_alive(
     ).beat(Capabilities(engines=()))
     (tmp_path / "secrets" / "in-use").mkdir()
 
-    _runner_loop(queue, queue_engine, runtime, workspace, clock).run(once=True)
+    _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(once=True)
 
     assert [path.name for path in (tmp_path / "secrets").iterdir()] == ["in-use"]
 
@@ -334,11 +357,14 @@ def test_an_unwritable_volume_claims_nothing(
     workspace: Workspace,
     clock: FakeClock,
     tmp_path: Path,
+    guard: GuardDouble,
 ) -> None:
     queue_seed.scan(world.operator_a, scannable)
     (tmp_path / "runs").chmod(0o500)
     try:
-        reports = _runner_loop(queue, queue_engine, runtime, workspace, clock).run(once=True)
+        reports = _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(
+            once=True
+        )
     finally:
         (tmp_path / "runs").chmod(0o700)
 
@@ -347,3 +373,128 @@ def test_an_unwritable_volume_claims_nothing(
     assert _capabilities(queue_seed)["engines"] == {
         "fake": {"image": str(FAKE_IMAGE), "issue": "RUN_VOLUME_NOT_WRITABLE"}
     }
+
+
+# --- egress guard（docs/DECISIONS.md §15.7）------------------------------------------------
+
+
+@pytest.mark.parametrize("change", ["stop", "vanish", "unwritable"])
+def test_an_unavailable_guard_claims_nothing(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    clock: FakeClock,
+    guard: GuardDouble,
+    change: str,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    if change == "stop":
+        guard.stop()
+    elif change == "vanish":
+        guard.vanish()
+    else:
+        guard.policies.chmod(0o500)
+    try:
+        reports = _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(
+            once=True
+        )
+    finally:
+        guard.policies.chmod(0o700)
+
+    assert reports == []
+    assert runtime.created == []
+    assert _capabilities(queue_seed)["engines"] == {
+        "fake": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"}
+    }
+
+
+def test_the_guard_is_checked_every_round_not_only_at_the_probe(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    clock: FakeClock,
+    guard: GuardDouble,
+) -> None:
+    """guard 停機後恢復：不必等 60 秒的 probe，下一輪就認領。"""
+    queue_seed.scan(world.operator_a, scannable)
+    guard.stop()
+    clock.at(5, guard.healthy)
+
+    reports = _runner_loop(
+        queue, queue_engine, runtime, workspace, clock, stop_after=20, guard=guard
+    ).run()
+
+    assert [report.run_status for report in reports] == [RunStatus.COLLECTED]
+    assert 5 <= clock.now < 60
+
+
+def test_a_guard_that_stops_is_noticed_before_the_next_claim(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    clock: FakeClock,
+    guard: GuardDouble,
+) -> None:
+    def enqueue() -> None:
+        queue_seed.scan(world.operator_a, scannable)
+
+    clock.at(3, guard.stop)
+    clock.at(5, enqueue)
+
+    reports = _runner_loop(
+        queue, queue_engine, runtime, workspace, clock, stop_after=20, guard=guard
+    ).run()
+
+    assert reports == []
+    assert runtime.created == []
+    assert _capabilities(queue_seed)["engines"] == {
+        "fake": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"}
+    }
+
+
+def test_leftover_policies_are_swept_when_no_other_runner_is_alive(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    clock: FakeClock,
+    guard: GuardDouble,
+) -> None:
+    (guard.policies / "00000000-0000-4000-8000-000000000001.json").write_bytes(b"{}")
+
+    _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(once=True)
+
+    assert guard.policy_files() == []
+
+
+def test_policies_are_not_swept_while_another_runner_is_alive(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    clock: FakeClock,
+    guard: GuardDouble,
+) -> None:
+    Fleet(
+        sessionmaker(queue_engine, expire_on_commit=False),
+        owner="runner:other",
+        role=InstanceRole.RUNNER,
+        software_version="0.1.0",
+    ).beat(Capabilities(engines=()))
+    (guard.policies / "00000000-0000-4000-8000-000000000001.json").write_bytes(b"{}")
+
+    _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(once=True)
+
+    assert guard.policy_files() == ["00000000-0000-4000-8000-000000000001.json"]

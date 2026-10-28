@@ -22,7 +22,7 @@ from secscan.grants.service import ScopeGrantService
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
-from secscan.scans.queue import Launch, Progress, QueueOperations, ScanQueue
+from secscan.scans.queue import EgressScope, Launch, Progress, QueueOperations, ScanQueue
 from tests.integration.api_support import DEFAULT_SECRET, LAB, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 from tests.integration.locks import Race, wait_until_waiting_for_a_lock
@@ -103,6 +103,22 @@ def test_launch_records_the_container_and_returns_the_sealed_secret(
     )
 
 
+def test_launch_carries_the_grant_scope_for_the_guard(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    """gate 剛以 FOR SHARE 確認過的 grant：guard 的 policy 以它產生（docs/DECISIONS.md §15.7）。"""
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.egress == EgressScope(
+        origin=scannable.target.origin,
+        scope=scannable.grant.scope,
+        valid_until=scannable.grant.window.valid_until,
+    )
+
+
 def test_an_anonymous_scan_has_no_secret(
     queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
@@ -125,6 +141,7 @@ def test_a_cancelled_scan_gets_no_container(
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
 
     assert launch == Launch(Progress(R.CANCELLING, S.CANCELLING), launch.max_duration_seconds, None)
+    assert launch.egress is None
     assert _run(queue_seed, lease.run_id).container_name is None
 
 
@@ -142,6 +159,7 @@ def test_a_refused_gate_gets_no_container_nor_secret(
 
     assert launch.progress == Progress(R.FAILED, S.FAILED)
     assert launch.secret is None
+    assert launch.egress is None
     run = _run(queue_seed, lease.run_id)
     assert (run.error_code, run.container_name, run.image_ref) == ("SCOPE_REVOKED", None, None)
 
@@ -170,6 +188,7 @@ def test_a_superseded_version_gets_no_secret(
 
     assert launch.progress == Progress(R.FAILED, S.FAILED)
     assert launch.secret is None
+    assert launch.egress is None
     assert _run(queue_seed, lease.run_id).error_code == RunErrorCode.AUTH_PROFILE_SUPERSEDED
 
 

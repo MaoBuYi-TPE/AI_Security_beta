@@ -106,6 +106,9 @@ class RunErrorCode(StrEnum):
     ARTIFACT_REJECTED = "ARTIFACT_REJECTED"
     RUNNER_STOPPED = "RUNNER_STOPPED"
     WORKSPACE_UNAVAILABLE = "WORKSPACE_UNAVAILABLE"
+    # egress guard（docs/DECISIONS.md §15.8）：啟動之前不可用 → failed；執行中中斷、重啟或續約失敗
+    # → interrupted。
+    GUARD_UNAVAILABLE = "GUARD_UNAVAILABLE"
 
 
 # runner 啟動前重新判斷 gate（§10.6）不通過的原因。grant 不屬於這個 target、origin 不在範圍內，

@@ -6,7 +6,7 @@
 import pytest
 
 from secscan.runner.domain.runtime import EngineVersion, NetworkState
-from secscan.runner.probe import probe
+from secscan.runner.probe import probe, require_guard
 from secscan.scanners.domain.fake import FAKE_IMAGE
 from secscan.scanners.domain.instances import CapabilityIssue, EngineCapability
 from secscan.scans.domain.catalog import Engine
@@ -86,3 +86,25 @@ def test_volumes_the_runner_cannot_write_make_engines_unavailable() -> None:
     [capability] = probe(FakeContainerRuntime(), POLICY, volumes_writable=False).engines
 
     assert capability.issue is CapabilityIssue.RUN_VOLUME_NOT_WRITABLE
+
+
+# --- egress guard（docs/DECISIONS.md §15.7）------------------------------------------------
+
+
+def test_an_unavailable_guard_makes_every_ready_engine_unavailable() -> None:
+    ready = probe(FakeContainerRuntime(), POLICY)
+
+    assert require_guard(ready, available=True) == ready
+    [capability] = require_guard(ready, available=False).engines
+    assert capability.issue is CapabilityIssue.GUARD_UNAVAILABLE
+    assert require_guard(ready, available=False).available_engines == frozenset()
+
+
+def test_other_problems_are_reported_before_the_guard() -> None:
+    runtime = FakeContainerRuntime()
+    runtime.failing.add("version")
+    broken = probe(runtime, POLICY)
+
+    [capability] = require_guard(broken, available=False).engines
+
+    assert capability.issue is CapabilityIssue.DOCKER_UNAVAILABLE

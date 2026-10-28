@@ -2,7 +2,8 @@
 
 - runs volume：`<run_id>/in`（runner 寫入的輸入檔，容器唯讀）、`<run_id>/out`（容器可寫）、
   `<run_id>/manifest.json`（runner 收集後寫入，在 out/ 之外，容器改不到）。
-- secrets volume：`<run_id>/target-auth`（0400），只有 runner 與該 run 的容器掛載；worker 永遠不掛。
+- secrets volume：`<run_id>/proxy-url`（guard 的帳密）與有認證時的 `<run_id>/target-auth`
+  （都是 0400），只有 runner 與該 run 的容器掛載；worker 永遠不掛。
 - 收集在容器刪除之後進行，以 dir fd 加 O_NOFOLLOW 走過 out/：只接受一般檔案，不跟隨任何 symlink。
   runner 掛著整個 runs 與 secrets volume，跟著工具建立的 symlink 就會讀到其他 run 的資料。
 - out/ 沒有磁碟配額：容器執行中，runner 以同樣的走訪（只 lstat、不開檔）檢查用量，超過就停止容器。
@@ -18,13 +19,13 @@ import os
 import shutil
 import stat
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from secscan.runner.domain.admission import SECRET_FILE
+from secscan.runner.domain.admission import SECRET_FILES
 from secscan.scanners.domain.plan import InputFile
 
 MANIFEST_FILE = "manifest.json"
@@ -131,8 +132,12 @@ class Workspace:
         except OSError as exc:
             raise WorkspaceError(f"無法建立工作目錄（{_reason(exc)}）") from None
 
-    def write_secret(self, run_id: UUID, value: str) -> None:
-        """target 的 secret 寫成 0400 的檔案；已經存在就拒絕（不覆寫）。失敗時不留下任何東西。"""
+    def write_secrets(self, run_id: UUID, files: Mapping[str, str]) -> None:
+        """把 run 的 secret 檔（proxy-url、target-auth）寫成 0400 的檔案；目錄只建立一次，已經存在就
+        拒絕（不覆寫）。全部成功，或什麼都不留下。
+        """
+        if not files or not set(files) <= SECRET_FILES:
+            raise WorkspaceError("只能寫入已知的 secret 檔")
         secret_dir = self._secrets / str(run_id)
         try:
             secret_dir.mkdir(mode=_PRIVATE_DIR)
@@ -142,15 +147,18 @@ class Workspace:
             raise WorkspaceError(f"無法寫入 secret（{_reason(exc)}）") from None
         try:
             secret_dir.chmod(_PRIVATE_DIR)
-            _write_new(secret_dir / SECRET_FILE, value.encode("utf-8"))
+            for name, value in files.items():
+                _write_new(secret_dir / name, value.encode("utf-8"))
         except OSError as exc:
-            self.discard_secret(run_id)
+            self.discard_secrets(run_id)
             raise WorkspaceError(f"無法寫入 secret（{_reason(exc)}）") from None
 
-    def discard_secret(self, run_id: UUID) -> None:
+    def discard_secrets(self, run_id: UUID) -> None:
+        """刪除 run 的每一個 secret 檔與目錄；不存在也算成功。"""
         secret_dir = self._secrets / str(run_id)
         try:
-            (secret_dir / SECRET_FILE).unlink(missing_ok=True)
+            for name in SECRET_FILES:
+                (secret_dir / name).unlink(missing_ok=True)
             secret_dir.rmdir()
         except FileNotFoundError:
             return

@@ -92,11 +92,20 @@ def test_only_the_run_directories_are_mounted() -> None:
             "ReadOnly": False,
             "VolumeOptions": {"Subpath": f"{RUN_ID}/out", "NoCopy": True},
         },
+        {
+            "Type": "volume",
+            "Source": "secscan_run_secrets",
+            "Target": "/scan/secret",
+            "ReadOnly": True,
+            "VolumeOptions": {"Subpath": str(RUN_ID), "NoCopy": True},
+        },
     ]
 
 
-def test_the_secret_is_mounted_read_only_when_the_scan_authenticates() -> None:
-    mounts = _body(target_auth=True)["HostConfig"]["Mounts"]
+@pytest.mark.parametrize("target_auth", [False, True])
+def test_the_secret_directory_is_always_mounted_read_only(target_auth: bool) -> None:
+    """每個容器都有 proxy-url（docs/DECISIONS.md §15.7）；target-auth 只在有認證時才有。"""
+    mounts = _body(target_auth=target_auth)["HostConfig"]["Mounts"]
 
     assert mounts[-1] == {
         "Type": "volume",
@@ -221,15 +230,10 @@ _UNSAFE: dict[str, Callable[[Body], None]] = {
     "copy_on_mount": lambda body: body["HostConfig"]["Mounts"][0]["VolumeOptions"].update(
         NoCopy=False
     ),
-    "secret_without_auth": _add_mount(
-        {
-            "Type": "volume",
-            "Source": "secscan_run_secrets",
-            "Target": "/scan/secret",
-            "ReadOnly": True,
-            "VolumeOptions": {"Subpath": str(RUN_ID), "NoCopy": True},
-        }
-    ),
+    "writable_secret": _mount(2, "ReadOnly", False),
+    "other_runs_secret": _subpath(2, "00000000-0000-4000-8000-000000000000"),
+    "secret_volume_root": _subpath(2, ""),
+    "secret_missing": _drop_mount(2),
     "duplicate_mount": lambda body: body["HostConfig"]["Mounts"].append(
         copy.deepcopy(body["HostConfig"]["Mounts"][0])
     ),
@@ -259,13 +263,14 @@ def test_unsafe_bodies_are_refused(name: str) -> None:
     assert caught.value.reason is PlanRejection.UNSAFE_CONTAINER
 
 
-def test_the_secret_mount_is_required_when_the_scan_authenticates() -> None:
-    body = _body(target_auth=True)
+@pytest.mark.parametrize("target_auth", [False, True])
+def test_the_secret_mount_is_always_required(target_auth: bool) -> None:
+    body = _body(target_auth=target_auth)
     del body["HostConfig"]["Mounts"][-1]
     spec = ContainerSpec(name=container_name(RUN_ID), body=body)
 
     with pytest.raises(PlanRejectedError):
-        check_container_spec(spec, plan=AUTH_PLAN, policy=POLICY)
+        check_container_spec(spec, plan=AUTH_PLAN if target_auth else PLAN, policy=POLICY)
 
 
 def test_the_name_must_match_the_run() -> None:

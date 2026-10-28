@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 
+from secscan.runner.domain.admission import PROXY_FILE, SECRET_FILE
 from secscan.runner.workspace import (
     MANIFEST_FILE,
     ArtifactIssue,
@@ -82,7 +83,7 @@ def test_the_secret_is_a_read_only_file_in_its_own_volume(
     workspace: Workspace, dirs: tuple[Path, Path]
 ) -> None:
     workspace.prepare(RUN, ())
-    workspace.write_secret(RUN, "Bearer canary-0001")
+    workspace.write_secrets(RUN, {SECRET_FILE: "Bearer canary-0001"})
 
     secret_dir = dirs[1] / str(RUN)
     secret = secret_dir / "target-auth"
@@ -97,19 +98,70 @@ def test_the_secret_is_a_read_only_file_in_its_own_volume(
 
 
 def test_a_secret_is_never_overwritten(workspace: Workspace) -> None:
-    workspace.write_secret(RUN, "first")
+    workspace.write_secrets(RUN, {SECRET_FILE: "first"})
 
     with pytest.raises(WorkspaceError):
-        workspace.write_secret(RUN, "second")
+        workspace.write_secrets(RUN, {SECRET_FILE: "second"})
 
 
 def test_discarding_the_secret_removes_it_and_is_idempotent(
     workspace: Workspace, dirs: tuple[Path, Path]
 ) -> None:
-    workspace.write_secret(RUN, "value")
+    workspace.write_secrets(RUN, {SECRET_FILE: "value"})
 
-    workspace.discard_secret(RUN)
-    workspace.discard_secret(RUN)
+    workspace.discard_secrets(RUN)
+    workspace.discard_secrets(RUN)
+
+    assert list(dirs[1].iterdir()) == []
+
+
+def test_the_proxy_url_and_the_target_secret_share_the_run_directory(
+    workspace: Workspace, dirs: tuple[Path, Path]
+) -> None:
+    workspace.write_secrets(RUN, {PROXY_FILE: "http://run:token@guard:8080", SECRET_FILE: "x"})
+
+    secret_dir = dirs[1] / str(RUN)
+    assert sorted(path.name for path in secret_dir.iterdir()) == [PROXY_FILE, SECRET_FILE]
+    assert {_mode(path) for path in secret_dir.iterdir()} == {0o400}
+
+
+def test_discarding_removes_every_secret_file(
+    workspace: Workspace, dirs: tuple[Path, Path]
+) -> None:
+    """T10 只刪 target-auth：多一個檔案時 rmdir 失敗，目錄就留下來了（修正的回歸測試）。"""
+    workspace.write_secrets(RUN, {PROXY_FILE: "proxy", SECRET_FILE: "x"})
+
+    workspace.discard_secrets(RUN)
+
+    assert list(dirs[1].iterdir()) == []
+
+
+@pytest.mark.parametrize("files", [{}, {"other": "x"}, {PROXY_FILE: "x", "../escape": "y"}])
+def test_only_known_secret_files_can_be_written(
+    workspace: Workspace, dirs: tuple[Path, Path], files: dict[str, str]
+) -> None:
+    with pytest.raises(WorkspaceError):
+        workspace.write_secrets(RUN, files)
+
+    assert list(dirs[1].iterdir()) == []
+
+
+def test_a_failure_on_the_second_file_leaves_nothing_behind(
+    workspace: Workspace, dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = os.write
+    calls: list[int] = []
+
+    def second_fails(descriptor: int, data: bytes) -> int:
+        calls.append(descriptor)
+        if len(calls) > 1:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(os, "write", second_fails)
+
+    with pytest.raises(WorkspaceError):
+        workspace.write_secrets(RUN, {PROXY_FILE: "proxy", SECRET_FILE: "canary-0001"})
 
     assert list(dirs[1].iterdir()) == []
 
@@ -118,7 +170,7 @@ def test_sweeping_removes_secrets_left_by_a_previous_runner(
     workspace: Workspace, dirs: tuple[Path, Path]
 ) -> None:
     for _ in range(3):
-        workspace.write_secret(uuid4(), "left over")
+        workspace.write_secrets(uuid4(), {SECRET_FILE: "left over"})
     (dirs[1] / "stray").write_bytes(b"x")
     (dirs[1] / "link").symlink_to(dirs[0])
 
@@ -181,7 +233,7 @@ def test_a_symlink_to_another_runs_secret_is_not_followed(
     workspace: Workspace, dirs: tuple[Path, Path]
 ) -> None:
     other = uuid4()
-    workspace.write_secret(other, "canary-other-run")
+    workspace.write_secrets(other, {SECRET_FILE: "canary-other-run"})
     out = _prepared(workspace, dirs)
     (out / "steal").symlink_to(dirs[1] / str(other) / "target-auth")
 
@@ -464,7 +516,7 @@ def test_an_unwritable_secrets_volume_is_a_workspace_error(
 ) -> None:
     for _ in _read_only(dirs[1]):
         with pytest.raises(WorkspaceError) as caught:
-            workspace.write_secret(RUN, "canary-0001")
+            workspace.write_secrets(RUN, {SECRET_FILE: "canary-0001"})
 
     assert str(dirs[1]) not in str(caught.value)
     assert "canary" not in str(caught.value)
@@ -479,7 +531,7 @@ def test_a_full_disk_while_writing_the_secret_leaves_nothing_behind(
     monkeypatch.setattr(os, "write", full)
 
     with pytest.raises(WorkspaceError):
-        workspace.write_secret(RUN, "canary-0001")
+        workspace.write_secrets(RUN, {SECRET_FILE: "canary-0001"})
 
     assert list(dirs[1].iterdir()) == []
 
@@ -494,7 +546,7 @@ def test_short_writes_are_completed(
 
     monkeypatch.setattr(os, "write", one_byte)
 
-    workspace.write_secret(RUN, "Bearer canary-0001")
+    workspace.write_secrets(RUN, {SECRET_FILE: "Bearer canary-0001"})
 
     assert (dirs[1] / str(RUN) / "target-auth").read_text(encoding="utf-8") == "Bearer canary-0001"
 
@@ -622,10 +674,10 @@ def test_io_errors_while_walking_are_unreadable(
 def test_a_secret_that_cannot_be_deleted_is_a_workspace_error(
     workspace: Workspace, dirs: tuple[Path, Path]
 ) -> None:
-    workspace.write_secret(RUN, "canary-0001")
+    workspace.write_secrets(RUN, {SECRET_FILE: "canary-0001"})
     for _ in _read_only(dirs[1] / str(RUN)):
         with pytest.raises(WorkspaceError) as caught:
-            workspace.discard_secret(RUN)
+            workspace.discard_secrets(RUN)
 
     assert "canary" not in str(caught.value)
     assert str(dirs[1]) not in str(caught.value)

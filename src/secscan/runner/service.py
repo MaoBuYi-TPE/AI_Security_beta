@@ -4,6 +4,9 @@
 - prepare_launch 先在 DB 記下容器與映像，才呼叫 create（之後的對帳一定找得到它）。
 - target 的 secret 在建立容器之前才解密（整個專案只有這裡呼叫 reveal），寫成 0400 的檔案、唯讀掛進
   容器；容器與 secret 在 finally 中刪除：任何結果、任何例外都一樣（審查後補上）。
+- egress guard（docs/DECISIONS.md §15.7）：guard 不可用就不建立容器；建立之前寫好 policy、發給容器
+  proxy-url；每次 DB 心跳成功之後續約。每條停止的路徑都先封鎖 guard；容器確認刪除之後才刪 policy。
+  執行中 guard 中斷、重啟或續約失敗 → interrupted。
 - 監看時每秒查一次容器的狀態與 out/ 的用量，啟動後立刻、之後每 5 秒心跳一次：要求取消就停止容器
   → cancelled；超過時間上限 → timed_out；out/ 超過上限 → failed；lease 失效就停止容器並放手
   （無法 fencing）；runner 要停止 → interrupted。查不到容器的狀態時重試，連續失敗才放棄。
@@ -17,18 +20,34 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from uuid import UUID
 
 from secscan.auth_profiles.domain.model import StoredSecret
-from secscan.runner.domain.admission import ContainerSpec, PlanRejectedError, build_container
+from secscan.runner.domain.admission import (
+    PROXY_FILE,
+    SECRET_FILE,
+    ContainerSpec,
+    PlanRejectedError,
+    build_container,
+)
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.runner.domain.runtime import ContainerRuntime, ContainerState, RuntimeUnavailableError
+from secscan.runner.egress import GuardEndpoint, RunEgress
+from secscan.runner.guard import GuardChannel, GuardUnavailableError
 from secscan.runner.workspace import ArtifactRejectedError, Workspace, WorkspaceError
 from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript, plan_fake_run
 from secscan.scanners.domain.plan import ExecutionPlan, ImageReference
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.model import Lease
-from secscan.scans.queue import HEARTBEAT_INTERVAL, Launch, LeaseLostError, RunReport, ScanQueue
+from secscan.scans.queue import (
+    HEARTBEAT_INTERVAL,
+    LEASE_DURATION,
+    EgressScope,
+    LeaseLostError,
+    RunReport,
+    ScanQueue,
+)
 from secscan.security.secret_cipher import SecretCipher, SecretUnreadableError
 
 logger = logging.getLogger(__name__)
@@ -50,15 +69,24 @@ class _Ending(StrEnum):
     STOPPED = "stopped"
     REJECTED = "rejected"
     LOST = "lost"
+    GUARD_LOST = "guard_lost"
 
 
 # 容器可能還在執行的結果：要確認容器已刪除，才能宣稱已停止。
 _NEEDS_REMOVAL = frozenset(
-    {_Ending.CANCELLED, _Ending.TIMED_OUT, _Ending.STOPPED, _Ending.REJECTED, _Ending.LOST}
+    {
+        _Ending.CANCELLED,
+        _Ending.TIMED_OUT,
+        _Ending.STOPPED,
+        _Ending.REJECTED,
+        _Ending.LOST,
+        _Ending.GUARD_LOST,
+    }
 )
 
 
-# 容器被 runner 停止的結果，以及 run 要轉到的狀態。
+# 容器被 runner 停止的結果，以及 run 要轉到的狀態。guard 中斷和 Docker 中斷一樣是基礎設施的問題：
+# 已經送出的流量無法確認，標成 interrupted（不當成零告警）。
 _STOPPED_ENDINGS: Mapping[_Ending, tuple[RunStatus, RunErrorCode | None]] = MappingProxyType(
     {
         _Ending.CANCELLED: (RunStatus.CANCELLED, None),
@@ -66,6 +94,7 @@ _STOPPED_ENDINGS: Mapping[_Ending, tuple[RunStatus, RunErrorCode | None]] = Mapp
         _Ending.STOPPED: (RunStatus.INTERRUPTED, RunErrorCode.RUNNER_STOPPED),
         _Ending.REJECTED: (RunStatus.FAILED, RunErrorCode.ARTIFACT_REJECTED),
         _Ending.LOST: (RunStatus.INTERRUPTED, RunErrorCode.RUNTIME_UNAVAILABLE),
+        _Ending.GUARD_LOST: (RunStatus.INTERRUPTED, RunErrorCode.GUARD_UNAVAILABLE),
     }
 )
 
@@ -75,6 +104,16 @@ class _Outcome:
     ending: _Ending
     state: ContainerState | None = None
     error_code: RunErrorCode | None = None
+
+
+@dataclass(slots=True)
+class _Attempt:
+    """執行中的一個 run：容器名稱，以及開始之後才有的出站設定與 guard 的 boot_id。"""
+
+    lease: Lease
+    name: str
+    egress: RunEgress | None = None
+    boot_id: UUID | None = None
 
 
 class _SecretUnavailableError(Exception):
@@ -92,11 +131,14 @@ class ContainerRunner:
         policy: ContainerPolicy,
         script: FakeScript,
         cipher: SecretCipher | None,
+        guard: GuardChannel,
+        endpoint: GuardEndpoint,
         engine_policies: Mapping[Engine, EnginePolicy] = ENGINE_POLICIES,
         stop_requested: Callable[[], bool] = lambda: False,
         on_heartbeat: Callable[[], None] = lambda: None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._queue = queue
         self._runtime = runtime
@@ -105,17 +147,21 @@ class ContainerRunner:
         self._policy = policy
         self._script = script
         self._cipher = cipher
+        self._guard = guard
+        self._endpoint = endpoint
         self._engine_policies = engine_policies
         self._stop_requested = stop_requested
         self._on_heartbeat = on_heartbeat
         self._sleep = sleep
         self._monotonic = monotonic
+        self._clock = clock
 
     def run_once(self, engines: Collection[Engine]) -> RunReport | None:
         """處理一個排隊中的 run；沒有工作時回 None。
 
         lease 失效時拋 LeaseLostError；無法確認容器已停止時拋 RuntimeUnavailableError（run 留給
-        T13 的容器對帳）。兩種情形，以及任何未預期的例外，都已盡力刪除容器與 secret。
+        T13 的容器對帳）。兩種情形，以及任何未預期的例外，都已盡力刪除容器與 secret，guard 的
+        policy 保持 blocked。
         """
         if not engines:
             return None
@@ -129,45 +175,110 @@ class ContainerRunner:
         launch = self._queue.prepare_launch(lease, image_ref=str(image))
         if launch.progress.run_status is RunStatus.CANCELLING:
             return self._advance(lease, RunStatus.CANCELLED)
-        if launch.progress.run_status is not RunStatus.RUNNING:
+        if launch.progress.run_status is not RunStatus.RUNNING or launch.egress is None:
             return RunReport.of(lease, launch.progress)
         try:
-            plan = self._plan(lease, launch)
+            plan = self._plan(lease, launch.secret is not None, launch.max_duration_seconds)
             spec = build_container(plan, policy=self._policy, engines=self._engine_policies)
         except PlanRejectedError as exc:
             logger.warning("ExecutionPlan 被拒絕：run %s，%s", lease.run_id, exc.reason.value)
             return self._fail(lease, RunErrorCode.PLAN_REJECTED)
-        return self._execute(lease, launch, plan, spec)
+        return self._execute(_Attempt(lease, spec.name), launch.secret, launch.egress, plan, spec)
 
-    def _plan(self, lease: Lease, launch: Launch) -> ExecutionPlan:
+    def _plan(self, lease: Lease, target_auth: bool, max_duration_seconds: int) -> ExecutionPlan:
         return plan_fake_run(
             run_id=lease.run_id,
             scan_id=lease.scan_id,
             script=self._script,
-            target_auth=launch.secret is not None,
-            max_duration_seconds=launch.max_duration_seconds,
+            target_auth=target_auth,
+            max_duration_seconds=max_duration_seconds,
         )
 
     def _execute(
-        self, lease: Lease, launch: Launch, plan: ExecutionPlan, spec: ContainerSpec
+        self,
+        attempt: _Attempt,
+        secret: StoredSecret | None,
+        egress: EgressScope,
+        plan: ExecutionPlan,
+        spec: ContainerSpec,
     ) -> RunReport:
         try:
-            outcome = self._start(lease, launch.secret, plan, spec)
+            outcome = self._start(attempt, secret, egress, plan, spec)
             if outcome is None:
-                outcome = self._supervise(lease, spec.name, plan.limits.wall_clock_seconds)
+                outcome = self._supervise(attempt, plan.limits.wall_clock_seconds)
         finally:
-            removed = self._cleanup(lease, spec.name)
+            removed = self._cleanup(attempt)
         if outcome.ending in _NEEDS_REMOVAL and not removed:
             raise RuntimeUnavailableError("無法確認容器已停止：run 留給對帳")
-        return self._conclude(lease, outcome)
+        return self._conclude(attempt.lease, outcome)
+
+    # --- 啟動 ---------------------------------------------------------------------------------
 
     def _start(
-        self, lease: Lease, secret: StoredSecret | None, plan: ExecutionPlan, spec: ContainerSpec
+        self,
+        attempt: _Attempt,
+        secret: StoredSecret | None,
+        egress: EgressScope,
+        plan: ExecutionPlan,
+        spec: ContainerSpec,
     ) -> _Outcome | None:
-        """寫入 secret 與輸入檔、建立並啟動容器；失敗時回傳原因（還沒有任何流量）。"""
+        """guard 可用 → 心跳 → secret 與輸入檔 → policy → 建立並啟動容器；失敗時回傳原因（還沒有
+        任何流量）。
+        """
+        admitted = self._admit(attempt, egress, plan.limits.wall_clock_seconds)
+        if isinstance(admitted, _Outcome):
+            return admitted
+        attempt.egress = admitted
+        outcome = self._provision(attempt.lease, admitted, secret, plan)
+        if outcome is not None:
+            return outcome
         try:
+            self._runtime.create(spec)
+            self._runtime.start(spec.name)
+        except RuntimeUnavailableError as exc:
+            logger.warning("無法啟動容器：run %s，%s", attempt.lease.run_id, exc)
+            return _Outcome(_Ending.NOT_STARTED, error_code=RunErrorCode.RUNTIME_UNAVAILABLE)
+        return None
+
+    def _admit(
+        self, attempt: _Attempt, egress: EgressScope, wall_clock_seconds: int
+    ) -> _Outcome | RunEgress:
+        """guard 可用、lease 仍有效、沒有要求取消，才產生這個 run 的出站設定。"""
+        lease = attempt.lease
+        health = self._guard.health()
+        if not health.available:
+            issue = health.issue.value if health.issue is not None else "?"
+            logger.warning("egress guard 不可用（%s）：run %s 不啟動", issue, lease.run_id)
+            return _Outcome(_Ending.NOT_STARTED, error_code=RunErrorCode.GUARD_UNAVAILABLE)
+        now = self._clock()
+        renew_until = now + LEASE_DURATION.total_seconds()
+        heartbeat = self._queue.heartbeat(lease)
+        self._on_heartbeat()
+        if not heartbeat.valid:
+            raise LeaseLostError("lease 已過期：沒有建立容器")
+        if heartbeat.cancel_requested:
+            self._queue.advance(lease, RunStatus.CANCELLING)
+            return _Outcome(_Ending.CANCELLED)
+        attempt.boot_id = health.boot_id
+        return RunEgress.open(
+            self._guard,
+            lease=lease,
+            egress=egress,
+            endpoint=self._endpoint,
+            now=now,
+            wall_clock_seconds=wall_clock_seconds,
+            renew_until=renew_until,
+        )
+
+    def _provision(
+        self, lease: Lease, egress: RunEgress, secret: StoredSecret | None, plan: ExecutionPlan
+    ) -> _Outcome | None:
+        """secret 檔（proxy-url、target-auth）、輸入檔，最後是 guard 的 policy。"""
+        try:
+            files = {PROXY_FILE: egress.proxy_url}
             if secret is not None:
-                self._workspace.write_secret(lease.run_id, self._reveal(secret))
+                files[SECRET_FILE] = self._reveal(secret)
+            self._workspace.write_secrets(lease.run_id, files)
             self._workspace.prepare(lease.run_id, plan.inputs)
         except _SecretUnavailableError:
             return _Outcome(_Ending.NOT_STARTED, error_code=RunErrorCode.SECRET_UNAVAILABLE)
@@ -175,11 +286,10 @@ class ContainerRunner:
             logger.error("工作目錄不可用：run %s，%s", lease.run_id, exc)
             return _Outcome(_Ending.NOT_STARTED, error_code=RunErrorCode.WORKSPACE_UNAVAILABLE)
         try:
-            self._runtime.create(spec)
-            self._runtime.start(spec.name)
-        except RuntimeUnavailableError as exc:
-            logger.warning("無法啟動容器：run %s，%s", lease.run_id, exc)
-            return _Outcome(_Ending.NOT_STARTED, error_code=RunErrorCode.RUNTIME_UNAVAILABLE)
+            egress.activate()
+        except GuardUnavailableError as exc:
+            logger.error("無法寫入 guard 的 policy：run %s，%s", lease.run_id, exc)
+            return _Outcome(_Ending.NOT_STARTED, error_code=RunErrorCode.GUARD_UNAVAILABLE)
         return None
 
     def _reveal(self, secret: StoredSecret) -> str:
@@ -191,7 +301,9 @@ class ContainerRunner:
         except SecretUnreadableError:
             raise _SecretUnavailableError from None
 
-    def _supervise(self, lease: Lease, name: str, wall_clock_seconds: int) -> _Outcome:
+    # --- 監看 ---------------------------------------------------------------------------------
+
+    def _supervise(self, attempt: _Attempt, wall_clock_seconds: int) -> _Outcome:
         started = self._monotonic()
         # 啟動後立刻心跳一次：lease 從認領起算，建立與啟動容器可能花掉不少時間（審查發現）。
         last_beat = started - HEARTBEAT_INTERVAL.total_seconds()
@@ -200,13 +312,14 @@ class ContainerRunner:
             now = self._monotonic()
             if now - last_beat >= HEARTBEAT_INTERVAL.total_seconds():
                 last_beat = now
-                if self._beat(lease, name):
-                    return _Outcome(_Ending.CANCELLED)
+                ending = self._beat(attempt)
+                if ending is not None:
+                    return _Outcome(ending)
             try:
-                outcome = self._step(lease, name, elapsed=now - started, limit=wall_clock_seconds)
+                outcome = self._step(attempt, elapsed=now - started, limit=wall_clock_seconds)
             except RuntimeUnavailableError as exc:
                 failures += 1
-                logger.warning("查不到容器 %s 的狀態（第 %d 次）：%s", name, failures, exc)
+                logger.warning("查不到容器 %s 的狀態（第 %d 次）：%s", attempt.name, failures, exc)
                 if failures >= MAX_STATE_FAILURES:
                     return _Outcome(_Ending.LOST)
                 outcome = None
@@ -216,59 +329,100 @@ class ContainerRunner:
                 return outcome
             self._sleep(POLL_SECONDS)
 
-    def _step(self, lease: Lease, name: str, *, elapsed: float, limit: int) -> _Outcome | None:
+    def _step(self, attempt: _Attempt, *, elapsed: float, limit: int) -> _Outcome | None:
         """查一次容器的狀態與 out/ 的用量；需要結束時停止容器並回傳結果。"""
-        state = self._runtime.state(name)
+        state = self._runtime.state(attempt.name)
         if state is None or not state.running:
             return _Outcome(_Ending.EXITED, state)
         if self._stop_requested():
-            return self._stopping(name, _Ending.STOPPED)
+            return self._stopping(attempt, _Ending.STOPPED)
         if elapsed >= limit:
-            return self._stopping(name, _Ending.TIMED_OUT)
+            return self._stopping(attempt, _Ending.TIMED_OUT)
         try:
-            self._workspace.check_output(lease.run_id)
+            self._workspace.check_output(attempt.lease.run_id)
         except (ArtifactRejectedError, WorkspaceError) as exc:
-            logger.warning("輸出超過上限：run %s，%s", lease.run_id, exc)
-            return self._stopping(name, _Ending.REJECTED)
+            logger.warning("輸出超過上限：run %s，%s", attempt.lease.run_id, exc)
+            return self._stopping(attempt, _Ending.REJECTED)
         return None
 
-    def _stopping(self, name: str, ending: _Ending) -> _Outcome:
-        self._stop(name)
+    def _stopping(self, attempt: _Attempt, ending: _Ending) -> _Outcome:
+        self._stop(attempt)
         return _Outcome(ending)
 
-    def _stop(self, name: str) -> None:
-        """停止容器；失敗時由之後的強制刪除處理（刪不掉就不宣稱已停止）。"""
+    def _stop(self, attempt: _Attempt) -> None:
+        """先封鎖 guard（容器之後送出的請求都被拒絕），再停止容器；停止失敗時由強制刪除處理。"""
+        self._block(attempt)
         try:
-            self._runtime.stop(name, grace_seconds=STOP_GRACE_SECONDS)
+            self._runtime.stop(attempt.name, grace_seconds=STOP_GRACE_SECONDS)
         except RuntimeUnavailableError as exc:
-            logger.warning("無法停止容器 %s（%s）：改由強制刪除處理", name, exc)
+            logger.warning("無法停止容器 %s（%s）：改由強制刪除處理", attempt.name, exc)
 
-    def _beat(self, lease: Lease, name: str) -> bool:
-        """延長 lease；回傳是否要求取消（是就先轉到 cancelling，再停止容器）。"""
+    def _block(self, attempt: _Attempt) -> None:
+        if attempt.egress is None:
+            return
+        try:
+            attempt.egress.block()
+        except GuardUnavailableError as exc:
+            # renew_until 仍會在 lease 到期時讓 guard 停止放行（dead-man switch）。
+            logger.error("無法封鎖 run %s 的 guard policy（%s）", attempt.lease.run_id, exc)
+
+    def _beat(self, attempt: _Attempt) -> _Ending | None:
+        """延長 lease 並續約 guard 的 policy；要求取消或 guard 失效時停止容器並回傳結果。"""
+        lease = attempt.lease
+        renew_until = self._clock() + LEASE_DURATION.total_seconds()
         heartbeat = self._queue.heartbeat(lease)
         self._on_heartbeat()
         if not heartbeat.valid:
-            self._stop(name)
+            self._stop(attempt)
             raise LeaseLostError("lease 已過期：已停止容器，交給對帳處理")
-        if not heartbeat.cancel_requested:
+        if heartbeat.cancel_requested:
+            # 取消：封鎖 guard → cancelling → 停止容器（docs/DECISIONS.md §15.7）。
+            self._block(attempt)
+            self._queue.advance(lease, RunStatus.CANCELLING)
+            self._stop(attempt)
+            return _Ending.CANCELLED
+        if not self._renewed(attempt, renew_until):
+            self._stop(attempt)
+            return _Ending.GUARD_LOST
+        return None
+
+    def _renewed(self, attempt: _Attempt, renew_until: float) -> bool:
+        """guard 仍可用、沒有重啟過（boot_id 相同），而且續約寫得出去。"""
+        health = self._guard.health()
+        if not health.available or health.boot_id != attempt.boot_id or attempt.egress is None:
+            logger.error("egress guard 中斷或重啟過：run %s 停止", attempt.lease.run_id)
             return False
-        # T11／T13：在停止容器之前，先把 guard 的 policy 改成 blocked。
-        self._queue.advance(lease, RunStatus.CANCELLING)
-        self._stop(name)
+        try:
+            attempt.egress.renew(renew_until)
+        except GuardUnavailableError as exc:
+            logger.error("無法續約 run %s 的 guard policy（%s）", attempt.lease.run_id, exc)
+            return False
         return True
 
-    def _cleanup(self, lease: Lease, name: str) -> bool:
-        """刪除容器與 secret；回傳容器是否確定已不存在（Docker 不可用時是 False）。"""
+    # --- 清理與結果 ---------------------------------------------------------------------------
+
+    def _cleanup(self, attempt: _Attempt) -> bool:
+        """封鎖 → 刪除容器 → 刪除 secret → 確認容器已刪除才刪 policy（否則保留 blocked）。
+
+        回傳容器是否確定已不存在（Docker 不可用時是 False）。
+        """
+        self._block(attempt)
+        run_id = attempt.lease.run_id
         try:
-            self._runtime.remove(name)
+            self._runtime.remove(attempt.name)
         except RuntimeUnavailableError as exc:
-            logger.error("無法刪除容器 %s（%s）：留給 T13 的對帳", name, exc)
+            logger.error("無法刪除容器 %s（%s）：留給 T13 的對帳", attempt.name, exc)
             return False
         finally:
             try:
-                self._workspace.discard_secret(lease.run_id)
+                self._workspace.discard_secrets(run_id)
             except WorkspaceError as exc:
-                logger.error("無法刪除 run %s 的 secret（%s）：下次啟動時清除", lease.run_id, exc)
+                logger.error("無法刪除 run %s 的 secret（%s）：下次啟動時清除", run_id, exc)
+        if attempt.egress is not None:
+            try:
+                attempt.egress.discard()
+            except GuardUnavailableError as exc:
+                logger.error("無法刪除 run %s 的 guard policy（%s）：下次啟動時清除", run_id, exc)
         return True
 
     def _conclude(self, lease: Lease, outcome: _Outcome) -> RunReport:
