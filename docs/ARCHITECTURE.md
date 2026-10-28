@@ -56,8 +56,11 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 | socket-proxy | docker_net | `/var/run/docker.sock`（唯讀） | 唯一接觸 Docker daemon 的服務 |
 | db | default（127.0.0.1:55432）、control_net | db_data | 保留 127.0.0.1 的 port 給 `make dev` 與 `make migrate` |
 | 掃描容器 | scan_net（`make scan-net` 建立：internal＋gateway isolated） | runs、run_secrets 的 subpath | 由 runner 建立，見 §4 |
+| guard（T11） | scan_net（10.89.8.254）、lab_net（10.89.7.254） | guard_policies（唯讀）、guard_status（tmpfs） | 官方 mitmproxy 映像＋我們的 addon；只聽 scan 那一側，不發布 port（`DECISIONS.md` §15） |
 
-全部非 root、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges`，並有記憶體與 pids 上限。`make dev` 仍在宿主執行 API（開發用），不具這樣的權限隔離。lab_net 與 egress guard 在 T11 接上。
+全部非 root、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges`，並有記憶體與 pids 上限。`make dev` 仍在宿主執行 API（開發用），不具這樣的權限隔離。
+
+**T11 已實作**（`DECISIONS.md` §15.6）：lab_net 與 scan_net 都由 Makefile 建立（`make lab-net`、`make scan-net`：internal、gateway isolated、固定網段、`--ip-range` 只配發下半段），compose 只以 external 引用。guard 固定在兩個網段的最後一個主機位址：guard 停機時，掃描容器也拿不到它的 IP。LAB_CIDR 的最後一個主機位址保留給 guard，target 與 grant 都不能用。runner 另外掛 guard_policies（讀寫）與 guard_status（唯讀）。
 
 ### 掃描容器
 
@@ -80,6 +83,7 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 
 - 在 scan_net 與 lab_net 之間轉送流量，不接 control_net。
 - policy 與 telemetry 都透過 volume 交換（§3.1），不經由網路連線。
+- **T11 已實作**（`DECISIONS.md` §15.1）：guard 以官方 mitmproxy 12.2.3 映像（digest 鎖定）執行，映像只 COPY guard 載入的模組（標準函式庫與純 domain）。啟動程式自己嵌入 mitmproxy：路由只有 scan 與 lab 兩條直連的路由 → 設定 options 並逐一讀回核對 → 最後才加入 addon；任何一步失敗都以非 0 結束，不會變成沒有檢查的 proxy。guard 不持有目標的 secret，policy 對它是唯讀的。
 
 ### 殘餘風險
 
@@ -92,6 +96,8 @@ runner 一旦被攻陷，就能透過 Docker API 影響整台開發機的容器�
 - 在應用層檢查。
 - 從接收端確認實際有沒有收到封包。
 
+**T11 的收包證據**（`tests/live/test_guard_live.py`、`test_guard_failover_live.py`）：接收端記下每一個 TCP accept；越界的請求（別的 origin、IP 的其他寫法、Host 不一致、redirect 之後的請求、DNS 改指向別的容器、排除的 path、不允許的 method、CONNECT、協定升級）都回 403／407，接收端與 canary 都沒有收到連線；掃描網路上的容器直連靶機、canary、guard 的 lab 位址都失敗，也解析不到外部名稱。
+
 Docker 文件指出 `internal: true` 仍會配 gateway 位址、容器可連宿主在該位址上的服務[S32]，因此 lab_net/scan_net 另加 `gateway_mode_ipv4: isolated`（不配 gateway）。T03 在 OrbStack 2.2.1 + Engine 29.4.0 上以 isolated + internal 實測：scan_net 容器連外部 IP 為 unreachable、連 `host.docker.internal` 解析不到，被 guard 擋下的請求也以 canary 證明未送達（見 `TOOLS.md` §3；未另做 internal-only 對照組）。M2 仍須以 egress guard 補齊 DNS/IP 綁定與 redirect 重檢，不以網路設定取代應用層檢查，且部署環境需重測。
 
 ## 3. Egress guard
@@ -103,7 +109,8 @@ guard 以 mitmproxy 的 addon/event 機制實作本專題的 scope、budget 與 
 - **辨識 run**：
   - runner 為每次 run 產生專屬的 proxy 帳密，掃描工具以 `http://<run_id>:<token>@guard:8080` 使用 proxy。
   - guard 驗證 `Proxy-Authorization` 後就移除這個 header，不轉送到上游。
-  - 無法辨識是哪個 run 的請求，一律拒絕。（實際的 header 處理方式在 M2 實測。）
+  - 無法辨識是哪個 run 的請求，一律拒絕。
+  - **T11 已實作**（`DECISIONS.md` §15.4）：token 每個 run 重新產生，policy 只存 sha256；掃描容器拿到 0400 的 `/scan/secret/proxy-url`（不在 env、argv、label、事件或 log）。帳密缺少或不符一律 407（附 `Proxy-Authenticate`，不透露 run 是否存在）；驗證之後刪除所有 `Proxy-*` header（實測：不刪會被轉送）。
 - **寫入 policy**：runner 在啟動容器前，以原子寫入（寫暫存檔後 rename）把該 run 的 policy 放進 policy volume，內容包括：
   - scope 快照
   - 允許的 IP
@@ -111,6 +118,7 @@ guard 以 mitmproxy 的 addon/event 機制實作本專題的 scope、budget 與 
   - 預算
   - 狀態
 - **讀取 policy**：guard 以唯讀方式掛載 policy volume，每個請求都檢查檔案是否有更新。
+- **T11 已實作**（`DECISIONS.md` §15.3）：policy 是每個 run 一個 `<run_id>.json`（schema 1），guard 嚴格解析（key 完全相符、canonical 寫法、以 Scope 重建）。`not_after` = min(grant 的期限, 啟動時間＋牆鐘上限)；`renew_until` 只在 DB 心跳成功之後延長 30 秒，runner 當掉時 guard 最晚在 lease 到期時停止放行（dead-man switch）。guard 每 5 秒寫 `status.json`（`boot_id`、listen、`enforcing`），runner 每一輪認領之前讀它。預算與 telemetry 在 T12。
 - **telemetry**：guard 把每個請求的決策與統計，以 JSONL 寫進 telemetry volume；worker 與 runner 以唯讀方式讀取。
 
 ### 3.2 每次實際出站必須處理
@@ -128,6 +136,8 @@ guard 以 mitmproxy 的 addon/event 機制實作本專題的 scope、budget 與 
 - CONNECT、SNI、Host/HTTP authority 與實際目的位址必須一致。
 - 每次 redirect 的下一個請求都要重新檢查，不能只核對起始 URL。[S13]
 
+**T11 已實作**（`DECISIONS.md` §15.5，順序固定、拒絕時不建立上游連線）：帳密與 policy → run 的狀態（blocked、過期、沒續約）→ 請求的形狀（header 的名稱與值、CONNECT、Upgrade、非 http、不可見字元、`#`）→ 改寫目的地的 header（`X-HTTP-Method-Override`、`X-Original-URL`、`Forwarded`、query 的 `_method`…，名稱中的 `_` 視同 `-`）→ authority（mitmproxy 解出的 host、port、scheme 與唯一的 Host 都必須和 origin 逐字相同）→ path 與 method（不正規化，`%`、`;`、`//`、`.`、`..` 一律拒絕；method 以轉送時的原始寫法比對）→ DNS（每一個答案都在 allowed_ips 與 LAB_CIDR 內）→ 綁定 IP、Host 寫回 canonical 的值。`request` 與 `server_connect` hook 再檢查一次；`response` hook 刪除靶機回應中的 `X-Secscan-Guard`（不能冒充 guard 的拒絕）；每個 hook 的例外都拒絕（mitmproxy 吞掉例外後會放行）。redirect 不改寫，跟隨之後的請求照同樣的順序檢查。
+
 P0 的限制：
 
 - 不跟隨外部 redirect、不抓外部 $ref、不處理 schema callback。
@@ -143,6 +153,7 @@ P0 的限制：
 - proxy 對上游仍要驗證憑證；自簽的靶場憑證需要明確設定 trust store，不用全域 skip verify。
 - mitmproxy 預設可能為了取得上游憑證，先建立上游連線。[S19] 啟動前要確認 lazy connection、關閉不必要的 upstream sniffing 等設定，並在建立任何上游 socket 之前通過 scope/IP 檢查；不能只等到 request hook 才檢查。
 - HTTPS guard/CA 測試還沒完成時，HTTPS profile 一律回「不支援」。禁止用隱藏關閉驗證的方式假裝相容。
+- **T11**：`connection_strategy=lazy`、`upstream_cert=false`、http2／http3／websocket／rawtcp 關閉、不 streaming，啟動時讀回核對（`DECISIONS.md` §15.2）；CONNECT 與 `https://` 一律拒絕。
 
 TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告中揭露代理對流量的影響：
 
@@ -170,6 +181,8 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 
 1. runner 先把 policy 狀態改為 blocked，guard 立即拒絕該 run 的所有請求。
 2. 再通知引擎，stop/kill 對應的容器。
+
+**T11 已實作**（`DECISIONS.md` §15.7）：取消是封鎖 → cancelling → stop；逾時、runner 停止、輸出超過上限、lease 失效、guard 中斷也都在停止容器之前先封鎖。容器確認刪除之後才刪 policy，刪不掉就保留 blocked。live 測試以掃描容器的 proxy-url 從探針送請求：取消之後 guard 在容器收到 kill 之前就開始回 `RUN_BLOCKED`。
 
 已經送到靶場的操作無法撤銷；靶場資料的重置由受控的 fixture 程序另外處理。
 
@@ -234,6 +247,10 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - 容器版的 prepare（`QueueOperations.prepare_launch`）在移到 running 的同一個 UPDATE 記下 `container_name` 與 `image_ref`，並以 `FOR SHARE` 讀出綁定版本的密文；runner 在建立容器前才解密（唯一的 `reveal` 呼叫者），寫成 0400 的檔案，容器刪除後立刻刪除。
   - 收集輸出在容器刪除之後，以 dir fd 加 `O_NOFOLLOW` 進行（`runner/workspace.py`）；runner 只計算 hash，不解析。
   - runner 與 worker 每 5 秒在 `runner_instances` 寫心跳（含 capability probe 的結果）；`GET /scanners` 依它顯示引擎是否可用。
+- **egress guard（T11，`DECISIONS.md` §15.9）**：
+  - 分層更新為 `… → scans → specs | auth_profiles | guard → grants → …`。`guard/` 是 mitmproxy 的 addon、policy 與 status 的格式；runner 以同一份格式寫 policy（`runner/guard.py`、`runner/egress.py`）。
+  - guard 在官方 mitmproxy 映像（Python 3.14）中執行：只能用標準函式庫與純 domain（新的 import-linter contract），不 import mitmproxy，flow 以 Protocol 描述；啟動程式 `deploy/guard/run_guard.py` 只負責接上 mitmproxy。單元測試確認 guard 載入的模組正好等於 guard 映像 COPY 的清單。
+  - 佇列在轉到 running 時帶回 gate 剛確認過的 grant 範圍（`EgressScope`）；guard 的 path、method 比對沿用 `ScopeRules`。
 - **DB 逾時（T09，`DECISIONS.md` §13.8）**：每個連線以 libpq 的 options 設定 `statement_timeout`、`lock_timeout`、`idle_in_transaction_session_timeout`；等鎖或查詢逾時回 503 加 `Retry-After`。
 
 建議介面（概念契約，不是已存在的程式）：
@@ -469,6 +486,12 @@ T09 已實作（`DECISIONS.md` §13.4）：
 - lease 失效或無法確認容器已停止時，runner 停止處理並刪除 secret，但無法 fencing，run 留在 running；有容器的 run 不被既有的對帳碰觸（lease 過期不代表容器已停止），由 T13 依 label 對帳。
 - `secscan-admin worker`：只把 lease 過期的 normalizing 退回 collected，再把 fake 的 collected 標成 succeeded。
 - in-process 的 `fake-runner` 保留；兩者都會認領 fake，擇一執行。
+
+**T11 已實作**（`DECISIONS.md` §15.7）：
+
+- runner 每一輪認領之前讀 guard 的 status；guard 不可用（過期、不再檢查、policy 目錄不可寫）就不認領，`GET /scanners` 顯示 `GUARD_UNAVAILABLE`。建立容器之前 guard 已不可用 → failed（`GUARD_UNAVAILABLE`），不建立容器。
+- 建立容器之前寫好 policy；每次 DB 心跳成功之後才續約 `renew_until`。執行中 guard 中斷、重啟（`boot_id` 改變）或續約寫不出去 → 封鎖、停止容器 → interrupted（`GUARD_UNAVAILABLE`）。
+- runner 被強制終止時，孤兒容器的 policy 不再續約：guard 最晚在 lease 到期時（30 秒）回 `POLICY_STALE`（live 測試以 SIGKILL 確認）。容器本身的回收與 run 的對帳仍在 T13。
 
 **取消的驗收目標**：
 

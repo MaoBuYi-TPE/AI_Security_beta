@@ -503,7 +503,7 @@ uv run secscan-admin create-admin-key --name "本機管理員" [--expires-in-day
 - `name` 1–100 字元（規則同 project 名稱）；`kind` 為 `web`、`api`、`hybrid`；`environment` 可省略，P0 只有 `lab`。
 - `base_url` 最長 256 字元，只能是 `http://主機[:port]`，結尾可以有一個 `/`：
   - canonical 形式：scheme 與主機轉小寫，省略 `:80`。
-  - 主機是名稱（英數字與連字號，每段 1–63 字元）或四段十進位的 IPv4。IPv4 必須是 `LAB_CIDR` 內的主機位址，否則 422 `SCOPE_OUTSIDE_LAB`。
+  - 主機是名稱（英數字與連字號，每段 1–63 字元）或四段十進位的 IPv4。IPv4 必須是 `LAB_CIDR` 內的主機位址，而且不是最後一個主機位址（保留給 egress guard，`DECISIONS.md` §15.6），否則 422 `SCOPE_OUTSIDE_LAB`。
   - 其他拒絕的情形見 `DECISIONS.md` §10.2，回 422 `INVALID_TARGET`；訊息說明原因，不回顯輸入。
 - 同一個 project 內 canonical origin 不可重複：409 `TARGET_ORIGIN_CONFLICT`。
 - 每個 project 最多 100 個 target：409 `QUOTA_EXCEEDED`（`DECISIONS.md` §10.9）。
@@ -562,7 +562,7 @@ uv run secscan-admin create-admin-key --name "本機管理員" [--expires-in-day
 | 欄位 | 規則 |
 |---|---|
 | `allowed_origins` | 1–4 個，規則同 §14.1 的 `base_url`；必須包含 target 的 origin。主機是 IP 的 origin，該 IP 必須列在 `allowed_ips` |
-| `allowed_ips` | 1–16 個，四段十進位的 IPv4 主機位址；`LAB_ONLY` 時必須在 `LAB_CIDR` 內，而且不是網段或廣播位址 |
+| `allowed_ips` | 1–16 個，四段十進位的 IPv4 主機位址；`LAB_ONLY` 時必須在 `LAB_CIDR` 內，而且不是網段、廣播或保留給 egress guard 的最後一個主機位址（T11） |
 | `allowed_paths` | 最多 256 個：完整的 literal path，或含整段 `{name}` 佔位的 route。不可有 `%`、`\`、`?`、`#`、`;`、`*`、空白、空段落或 `.`、`..` 段落，每個最長 512 字元。清單是空的時，必須設定 `allow_all_paths: true` |
 | `allow_all_paths` | 預設 false；true 時 `allowed_paths` 必須是空的 |
 | `excluded_paths` | 最多 64 個，語法同上；排除優先於允許，不可與 `allowed_paths` 重複 |
@@ -1031,6 +1031,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `ARTIFACT_REJECTED` | 輸出有 symlink、hardlink、特殊檔、讀不到的條目，或超過條目數、深度、大小的上限（執行中超過時容器會被停止）（T10） |
 | `RUNNER_STOPPED` | runner 被要求停止，已停止並刪除容器（`interrupted`，T10） |
 | `WORKSPACE_UNAVAILABLE` | runner 的工作目錄不可用（權限、磁碟滿），或寫不出收集的 manifest（T10） |
+| `GUARD_UNAVAILABLE` | egress guard 不可用（T11，`DECISIONS.md` §15.8）：建立容器之前（status 過期、不再檢查、寫不出 policy）→ `failed`；執行中 guard 中斷、重啟或續約失敗 → 封鎖、停止容器 → `interrupted` |
 
 ### 17.3 事件
 
@@ -1109,10 +1110,10 @@ uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-
 ```
 
 - 經 `RUNNER_DOCKER_URL`（預設 `tcp://socket-proxy:2375`）操作 Docker；compose 的 `runner` 服務以這個指令執行。
-- 啟動時刪除上一個 runner 留下的 secret、做 capability probe（§18.4）；只認領 probe 通過的引擎，probe 每 60 秒重做。
-- 每個 run：認領 → 重新判斷 gate、綁定的 profile 版本與建立者的 key（同 T09）→ 記下容器名稱 `secscan-run-<run_id>` 與映像 → 驗證 ExecutionPlan → 解密 target 的 secret（有 auth profile 時），寫成 0400 的檔案 → 建立並啟動容器 → 啟動後立刻、之後每 5 秒心跳，每秒查一次狀態與 out/ 的用量 → 結束之後收集輸出 → `collected`。容器與 secret 不論結果、不論例外都刪除。
+- 啟動時刪除上一個 runner 留下的 secret 與 guard 的 policy、做 capability probe（§18.4）；只認領 probe 通過的引擎，probe 每 60 秒重做。每一輪認領之前讀 egress guard 的 status（T11）：不可用時不認領。
+- 每個 run：認領 → 重新判斷 gate、綁定的 profile 版本與建立者的 key（同 T09）→ 記下容器名稱 `secscan-run-<run_id>` 與映像 → 驗證 ExecutionPlan → guard 可用、心跳 → 寫 `proxy-url` 與 target 的 secret（有 auth profile 時解密），都是 0400 的檔案 → 寫 guard 的 policy → 建立並啟動容器 → 啟動後立刻、之後每 5 秒心跳（成功之後續約 policy），每秒查一次狀態與 out/ 的用量 → 結束之後收集輸出 → `collected`。容器與 secret 不論結果、不論例外都刪除；容器確認刪除之後才刪 policy。
 - 查不到容器的狀態時重試，連續 3 次才放棄：已確認刪除容器時是 `interrupted`（`RUNTIME_UNAVAILABLE`），刪不掉就不轉換。out/ 超過上限時停止容器（`ARTIFACT_REJECTED`）。
-- 要求取消：轉到 `cancelling`、停止容器（SIGTERM，5 秒後 SIGKILL）、刪除容器 → `cancelled`。超過時間上限：`timed_out`（`TIME_LIMIT_EXCEEDED`）。收到 SIGTERM：停止並刪除容器 → `interrupted`（`RUNNER_STOPPED`）。
+- 要求取消：封鎖 guard 的 policy → 轉到 `cancelling` → 停止容器（SIGTERM，5 秒後 SIGKILL）、刪除容器 → `cancelled`。超過時間上限：`timed_out`（`TIME_LIMIT_EXCEEDED`）。收到 SIGTERM：停止並刪除容器 → `interrupted`（`RUNNER_STOPPED`）。每一條停止容器的路徑都先封鎖 guard（T11）。
 - lease 失效、或無法確認容器已停止：停止處理、刪除 secret，run 停在 `running`，由 T13 的容器對帳處理。
 - `--once`：最多處理一個 run。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。fake 的腳本預設依 `RUNNER_FAKE_OUTCOME`、`RUNNER_FAKE_HOLD_SECONDS`。
 
@@ -1151,5 +1152,5 @@ uv run secscan-admin worker [--once]
 ```
 
 - 引擎依執行順序列出（zap、nuclei、schemathesis、fake）。可用與否依「最近一個 30 秒內有心跳的 runner」回報的 capability probe。
-- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`RUN_VOLUME_NOT_WRITABLE`（runner 寫不進掛載的目錄）、`IMAGE_MISSING`（映像不在本機或架構不符）。
+- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`RUN_VOLUME_NOT_WRITABLE`（runner 寫不進掛載的目錄）、`IMAGE_MISSING`（映像不在本機或架構不符）、`GUARD_UNAVAILABLE`（egress guard 的 status 過期、不再檢查，或 policy 目錄不可寫；T11）。
 - `/api/v1/scan-profiles` 仍延到 M3（要依 ZAP 實際的設定調整 profile）。

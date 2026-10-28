@@ -22,10 +22,12 @@
 | wollomatic/socket-proxy（T10 加入） | 1.13.1 | sha256:3935b709275e… | MIT | 以 `65534:0` 執行（OrbStack VM 內 docker.sock 是 root:root 0660） | 可（scratch 映像） |
 | python（T10，secscan 映像的基底） | 3.12.15-slim-bookworm | sha256:6a0e06f5ba0b… | PSF-2.0 | secscan 映像以 10001 執行 | 可（`/tmp` 用 tmpfs） |
 | astral-sh/uv（T10，只在建置階段） | 0.13.1 | sha256:4a1f3666816d… | MIT／Apache-2.0 | — | — |
+| secscan-guard（T11，egress guard） | 基底 mitmproxy/mitmproxy 12.2.3（Python 3.14.5） | 基底 sha256:00b77b5d8804… | MIT（基底） | 10001（不用映像的 entrypoint，直接以 `python3 -I -B` 執行啟動程式） | 可（confdir 在 `/tmp` 的 tmpfs；映像宣告的 VOLUME 另掛空的 tmpfs） |
 
 - **tracecov**：schemathesis 映像預設 `SCHEMATHESIS_COVERAGE=true`，會載入 `tracecov`（PyPI 0.25.3，授權 `LicenseRef-TraceCov-Community-1.0`，**非 OSI**、限 Internal Use、會寫 `/app`）。本專題一律設 **`SCHEMATHESIS_COVERAGE=false`** 關閉，避免授權與唯讀 rootfs 問題。
 - **T10 的 busybox**：fake 引擎的掃描容器改以 `10001:10001`、唯讀 rootfs 執行 `/bin/sleep`／`/bin/false`（live 測試通過）。
 - **mitmproxy entrypoint**：預設 entrypoint 需 root（跑 `usermod` 再 `gosu`）。改以 `entrypoint: [mitmdump]` + `user: "1000:1000"` 直接啟動。
+- **T11 的 guard 映像**（`deploy/guard/Dockerfile`，`DECISIONS.md` §15.1）：FROM 上表的 mitmproxy digest，只 COPY guard 載入的 secscan 模組與 `run_guard.py`（屬於 root），以 10001 執行。`/home/mitmproxy` 是 0700、屬於 mitmproxy 使用者，10001 進不去，所以 confdir 改放 `/tmp/mitmproxy`。mitmproxy 自己在 `-W error` 下會因 pyparsing 的 DeprecationWarning 失敗（guard 不開 `-W error`；我們的模組在 3.14 以 `-W error` 載入沒有警告）。
 
 ## 2. Nuclei 模板
 

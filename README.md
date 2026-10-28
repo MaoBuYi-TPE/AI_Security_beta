@@ -42,7 +42,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成 M0、M1（T02–T09）與 M2 的 T10：
+目前完成 M0、M1（T02–T09）與 M2 的 T10、T11：
 - **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
 - **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
 - **T05**：平台 API key（DB 只存 hash、一定會過期、可撤銷）、project 與 object-level 權限、`/api/v1` 的 projects、keys 與稽核查詢端點，以及建立初始管理 key 的本機 CLI `secscan-admin`（見下方「平台 API key」與 `docs/API_CONTRACT.md` §13）。
@@ -54,7 +54,9 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 - **T10**：容器版的 runner 與 worker（`secscan-admin runner`／`worker`）、經 wollomatic socket-proxy 存取 Docker（只放行掃描容器需要的 API）、ExecutionPlan 的驗證與強化的單次容器、target secret 以 0400 檔注入、`GET /api/v1/scanners`，以及 api、runner、worker 的容器化（`make up`）與測試程序連不到 Docker 的隔離（見下方「app stack 與 runner」與 `docs/API_CONTRACT.md` §18）。
 
-還沒有正式的 Adapter 與 egress guard（T11 起）：scan 只能用 `fake` 引擎，它的容器不連任何位址，結果在回應中標為 `fixture: true`，不是真的掃描。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
+- **T11**：egress guard（官方 mitmproxy 映像加上我們的 addon）：每個 run 一組 proxy 帳密與 policy，逐請求檢查 origin、DNS／IP、path、method 與 redirect 之後的請求，拒絕時不建立上游連線；runner 在 guard 不可用時不認領、每條停止的路徑都先封鎖 guard；lab_net 與 scan_net 改由 Makefile 建立（見下方「egress guard」與 `docs/DECISIONS.md` §15）。
+
+還沒有正式的 Adapter（M3 起）：scan 只能用 `fake` 引擎，它的容器不連任何位址，結果在回應中標為 `fixture: true`，不是真的掃描。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
 ### 開發環境
 
@@ -247,16 +249,33 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **掃描容器**：每個 run 一個 `secscan-run-<run_id>`：核准的映像（digest 鎖定，runner 不 pull，`make images` 事先 pull）、uid 10001、唯讀、只接 scan_net、只掛該 run 的 volume subpath；有 auth profile 時 secret 是 `/scan/secret/target-auth`（0400，容器刪除後就刪除）。
 - **fake 的腳本**：`RUNNER_FAKE_OUTCOME=fail`、`RUNNER_FAKE_HOLD_SECONDS=30 make up`（容器停留 30 秒，可以試取消：5–6 秒內刪除容器）。
 - **in-process 的 fake-runner** 仍可在宿主使用（不需要 Docker）；它和容器版的 runner 都會認領 fake，擇一執行。
-- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-runner` 在獨立的 compose 專案（自己的 DB、網路與 volume，API 綁 127.0.0.1:8765）中建立、測試、一律拆除；不連 lab。需要 OrbStack。
+- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-runner` 在獨立的 compose 專案（自己的 DB、網路與 volume，API 綁 127.0.0.1:8765）中建立、測試、一律拆除；T11 起在 live 自己的 lab 網路（10.89.10.0/24）上啟動接收端，不啟動 Juice Shop、VAmPI。需要 OrbStack。
 - `secscan_scan_net` 與 T03 spike 的網路同名：執行 spike 前先 `make down`，並刪除這個網路。
 - 完整規則見 `docs/API_CONTRACT.md` §18，設計理由見 `docs/DECISIONS.md` §14。
+
+#### egress guard（T11）
+
+`make up` 一併啟動 guard（`secscan-guard:dev`，`make build` 建立），它只接 `secscan_scan_net` 與 `secscan_lab_net`，固定在兩個網段的最後一個位址（10.89.8.254、10.89.7.254），只在 scan 那一側的 8080 聽。
+
+- **掃描容器**：拿到 `/scan/secret/proxy-url`（0400，`http://<run_id>:<token>@10.89.8.254:8080`），只能經 guard 連到 grant 核准的 target origin；被擋下的請求回 403（`X-Secscan-Guard: <原因>`）或 407（帳密）。各工具使用這個 proxy 的設定在 M3。
+- **guard 不可用時**：`GET /api/v1/scanners` 顯示 `GUARD_UNAVAILABLE`，runner 不認領；執行中斷掉的 run 標成 `interrupted`。`docker logs secscan-guard-1` 是每個請求的決定（不含 header 的值、query 與 token）。
+- **保留的位址**：`LAB_CIDR` 的最後一個主機位址（預設 10.89.7.254）保留給 guard，target 與 grant 都不能用。
+- **重建 T10 以前建立的網路**：舊的 `secscan_scan_net`、`secscan_lab_net` 沒有 `--ip-range`，`make scan-net`／`make lab-net` 會失敗並提示。先停掉使用它們的服務，再刪除重建：
+
+  ```bash
+  make down && make lab-down
+  docker network rm secscan_scan_net secscan_lab_net
+  make scan-net lab-net
+  ```
+
+- 完整規則見 `docs/API_CONTRACT.md` §18，設計與實測見 `docs/DECISIONS.md` §15。
 
 #### 隔離 lab 靶場（T03）
 
 需要先啟動 OrbStack（`orb start`）。lab 只接 internal network、不發布任何 port：
 
 ```bash
-make lab-up                     # 啟動 Juice Shop 與 VAmPI（vulnerable/secure）
+make lab-up                     # 啟動 Juice Shop 與 VAmPI（vulnerable/secure）；先以 make lab-net 建立 lab_net
 make lab-up LAB_PROFILES=vampi  # 只啟動部分（profile：juice-shop、vampi）
 make lab-down                   # 停止並移除（若 spike 仍接在 lab_net 上，需先停 spike）
 ```

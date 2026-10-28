@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -91,7 +91,8 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make test | M0（T04 起會先啟動 db-test） | 執行 unit/contract/integration 測試與 coverage 門檻，不做 live scan。測試程序不連網、不碰 Docker；需要 OrbStack 執行 db-test |
 | make lint | M0 | ruff lint/format check、import-linter |
 | make typecheck | M0 | mypy |
-| make lab-up | M0（T03 已建立） | 以 compose profile 啟動 lab 靶機（只接 internal network，不發布 port） |
+| make lab-net | M2（T11 已建立） | 建立或檢查 lab_net（internal＋isolated＋10.89.7.0/24＋只配發下半段的 ip-range）；egress guard 固定在 .254。舊的 lab_net 沒有 ip-range 時會失敗，刪除後重建（README） |
+| make lab-up | M0（T03 已建立） | 以 compose profile 啟動 lab 靶機（只接 internal network，不發布 port）；T11 起先執行 make lab-net |
 | make lab-down | M0（T03 已建立） | 停止並移除 lab（先停 spike 再執行） |
 | make env | M1（T04 已建立） | 建立或補齊 `.env`（權限 600）中缺少的本機 DB 密碼（隨機值），不覆寫既有的值 |
 | make db-up／make db-down | M1（T04 已建立） | 啟動開發用 PostgreSQL（只綁 127.0.0.1:55432）／停止 db 與 db-test（保留開發資料） |
@@ -102,9 +103,9 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | uv run secscan-admin fake-runner [--outcome succeed\|fail] [--hold-seconds N] [--once] | M1（T09 已建立） | 對帳 lease 過期的 fake run，再處理排隊中的 fake run；不連任何位址，結果標為 fixture（`API_CONTRACT.md` §17.5） |
 | uv run secscan-admin runner [--once] [--outcome succeed\|fail] [--hold-seconds N] | M2（T10 已建立） | 容器版的 runner：經 socket-proxy 啟動強化的單次容器（T10 只有 fake），收集輸出；SIGTERM 時停止並刪除容器（`API_CONTRACT.md` §18.1） |
 | uv run secscan-admin worker [--once] | M2（T10 已建立） | 對帳過期的解析，再處理 collected 的 run（T10 只有 fake，不讀檔；`API_CONTRACT.md` §18.2） |
-| make build／make images | M2（T10 已建立） | 建立 secscan 的映像／以 digest pull 核准的掃描器映像與 socket-proxy（runner 不 pull） |
-| make up／make down | M2（T10 已建立） | 啟動／停止 app stack（db、api、runner、worker、socket-proxy），並建立 internal＋isolated 的 scan_net；API 只綁 127.0.0.1:`API_PORT`（預設 8000） |
-| make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，一律拆除；不連 lab |
+| make build／make images | M2（T10 已建立） | 建立 secscan 與 egress guard（T11）的映像／以 digest pull 核准的掃描器映像與 socket-proxy（runner 不 pull） |
+| make up／make down | M2（T10 已建立） | 啟動／停止 app stack（db、api、runner、worker、socket-proxy；T11 加上 guard），並建立 internal＋isolated 的 scan_net 與 lab_net；API 只綁 127.0.0.1:`API_PORT`（預設 8000） |
+| make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，一律拆除；T11 起在 live 自己的 lab 網路上啟動接收端與探針（SEC-02～SEC-10、取消與故障），不啟動 Juice Shop、VAmPI |
 | make test-contract | M1–M2 | 對固定 fixture 測 API/Parser 契約 |
 | make test-live-lab | M3 起 | 需要 `ENABLE_LIVE_LAB_TESTS=1`、LAB_ONLY、有效 grant，並通過隔離檢查才執行 |
 | make record-fixtures | M3 起 | 只在 lab 重新錄製工具輸出 fixture，並產生差異供人工審查 |

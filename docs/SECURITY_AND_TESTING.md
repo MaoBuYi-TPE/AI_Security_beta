@@ -118,7 +118,15 @@ T10 已涵蓋：
 - **capability probe**：Docker 不可用、API 版本不含 1.45、scan_net 不是 internal 或沒有 isolated、少一個 volume、volume 不可寫、映像不在或架構不符，各自回報原因。
 - **部署設定的靜態檢查**：只有 socket-proxy 掛 docker.sock（唯讀）；沒有服務是 privileged、有 host 模式或 device；app 服務都非 root、唯讀、`cap_drop: ALL`、`no-new-privileges`；映像以 digest 鎖定或本機建立（不 pull）；網路與 port；socket-proxy 的放行清單以相同的語意（自動加 `^$`、只比對 path）核對 10 個該放行與 33 個該拒絕的端點（含路徑穿越與未核准的映像），映像的規則是核准清單的逐字比對；內插到 regex 的名稱沒有特殊字元；secrets volume 是 tmpfs。
 
-guard policy 比對與 policy budget，留給 T11、T12。
+T11 已涵蓋（`tests/unit/guard/`，guard 的程式 branch coverage 100%）：
+- **逐請求的判斷（SEC-02、SEC-05、SEC-08、SEC-09 的應用層）**：authority 的對照表（大寫、結尾的點、底線、別的 port、IP 的十六進位與 `[::ffff:…]` 寫法、Host 與 request target 不同、兩個 Host、HTTP/1.0 沒有 Host、`0080`），path 的歧義（`%`、`;`、`//`、`.`、`..`、反斜線、字面的 `{x}`、超過 512 字元），method 的大小寫與 TRACE、CONNECT，改寫目的地的 header（名稱中的 `_` 視同 `-`）與 query 的 `_method`（含多重編碼），header 的值含 CR、LF、NUL 或其他控制字元、名稱不是 token（`HEADER_INVALID`），Upgrade、scheme、`#`、`OPTIONS *`；檢查的順序；Hypothesis 的性質：只要放行，host、port 必然等於 origin、path 合語法、`ScopeRules` 判定在範圍內。
+- **policy 與帳密**：schema 1 的嚴格解析（多或少的 key、重複的 key、布林當整數、浮點數、NaN、非 canonical 的 UUID／IP／origin、檔名與 run_id 不符、範圍規則）、Hypothesis 的來回、最大的 grant 在 512 KiB 以內；Basic 的嚴格解析（base64 的 canonical 寫法、大寫或沒有連字號的 UUID、token 的格式）、hash 比對。
+- **位址（SEC-04、SEC-06 的應用層）**：每一個 DNS 答案都要合格（混合的答案、guard 自己、保留的位址、網段與廣播位址、目前 LAB_CIDR 以外、答案太多）。
+- **addon**：放行時刪除 `Proxy-*`（含 `Proxy_` 的寫法）、綁定 IP、Host 寫回 canonical；靶機回應中的 `X-Secscan-Guard` 被刪除、guard 自己的拒絕保留；拒絕的旗標存在卻沒有回應時中止；407 與 403 的每個原因；不在範圍內就不解析 DNS；任何例外都拒絕、回應建立不了就中止；`request`、`server_connect`、`client_connected` 的第二道防線；log 中沒有 token、query 與 header 的值。
+- **store、status、路由與啟動**：symlink、FIFO、目錄、超過大小、讀不到；只在檔案改變時重讀、損毀也快取、快取有上限；status 的新鮮度、版本、listen 與 enforcing；`/proc/net/route` 的預設路由、多一個網路、經 gateway；options 逐一核對（eager、upstream_cert、rawtcp、非空的 ignore_hosts、聽 0.0.0.0、streaming…）；路由或 options 不安全時不加入 addon、以非 0 結束；guard 載入的模組正好等於映像 COPY 的清單（`python -I -W error`）。
+- **runner 的 guard 通道**：policy 以 0400 原子寫入、寫不出去就是 guard 不可用；封鎖與續約可以重複、封鎖之後不再續約、還沒寫入就封鎖不產生檔案；`not_after` 受 grant 的期限限制；proxy-url 帶著新的 token；sweep 只刪 policy 與暫存檔。
+
+policy budget 留給 T12。
 
 ### 4.2 Contract / Parser
 
@@ -187,6 +195,13 @@ T10 已涵蓋 runner 與 worker（真的 DB 佇列加上記憶體中的容器 ru
 - **migration 0006**：容器欄位的每個 CHECK、trigger 只允許在 preparing → running 記下一次；runner_instances 的每個 CHECK 與 unique。
 - **reveal 的呼叫者**：AST 檢查 src 中只有 `runner/service.py` 呼叫 `reveal`。
 
+T11 已涵蓋 runner 與 egress guard 的整合（`test_container_runner_guard.py`：以一個 spy 把容器的操作、policy 的寫入與 run 的轉換記在同一個有序的 log）：
+- 建立容器之前 policy 已寫好（範圍、`not_after`、`renew_until`、token 的 hash 與容器內 0400 的 proxy-url 相符）；每次心跳都續約、不超過 lease。
+- 停止的順序：取消是封鎖 → cancelling → stop → 刪除容器 → 刪除 policy；逾時與 runner 停止都先封鎖；lease 失效且刪不掉容器、Docker 中途不可用時 policy 保持 blocked；封鎖寫不出去仍會停止容器。
+- guard 不可用（停機、不見、過期）或寫不出 policy：failed（`GUARD_UNAVAILABLE`），不建立容器、不留下 secret；執行中 guard 停機、重啟、過期或續約失敗：interrupted（`GUARD_UNAVAILABLE`）。
+- 常駐迴圈每一輪都讀 status（停機 5 秒後恢復就認領，不等 60 秒的 probe）；guard 不可用或 policy 目錄不可寫時不認領、`/scanners` 回報 `GUARD_UNAVAILABLE`；只有沒有其他存活的 runner 時才清除殘留的 policy。
+- 佇列在轉到 running 時帶回 grant 的範圍與期限，取消、gate 失敗、profile 被取代時沒有。
+
 T06 已涵蓋 target 與 scope grant：
 - A 專案讀寫 B 專案的 target 與 grant（含核准、撤銷），回應與不存在的 id、不存在的路徑完全相同。
 - viewer 不能建立 target 或申請 grant；operator 不能核准或撤銷。
@@ -205,11 +220,29 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。模板的 allowlist 在 M4（Nuclei）加入。
 - **SEC-18**：T10 只涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；artifact 的 storage key、下載與 worker 的解析在 M3、M5。
 - **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
-- **SEC-06、SEC-07**：T10 只以 live 測試確認掃描容器解析不到 socket-proxy、db、api、runner，也沒有預設路由；guard 與收包證據在 T11。
+- **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method` 與 path 中的 `%`（`DECISIONS.md` §15.10 的取捨，T14 量測）。
+- **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約；grant 撤銷時停止執行中的 scan 在 T13。
+- **SEC-19（T11 的部分）**：取消時先封鎖 guard、再停止容器（live 以時間線證明）；孤兒容器的回收在 T13。
+- **SEC-15**：T11 的 guard 只放行 scan 的 target origin，任何帶著認證的請求都送不到其他 origin；跨 origin 的認證 header 規則（多個 origin）在 T12，工具實際送出的認證在 M3。
 
 ### 4.4 Live E2E
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。
+
+T11 已涵蓋（`tests/live/test_guard_live.py`；live 自己的 lab 網路 10.89.10.0/24 上的接收端 lab-target、lab-canary，以及 control_net 上的 control canary；接收端記下每一個 TCP accept）：
+- guard 非 root、唯讀、沒有 capability、只接 scan 與 lab（固定在 .254）、policy 唯讀，healthcheck 通過；lab 那一側連不到 guard 的 proxy。
+- 34 種越界的請求（帳密、別的 origin 與 IP 寫法、Host 不一致、userinfo、HTTP/1.0、排除與未授權的 path、編碼與點段、字面的佔位、method、改寫目的地的 header、`_method`、websocket、`OPTIONS *`、CONNECT、`https://`）都回 403／407／400，前後各一個允許的請求證明接收端在記錄：目標只收到這兩個，canary 與 control canary 都是 0（SEC-02、SEC-05、SEC-08、SEC-09）。
+- 目標收到的請求：Host 是 canonical、沒有 `Proxy-*`、來源是 guard 的 lab 位址（DoD 的收包證明）。
+- redirect：302 照樣轉送，跟隨到 canary 或排除的 path 都被拒絕（SEC-03）。
+- DNS：同一個名稱改指向 canary、或兩個容器共用 alias，都回 `ADDRESS_NOT_ALLOWED`（SEC-04）。
+- 經 guard 到 db、socket-proxy、api、control canary、`169.254.169.254`、`host.docker.internal`、`localhost.localdomain`、guard 自己都被拒；guard 容器內也連不到這些位址（SEC-06）。
+- 掃描網路上的容器直連靶機、canary、guard 的 lab 位址都失敗，解析不到外部名稱、lab 的名稱與 db（SEC-07）。
+- 期限到了、沒有續約、已封鎖、損毀的 policy 依序回 `RUN_EXPIRED`、`POLICY_STALE`、`RUN_BLOCKED`、407（SEC-01 的 guard 部分、SEC-10）。
+- token 與 query 不在 guard、runner、api、worker 的 log 與 `docker inspect` 中；guard 的 log 只有不含 query 的 path。
+- 取消（SEC-19）：每 20 ms 送一次請求的探針記下，放行與拒絕之間沒有交錯、取消後 10 秒內開始拒絕；guard 第一次回 `RUN_BLOCKED` 早於容器的 kill／die 事件；之後接收端沒有再收到。
+- 在 guard 的映像中，以 mitmproxy 12.2.3 的真物件驅動 addon，確認單元測試的假物件和真物件一致（16 項，含刪除小寫的 `x-secscan-guard`）。
+- 尚未涵蓋：同一條 keep-alive 連線上交錯的放行與拒絕、pipelining 與 header 值中夾帶的請求（接收端與探針每個請求一條新連線）；目前只有單元測試，記為證據缺口（`DECISIONS.md` §15.10）。
+- fake scan：執行中有這個 run 的 policy、容器內有 0400 的 proxy-url，結束之後都刪除。
 
 T10 已涵蓋（`make test-live-runner`，`tests/live/`；獨立的 compose 專案、自己的 DB，跑完一律拆除；fake 引擎，不連 lab）：api、runner、worker 沒有 docker.sock、不是 privileged；socket-proxy 唯讀掛 socket、只接 docker_net；runner 容器內呼叫不該開放的 API 都是 403／405、沒有產生容器；api、worker 連不到 socket-proxy；`GET /scanners` 顯示 fake 可用；fake scan 的容器非 root、唯讀、無 capability、IPC 與 cgroup namespace 是 private、只有三個 volume subpath（只看得到自己的 in/、out/ 與 secret）、secret 0400、解析不到 proxy／db／api／runner、沒有預設路由，完成後容器與 secret 都刪除；取消後 30 秒內刪除容器；secrets volume 是 tmpfs；canary secret 不在任何容器的 log 與設定中。
 
@@ -225,6 +258,8 @@ T10 已涵蓋（`make test-live-runner`，`tests/live/`；獨立的 compose 專�
 - Token 到期、手動取消
 
 結果要求：無重複同 run 活躍容器；未證明舊 run 停止前不啟動新 run；partial evidence 不被刪除；狀態不能永久顯示 running；不將錯誤轉為「0 漏洞」。
+
+T11 已涵蓋（egress guard，`tests/live/test_guard_failover_live.py`）：guard 停機時 `/scanners` 顯示 `GUARD_UNAVAILABLE`、新的 scan 留在 queued、對 guard 的連線失敗（fail closed），恢復後完成；guard 重啟（`boot_id` 改變）讓執行中的 run interrupted（`GUARD_UNAVAILABLE`）；runner 被 SIGKILL 之後，孤兒容器的請求在 lease（30 秒）內開始被拒絕（`POLICY_STALE`）、接收端不再收到；設定錯誤、只接一個網路、模組損壞的 guard 以非 0 結束、從未監聽。
 
 T10 已涵蓋（容器版的 runner）：runner 收到 SIGTERM 時停止並刪除容器、run 標成 interrupted（live 實測 1.3 秒）；lease 失效時停止容器；Docker 中途不可用時刪除 secret、不把 run 標成結束的狀態；容器 OOM、消失、create／start 失敗。lease 過期而容器仍在執行、孤兒容器在 T13。
 
