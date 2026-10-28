@@ -158,7 +158,11 @@ def _is_host_label(label: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class LabNetwork:
-    """LAB_ONLY 時允許的靶場網段（設定 LAB_CIDR，docs/DECISIONS.md §10.1）。"""
+    """LAB_ONLY 時允許的靶場網段（設定 LAB_CIDR，docs/DECISIONS.md §10.1）。
+
+    最後一個主機位址保留給 egress guard（§15.6）：guard 在 lab_net 上固定用它，target 與 grant
+    都不可指向它（否則掃描流量會經 guard 送回 guard 自己）。
+    """
 
     cidr: IPv4Network
 
@@ -166,12 +170,20 @@ class LabNetwork:
         if not isinstance(self.cidr, IPv4Network):
             raise TypeError("LabNetwork 需要 IPv4Network")
 
+    @property
+    def guard_address(self) -> IPv4Address:
+        return self.cidr.broadcast_address - 1
+
     def check_host(self, address: IPv4Address) -> None:
-        """address 必須在網段內，而且不是網段位址或廣播位址。"""
+        """address 必須在網段內，而且不是網段位址、廣播位址或保留給 guard 的位址。"""
         edges = (self.cidr.network_address, self.cidr.broadcast_address)
         if address not in self.cidr or address in edges:
             raise OutsideLabError(
                 f"IP 必須是 LAB_CIDR（{self.cidr}）內的主機位址，不可是網段或廣播位址"
+            )
+        if address == self.guard_address:
+            raise OutsideLabError(
+                f"IP 不可是 LAB_CIDR（{self.cidr}）的最後一個主機位址：它保留給 egress guard"
             )
 
     def check_origin(self, origin: Origin) -> None:

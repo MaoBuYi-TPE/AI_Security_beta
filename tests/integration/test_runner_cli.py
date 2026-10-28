@@ -6,7 +6,7 @@ Docker 以記憶體中的假 runtime 取代（測試程序連不到 daemon）；
 import os
 import signal
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -16,6 +16,7 @@ from secscan.cli.services import stop_signals
 from secscan.runner.docker_runtime import DockerRuntime
 from secscan.runner.loop import RunnerLoop
 from secscan.worker.loop import WorkerLoop
+from tests.guard_support import GuardDouble
 from tests.integration.api_support import Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 from tests.runner_fakes import FakeContainerRuntime
@@ -59,6 +60,9 @@ def environment(
     monkeypatch.setenv("SECRET_ENCRYPTION_KEYS", TEST_SECRET_ENCRYPTION_KEYS)
     monkeypatch.setenv("RUNNER_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("RUNNER_SECRETS_DIR", str(tmp_path / "secrets"))
+    guard = GuardDouble.create(tmp_path)
+    monkeypatch.setenv("RUNNER_GUARD_POLICIES_DIR", str(guard.policies))
+    monkeypatch.setenv("RUNNER_GUARD_STATUS_DIR", str(guard.status_dir))
     return tmp_path
 
 
@@ -143,6 +147,24 @@ def test_an_unready_environment_fails(
     assert _run_status(queue_seed, scan.id) == ("queued", None)
 
 
+def test_an_unavailable_guard_claims_nothing(
+    environment: Path,
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """guard 停機（status 標成不再檢查）：runner 不認領，run 留在 queued（DECISIONS §15.7）。"""
+    scan = queue_seed.scan(world.operator_a, scannable)
+    GuardDouble(environment / "guard-policies", environment / "guard-status", uuid4()).stop()
+
+    assert main(["runner", "--once"]) == EXIT_FAILURE
+    assert "沒有可用的引擎" in capsys.readouterr().err
+    assert _run_status(queue_seed, scan.id) == ("queued", None)
+    assert runtime.created == []
+
+
 def test_docker_lost_mid_run_fails_the_command(
     environment: Path,
     runtime: FakeContainerRuntime,
@@ -181,6 +203,8 @@ def test_without_encryption_keys_authenticated_scans_fail(
     [
         ("RUNNER_POLL_SECONDS", "0", "RUNNER_*"),
         ("RUNNER_DOCKER_URL", "http://socket-proxy:2375", "RUNNER_DOCKER_URL"),
+        ("RUNNER_GUARD_PROXY", "guard:8080", "RUNNER_*"),
+        ("RUNNER_GUARD_PROXY", "10.89.8.254", "RUNNER_*"),
     ],
 )
 def test_bad_runner_settings_fail(

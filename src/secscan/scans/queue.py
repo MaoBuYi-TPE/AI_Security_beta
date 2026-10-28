@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session, aliased, sessionmaker
 from secscan.api_keys.repository import ApiKeyRepository
 from secscan.auth_profiles.domain.model import StoredSecret
 from secscan.auth_profiles.repository import AuthProfileRepository
-from secscan.grants.domain.lifecycle import GrantUnusableError, check_usable
+from secscan.grants.domain.lifecycle import GrantUnusableError, ScopeGrant, check_usable
+from secscan.grants.domain.scope import Scope
 from secscan.grants.repository import ScopeGrantRepository
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import (
@@ -40,12 +41,13 @@ from secscan.scans.progress import (
     ScanProgress,
     now,
 )
-from secscan.targets.domain import LabNetwork, OutsideLabError
+from secscan.targets.domain import LabNetwork, Origin, OutsideLabError
 from secscan.targets.repository import TargetRepository
 
 __all__ = [
     "HEARTBEAT_INTERVAL",
     "LEASE_DURATION",
+    "EgressScope",
     "Heartbeat",
     "Launch",
     "LeaseLostError",
@@ -99,16 +101,29 @@ class RunReport:
 
 
 @dataclass(frozen=True, slots=True)
+class EgressScope:
+    """running 的 run 能連到的範圍：guard 的 policy 由此產生（docs/DECISIONS.md §15.7）。
+
+    origin 是 scan 的 target（T11 只放行它）；scope 是 gate 剛以 FOR SHARE 確認過的 grant 範圍。
+    """
+
+    origin: Origin
+    scope: Scope
+    valid_until: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Launch:
     """容器版 runner 的 prepare 結果（docs/DECISIONS.md §14.6）。
 
     run 轉到 running 時，已記下容器名稱與映像；secret 是綁定版本的密文（沒有 auth profile、或沒有
-    開始執行時是 None），由 runner 在建立容器前才解密。
+    開始執行時是 None），由 runner 在建立容器前才解密。egress 只在轉到 running 時才有。
     """
 
     progress: Progress
     max_duration_seconds: int
     secret: StoredSecret | None
+    egress: EgressScope | None = None
 
 
 class QueueOperations:
@@ -171,13 +186,14 @@ class QueueOperations:
         scan, run = self._fenced(lease)
         if scan.cancel_requested:
             return self._launch(scan, self._move(scan, run, RunStatus.CANCELLING))
-        error_code = self._gate(scan, clock)
+        error_code, grant = self._gate(scan, clock)
         secret: StoredSecret | None = None
         if error_code is None:
             error_code, secret = self._binding(scan, read_secret=image_ref is not None)
         error_code = error_code or self._creator(scan)
-        if error_code is not None:
-            return self._launch(scan, self._move(scan, run, RunStatus.FAILED, error_code))
+        if error_code is not None or grant is None:
+            failed = error_code or RunErrorCode.SCOPE_MISMATCH
+            return self._launch(scan, self._move(scan, run, RunStatus.FAILED, failed))
         container = (
             ContainerAssignment(name=f"{CONTAINER_NAME_PREFIX}{run.id}", image_ref=image_ref)
             if image_ref is not None
@@ -185,12 +201,23 @@ class QueueOperations:
         )
         self._progress.move(scan, run, RunStatus.RUNNING, container=container)
         progress = Progress(run_status=RunStatus.RUNNING, scan_status=self._progress.settle(scan))
-        return self._launch(scan, progress, secret)
+        egress = EgressScope(
+            origin=scan.target_origin, scope=grant.scope, valid_until=grant.window.valid_until
+        )
+        return self._launch(scan, progress, secret, egress)
 
     @staticmethod
-    def _launch(scan: LockedScan, progress: Progress, secret: StoredSecret | None = None) -> Launch:
+    def _launch(
+        scan: LockedScan,
+        progress: Progress,
+        secret: StoredSecret | None = None,
+        egress: EgressScope | None = None,
+    ) -> Launch:
         return Launch(
-            progress=progress, max_duration_seconds=scan.max_duration_seconds, secret=secret
+            progress=progress,
+            max_duration_seconds=scan.max_duration_seconds,
+            secret=secret,
+            egress=egress,
         )
 
     def advance(
@@ -299,19 +326,24 @@ class QueueOperations:
         self._progress.move(scan, run, to, error_code=error_code)
         return Progress(run_status=to, scan_status=self._progress.settle(scan))
 
-    def _gate(self, scan: LockedScan, clock: Callable[[], datetime]) -> RunErrorCode | None:
-        """以建立 scan 時相同的規則重新判斷（§10.6）；時間在取得鎖之後才取。"""
+    def _gate(
+        self, scan: LockedScan, clock: Callable[[], datetime]
+    ) -> tuple[RunErrorCode | None, ScopeGrant | None]:
+        """以建立 scan 時相同的規則重新判斷（§10.6）；時間在取得鎖之後才取。
+
+        通過時一併回傳鎖住的 grant：guard 的 policy 以它的範圍與期限產生（§15.7）。
+        """
         target = self._targets.lock(scan.target_id, shared=True)
         grant = self._grants.lock(scan.scope_grant_id, shared=True)
         if target is None or grant is None or target.origin != scan.target_origin:
-            return RunErrorCode.SCOPE_MISMATCH
+            return RunErrorCode.SCOPE_MISMATCH, None
         try:
             check_usable(grant, target=target, lab=self._lab, now=clock())
         except GrantUnusableError as exc:
-            return GATE_ERROR_CODES[exc.reason]
+            return GATE_ERROR_CODES[exc.reason], None
         except OutsideLabError:
-            return RunErrorCode.SCOPE_OUTSIDE_LAB
-        return None
+            return RunErrorCode.SCOPE_OUTSIDE_LAB, None
+        return None, grant
 
     def _binding(
         self, scan: LockedScan, *, read_secret: bool

@@ -20,10 +20,18 @@ from typing import Any
 PROJECT = os.environ.get("SECSCAN_LIVE_PROJECT", "secscan-live")
 API = "http://127.0.0.1:8765/api/v1"
 SCAN_NET = "secscan_live_scan_net"
+LAB_NET = "secscan_live_lab_net"
 SECRETS_VOLUME = "secscan_live_run_secrets"
+POLICIES_VOLUME = "secscan_live_guard_policies"
+STATUS_VOLUME = "secscan_live_guard_status"
+# live stack 的 lab 網段（LAB_CIDR）與 guard 的固定位址（Makefile 的 LIVE_*）。
+LAB_CIDR = "10.89.10.0/24"
+GUARD_IP = "10.89.9.254"
+GUARD_LAB_IP = "10.89.10.254"
 SPEC = Path(__file__).resolve().parents[1] / "fixtures" / "openapi" / "vampi-openapi3.yml"
 BUSYBOX = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
-LAB_IP = "10.89.7.20"
+LAB_IP = "10.89.10.20"
+GUARD_IMAGE = "secscan-guard:dev"
 
 
 def docker(*arguments: str, stdin: str | None = None, check: bool = True) -> str:

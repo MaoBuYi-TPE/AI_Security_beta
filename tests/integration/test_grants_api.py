@@ -132,7 +132,9 @@ def test_expired_status_is_derived_when_read(
     assert _error(approve)["code"] == "INVALID_STATE_TRANSITION"
 
 
-@pytest.mark.parametrize("address", ["192.168.1.10", "10.89.7.0", "10.89.7.255", "10.89.8.1"])
+@pytest.mark.parametrize(
+    "address", ["192.168.1.10", "10.89.7.0", "10.89.7.254", "10.89.7.255", "10.89.8.1"]
+)
 def test_ips_must_be_lab_hosts(
     api_client: TestClient, seed: Seeder, world: World, address: str
 ) -> None:

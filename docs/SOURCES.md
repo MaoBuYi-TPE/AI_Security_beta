@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25；S79–S82 為 2026-10-26；S83–S86 為 2026-10-27。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25；S79–S82 為 2026-10-26；S83–S86 為 2026-10-27；S87–S93 為 2026-10-28。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -90,6 +90,13 @@
 | S84 | [Tecnativa/docker-socket-proxy — haproxy.cfg](https://github.com/Tecnativa/docker-socket-proxy/blob/master/haproxy.cfg) | `http-request deny unless METH_GET \|\| { env(POST) -m bool }`：POST 是全域開關；`CONTAINERS` 的規則 `^(/v[\d.]+)?/containers` 沒有結尾錨點，`/containers/{id}/exec`、`/containers/{id}/archive` 也會放行。T10 不採用的理由 |
 | S85 | [Docker SDK for Python — Change log](https://docker-py.readthedocs.io/en/stable/change-log.html)；[PyPI docker](https://pypi.org/project/docker/) | 7.2.0（2026-07-09）：「Added subpath support for volumes」；「docker.from_env() now honors the active Docker CLI context when DOCKER_HOST is not set」。7.1.0 的預設 API 版本 1.44。T10 的 runner 用低階 `APIClient`、版本固定 1.45 |
 | S86 | [Docker Engine API — Version history](https://docs.docker.com/reference/api/engine/version-history/) | v1.45：`POST /containers/create` 的 `Mounts` 可以用 `VolumeOptions.Subpath` 只掛載 volume 的子目錄。T10 的掃描容器只以 subpath 掛載該 run 的目錄 |
+| S87 | [mitmproxy — Options](https://docs.mitmproxy.org/stable/concepts/options/) | `connection_strategy`（預設 eager）、`upstream_cert`、`http2`、`http3`、`websocket`、`rawtcp`、`ignore_hosts`、`tcp_hosts`、`body_size_limit`、`stream_large_bodies`、`validate_inbound_headers` 等選項的語意。T11 的 guard 逐一設定並讀回核對（`DECISIONS.md` §15.2） |
+| S88 | [mitmproxy — Event Hooks](https://docs.mitmproxy.org/stable/api/events.html) | `requestheaders`、`request`、`http_connect`、`server_connect`（「Setting `data.server.error` kills the connection」）、`client_connected`（設定 `client.error` 中止）、`tcp_start`、`websocket_start` 等 hook 的時機。T11 的 addon |
+| S89 | [mitmproxy 12.2.3 原始碼](https://github.com/mitmproxy/mitmproxy/tree/v12.2.3)（從鎖定 digest 的映像取出） | `proxy/layers/http/__init__.py`：origin-form 轉換在 `requestheaders` 之前、addon 設定 response 時不建立上游連線、streaming 在 `request` hook 之前就連線；`http.py`：設定 `host` 會改寫 Host、`method` 轉成大寫；`addonmanager.py` 的 `safecall` 吞掉 addon 的例外；`master.py` 與 `addons/errorcheck.py` 的啟動檢查。T11 的實測對照（`DECISIONS.md` §15） |
+| S90 | [mitmproxy discussion #5255 — Running mitmproxy from a Python script](https://github.com/mitmproxy/mitmproxy/discussions/5255) | 在 `asyncio.run` 中建立 `DumpMaster`、`addons.add()` 再 `await master.run()` 的嵌入用法。T11 的 `run_guard.py` |
+| S91 | [PyPI — mitmproxy 12.2.3](https://pypi.org/project/mitmproxy/12.2.3/) | 相依：`cryptography<=48.1,>=42.0`、`typing-extensions<=4.14,>=4.13.2`（python < 3.13）；映像內 `importlib.metadata` 讀到相同的值。與 uv.lock（50.0.2、4.16.0）衝突，guard 改以官方映像執行 |
+| S92 | [moby/moby#47589](https://github.com/moby/moby/pull/47589)；[CVE-2024-29018](https://github.com/moby/moby/security/advisories/GHSA-mq39-4gv4-mvpx) | Docker Engine 26 起，只接 internal network 的容器不再經宿主轉送外部 DNS 查詢（修補經 DNS 外洩資料的問題）。T11 的 scan_net 與 lab_net |
+| S93 | [RFC 9112 §3.2.2 — absolute-form](https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2) | proxy 收到 absolute-form 的請求時，以 request target 的 authority 取代 Host。T11 的 guard 要求兩者逐字相同，並把 Host 寫回 canonical 的值 |
 
 ## 需要在 M0–M2 實際確認的事項
 

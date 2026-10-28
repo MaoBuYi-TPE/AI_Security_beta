@@ -32,6 +32,8 @@ class CapabilityIssue(StrEnum):
     RUN_VOLUME_MISSING = "RUN_VOLUME_MISSING"
     RUN_VOLUME_NOT_WRITABLE = "RUN_VOLUME_NOT_WRITABLE"
     IMAGE_MISSING = "IMAGE_MISSING"
+    # egress guard 不可用（status 過期、不再檢查、policy 目錄不可寫；docs/DECISIONS.md §15.8）。
+    GUARD_UNAVAILABLE = "GUARD_UNAVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)

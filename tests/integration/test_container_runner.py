@@ -16,7 +16,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import Engine, Row
 from sqlalchemy.orm import Session, sessionmaker
 
-from secscan.runner.domain.admission import SECRET_FILE, ContainerSpec
+from secscan.runner.domain.admission import PROXY_FILE, SECRET_FILE, ContainerSpec
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy
 from secscan.runner.domain.runtime import RuntimeUnavailableError
 from secscan.runner.service import ContainerRunner
@@ -32,6 +32,7 @@ from secscan.scans.repository import ScanRepository
 from secscan.scans.service import ScanService
 from secscan.security.secret_cipher import SecretCipher
 from secscan.worker.service import Worker
+from tests.guard_support import ENDPOINT, GuardDouble
 from tests.integration.api_support import DEFAULT_SECRET, LAB, Scannable, Seeder, World
 from tests.runner_fakes import FakeClock, FakeContainerRuntime
 from tests.secret_support import shared_cipher
@@ -86,8 +87,17 @@ def workspace(tmp_path: Path) -> Workspace:
 
 
 @pytest.fixture
+def guard(tmp_path: Path) -> GuardDouble:
+    return GuardDouble.create(tmp_path)
+
+
+@pytest.fixture
 def make_runner(
-    queue: ScanQueue, runtime: FakeContainerRuntime, workspace: Workspace, clock: FakeClock
+    queue: ScanQueue,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    clock: FakeClock,
+    guard: GuardDouble,
 ) -> Callable[..., ContainerRunner]:
     def factory(**overrides: Any) -> ContainerRunner:
         options: dict[str, Any] = {
@@ -95,6 +105,8 @@ def make_runner(
             "policy": POLICY,
             "script": FakeScript(hold_seconds=3),
             "cipher": shared_cipher(),
+            "guard": guard.channel(),
+            "endpoint": ENDPOINT,
             "sleep": clock.sleep,
             "monotonic": clock.monotonic,
         }
@@ -207,10 +219,11 @@ def test_heartbeats_keep_the_lease_and_the_instance_alive(
         make_runner(script=FakeScript(hold_seconds=40), on_heartbeat=lambda: beats.append(1))
     )
 
-    # lease 是 30 秒：停留 40 秒仍然成功，代表期間有延長。啟動後立刻心跳一次，之後每 5 秒一次
-    # （第 0 到 40 秒共 9 次；心跳在查狀態之前），收集之前再心跳一次。
+    # lease 是 30 秒：停留 40 秒仍然成功，代表期間有延長。建立容器之前心跳一次（guard 的 renew_until
+    # 以它為準，docs/DECISIONS.md §15.7），啟動後立刻一次，之後每 5 秒一次（第 0 到 40 秒共 9 次；
+    # 心跳在查狀態之前），收集之前再心跳一次。
     assert report.run_status is R.COLLECTED
-    assert len(beats) == 10
+    assert len(beats) == 11
 
 
 # --- secret --------------------------------------------------------------------------------
@@ -243,19 +256,30 @@ def test_the_secret_exists_only_while_the_container_does(
     assert report.run_status is R.COLLECTED
 
 
-def test_an_anonymous_scan_mounts_no_secret(
+def test_an_anonymous_scan_gets_only_the_proxy_url(
     make_runner: Callable[..., ContainerRunner],
     runtime: FakeContainerRuntime,
+    clock: FakeClock,
     queue_seed: Seeder,
     world: World,
     scannable: Scannable,
+    tmp_path: Path,
 ) -> None:
+    """secret 目錄一律掛載（proxy-url，docs/DECISIONS.md §15.7）；沒有認證就沒有 target-auth。"""
     queue_seed.scan(world.operator_a, scannable, auth_profile_id=None)
+    seen: list[list[str]] = []
+    clock.at(
+        1,
+        lambda: seen.extend(
+            sorted(p.name for p in d.iterdir()) for d in (tmp_path / "secrets").iterdir()
+        ),
+    )
 
     _report(make_runner())
 
     [spec] = runtime.created
-    assert _mount_targets(spec) == ["/scan/in", "/scan/out"]
+    assert _mount_targets(spec) == ["/scan/in", "/scan/out", "/scan/secret"]
+    assert seen == [[PROXY_FILE]]
 
 
 @pytest.mark.parametrize("cipher", ["other-keys", "none"])
@@ -589,8 +613,9 @@ def test_the_first_heartbeat_comes_right_after_the_start(
         make_runner(script=FakeScript(hold_seconds=1), on_heartbeat=lambda: beats.append(1))
     )
 
+    # 建立容器之前、啟動之後立刻、收集之前各一次。
     assert report.run_status is R.COLLECTED
-    assert len(beats) == 2
+    assert len(beats) == 3
 
 
 @pytest.mark.parametrize("volume", ["runs", "secrets"])
@@ -714,6 +739,8 @@ def test_output_over_the_limits_stops_the_container(
         policy=POLICY,
         script=FakeScript(hold_seconds=60),
         cipher=shared_cipher(),
+        guard=GuardDouble.create(tmp_path).channel(),
+        endpoint=ENDPOINT,
         sleep=clock.sleep,
         monotonic=clock.monotonic,
     )
@@ -814,7 +841,7 @@ def test_a_secret_that_cannot_be_deleted_does_not_fail_the_run(
     def stuck(_run_id: UUID) -> None:
         raise WorkspaceError("無法刪除 secret（EBUSY）")
 
-    monkeypatch.setattr(workspace, "discard_secret", stuck)
+    monkeypatch.setattr(workspace, "discard_secrets", stuck)
 
     assert _report(make_runner()).run_status is R.COLLECTED
 

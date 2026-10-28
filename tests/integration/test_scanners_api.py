@@ -105,22 +105,21 @@ def test_a_live_runner_makes_fake_available(
     assert body["data"]["runner"]["last_heartbeat_at"].endswith("Z")
 
 
+@pytest.mark.parametrize(
+    "issue", [CapabilityIssue.SCAN_NETWORK_NOT_ISOLATED, CapabilityIssue.GUARD_UNAVAILABLE]
+)
 def test_a_capability_issue_is_reported(
-    client: TestClient, world: World, queue_engine: Engine
+    client: TestClient, world: World, queue_engine: Engine, issue: CapabilityIssue
 ) -> None:
     _beat(
         queue_engine,
         InstanceRole.RUNNER,
-        Capabilities(
-            engines=(
-                EngineCapability(ScanEngine.FAKE, IMAGE, CapabilityIssue.SCAN_NETWORK_NOT_ISOLATED),
-            )
-        ),
+        Capabilities(engines=(EngineCapability(ScanEngine.FAKE, IMAGE, issue),)),
     )
 
     fake = _engines(client.get("/api/v1/scanners", headers=world.viewer_a.headers).json())["fake"]
 
-    assert (fake["available"], fake["unavailable_reason"]) == (False, "SCAN_NETWORK_NOT_ISOLATED")
+    assert (fake["available"], fake["unavailable_reason"]) == (False, issue.value)
 
 
 def test_a_missing_key_is_refused(client: TestClient) -> None:

@@ -24,9 +24,12 @@ from secscan.scans.domain.model import CONTAINER_NAME_PREFIX
 # 掃描容器內的固定路徑：in/ 唯讀、out/ 可寫、secret 唯讀。
 IN_DIR = "/scan/in"
 OUT_DIR = "/scan/out"
-# 以下是路徑與檔名，不是密碼。
+# 以下是路徑與檔名，不是密碼。secret 目錄一律掛載：每個容器都有 proxy-url（egress guard 的帳密，
+# docs/DECISIONS.md §15.4）；target-auth 只在 scan 有認證時才有。
 SECRET_DIR = "/scan/secret"  # noqa: S105
 SECRET_FILE = "target-auth"  # noqa: S105
+PROXY_FILE = "proxy-url"
+SECRET_FILES = frozenset({SECRET_FILE, PROXY_FILE})
 # 容器的 log 由 Docker 保存：限制大小，工具大量輸出也不會塞滿磁碟。
 LOG_CONFIG: JsonObject = {"Type": "json-file", "Config": {"max-size": "1m", "max-file": "1"}}
 NOFILE_LIMIT = 1024
@@ -245,11 +248,10 @@ def _mounts_safe(mounts: JsonValue, plan: ExecutionPlan, policy: ContainerPolicy
     """
     run = str(plan.run_id)
     allowed = [
-        (IN_DIR, policy.runs_volume, f"{run}/in", True),
-        (OUT_DIR, policy.runs_volume, f"{run}/out", False),
+        ("/scan/in", policy.runs_volume, f"{run}/in", True),
+        ("/scan/out", policy.runs_volume, f"{run}/out", False),
+        ("/scan/secret", policy.secrets_volume, run, True),
     ]
-    if plan.target_auth:
-        allowed.append((SECRET_DIR, policy.secrets_volume, run, True))
     if not isinstance(mounts, list) or len(mounts) != len(allowed):
         return False
     return all(
@@ -264,13 +266,11 @@ def _mounts_safe(mounts: JsonValue, plan: ExecutionPlan, policy: ContainerPolicy
 
 def _mounts(plan: ExecutionPlan, policy: ContainerPolicy) -> list[JsonValue]:
     run = str(plan.run_id)
-    mounts: list[JsonValue] = [
+    return [
         _volume(policy.runs_volume, f"{run}/in", IN_DIR, read_only=True),
         _volume(policy.runs_volume, f"{run}/out", OUT_DIR, read_only=False),
+        _volume(policy.secrets_volume, run, SECRET_DIR, read_only=True),
     ]
-    if plan.target_auth:
-        mounts.append(_volume(policy.secrets_volume, run, SECRET_DIR, read_only=True))
-    return mounts
 
 
 def _volume(source: str, subpath: str, target: str, *, read_only: bool) -> JsonObject:

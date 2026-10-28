@@ -8,7 +8,11 @@ COMPOSE = $(shell if docker compose version >/dev/null 2>&1; then echo "docker c
 DB_FILE := compose.yaml
 LAB_FILE := compose.lab.yaml
 LAB_PROJECT := secscan-lab
-LAB_NET := secscan_lab_net
+# lab_net 與 scan_net 由這裡建立（docs/DECISIONS.md §15.6）：internal＋gateway isolated＋固定網段，
+# 動態配發只在下半段（--ip-range）；egress guard 固定在每個網段的最後一個主機位址。
+LAB_NET ?= secscan_lab_net
+LAB_SUBNET ?= 10.89.7.0/24
+LAB_IP_RANGE ?= 10.89.7.0/25
 # 預設啟動全部靶機；可用 `make lab-up LAB_PROFILES="vampi"` 只啟動部分。
 LAB_PROFILES ?= juice-shop vampi
 LAB_PROFILE_ARGS := $(foreach p,$(LAB_PROFILES),--profile $(p))
@@ -23,6 +27,7 @@ ENV_LINE := ^[[:space:]]*(export[[:space:]]+)?
 # app stack（docs/DECISIONS.md §14.8）。掃描容器的網路由這裡建立，compose 只引用（external）。
 SCAN_NET ?= secscan_scan_net
 SCAN_SUBNET ?= 10.89.8.0/24
+SCAN_IP_RANGE ?= 10.89.8.0/25
 # runner 不 pull 映像：核准的掃描器映像由這裡以 digest pull（和 runner/domain/policy.py 一致，
 # tests/unit/test_deployment.py 會核對）。
 SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
@@ -30,13 +35,20 @@ SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0f
 LIVE_PROJECT := secscan-live
 LIVE_SCAN_NET := secscan_live_scan_net
 LIVE_SCAN_SUBNET := 10.89.9.0/24
+LIVE_SCAN_IP_RANGE := 10.89.9.0/25
+LIVE_LAB_NET := secscan_live_lab_net
+LIVE_LAB_SUBNET := 10.89.10.0/24
+LIVE_LAB_IP_RANGE := 10.89.10.0/25
 LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_runs \
 	SECSCAN_SECRETS_VOLUME=secscan_live_run_secrets API_PORT=8765 DB_PORT=55434 \
-	RUNNER_FAKE_HOLD_SECONDS=15
+	RUNNER_FAKE_HOLD_SECONDS=15 SECSCAN_LAB_NET=$(LIVE_LAB_NET) LAB_CIDR=$(LIVE_LAB_SUBNET) \
+	SECSCAN_SCAN_SUBNET=$(LIVE_SCAN_SUBNET) SECSCAN_GUARD_IP=10.89.9.254 \
+	SECSCAN_GUARD_LAB_IP=10.89.10.254 SECSCAN_GUARD_POLICIES_VOLUME=secscan_live_guard_policies \
+	SECSCAN_GUARD_STATUS_VOLUME=secscan_live_guard_status
 LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
-	lab-up lab-down lab-verify build images scan-net up down test-live-runner
+	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -112,7 +124,7 @@ migrate:
 	@$(UV_RUN) alembic current
 
 # 啟動隔離 lab 靶場（只接 internal network，不發布 port）。
-lab-up: docker-check
+lab-up: docker-check lab-net
 	@# up 之前先擋掉對外 port 與 host 網路的設定
 	@if $(COMPOSE) -f $(LAB_FILE) $(LAB_PROFILE_ARGS) config | grep -qE '^[[:space:]]*(published|network_mode):'; then \
 		echo "錯誤：compose 含對外 port 或 network_mode，lab 必須完全隔離"; exit 1; fi
@@ -137,45 +149,65 @@ lab-verify:
 lab-down:
 	$(COMPOSE) -f $(LAB_FILE) --profile juice-shop --profile vampi down --remove-orphans
 
-# 建立 secscan 的應用程式映像（api、runner、worker 共用）。
+# 建立 secscan 的應用程式映像（api、runner、worker 共用）與 egress guard 的映像。
 build: docker-check
-	$(COMPOSE) -f $(DB_FILE) --profile app build api
+	$(COMPOSE) -f $(DB_FILE) --profile app build api guard
 
 # 以 digest pull 核准的掃描器映像與 socket-proxy（runner 本身不 pull）。
 images: docker-check
 	@for image in $(SCANNER_IMAGES); do docker pull --quiet "$$image" >/dev/null || exit 1; done
 	$(COMPOSE) -f $(DB_FILE) --profile app pull --quiet socket-proxy
 
-# 掃描容器的網路：internal＋gateway isolated＋固定網段；已存在時只檢查。
-scan-net: docker-check
-	@docker network inspect $(SCAN_NET) >/dev/null 2>&1 || docker network create --internal \
-		--opt com.docker.network.bridge.gateway_mode_ipv4=isolated \
-		--subnet $(SCAN_SUBNET) $(SCAN_NET) >/dev/null
-	@docker network inspect $(SCAN_NET) --format '{{.Internal}}' | grep -qx true \
-		|| { echo "錯誤：$(SCAN_NET) 不是 internal network"; exit 1; }
-	@test "$$(docker network inspect $(SCAN_NET) --format '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}}')" = isolated \
-		|| { echo "錯誤：$(SCAN_NET) 不是 isolated gateway"; exit 1; }
+# 建立或檢查一個 internal＋gateway isolated 的網路（NET、SUBNET、IP_RANGE 由呼叫端給定）。
+# 已存在時只檢查：舊的網路沒有 ip-range 時會失敗，刪除後重建（README）。
+ensure-net: docker-check
+	@docker network inspect $(NET) >/dev/null 2>&1 || docker network create --internal --opt com.docker.network.bridge.gateway_mode_ipv4=isolated --subnet $(SUBNET) --ip-range $(IP_RANGE) $(NET) >/dev/null
+	@docker network inspect $(NET) --format '{{.Internal}}' | grep -qx true \
+		|| { echo "錯誤：$(NET) 不是 internal network"; exit 1; }
+	@test "$$(docker network inspect $(NET) --format '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}}')" = isolated \
+		|| { echo "錯誤：$(NET) 不是 isolated gateway"; exit 1; }
+	@test "$$(docker network inspect $(NET) --format '{{range .IPAM.Config}}{{.Subnet}} {{.IPRange}}{{end}}')" = "$(SUBNET) $(IP_RANGE)" \
+		|| { echo "錯誤：$(NET) 的網段或 ip-range 不是 $(SUBNET)、$(IP_RANGE)；請刪除後重建（見 README）"; exit 1; }
 
-# 啟動 app stack（db、api、runner、worker、socket-proxy）。API 只綁 127.0.0.1:$${API_PORT:-8000}。
+# 掃描容器的網路（scan_net）與靶機的網路（lab_net）。
+scan-net:
+	@$(MAKE) --no-print-directory ensure-net NET=$(SCAN_NET) SUBNET=$(SCAN_SUBNET) IP_RANGE=$(SCAN_IP_RANGE)
+
+lab-net:
+	@$(MAKE) --no-print-directory ensure-net NET=$(LAB_NET) SUBNET=$(LAB_SUBNET) IP_RANGE=$(LAB_IP_RANGE)
+
+# 啟動 app stack（db、api、runner、worker、socket-proxy、guard）。API 只綁 127.0.0.1:$${API_PORT:-8000}。
 # 第一次使用先執行 make migrate（db 的 schema）與 create-admin-key。
-up: env docker-check scan-net images build
+up: env docker-check scan-net lab-net images build
 	$(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
 
 # 停止 app stack 與 db（資料保留在 volume）。
 down:
 	$(COMPOSE) -f $(DB_FILE) --profile app down
 
-# live 測試：真的 Docker、socket-proxy 與 fake 容器（不連 lab，不送掃描流量）。需要自己設定
-# ENABLE_LIVE_LAB_TESTS=1；在獨立的 compose 專案建立、測試、一律拆除（含它的 volume 與網路）。
+# live 測試：真的 Docker、socket-proxy、egress guard 與 fake 容器；guard 的測試在 live 自己的 lab 網路
+# 上啟動接收端（不啟動 Juice Shop、VAmPI）。需要自己設定 ENABLE_LIVE_LAB_TESTS=1；在獨立的 compose
+# 專案建立、測試、一律拆除：先刪掉接在這兩個網路上的容器（測試的接收端、探針與孤兒的掃描容器，
+# 否則 volume 還在使用中刪不掉），再刪 compose 的服務、volume 與網路。
+# 會中斷 stack 的測試（停掉 guard、kill runner）放在最後執行。
+LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
+	tests/live/test_guard_failover_live.py
 test-live-runner: env docker-check images build
 	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }
-	@$(MAKE) --no-print-directory scan-net SCAN_NET=$(LIVE_SCAN_NET) SCAN_SUBNET=$(LIVE_SCAN_SUBNET)
+	@$(MAKE) --no-print-directory scan-net SCAN_NET=$(LIVE_SCAN_NET) SCAN_SUBNET=$(LIVE_SCAN_SUBNET) \
+		SCAN_IP_RANGE=$(LIVE_SCAN_IP_RANGE)
+	@$(MAKE) --no-print-directory lab-net LAB_NET=$(LIVE_LAB_NET) LAB_SUBNET=$(LIVE_LAB_SUBNET) \
+		LAB_IP_RANGE=$(LIVE_LAB_IP_RANGE)
 	@status=0; \
 		$(LIVE_COMPOSE) up -d --wait db \
 		&& DB_PORT=55434 $(UV_RUN) alembic upgrade head >/dev/null \
 		&& $(LIVE_COMPOSE) up -d --wait \
-		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(UV_RUN) pytest -m live -p no:cacheprovider tests/live \
+		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(UV_RUN) pytest -m live -p no:cacheprovider $(LIVE_TESTS) \
 		|| status=$$?; \
+		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
+			ids=$$(docker ps -aq --filter "network=$$net"); \
+			[ -z "$$ids" ] || docker rm -f $$ids >/dev/null; \
+		done; \
 		$(LIVE_COMPOSE) down -v --remove-orphans; \
-		docker network rm $(LIVE_SCAN_NET) >/dev/null 2>&1; \
+		docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
 		exit $$status

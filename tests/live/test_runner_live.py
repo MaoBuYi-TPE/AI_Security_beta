@@ -152,6 +152,13 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         ("volume", "/scan/secret", False),
     ]
     assert CANARY not in json.dumps(info)
+    # proxy 的 token 只在 0400 的檔案中：不在掃描容器的設定、argv、env 與 log（DECISIONS §15.4）。
+    token = (
+        docker("exec", name, "cat", "/scan/secret/proxy-url").strip().split("@")[0].split(":")[-1]
+    )
+    assert len(token) == 43
+    assert token not in json.dumps(info)
+    assert token not in docker("logs", name, check=False)
     # subpath 確實生效：容器只看得到自己的 in/ 與 out/，看不到其他 run 的目錄（審查建議）。
     listing = docker("exec", name, "sh", "-c", "ls -A /scan; echo ---; ls -A /scan/in /scan/secret")
     assert listing.split() == [
@@ -162,6 +169,7 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         "/scan/in:",
         "run.json",
         "/scan/secret:",
+        "proxy-url",
         "target-auth",
     ]
     assert host["IpcMode"] == "private"
@@ -171,7 +179,7 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         name,
         "sh",
         "-c",
-        "stat -c '%a %u' /scan/secret/target-auth; "
+        "stat -c '%a %u' /scan/secret/target-auth /scan/secret/proxy-url; "
         "test -e /var/run/docker.sock && echo socket || echo no-socket; "
         "for host in socket-proxy db api runner; do "
         "nslookup $host >/dev/null 2>&1 && echo resolved || echo unresolved; done; "
@@ -180,6 +188,8 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         check=False,
     ).split()
     assert checks == [
+        "400",
+        "10001",
         "400",
         "10001",
         "no-socket",
@@ -191,8 +201,13 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         "0",
     ]
 
+    # egress guard（docs/DECISIONS.md §15.7）：執行中有這個 run 的 policy，結束之後刪除。
+    run_id = info["Config"]["Labels"]["secscan.run_id"]
+    assert f"{run_id}.json" in docker("exec", container("runner"), "ls", "/guard/policies").split()
+
     wait_for(lambda: target.status(scan_id) == "completed", timeout=60)
     assert scan_containers(scan_id) == []
+    assert f"{run_id}.json" not in docker("exec", container("runner"), "ls", "/guard/policies")
     leftover = docker(
         "run",
         "--rm",

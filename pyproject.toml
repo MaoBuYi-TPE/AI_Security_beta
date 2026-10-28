@@ -105,12 +105,14 @@ root_package = "secscan"
 include_external_packages = true
 
 # 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7、§11.7、§12.7、§13.9、
-# §14.10）：
+# §14.10、§15.9）：
 # - main 組裝 app，cli 是本機管理指令；兩者都是程序入口。migrations 登記所有 ORM model。
 # - 功能模組依實際呼叫關係排列：scans 建立 scan 時要用 gate（grants）、inventory（specs）與
 #   profile 的版本（auth_profiles）；runner（容器）與 worker（解析）只經 scans 的佇列操作 run，
 #   並以 scanners 建 ExecutionPlan、寫心跳；specs 要鎖住 target，並以 grant 預覽 inventory；
 #   auth_profiles 要鎖住 target、得知所屬 project（與 specs 同一層、互不依賴）；
+#   guard（egress guard 的 addon 與 policy 的格式）以 grants 的 scope 規則逐請求檢查，runner 寫
+#   policy；它在 mitmproxy 的映像中執行，只能用標準函式庫與純 domain（見下方的 contract）；
 #   grants 要鎖住 target、得知所屬 project；targets 要確認 project
 #   存在；projects 會用 api_keys 的身分驗證與 audit；api_keys 撤銷 key 時寫 audit；
 #   audit 依賴 security 的遮罩。
@@ -130,7 +132,7 @@ layers = [
     "health | runner | worker",
     "scanners",
     "scans",
-    "specs | auth_profiles",
+    "specs | auth_profiles | guard",
     "grants",
     "targets",
     "projects",
@@ -155,6 +157,26 @@ source_modules = [
     "secscan.security.**",
 ]
 forbidden_modules = ["fastapi", "starlette", "sqlalchemy", "alembic", "psycopg", "docker"]
+
+# egress guard 在官方 mitmproxy 映像（Python 3.14）中執行，映像內沒有我們的相依套件
+# （docs/DECISIONS.md §15.1）：guard 只能用標準函式庫與純 domain 模組。預設也檢查間接 import。
+[[tool.importlinter.contracts]]
+name = "Guard runs on the standard library only"
+type = "forbidden"
+source_modules = ["secscan.guard"]
+forbidden_modules = [
+    "fastapi",
+    "starlette",
+    "sqlalchemy",
+    "alembic",
+    "psycopg",
+    "docker",
+    "pydantic",
+    "pydantic_settings",
+    "yaml",
+    "cryptography",
+    "uvicorn",
+]
 
 # 加密只經由 security.secret_cipher（docs/DECISIONS.md §12.2）：其他模組不得直接使用 cryptography，
 # 解密只能透過 SecretCipher.reveal（AST 測試確認 src 中沒有呼叫者），不會繞過去自己解。

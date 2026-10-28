@@ -118,10 +118,12 @@ def _runner_loop(
     owner = _owner(InstanceRole.RUNNER)
     workspace = Workspace(runner_settings.runs_dir, runner_settings.secrets_dir)
     policy = runner_settings.container_policy()
+    guard = runner_settings.guard_channel()
     loop = RunnerLoop(
         _fleet(sessions, owner, InstanceRole.RUNNER),
         runtime=runtime,
         workspace=workspace,
+        guard=guard,
         policy=policy,
         stop_requested=stop_requested,
         poll_seconds=runner_settings.poll_seconds,
@@ -135,6 +137,8 @@ def _runner_loop(
             policy=policy,
             script=script,
             cipher=cipher,
+            guard=guard,
+            endpoint=runner_settings.guard_endpoint(),
             stop_requested=stop_requested,
             on_heartbeat=loop.beat,
         )

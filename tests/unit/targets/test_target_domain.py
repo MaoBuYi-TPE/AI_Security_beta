@@ -20,9 +20,29 @@ LAB = LabNetwork(IPv4Network("10.89.7.0/24"))
 BAD_NAMES = ["", "   ", "　", "\t\n", "lab\x00", "x" * (TARGET_NAME_MAX_LENGTH + 1)]
 
 
-@pytest.mark.parametrize("address", ["10.89.7.1", "10.89.7.20", "10.89.7.254"])
+@pytest.mark.parametrize("address", ["10.89.7.1", "10.89.7.20", "10.89.7.253"])
 def test_lab_hosts_are_accepted(address: str) -> None:
     LAB.check_host(IPv4Address(address))
+
+
+@pytest.mark.parametrize(
+    ("cidr", "reserved", "usable"),
+    [
+        ("10.89.7.0/24", "10.89.7.254", "10.89.7.253"),
+        ("10.89.0.0/16", "10.89.255.254", "10.89.255.253"),
+        ("192.168.56.0/30", "192.168.56.2", "192.168.56.1"),
+    ],
+)
+def test_last_host_is_reserved_for_the_egress_guard(cidr: str, reserved: str, usable: str) -> None:
+    """guard 在 lab_net 上固定用最後一個主機位址（DECISIONS §15.6）：target 與 grant 不可指向它。"""
+    lab = LabNetwork(IPv4Network(cidr))
+
+    assert lab.guard_address == IPv4Address(reserved)
+    lab.check_host(IPv4Address(usable))
+    with pytest.raises(OutsideLabError, match="保留給 egress guard"):
+        lab.check_host(IPv4Address(reserved))
+    with pytest.raises(OutsideLabError, match="保留給 egress guard"):
+        lab.check_origin(parse_origin(f"http://{reserved}:8080"))
 
 
 @pytest.mark.parametrize(
