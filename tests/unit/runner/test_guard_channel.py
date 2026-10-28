@@ -229,6 +229,7 @@ def test_a_blocked_policy_is_never_renewed(guard: GuardDouble) -> None:
     policy = guard.policy(LEASE.run_id)
     assert policy is not None
     assert policy.state is PolicyState.BLOCKED
+    assert policy.renew_until == int(NOW) + 30  # 封鎖之後不再延長（突變檢查發現）
 
 
 def test_blocking_before_activation_writes_nothing(guard: GuardDouble) -> None:

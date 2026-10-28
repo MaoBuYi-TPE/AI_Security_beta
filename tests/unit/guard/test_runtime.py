@@ -234,11 +234,14 @@ class FakeMaster:
         self.addons = FakeAddons()
         self.config = config
         self.status_while_running: GuardStatus | None = None
+        self.status_before_running: GuardStatus | None = None
         self.shutdowns = 0
 
     async def run(self) -> None:
         # mitmproxy 先建立 server（期間 status 已寫過一次，還不是 enforcing），才呼叫 running。
         await asyncio.sleep(0.02)
+        path = self.config.status_dir / STATUS_FILE_NAME
+        self.status_before_running = _status(self.config) if path.exists() else None
         for addon in self.addons.added:
             if hasattr(addon, "running"):
                 addon.running()
@@ -291,6 +294,9 @@ def test_serve_adds_the_addon_last_and_reports_enforcing(config: GuardConfig) ->
     assert [type(addon) for addon in master.addons.added] == [GuardAddon]
     assert master.status_while_running is not None
     assert master.status_while_running.enforcing is True
+    # mitmproxy 開始監聽之前不能宣稱正在檢查（突變檢查發現）。
+    assert master.status_before_running is not None
+    assert master.status_before_running.enforcing is False
     assert _status(config).enforcing is False  # 結束時改成 false
 
 

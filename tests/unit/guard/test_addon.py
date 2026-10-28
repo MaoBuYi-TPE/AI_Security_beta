@@ -612,3 +612,10 @@ def test_guard_denials_keep_their_reason_header(harness: Harness) -> None:
     harness.addon.response(flow)
 
     assert _reason(flow) == "PATH_EXCLUDED"
+
+
+def test_the_forwarded_method_is_compared_as_sent(harness: Harness) -> None:
+    """mitmproxy 的 request.method 會轉成大寫，轉送的卻是原始的寫法（§15 實測 5；突變檢查發現）。"""
+    flow = _screen(harness, _flow(method="get"))
+
+    assert _reason(flow) == "METHOD_NOT_AUTHORIZED"

@@ -290,6 +290,13 @@ def test_host_header_must_be_the_single_canonical_authority(
     assert request_reason(_view(headers=headers), POLICY) is Reason.ORIGIN_MISMATCH
 
 
+def test_the_request_target_port_must_match_even_when_host_does() -> None:
+    """absolute-form 指向別的 port、Host 寫 canonical：上游會連到那個 port（突變檢查發現）。"""
+    view = _view(port=8081, headers=(("Host", "lab-target:8080"),))
+
+    assert request_reason(view, POLICY) is Reason.ORIGIN_MISMATCH
+
+
 def test_port_80_accepts_both_host_forms() -> None:
     policy = _compiled(origin="http://lab-target")
 
