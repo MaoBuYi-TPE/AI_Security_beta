@@ -1101,6 +1101,224 @@ DB 只檢查錯誤碼的格式（§13.4），不必改 migration。
 - M3：worker 的 parser 與 artifacts 資料表；ZAP 的映像、指令樣板與 secret 格式；工具以 uid 10001 執行的相容性。
 - T23：compose `secrets:`、拆分 `.env`；DDL 與 DML 角色；`sslmode`。
 
+## 15. T11 補充決定：egress guard、internal networks 與逐請求的檢查（2026-10-28）
+
+T11 建立 egress guard：掃描容器只能經 guard 連到 grant 核准的 origin，guard 逐請求檢查 origin、DNS／IP、path、method 與 redirect 之後的請求。以下是規劃文件沒有寫到、實作前才定下的細節。
+
+使用者的決定（2026-10-28）：
+- guard 以**官方 mitmproxy 12.2.3 映像＋我們的 addon** 執行；啟動程式由我們自己寫，嵌入 mitmproxy（§15.1）。
+- fake 引擎**不送流量**（仍是 busybox sleep）；收包證據由 live 測試另外啟動的 probe 容器取得。
+- 「grant 撤銷時停止執行中的 scan」留給 **T13**；T11 的 guard 只逐請求檢查期限。
+
+T11 不從產品路徑送出任何掃描流量：live 測試用自己的 live lab 網路與接收端，不啟動 Juice Shop 或 VAmPI。
+
+依據：
+- mitmproxy 文件：options [S87]、event hooks [S88]（`server_connect` 中設定 `data.server.error` 就中止連線）；嵌入的用法 [S90]。
+- mitmproxy 12.2.3 原始碼 [S89]（從鎖定 digest 的映像中取出閱讀）：
+  - `DumpMaster` 在建構時載入預設 addon，addon 的 options 之後才存在；`Master` 必須在 event loop 內建立。
+  - `errorcheck`：啟動期間有 ERROR log 就以 1 結束；啟動完成後不再檢查。
+  - addon 拋出的例外由 `safecall` 記下（含例外訊息）後吞掉，流程照常繼續。
+  - regular mode 的 HTTP/1 請求在 `requestheaders` 之前就改成 origin-form（`authority = ""`）。
+  - addon 在 `requestheaders` 設定 response 時，body 仍會讀完、`request` hook 仍會執行，但之後直接回應，不建立上游連線。
+  - 設定 `request.host` 會把 Host 改成 `ip:port`。
+  - `request.method` 會轉成大寫，轉送的卻是原始的 `data.method`。
+- 相依套件：映像內 mitmproxy 12.2.3 要求 `cryptography<=48.1`、`typing-extensions<=4.14` [S91]，我們的 uv.lock 是 50.0.2、4.16.0，不能裝進同一個環境。12.3.x 發布未滿兩週，不採用。映像的 Python 是 3.14.5。
+- Docker ≥ 26 不替只接 internal network 的容器轉送外部 DNS [S92]；RFC 9112 §3.2.2：proxy 收到 absolute-form 的請求時，要以 request target 取代 Host [S93]。
+- T03 的 spike：addon 的例外被吞掉之後請求照樣放行；`mitmdump -s` 載入失敗時仍繼續當 proxy。
+- **實測**（OrbStack，Docker Engine 29.4.0，鎖定 digest 的映像，以 uid 10001、唯讀 rootfs 執行，2026-10-28）：
+  1. 啟動：
+     - 在 `asyncio.run` 中建立 `DumpMaster(with_dumper=False)`；`confdir` 與核心 options 在建構時給定，addon 的 options 之後設定，都讀得回來。
+     - 綁不到位址時，`errorcheck` 讓程序以 1 結束。
+     - `add_signal_handler(SIGTERM, master.shutdown)` 讓 `run()` 正常返回。
+     - `python -I` 不把 script 所在的目錄加進 `sys.path`，所以啟動程式要自己加。
+     - tlsconfig 在第一次 configure 時就在 `confdir` 建立 CA 檔，tmpfs 可以使用。
+  2. 拒絕時完全不連上游：`requestheaders` 設定 response 時，以下都是 0 個 `server_connect`、接收端 0 個 accept：
+     - GET、帶 Content-Length 的 POST、chunked。
+     - `Expect: 100-continue`：mitmproxy 先回 100，再回 403。
+     - body 超過 `body_size_limit`：413，`requestheaders` 在檢查大小時就被呼叫。
+     - CONNECT：只經過 `http_connect`。
+  3. hook 拋出例外時，請求照樣轉送到接收端，log 中有例外的訊息：包裝是必要的，例外的訊息也不能交給 mitmproxy。
+  4. 綁定：
+     - 設定 `request.host = <IP>` 之後把 Host 寫回 canonical 的 authority，接收端看到 canonical 的 Host。
+     - `server_connect` 看到的是 `(IP, port)`；在那裡設定 error 之後回 502、0 個 accept。
+  5. 解析的對照（raw request → mitmproxy 解出的值）：
+     - origin-form 的 host 與 port 取自 Host；absolute-form 取自 request target，Host 保持原樣（兩者可以不同）。
+     - 大小寫、結尾的點、十六進位與整數的 IP 寫法、`[::ffff:…]` 都原樣保留在 `host`。`0080` 解成 port 80，Host 仍是 `…:0080`。
+     - 被 mitmproxy 以 400 拒絕：userinfo、host 中的 `\` 或 `%`、path 中的非 ASCII 字元。
+     - 照樣交給 addon：path 中的控制字元與 `#`、`OPTIONS *`（path 是 `*`）、absolute-form 的 `https://`（scheme 是 https）。
+     - HTTP/1.0 沒有 Host 時 `host_header` 是 None；兩個 Host 會以 `, ` 合併；Host 前後的空白會被去掉。
+     - `get` 在 `request.method` 中是 `GET`，轉送時是原始的 `get`。
+  6. header：
+     - 不刪除 `Proxy-Authorization` 時會被轉送。
+     - CL＋TE、兩個 Content-Length：400（`validate_inbound_headers`）。
+     - `Upgrade: h2c`：mitmproxy 自己移除後轉送。
+     - `Upgrade: websocket`：會轉送，上游回 101 時連線就變成沒有檢查的通道。
+     - HTTP/1 的 request trailer：mitmproxy 在讀 body 時就讓那條連線結束（`NotImplementedError`），不會轉送，其他連線不受影響。
+  7. options 的預設值：`connection_strategy` 是 eager；`upstream_cert`、`http2`、`http3`、`websocket`、`rawtcp`、`onboarding`、`command_history` 都是 true；`block_global` 是 true（client 是私有 IP，不受影響）；`body_size_limit` 沒有上限。
+  8. 網路：
+     - internal＋gateway isolated＋`--ip-range x.x.x.0/25`＋固定的 `.254` 可行。
+     - isolated 模式不保留 `.1` 給 gateway，動態配發從 `.1` 開始。
+     - guard 的 `/proc/net/route` 只有兩條直連的路由，沒有預設路由。
+     - guard 解析得到兩個網路上的容器名稱，外部名稱與 `host.docker.internal` 立刻失敗（EAI_AGAIN）；兩個容器共用 alias 時回傳兩個 IP。
+     - 掃描容器解析不到 lab 的名稱，也解析不到外部名稱。
+  9. 時鐘：容器與宿主的差距在 0.05 秒以內。
+  10. 映像內有 `mitmproxy.test.tflow` 與 `taddons`：live 的 contract 測試以真的 flow 物件驅動 addon。
+
+### 15.1 guard 的執行方式
+
+| 項目 | 採用 | 理由 |
+|---|---|---|
+| 映像 | `deploy/guard/Dockerfile`：FROM `mitmproxy/mitmproxy:12.2.3@sha256:00b77b5d…`，只 COPY guard 需要的模組（import 的封閉集合）與啟動程式，`USER 10001:10001`，ENTRYPOINT 是 `python3 -I /opt/secscan-guard/run_guard.py` | 使用者的決定；相依套件衝突，不能共用 uv.lock |
+| 啟動（`run_guard.py`） | 依序：<br>1. 嚴格讀取設定；檢查 `/proc/net/route`：只有 scan 與 lab 兩條直連的路由、沒有預設路由。<br>2. 在 `asyncio.run` 中，以核心 options 建立 `DumpMaster(with_dumper=False)`。<br>3. 設定 addon 的 options，再逐一讀回核對（§15.2）。<br>4. 最後才加入 guard addon。<br>任何一步失敗都以非 0 結束 | 不用 `mitmdump -s`：載入失敗時它仍是沒有檢查的 proxy（T03） |
+| addon 的程式 | `src/secscan/guard/` 只用標準函式庫與純 domain（`targets.domain`、`grants.domain`、`core.text`、`core.network`）。不 import mitmproxy：以 Protocol 描述用到的 flow 屬性，建立 response 的方式由啟動程式注入 | 在 3.12 的測試環境中可以完整測試，mypy strict 也涵蓋 |
+| 例外 | 每個 hook 只捕捉 `Exception`（`CancelledError` 照常傳遞），一律拒絕或中止連線；log 只記 hook 名稱與例外類別（`# noqa: BLE001`，理由寫在程式中）。放行要有正向的核准紀錄：後面的 hook 找不到核准就拒絕 | mitmproxy 吞掉例外之後會放行（實測 3） |
+| 紀錄 | 自己的 JSON handler（`propagate=False`），只記：canonical 的 run_id、決定、原因、method、host、port、path（截斷、不含 query）、上游 IP、status。不記 header 的值、query、token。mitmproxy 自己的 termlog 只輸出 warn 以上 | repo 沒有 logging 設定；mitmproxy 的訊息可能含請求的內容 |
+| Python | 映像是 3.14、測試環境是 3.12：guard 的程式只用兩邊都有的功能。subprocess 測試確認 guard 載入的模組；live 測試在映像中實際執行 | 使用者接受的取捨 |
+| confdir | tmpfs 掛在映像宣告的 VOLUME（`/home/mitmproxy/.mitmproxy`，uid 10001、0700），也是 `confdir` | 不讓 Docker 每次建立匿名 volume；P0 不用 CA |
+
+### 15.2 mitmproxy 的 options
+
+啟動時設定，並逐一讀回核對（不符就以非 0 結束）：
+
+| 類別 | 值 |
+|---|---|
+| 監聽 | `mode` 只有 `regular@<guard 的 scan IP>:8080`（不聽 lab 那一側、不聽 0.0.0.0） |
+| 連線 | `connection_strategy=lazy`、`upstream_cert=false`、`http2`／`http3`／`websocket`／`rawtcp`=false |
+| 請求 | `body_size_limit=16m`、`stream_large_bodies` 沒有設定（不 streaming：streaming 會在 `request` hook 之前就連上游）、`validate_inbound_headers=true`、`normalize_outbound_headers=true` |
+| 不能改寫請求或略過檢查 | `ignore_hosts`、`allow_hosts`、`tcp_hosts`、`udp_hosts`、`map_remote`、`map_local`、`modify_headers`、`modify_body`、`block_list`、`client_replay`、`server_replay`、`scripts` 都是空的；`proxyauth`、`upstream_auth`、`stickyauth`、`stickycookie`、`save_stream_file`、`connect_addr` 都是 None；`anticache`、`anticomp`、`onboarding`、`command_history` 是 false |
+| 其他 | `ssl_insecure=false`、`block_global=true`、`block_private=false`、`termlog_verbosity=warn` |
+
+非空的 `ignore_hosts` 或 `tcp_hosts` 會讓流量不經 HTTP 層、也不經 addon 直接轉送，所以必須是空的。
+
+### 15.3 runner 與 guard 交換資料（不經網路，ARCHITECTURE §3.1）
+
+- **volume**（都是 tmpfs，uid 10001、0700；掃描容器與 worker 都不掛）：
+  - `guard_policies`：runner 讀寫、guard 唯讀。
+  - `guard_status`：guard 讀寫、runner 唯讀。
+- **policy**：每個 run 一個 `<run_id>.json`，schema 1，平的結構：
+  ```json
+  {"schema": 1, "run_id": "…", "scan_id": "…", "state": "active",
+   "token_sha256": "<64 hex>", "not_after": 1767600000, "renew_until": 1767598830,
+   "origin": "http://lab-target:8080", "allowed_ips": ["10.89.7.20"],
+   "methods": ["GET", "POST"], "allow_all_paths": false,
+   "paths": ["/api/items/{id}"], "excluded_paths": ["/api/admin"]}
+  ```
+  - **時間**（整數 epoch 秒）：
+    - `not_after` = min(grant 的 `valid_until`, 啟動時間 ＋ plan 的牆鐘上限)。
+    - `renew_until` = DB 心跳成功之前讀到的時間 ＋ LEASE_DURATION（30 秒）。
+  - **寫入**：以 dir fd、`O_EXCL|O_NOFOLLOW` 的 0400 暫存檔寫入、fsync，再 `os.replace`；封鎖與續約都走同一條路。
+  - **guard 的解析**：
+    - key 必須完全相符、拒絕重複的 key；布林不能當整數；UUID、IP、origin 都必須是 canonical 寫法；檔名必須等於 run_id。上限 512 KiB（最大的 grant 約 165 KB，§10.9）。
+    - 以 `Scope(origins=(origin,), …)` 重建，再交給 `ScopeRules.of`：建構子重跑所有驗證，比對規則和 T09 凍結 operation 時相同。
+  - **guard 的讀取**：每個請求 `stat` 一次，inode、mtime 或 size 變了才重讀；`O_NOFOLLOW`、只接受一般檔案；快取有上限，損毀的結果也快取。
+- **續約（dead-man switch）**：只在 DB 心跳成功之後重寫 `renew_until`，寫失敗等同 guard 不可用。runner 當掉時，孤兒容器的出站最晚在 30 秒內停止：出站不會比 lease 活得久。
+- **guard 的 status**：每 5 秒原子寫入 `status.json`，內容是 schema、`boot_id`（每次啟動隨機產生）、啟動與更新的時間、listen 位址、policy 的 schema 版本、`enforcing`（addon 已載入、自我檢查通過）。runner 判斷 guard 可用的條件：15 秒內有更新、版本相符、listen 位址等於自己設定的 proxy、`enforcing` 為 true。
+
+### 15.4 proxy 憑證
+
+- runner 為每個 run 產生 `secrets.token_urlsafe(32)`；policy 只存它的 sha256。
+- 掃描容器拿到 secrets 目錄中的 `proxy-url`（0400）：`http://<run_id>:<token>@<guard 的 scan IP>:8080`。不放在 env、argv、label、事件、audit 或 log；各工具的設定格式在 M3、M4。
+- guard 只接受一個 `Proxy-Authorization: Basic`：base64 嚴格解碼、run_id 是小寫的 UUID、token 的格式固定，以 `hmac.compare_digest` 比對 hash。驗證之後刪除所有 `Proxy-*` header（實測 6）。
+
+### 15.5 逐請求的檢查（`requestheaders`，順序固定；拒絕時不建立上游連線）
+
+1. **帳密與 policy**：帳密缺少或錯誤、run 不存在、policy 損毀，一律 407，附 `Proxy-Authenticate: Basic realm="secscan-guard"`（ZAP 的 reactive auth 需要）。真正的原因只寫進 guard 的 log，不讓 client 知道哪些 run 存在。
+2. **run 的狀態**（token 驗證通過之後才回 403＋原因）：已封鎖 → `RUN_BLOCKED`；`now >= not_after` → `RUN_EXPIRED`；`now >= renew_until` → `POLICY_STALE`。
+3. **請求的形狀**：
+   - CONNECT 在 `http_connect` 一律 403（`CONNECT_DENIED`，P0 不支援 HTTPS）。
+   - 有 `Upgrade`、`HTTP2-Settings`，或 `Connection` 含 `upgrade` → `UPGRADE_DENIED`。
+   - scheme 不是 http → `SCHEME_DENIED`。
+   - method 或 request target 不是可見的 ASCII、含 `#` → `PATH_AMBIGUOUS`。
+4. **改寫目的地的 header**：`X-HTTP-Method-Override`、`X-HTTP-Method`、`X-Method-Override`、`X-Original-URL`、`X-Rewrite-URL`、`X-Forwarded-Host`、`X-Host`、`X-Forwarded-Server`、`X-Forwarded-Prefix`、`Forwarded`，或 query 中解碼後（不分大小寫）是 `_method` 的 key → `OVERRIDE_HEADER`。這些會讓靶機改用別的 method 或 path，繞過 grant。body 中的 `_method` 是殘餘風險（§15.10）。
+5. **authority**（parser differential）：三個來源都必須和 policy 的 origin 逐字相同，不符 → `ORIGIN_MISMATCH`：
+   - mitmproxy 解出的 host 與 port（大小寫、結尾的點都算不同）；
+   - 唯一一個 `Host` header（port 是 80 時也接受 `host:80`）；
+   - scheme。
+
+   T11 只放行 scan 的 target origin。逐字比對擋下所有替代寫法：大寫、結尾的點、十六進位、整數、前導零、`[::ffff:…]`、userinfo（實測 5）。
+6. **path 與 method**：
+   - method 以原始的 bytes 比對（實測 5：轉送的是原始的 method）。
+   - 去掉 query，先以 `path_problem` 檢查（`%`、`;`、`//`、`.`、`..`、`\`、非 ASCII、超過 512 字元都拒絕）；含 `{`、`}` 的也拒絕（`parse_route` 會把字面的 `{x}` 當成佔位）。這些都回 `PATH_AMBIGUOUS`。
+   - 再交給 `ScopeRules.classify`：`PATH_EXCLUDED`／`METHOD_NOT_AUTHORIZED`／`PATH_NOT_AUTHORIZED`。`OPTIONS *` 也因此拒絕。
+7. **位址**（只解析 policy origin 的 host，guard 不會變成 DNS 外洩的管道）：
+   - origin 是 IP 時不解析；是名稱時以注入的 async resolver 解析（2 秒逾時、答案數量有上限）。
+   - **每一個**答案都必須同時是 IPv4、在 `allowed_ips` 中、通過 `LabNetwork.check_host`（網段內，不是網路、廣播或保留給 guard 的位址），而且不是 guard 自己的位址。
+   - 不符 → `ADDRESS_NOT_ALLOWED`；解析失敗 → `DNS_FAILED`。
+8. **核准與綁定**：設定 `request.host = <IP>`，再把 Host 寫回 policy 的 canonical authority：上游連的是驗證過的 IP、Host 不變，事後重新解析也不會生效（SEC-04）。核准記在 `flow.metadata`，以及 `client.id → {(ip, port): run_id}`。
+
+其他 hook 的防線：
+- `request`：已經拒絕的請求不處理；其餘再查一次 policy 的狀態、必須有核准、有 trailer 就拒絕。
+- `server_connect`：目的位址必須是這條 client 連線核准過的，而且 run 仍然有效；否則（含例外）設定 `data.server.error`。
+- `client_connected`：來源不在 scan_net 的網段就中止；`client_disconnected` 時清掉核准。
+- `tcp_start`、`udp_start`、`websocket_start`：一律中止（縱深防禦；這些協定都已關閉）。
+- `response`、`error`：記錄 status 與實際的上游 IP。
+- redirect 不改寫、也不另外分類：工具跟隨 redirect 送出的下一個請求，照上面的順序重新檢查（SEC-03）。
+
+拒絕的回應：403，附 `X-Secscan-Guard: <原因>` 與一行純文字。M3 的 parser 依這個 header 排除 guard 的回應。
+
+### 15.6 網路與位址
+
+| 項目 | 採用 |
+|---|---|
+| lab_net | 改由 `make lab-net` 建立：internal、gateway isolated、10.89.7.0/24、`--ip-range 10.89.7.0/25`。`compose.lab.yaml` 與 `compose.yaml` 都以 external 引用 `${SECSCAN_LAB_NET:-secscan_lab_net}` |
+| scan_net | `make scan-net` 加上 `--ip-range 10.89.8.0/25` 並驗證。guard 停機時，掃描容器也拿不到 guard 的 IP（否則可以冒充 guard，收集其他 run 的帳密） |
+| guard 的位址 | 兩個網段的最後一個 host（scan 10.89.8.254、lab 10.89.7.254），在動態配發的範圍之外。guard 啟動時確認：lab IP 是保留的位址、scan IP 不在 LAB_CIDR 內 |
+| `LabNetwork` | 保留 LAB_CIDR 的最後一個 host 給 guard：target、grant 與 gate 都拒絕（T06 的交接）。LAB_CIDR 的規則（RFC 1918、/16–/30）抽到 `core/network.py`，config 與 guard 共用 |
+| guard 的網路 | 只接 scan_net 與 lab_net；不接 control_net、docker_net、default；不發布 port；只聽 scan 那一側 |
+| canary | 只存在於 live 測試，文件寫明 |
+| 舊環境 | 已存在、沒有 ip-range 的網路，`make scan-net`／`make lab-net` 的驗證會失敗；README 寫重建的步驟 |
+
+### 15.7 runner 的整合（維持 T10 的生命週期結構）
+
+- **佇列**：`_gate` 改成也回傳 grant；`Launch` 加上 `egress: EgressScope | None`（target 的 origin、grant 的 scope 與 `valid_until`），只在轉到 running 時設定。in-process 的 fake-runner 與 worker 不受影響。
+- **secret 檔**：每個容器都會拿到 `proxy-url`，所以 `/scan/secret` 一律掛載；`target_auth` 的語意不變。
+  - `write_secrets(run_id, {允許的名稱: 內容})`：只 mkdir 一次，全部成功或什麼都不留。
+  - `discard_secrets`：刪掉所有已知的名稱再 rmdir（修正 T10「只刪 `target-auth`，多一個檔案時 rmdir 失敗」的問題）。
+- **`runner/egress.py`**：每個 run 的 handle（token、policy、寫入、續約、封鎖、刪除）。
+- **啟動**（`_start`）：guard 不可用 → failed（`GUARD_UNAVAILABLE`），不建立容器；心跳 → 寫 secrets（`proxy-url`，有認證時加 `target-auth`）→ 寫 `in/` → 寫 policy（`renew_until` 取自剛才的心跳）→ create → start。
+- **停止**：封鎖寫在 `_stop` 裡，每條停止的路徑都先封鎖：lease 失效、runner 停止、逾時、輸出被拒、guard 中斷。取消的順序是封鎖 → cancelling → stop（完成 T10 標記的插入點）。
+- **心跳**（`_beat`）：DB 心跳成功之後才續約。以下都是新的結果 `GUARD_LOST`：guard 不可用、`boot_id` 改變（guard 重啟過，可能漏掉請求）、續約寫不出去。`GUARD_LOST` 的處理是封鎖 → stop → **interrupted**（`GUARD_UNAVAILABLE`），和 T10 的「基礎設施中斷」一致，不把工具連不上當成零告警。
+- **清理**：封鎖 → 刪容器 → 刪 secrets → 確認容器已刪除才刪 policy；否則保留 blocked 的 policy。
+- **迴圈與 probe**：每一輪認領之前都讀 guard 的 status（一個小檔案），結果交給可認領的引擎與心跳，不必等 60 秒的 probe。不可用時，每個引擎都回 `GUARD_UNAVAILABLE`；policy 目錄不可寫也算不可用。啟動時連同 secret 一起清掉殘留的 policy（條件同 T10：沒有其他存活的 runner）。
+
+### 15.8 錯誤碼與能力代碼
+
+| 代碼 | 情況 |
+|---|---|
+| `RunErrorCode.GUARD_UNAVAILABLE` | 啟動之前（guard 不可用、寫不出 policy）→ failed；執行中（guard 中斷或重啟、續約失敗）→ interrupted。DB 只檢查格式，不必 migration |
+| `CapabilityIssue.GUARD_UNAVAILABLE` | `GET /scanners` 的不可用原因；API 與 runner 一起更新（`read_capabilities` 會丟掉不認得的代碼） |
+
+guard 的拒絕原因只出現在 guard 的 log 與回應的 header：
+- 帳密與 policy：`PROXY_AUTH_REQUIRED`（log 中再細分 `RUN_NOT_ACTIVE`、`POLICY_INVALID`、`TOKEN_MISMATCH`）、`RUN_BLOCKED`、`RUN_EXPIRED`、`POLICY_STALE`。
+- 請求的形狀與 origin：`CONNECT_DENIED`、`UPGRADE_DENIED`、`SCHEME_DENIED`、`OVERRIDE_HEADER`、`ORIGIN_MISMATCH`。
+- path 與 method：`PATH_AMBIGUOUS`、`PATH_EXCLUDED`、`METHOD_NOT_AUTHORIZED`、`PATH_NOT_AUTHORIZED`。
+- 位址：`DNS_FAILED`、`ADDRESS_NOT_ALLOWED`。
+- 內部：`NOT_APPROVED`、`TRAILERS_DENIED`、`GUARD_ERROR`。
+
+### 15.9 模組與分層（更新 §14.10）
+
+```text
+main | cli → migrations → health | runner | worker → scanners → scans → specs | auth_profiles | guard → grants → targets → projects → api_keys → audit → security → core
+```
+
+- guard 只用 grants、targets、core 的純模組；runner 可以 import guard（policy 的格式只有一份）。
+- 新的 forbidden contract：`secscan.guard` 不得 import fastapi、starlette、sqlalchemy、alembic、psycopg、docker、pydantic、pydantic_settings、yaml、cryptography、uvicorn。
+- subprocess 測試：`python -I` 載入 guard 之後，`sys.modules` 只有標準函式庫與 `secscan`，而且 `secscan.*` 正好等於 `deploy/guard/Dockerfile` 的 COPY 清單。
+
+### 15.10 取捨與不在 T11 範圍
+
+取捨（殘餘風險）：
+- path 中的 `%` 一律拒絕：會擋掉工具放在 path 的 payload，部分 ZAP 檢查無法執行；刻意 fail closed，M3 依量測決定。
+- body 中的 `_method`（例如表單欄位）擋不到；lab 的靶機另外確認是否支援這個寫法。
+- proxy 憑證沒有綁定來源 IP：P0 只有一個 runner、一次一個掃描容器；ip-range 讓掃描容器拿不到 guard 的 IP。
+- mitmproxy 本身可能被惡意的靶機回應攻陷：guard 不接 control_net、docker_net；非 root、唯讀、沒有 capability；policy 唯讀；不持有目標的 secret。
+- guard 以 `DumpMaster` 這個半內部的 API 嵌入：以 digest 鎖定版本、啟動時讀回 options 核對、live 的 contract 測試涵蓋。
+
+不在 T11 範圍：
+- T12：policy schema 2（預算：速率、burst、總請求數、跨引擎共用；額外的 origin 與跨 origin 的認證 header 規則）；telemetry 與計數（以 `boot_id` 銜接重啟）；preflight 的實際執行；ZAP 的 reactive 407 讓請求數加倍，計數時要考慮。
+- T13：grant 撤銷或 target 停用時停止執行中的 scan（SEC-01 的後半）；有容器的 run 的對帳與孤兒容器（含 runner 被 kill 之後留下的 policy，reconciler 沿用 `runner/guard.py` 封鎖）；`/health/ready`。
+- M3：工具的 proxy 設定格式；HTTPS（CA、上游憑證驗證）；parser 依 `X-Secscan-Guard` 排除 guard 的回應。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。
