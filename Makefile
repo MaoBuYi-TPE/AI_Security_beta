@@ -187,7 +187,8 @@ down:
 
 # live 測試：真的 Docker、socket-proxy、egress guard 與 fake 容器；guard 的測試在 live 自己的 lab 網路
 # 上啟動接收端（不啟動 Juice Shop、VAmPI）。需要自己設定 ENABLE_LIVE_LAB_TESTS=1；在獨立的 compose
-# 專案建立、測試、一律拆除（含它的 volume、網路，以及測試接在這兩個網路上的容器）。
+# 專案建立、測試、一律拆除：先刪掉接在這兩個網路上的容器（測試的接收端、探針與孤兒的掃描容器，
+# 否則 volume 還在使用中刪不掉），再刪 compose 的服務、volume 與網路。
 # 會中斷 stack 的測試（停掉 guard、kill runner）放在最後執行。
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
 	tests/live/test_guard_failover_live.py
@@ -203,10 +204,10 @@ test-live-runner: env docker-check images build
 		&& $(LIVE_COMPOSE) up -d --wait \
 		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(UV_RUN) pytest -m live -p no:cacheprovider $(LIVE_TESTS) \
 		|| status=$$?; \
-		$(LIVE_COMPOSE) down -v --remove-orphans; \
 		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
 			ids=$$(docker ps -aq --filter "network=$$net"); \
 			[ -z "$$ids" ] || docker rm -f $$ids >/dev/null; \
-			docker network rm $$net >/dev/null 2>&1; \
 		done; \
+		$(LIVE_COMPOSE) down -v --remove-orphans; \
+		docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
 		exit $$status
