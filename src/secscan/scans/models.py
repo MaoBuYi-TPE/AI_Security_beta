@@ -44,7 +44,12 @@ from secscan.scans.domain.lifecycle import (
     RunStatus,
     ScanStatus,
 )
-from secscan.scans.domain.model import ANONYMOUS_ROLE, MAX_EVENT_PAYLOAD_BYTES, EventType
+from secscan.scans.domain.model import (
+    ANONYMOUS_ROLE,
+    CONTAINER_NAME_PREFIX,
+    MAX_EVENT_PAYLOAD_BYTES,
+    EventType,
+)
 from secscan.scans.domain.request import IDEMPOTENCY_KEY_MAX_LENGTH, IDEMPOTENCY_KEY_MIN_LENGTH
 from secscan.specs.domain.openapi import MAX_OPERATIONS, OPERATION_ID_MAX_LENGTH, OPERATION_METHODS
 from secscan.targets.domain import ORIGIN_MAX_LENGTH
@@ -57,6 +62,12 @@ LEASE_OWNER_MAX_LENGTH = 128
 ERROR_CODE_MAX_LENGTH = 64
 EVENT_TYPE_MAX_LENGTH = 64
 SHA256_BYTES = 32
+CONTAINER_NAME_MAX_LENGTH = 64
+IMAGE_REF_MAX_LENGTH = 255
+# repo:tag@sha256:<64 hex>（完整的文法在 scanners.domain.plan；DB 是最後一道防線）。
+IMAGE_REF_PATTERN = (
+    "^[a-z0-9][a-z0-9._/:-]{0,180}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}@sha256:[0-9a-f]{64}$"
+)
 
 
 def _in_list(members: Iterable[str]) -> str:
@@ -261,6 +272,23 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             "AND (heartbeat_at IS NULL OR heartbeat_at >= started_at)",
             name="times",
         ),
+        # 容器版的 runner 在 run 開始時記下容器與映像（docs/DECISIONS.md §14.6）；in-process 的
+        # fake runner 沒有容器。只能在 preparing → running 的那一次寫入（migration 的 trigger）。
+        CheckConstraint(
+            f"container_name IS NULL OR container_name = '{CONTAINER_NAME_PREFIX}' || id::text",
+            name="container_matches_run",
+        ),
+        CheckConstraint(
+            f"image_ref IS NULL OR image_ref ~ '{IMAGE_REF_PATTERN}'", name="image_ref_valid"
+        ),
+        CheckConstraint(
+            "(container_name IS NULL) = (image_ref IS NULL)", name="container_with_image"
+        ),
+        CheckConstraint(
+            "container_name IS NULL OR status NOT IN "
+            f"('{RunStatus.QUEUED.value}', '{RunStatus.PREPARING.value}')",
+            name="container_after_start",
+        ),
     )
 
     scan_id: Mapped[UUID] = mapped_column(ForeignKey("scans.id", ondelete="RESTRICT"))
@@ -273,6 +301,8 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     started_at: Mapped[datetime | None]
     finished_at: Mapped[datetime | None]
     error_code: Mapped[str | None] = mapped_column(String(ERROR_CODE_MAX_LENGTH))
+    container_name: Mapped[str | None] = mapped_column(String(CONTAINER_NAME_MAX_LENGTH))
+    image_ref: Mapped[str | None] = mapped_column(String(IMAGE_REF_MAX_LENGTH))
 
 
 class ScanEventModel(Base):

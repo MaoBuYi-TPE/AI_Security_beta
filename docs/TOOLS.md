@@ -19,8 +19,12 @@
 | bkimminich/juice-shop | v20.3.0 | sha256:cea5a4af4aac… | MIT | 65532（distroless，node 在 `/nodejs/bin/node`，無 shell） | **不相容**（見 §5） |
 | erev0s/vampi | latest | sha256:0a5a224b6e14… | MIT | root | 可（tmpfs `/tmp`、`/vampi/database`） |
 | busybox | 1.38.0 | sha256:fd7dc98638c8… | GPL-2.0-only（僅作 probe，不散布） | root | — |
+| wollomatic/socket-proxy（T10 加入） | 1.13.1 | sha256:3935b709275e… | MIT | 以 `65534:0` 執行（OrbStack VM 內 docker.sock 是 root:root 0660） | 可（scratch 映像） |
+| python（T10，secscan 映像的基底） | 3.12.15-slim-bookworm | sha256:6a0e06f5ba0b… | PSF-2.0 | secscan 映像以 10001 執行 | 可（`/tmp` 用 tmpfs） |
+| astral-sh/uv（T10，只在建置階段） | 0.13.1 | sha256:4a1f3666816d… | MIT／Apache-2.0 | — | — |
 
 - **tracecov**：schemathesis 映像預設 `SCHEMATHESIS_COVERAGE=true`，會載入 `tracecov`（PyPI 0.25.3，授權 `LicenseRef-TraceCov-Community-1.0`，**非 OSI**、限 Internal Use、會寫 `/app`）。本專題一律設 **`SCHEMATHESIS_COVERAGE=false`** 關閉，避免授權與唯讀 rootfs 問題。
+- **T10 的 busybox**：fake 引擎的掃描容器改以 `10001:10001`、唯讀 rootfs 執行 `/bin/sleep`／`/bin/false`（live 測試通過）。
 - **mitmproxy entrypoint**：預設 entrypoint 需 root（跑 `usermod` 再 `gosu`）。改以 `entrypoint: [mitmdump]` + `user: "1000:1000"` 直接啟動。
 
 ## 2. Nuclei 模板

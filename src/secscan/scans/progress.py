@@ -52,12 +52,21 @@ class LockedScan:
     auth_profile_id: UUID | None
     auth_profile_version: int | None
     created_by_key_id: UUID
+    max_duration_seconds: int
     status: ScanStatus
     cancel_requested: bool
 
     @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_SCAN_STATUSES
+
+
+@dataclass(frozen=True, slots=True)
+class ContainerAssignment:
+    """容器版 runner 為這個 run 啟動的容器（docs/DECISIONS.md §14.6）：先記下，才呼叫 create。"""
+
+    name: str
+    image_ref: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +99,7 @@ class ScanProgress:
                 ScanModel.auth_profile_id,
                 ScanModel.auth_profile_version,
                 ScanModel.created_by_key_id,
+                ScanModel.max_duration_seconds,
                 ScanModel.status,
                 ScanModel.cancel_requested_at,
             )
@@ -107,6 +117,7 @@ class ScanProgress:
             auth_profile_id=row.auth_profile_id,
             auth_profile_version=row.auth_profile_version,
             created_by_key_id=row.created_by_key_id,
+            max_duration_seconds=row.max_duration_seconds,
             status=ScanStatus(row.status),
             cancel_requested=row.cancel_requested_at is not None,
         )
@@ -152,20 +163,27 @@ class ScanProgress:
         *,
         error_code: RunErrorCode | None = None,
         lease_owner: str | None = None,
+        container: ContainerAssignment | None = None,
     ) -> None:
         """依 domain 的轉換表改變 run，並寫入事件。
 
         lease_owner 只在認領時給：寫入新的 lease。轉到不需要 lease 的狀態（collected、終止）時清除
         lease；其他轉換保留原本的 lease。只有要求過取消的 scan，run 才能轉到 cancelling
         （DB 的 ck_scans_cancel_matches_status 也這樣要求；審查發現）。
+        container 只在開始執行（→ running）時給：和狀態在同一個 UPDATE 寫入（trigger 只允許
+        這一次）。
         """
         plan_run_transition(run.status, to, error_code=error_code)
         if to is RunStatus.CANCELLING and not scan.cancel_requested:
             raise ValueError("只有要求過取消的 scan，run 才能轉到 cancelling")
+        if container is not None and to is not RunStatus.RUNNING:
+            raise ValueError("容器只能在 run 開始執行時記下")
         values: dict[str, object] = {
             "status": to.value,
             "error_code": error_code.value if error_code is not None else None,
         }
+        if container is not None:
+            values.update(container_name=container.name, image_ref=container.image_ref)
         if to not in LEASED_RUN_STATUSES:
             values.update(lease_owner=None, lease_expires_at=None, heartbeat_at=None)
         elif lease_owner is not None:

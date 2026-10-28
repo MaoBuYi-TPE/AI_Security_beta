@@ -929,6 +929,178 @@ main | cli → migrations → health | runner → scans → specs | auth_profile
 - 同一個 target 需要同時跑多個 scan（例如不同的 auth role）：改成以 (target, auth role) 為單位的忙碌判斷，並檢討共用預算。
 - 輪詢事件的負擔太大：加 LISTEN/NOTIFY，sequence 的語意不變。
 
+## 14. T10 補充決定：runner、docker-socket-proxy、ExecutionPlan 與容器限制（2026-10-27）
+
+T10 建立真的 runner 程序：經 docker-socket-proxy 啟動單次容器，送進 Docker 之前先驗證 ExecutionPlan。以下是規劃文件沒有寫到、實作前才定下的細節。
+
+使用者的決定（2026-10-27）：
+- socket-proxy 改用 **wollomatic/socket-proxy**（§14.1；原本的文件寫 Tecnativa [S27]）。
+- 容器化 **api、runner、worker**；worker 在 T10 只處理 fake 的 normalizing（parser 在 M3）。
+- **secret 注入在 T10 做**：runner 是 `reveal` 唯一的呼叫者（§12.2 的交接）。
+
+T10 不送出任何掃描流量：只有 fake 引擎，fake 容器在 scan_net 上不連任何位址（guard 在 T11），也不啟動 lab。
+
+依據：
+- wollomatic/socket-proxy [S83]：每個 HTTP method 一個 regex，自動加上 `^`、`$`，沒有設定的 method 一律拒絕；`-allowfrom` 預設只允許 127.0.0.1，可以寫主機名稱；`-allowbindmountfrom` 會檢查 container create 等端點的 body，只放行列出目錄下的 host bind，`VolumesFrom` 一律拒絕，named volume 不算 bind；README 明說它**不限制 privileged、host namespace、capability 與 device**，「is a request filter, not a sandbox」。1.13.0 修補了 bind mount 的檢查；1.13.1（2026-08-15）只升 Go；1.13.2（2026-10-24）只升 Go 與文件，發布未滿兩週，暫不採用。
+- Tecnativa 的 haproxy.cfg [S84]：`POST` 是全域開關；`CONTAINERS` 的規則是 `^(/v[\d.]+)?/containers`，沒有結尾錨點，所以 `CONTAINERS=1` 加上 `POST=1` 時，`/containers/{id}/exec`（建立 exec）與 `/containers/{id}/archive`（把檔案寫進容器）都會放行，也能停止、刪除任何容器。
+- Docker SDK for Python 7.2.0 [S85]：低階 `APIClient` 給定版本時不在建立時呼叫 daemon；`from_env()` 在沒有 `DOCKER_HOST` 時會改用 Docker CLI 的 context。Engine API 1.45 起支援 volume 的 `Subpath` [S86]。
+- 實測（OrbStack，Docker Engine 29.4.0、API 1.54、最低 1.40，2026-10-27）：
+  - VM 內的 `/var/run/docker.sock` 是 `root:root 0660`：socket-proxy 以 `65534:0` 執行（非 root 的 uid，group 0 才連得到 socket）。
+  - socket-proxy 的 regex 只比對 path，不含 query（`/v1.45/version?x=1` 符合 `/v1\.[0-9]+/version`）。
+  - `-allowfrom` 的主機名稱在每個請求時解析（容器停止後，同一個 IP 的其他容器就被拒絕）。
+  - `-allowbindmountfrom` 指向不存在的目錄時，`HostConfig.Binds` 與 type 為 bind 的 `Mounts` 都回 403；沒有 bind 的 create 照常 201。
+  - 只接 internal network 的容器，publish 的 port 不會生效：api 與 db 另外接一個非 internal 的網路，只用來發布 127.0.0.1 的 port。
+
+### 14.1 docker-socket-proxy
+
+| 項目 | 採用 | 理由 |
+|---|---|---|
+| 實作 | wollomatic/socket-proxy 1.13.1，以 digest 鎖定（`sha256:3935b709…`） | Tecnativa 只能整段開放 API 區段，做不到 SEC-21 要求的「exec 等 API 回 403」（上方依據） |
+| 放行清單 | GET：`/version`、`/containers/secscan-run-<uuid>/json`、`/images/<核准的映像>/json`（逐字比對核准清單、`.` 已跳脫：審查發現原本的通式會放行 `/` 與 `..`）、scan_net、兩個 volume。POST：`/containers/create`、`/containers/secscan-run-<uuid>/(start\|stop)`。DELETE：`/containers/secscan-run-<uuid>`。其他一律 403 | runner 一律以名稱 `secscan-run-<run_id>` 操作容器，proxy 因此能把管理限制在掃描容器，碰不到 db、api 或其他專案的容器。沒有 exec、archive、build、pull、logs，也不能建立 network 或 volume |
+| 其他設定 | `-allowfrom=runner`；`-allowbindmountfrom` 指向不存在的空目錄（create 的 `Binds` 與 type 為 bind 的 `Mounts` 都拒絕）；`-watchdoginterval` 加 `-stoponwatchdog`（socket 不可用就結束，由 compose 重啟）；只接 internal 的 docker_net、不發布 port；`65534:0`、`read_only`、`cap_drop: ALL`、`no-new-privileges` | privileged、namespace、capability、volume 的 driver 選項（`o=bind` 的 local volume）與任意的本機映像，proxy 都不檢查，只靠 runner 的驗證（§14.3）。socket 的 `:ro` 不會限制 API 呼叫，不算一道防線（審查指出） |
+| 放行清單的來源 | compose 的設定是唯一的來源；單元測試解析 compose，以相同的語意（自動加 `^$`、只比對 path）核對一張「該放行、該拒絕」的對照表 | 改了設定，測試就會指出哪一個端點的結果變了 |
+
+殘餘風險（同 `ARCHITECTURE.md` §2）：
+- runner 被攻陷時仍可以建立 privileged 容器（proxy 不檢查 body 的這部分）。緩解是 runner 不解析不可信資料、只掃 lab；要掃 lab 以外的目標，runner 與掃描容器必須移到獨立的 VM。
+- 放行的查詢讓被攻陷的 runner 看得到 scan_net 上的容器與 IP、volume 在宿主上的路徑（影響小，記錄於此）。
+- `65534:0` 是 OrbStack 的做法（VM 內 socket 是 `root:root 0660`）；原生 Linux 改用 `group_add` 加上 docker socket 的 GID，不改成 root。
+
+### 14.2 Docker 存取
+
+| 項目 | 採用 | 理由 |
+|---|---|---|
+| SDK | `docker` 的低階 `APIClient`，`base_url` 明確給（預設 `tcp://socket-proxy:2375`），API 版本固定 1.45，不用 `from_env()` | 不受 CLI context 影響；1.45 是 subpath 的最低版本，probe 確認 daemon 的範圍包含它 |
+| create 的 body | runner 自己組好整個 body（§14.3），以 `create_container_from_config` 原樣送出 | 驗證的就是實際送出的內容，不經 SDK 再轉換一次 |
+| 等待 | 每秒以 `GET /containers/{name}/json` 查狀態，不用長時間阻塞的 wait | 少開放一個端點；等待期間要心跳、檢查取消與時間上限 |
+| 唯一 import 的地方 | `runner/docker_runtime.py`（import-linter：其他模組不得 import `docker`） | CLAUDE.md §5 |
+| 映像 | runner 不 pull（proxy 也不放行）；`make images` 在宿主以 digest pull。缺少時 probe 不通過、不認領 | 不讓 runner 觸發 daemon 對外連線 |
+| 容器名稱 | `secscan-run-<run_id>`：同一個 run 只可能有一個容器，重複 create 得到 409 | 防止重複啟動的最後一道；完整的對帳在 T13 |
+
+### 14.3 ExecutionPlan 與驗證
+
+- **ExecutionPlan**（`scanners/domain/plan.py`，純資料）：run 與 scan 的 id、引擎、映像（`repo:tag@sha256:…`）、entrypoint、args、非秘密的環境變數、要寫進 `in/` 的輸入檔、是否掛載 target 的 secret（只有參照，沒有值）、資源與時間上限。**沒有** host path、網路名稱、user、privileged、capability 這些欄位：由 runner 固定的容器政策決定。
+- **建構**：`scanners/domain/fake.py` 依 fake 的腳本建 plan：成功 → `/bin/sleep <秒數>`，失敗 → `/bin/false`；映像是 busybox 1.38.0（digest 鎖定）；寫一個不含秘密的 `run.json` 到 `in/`。
+- **驗證**（`runner/domain/admission.py`，純函式）：每個引擎一份政策，plan 必須
+  - 使用核准清單中的映像（完整的 ref 逐字比對，tag 或 digest 不同都拒絕）；
+  - entrypoint 與 args 符合其中一個指令樣板（每個位置是 literal 或 regex 的完整比對，不能多也不能少）；
+  - 環境變數的名稱在白名單、值符合格式；輸入檔的名稱在白名單、大小在上限內；
+  - 只有接受 target 認證的引擎才能掛載 secret；資源與時間的上限大於 0 且不超過引擎的上限。
+  不符就 `PlanRejectedError(原因)`；訊息只有原因，不含值。
+- **再檢查一次 create 的 body**（不變式，縱深防禦）：由 plan 與容器政策組出 body 之後、送出之前，以獨立的規則檢查（自己的一份字面值與掛載規則，不呼叫組 body 的程式、不共用它的常數：審查發現原本共用，改錯時會一起放行）：只有允許的欄位；`Privileged` 為 false；沒有 `Binds`；`Mounts` 只有這個 run 的 volume subpath（而且只有 `out/` 可寫）；`NetworkMode` 是 scan_net；`CapDrop` 是 `ALL`；`no-new-privileges`；唯讀 rootfs；`Init`；`IpcMode`、`CgroupnsMode` 是 `private`（不依賴 daemon 的預設值）；user 是 `10001:10001`；有記憶體（不能用 swap）、CPU、pids 上限；不自動重啟。另外 plan 被拒或 body 不安全時，Docker 一個請求都收不到（測試確認）。
+- 核准的映像寫在 runner 的政策裡，和 scanners 的建構各寫一次：驗證是獨立的白名單，不是「建構的結果自己核准自己」。
+
+### 14.4 掃描容器的限制
+
+- user `10001:10001`（和 runner 相同：隔離靠掛載，不靠 uid）、唯讀 rootfs、`CapDrop: ALL`、`no-new-privileges`、`Init: true`（訊號能傳到工具，stop 時不必等到 kill）。
+- 只接 scan_net（internal、gateway isolated）；不掛任何 host path，只有 volume subpath：`<runs>/<run_id>/in`（唯讀）、`<runs>/<run_id>/out`（可寫）、`<secrets>/<run_id>`（唯讀，有 secret 時）。
+- 記憶體（`MemorySwap` 等於 `Memory`，不能用 swap）、`NanoCpus`、`PidsLimit`、`nofile` 上限；log 用 `json-file` 並限制大小；不自動重啟、不自動刪除（runner 讀完結束的狀態才刪）。fake：64 MiB、0.5 CPU、64 個 pid。
+- labels：`secscan.managed`、`secscan.run_id`、`secscan.scan_id`、`secscan.engine`（T13 的對帳用）。
+
+### 14.5 工作目錄、收集與 secret
+
+| 項目 | 採用 | 理由 |
+|---|---|---|
+| volume | `runs`（`in/`、`out/`、收集的 manifest）與 `run_secrets`（只有 runner 與該 run 的容器掛載）兩個 named volume | M3 的 worker 要讀 `out/`，但永遠不掛 secret 的 volume：以 volume 分開，不靠檔案權限 |
+| 收集 | 容器刪除之後，runner 以 `O_NOFOLLOW` 與 `lstat` 走過 `out/`：只接受一般檔案，拒絕 symlink、hardlink（nlink > 1）、device、FIFO、socket、讀不到的條目、非 UTF-8 或含控制字元與格式字元（Cc、Cf）的名稱；限制深度、條目數（目錄也算）、單檔與總大小。逐一走訪、超過上限就停，不先讀完整個目錄（審查發現：工具可以建立數百萬個條目讓 runner 耗盡記憶體）；計算 sha256，寫成 `runs/<run_id>/manifest.json`（在 `out/` 之外，掃描容器改不到）。違反就 failed（`ARTIFACT_REJECTED`） | runner 掛著整個 runs volume，跟著工具建立的 symlink 會讀到其他 run 的資料（SEC-18）。`ARCHITECTURE.md` §12：runner 只收集與計算 hash，不解析 |
+| 執行中的用量 | out/ 沒有磁碟配額：容器執行中，runner 每秒以同樣的走訪（只 `lstat`、不開檔、不跟隨 symlink）檢查條目數、深度與總大小，超過就停止容器 → failed（`ARTIFACT_REJECTED`）。這是軟性的上限（寫入速度快時會超過一點）；硬性的配額要有大小上限的檔案系統，在 M3 接真工具時處理 | 審查發現：容器可以寫滿 VM 的磁碟，連 db 都受影響 |
+| secret | prepare 在同一個 transaction 中，以 `FOR SHARE` 讀出綁定版本的密文（§13.11 的交接）。runner 在建立容器之前才 `reveal`，寫成 `<secrets>/<run_id>/target-auth`（0400、`O_EXCL`、寫完整），唯讀掛進容器；容器刪除之後立刻刪除。secrets volume 是 tmpfs（只存在記憶體，刪除即抹除）。runner 啟動時清掉殘留的 secret 目錄，但還有其他存活的 runner 時不清（可能正在使用） | CLAUDE.md §9；環境變數會出現在 `docker inspect`（T03），所以用檔案。plan、create 的 body、label、事件、audit、log 都只有參照 |
+| fake 與 secret | fake 的政策接受 target 認證：有 auth profile 的 fake scan 會收到檔案，但 fake 不讀它 | 用真的容器驗證注入、權限與刪除；M3 的 ZAP 依自己需要的格式處理 |
+| 解密失敗 | failed（`SECRET_UNAVAILABLE`），不啟動容器 | fail closed |
+
+### 14.6 runner 與 worker 的生命週期
+
+**runner**（`runner/service.py` 的 `ContainerRunner`；每一步都經 `ScanQueue`；容器與 secret 在 finally 中刪除，任何結果、任何例外都一樣）：
+1. 認領 probe 通過的引擎（T10 只有 fake）；沒有 plan 的引擎直接 failed（`PLAN_REJECTED`），不記下容器與映像。
+2. `prepare_launch`：既有的檢查（gate、profile 的版本、建立者的 key）通過時，在移到 running 的同一個 transaction 中寫入 `container_name` 與 `image_ref`（先記下、才呼叫 create），並回傳密文與 scan 的時間上限。
+3. 建 plan → 驗證 → 寫 `in/` 與 secret → create → start。工作目錄不可用（權限、磁碟滿）：failed（`WORKSPACE_UNAVAILABLE`）；start 之前 Docker 出錯：failed（`RUNTIME_UNAVAILABLE`）。
+4. 等待：啟動後立刻心跳一次（lease 從認領起算），之後每 5 秒一次；每秒查一次容器的狀態與 out/ 的用量。
+   - 查不到狀態：重試，連續 3 次才放棄；已確認刪除容器 → interrupted（`RUNTIME_UNAVAILABLE`），刪不掉就不轉換。
+   - out/ 超過上限：停止容器 → failed（`ARTIFACT_REJECTED`）。
+   - 會停止容器的結果（取消、逾時、超過上限、runner 停止）都要確認容器已刪除才轉換；刪不掉就留給 T13 的對帳。
+   - 要求取消：cancelling → stop（寬限 5 秒後 kill）→ cancelled（T11／T13 在 stop 之前插入「封鎖 guard」）。
+   - 超過時間上限（scan 的 `max_duration_seconds`，T10 每個 run 各自計算；跨引擎共用在 T12）：stop → timed_out（`TIME_LIMIT_EXCEEDED`）。
+   - lease 失效：stop、刪除容器、停止處理，不轉換（無法 fencing；run 留給 T13 的對帳）。
+   - runner 收到 SIGTERM：stop、刪除容器 → interrupted（`RUNNER_STOPPED`）。容器確定已經停止，所以可以這樣標。
+5. 結束：exit 0 → collecting → 心跳（收集可能要計算大量的 hash）→ 收集 → collected；OOM → failed（`RESOURCE_LIMIT_EXCEEDED`）；其他非 0 → failed（`ENGINE_FAILED`）。不論結果都刪除容器與 secret。
+
+**worker**（`worker/service.py`）：對帳 lease 過期的 normalizing（→ collected，解析可以重試），再認領 fake 的 collected → normalizing → succeeded。fake 沒有東西可以解析，不讀任何檔案；M3 加上 parser。
+
+**和 in-process 的 FakeRunner 並存**：`secscan-admin fake-runner` 保留（不需要 Docker）。兩者都會認領 fake，擇一執行。`reconcile_expired` 的 runner 階段只處理 `container_name IS NULL` 的 run：有容器的 run，lease 過期不代表容器已經停止（`ARCHITECTURE.md` §9），留給 T13 的容器對帳。
+
+### 14.7 capability probe 與 `GET /scanners`
+
+- probe：daemon 的 API 版本範圍包含 1.45；scan_net 存在、internal、gateway 是 isolated；兩個 volume 存在，而且 runner 掛載的目錄可寫（權限錯了要在認領之前發現，審查發現）；每個核准的映像都在本機。結果是每個引擎 `available` 或 `unavailable` 加原因代碼，不含路徑或秘密。probe 不通過就只寫心跳、不認領，每 60 秒重試。
+- 心跳表 `runner_instances`：runner 與 worker 每 5 秒更新一次；30 秒內有心跳才算存活。同一個 owner 只更新同一列；啟動時刪掉 7 天沒有心跳的列。
+- `GET /api/v1/scanners`：任何有效的平台 key 都可以讀（內容不分 project，也不含秘密）；讀回的映像 ref 不合格式就當成沒有回報，不把任意文字轉給使用者。依引擎列出是否已整合、是否可用、映像、可用的 scan profile、不可用的原因、最後 probe 的時間，以及 runner、worker 是否存活。只有 4 筆，不分頁。
+- `/health/ready` 不納入 runner 心跳：API 沒有 runner 也能接受並排入 scan；是否要列入留給 T13。
+
+### 14.8 部署（compose）
+
+- 一個映像（`Dockerfile`，多階段：uv 依 `uv.lock` 建 venv → python 3.12 slim，都以 digest 鎖定；uid 10001；唯讀 rootfs 可以執行）。
+- `compose.yaml` 的 `app` profile：`api`、`runner`、`worker`、`socket-proxy`；`make db-up` 不受影響。
+  - control_net、docker_net、scan_net 都是 internal；scan_net 另加 gateway isolated（同 T03）。
+  - api 與 db 另外接 `default`，只為了發布 127.0.0.1 的 port（上方實測）。
+  - runner 接 control_net、docker_net；worker 只接 control_net；只有 socket-proxy 掛 docker.sock。
+  - 都以非 root、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges` 執行，並有記憶體與 pids 上限。
+- api 與 runner 仍以環境變數取得 DB 密碼與 `SECRET_ENCRYPTION_KEYS`；proxy 不放行 inspect `secscan-run-*` 以外的容器，runner 讀不到其他容器的環境變數。compose `secrets:` 與拆分 `.env` 仍在 T23（§7）。
+- 程序入口：`secscan-admin runner`、`secscan-admin worker`。`cli.py` 改成 `cli/` 套件（`__init__` 與 `services`），維持 800 行以內。
+
+### 14.9 測試隔離與 live 測試
+
+- `tests/isolation.py`（pytest plugin，由 `tests/conftest.py` 載入）：
+  - AF_UNIX 的 connect 只允許 pytest 暫存目錄底下的路徑。沒有開關時，防護在 `pytest_configure` 就套用到整個 session（session 範圍的 fixture 也受限，審查建議），每個測試再套用更窄的範圍。
+  - `DOCKER_HOST` 設成不存在的 socket，並清掉 `DOCKER_CONTEXT`、`DOCKER_CONFIG`、`DOCKER_TLS_VERIFY`、`DOCKER_CERT_PATH`（子程序的 `docker` CLI 也連不到）。
+  - 用了 `enable_socket`／`socket_enabled`、卻沒有標記 `live` 的測試，收集時就讓整個 session 失敗。
+- `live` 測試沒有 `ENABLE_LIVE_LAB_TESTS=1` 就 skip；只有 live 測試解除上述限制。`make test` 只跑 `not live`。
+- Docker SDK 的測試不開 socket：把 SDK 的 HTTP adapter 換成記錄請求的假實作，確認送出的請求逐一正確。
+- `make test-live-runner`：以獨立的 compose 專案（`secscan-live`：自己的 DB volume、網路與 volume 名稱，API 綁 127.0.0.1:8765）建立 → 跑 live 測試 → 一律拆除。不動開發用的 db。
+
+### 14.10 模組與分層（更新 §13.9）
+
+```text
+main | cli → migrations → health | runner | worker → scanners → scans → specs | auth_profiles → grants → targets → projects → api_keys → audit → security → core
+```
+
+| 模組 | 為什麼在這一層 |
+|---|---|
+| runner | 認領 run、驗證 plan、經 proxy 啟動容器；唯一能 import `docker` |
+| worker | 解析（T10 只有 fake 的 normalizing）；不能 import `docker` |
+| scanners | ExecutionPlan 與建構（純函式）、`runner_instances` 與 `GET /scanners`；runner 與 worker 都要寫心跳，所以放在它們之下 |
+
+### 14.11 錯誤碼
+
+| 錯誤碼 | 情況 |
+|---|---|
+| `PLAN_REJECTED` | plan 或 create 的 body 不符合政策（不呼叫 Docker） |
+| `RUNTIME_UNAVAILABLE` | 啟動之前 Docker 出錯（例如 proxy 拒絕、映像不見了） |
+| `SECRET_UNAVAILABLE` | 解不開綁定版本的密文 |
+| `TIME_LIMIT_EXCEEDED` | 超過時間上限（timed_out） |
+| `RESOURCE_LIMIT_EXCEEDED` | 容器因記憶體上限被終止 |
+| `ARTIFACT_REJECTED` | 輸出有 symlink、特殊檔或超過上限 |
+| `RUNNER_STOPPED` | runner 被要求停止，已停止並刪除容器（interrupted） |
+| `WORKSPACE_UNAVAILABLE` | runner 的工作目錄不可用（權限、磁碟滿），或寫不出收集的 manifest（審查後補上） |
+
+DB 只檢查錯誤碼的格式（§13.4），不必改 migration。
+
+### 14.12 取捨與不在 T10 範圍
+
+取捨：
+- runner 被攻陷時仍能建立 privileged 容器（§14.1 的殘餘風險）。
+- lease 失效、runner 被強制終止或 Docker 中途不可用時，run 停在 running，容器可能還在：要到 T13 的容器對帳才會處理。
+- 時間上限是每個 run 各自計算；跨引擎共用預算在 T12。
+- 兩種 fake runner 擇一執行。
+- out/ 的用量是軟性的上限（每秒檢查）；硬性的磁碟配額在 M3。
+- `prepare_launch` 的 `FOR SHARE` 只保證到 commit：之後 PATCH 清除 secret，不會讓已經啟動的 run 失效（同 §13.11 的語意）。
+- api 與 runner 都持有 `SECRET_ENCRYPTION_KEYS` 與同一個 DB 角色：「只有 runner 呼叫 reveal」是程式層級的約束（AST 測試），不是權限邊界。分開金鑰與 DB 角色在 T23。
+- runs volume 中每個 run 的目錄不會被刪除（保留期限在 M5／T23 定義）。
+
+不在 T10 範圍：
+- T11：guard 與 policy；取消時先封鎖 guard；scan_net 隔離的完整收包證據（SEC-06、SEC-07）。
+- T12：共享預算與 telemetry；preflight 的實際執行。
+- T13：有容器的 run 的對帳（lease 過期時依 label 找容器、確認停止之後才標 interrupted）、孤兒容器清理、`/health/ready` 是否納入 runner 心跳。
+- M3：worker 的 parser 與 artifacts 資料表；ZAP 的映像、指令樣板與 secret 格式；工具以 uid 10001 執行的相容性。
+- T23：compose `secrets:`、拆分 `.env`；DDL 與 DML 角色；`sslmode`。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。

@@ -23,6 +23,11 @@ fake 引擎的 runner（docs/DECISIONS.md §13.7）：
 - 先對帳 lease 過期的 fake run、解析留下的 collected，再處理排隊中的 fake run，直到沒有工作
   （--once 只處理一個）。不連任何位址，不需要 SECRET_ENCRYPTION_KEYS，不解密任何 secret。
 - 每個 run 的結果寫到 stderr；lease 失效、DB 錯誤或被中斷時 exit 1。
+
+容器版的 runner 與 worker（docs/DECISIONS.md §14.6；說明見 secscan.cli.services）：
+
+    uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-300]
+    uv run secscan-admin worker [--once]
 """
 
 import argparse
@@ -51,12 +56,15 @@ from secscan.api_keys.domain import (
 )
 from secscan.api_keys.service import ApiKeyService
 from secscan.auth_profiles.service import AuthProfileService, SecretRotationError
+from secscan.cli import services
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
 from secscan.core.text import require_text
 from secscan.migrations import head_revision
-from secscan.runner.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeRunner, FakeScript, RunReport
-from secscan.scans.queue import LeaseLostError, ScanQueue
+from secscan.runner.config import RunnerSettings
+from secscan.runner.fake import FakeRunner
+from secscan.scanners.domain.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
+from secscan.scans.queue import LeaseLostError, RunReport, ScanQueue
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
 from secscan.targets.domain import LabNetwork
 
@@ -68,14 +76,13 @@ EXIT_USAGE = 2  # argparse 的參數錯誤
 OUTPUT_FILE_MODE = 0o600
 ROTATE_COMMAND = "rotate-secret-keys"
 FAKE_RUNNER_COMMAND = "fake-runner"
+RUNNER_COMMAND = "runner"
+WORKER_COMMAND = "worker"
 FAKE_RUNNER_APPLICATION_NAME = "secscan-fake-runner"
 # 解不開時最多列出幾個 profile id（其餘以數量表示）。
 MAX_LISTED_PROFILES = 10
 
-_NOT_READY = {
-    DatabaseStatus.UNAVAILABLE: "無法連線資料庫：請先執行 make db-up，並確認 .env 的 DB_* 設定。",
-    DatabaseStatus.SCHEMA_OUTDATED: "資料庫 schema 不是目前版本：請先執行 make migrate。",
-}
+_NOT_READY = services.NOT_READY
 
 
 class KeyOutput:
@@ -130,6 +137,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == FAKE_RUNNER_COMMAND:
         script = FakeScript(outcome=FakeOutcome(args.outcome), hold_seconds=args.hold_seconds)
         return _run_fake_runner(settings, script, once=args.once)
+    if args.command == RUNNER_COMMAND:
+        return _run_container_runner(settings, args)
+    if args.command == WORKER_COMMAND:
+        return services.run_worker(settings, once=args.once, report=_report)
     output = KeyOutput(args.output)
     try:
         output.prepare()
@@ -145,6 +156,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     finally:
         output.discard()
+
+
+def _run_container_runner(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        runner_settings = RunnerSettings()
+    except ValidationError as exc:
+        problems = "；".join(_describe(error) for error in exc.errors())
+        _report(f"設定不正確（RUNNER_* 環境變數）：{problems}")
+        return EXIT_FAILURE
+    default = runner_settings.fake_script()
+    script = FakeScript(
+        outcome=FakeOutcome(args.outcome) if args.outcome is not None else default.outcome,
+        hold_seconds=args.hold_seconds if args.hold_seconds is not None else default.hold_seconds,
+    )
+    return services.run_runner(settings, runner_settings, script, once=args.once, report=_report)
 
 
 def _create_admin_key(
@@ -332,6 +358,33 @@ def _parser() -> argparse.ArgumentParser:
         help=f"在 running 停留的秒數（0 到 {MAX_HOLD_SECONDS}，期間心跳並檢查取消），預設 0",
     )
     fake.add_argument("--once", action="store_true", help="只處理一個排隊中的 run")
+    runner = commands.add_parser(
+        RUNNER_COMMAND,
+        help="容器版的 runner：經 socket-proxy 啟動掃描容器（T10 只有 fake）",
+        description=(
+            "認領排隊中的 run，經 RUNNER_DOCKER_URL 啟動強化過的單次容器，收集輸出。"
+            "收到 SIGTERM 時停止並刪除執行中的容器。"
+        ),
+    )
+    runner.add_argument(
+        "--outcome",
+        choices=[outcome.value for outcome in FakeOutcome],
+        default=None,
+        help="fake 容器的結果（預設依 RUNNER_FAKE_OUTCOME，否則 succeed）",
+    )
+    runner.add_argument(
+        "--hold-seconds",
+        type=_hold_seconds,
+        default=None,
+        help=f"fake 容器停留的秒數（0 到 {MAX_HOLD_SECONDS}；預設依 RUNNER_FAKE_HOLD_SECONDS）",
+    )
+    runner.add_argument("--once", action="store_true", help="最多處理一個 run 就結束")
+    worker = commands.add_parser(
+        WORKER_COMMAND,
+        help="worker：處理收集好的 run（T10 只有 fake，不讀任何檔案）",
+        description="對帳過期的解析，再處理等待解析的 run。收到 SIGTERM 時停止。",
+    )
+    worker.add_argument("--once", action="store_true", help="最多處理一個 run 就結束")
     return parser
 
 

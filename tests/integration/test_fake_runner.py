@@ -14,12 +14,13 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.grants.service import ScopeGrantService
-from secscan.runner.fake import FakeOutcome, FakeRunner, FakeScript, RunReport
+from secscan.runner.fake import FakeRunner
+from secscan.scanners.domain.fake import FakeOutcome, FakeScript
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.catalog import ScanProfile, plan_runs
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease, NewScan, Scan
-from secscan.scans.queue import LeaseLostError, ScanQueue
+from secscan.scans.queue import LeaseLostError, RunReport, ScanQueue
 from secscan.scans.repository import ScanRepository
 from secscan.scans.service import ScanService
 from tests.integration.api_support import LAB, Scannable, Seeder, World

@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25；S79–S82 為 2026-10-26。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25；S79–S82 為 2026-10-26；S83–S86 為 2026-10-27。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -86,10 +86,14 @@
 | S80 | [PostgreSQL — Client Connection Defaults](https://www.postgresql.org/docs/current/runtime-config-client.html) | `statement_timeout`、`lock_timeout`、`idle_in_transaction_session_timeout` 預設 0（關閉），沒有單位時是毫秒；前兩者「Setting … in postgresql.conf is not recommended because it would affect all sessions」；`lock_timeout`「applies separately to each lock acquisition attempt」，且「if statement_timeout is nonzero, it is rather pointless to set lock_timeout to the same or larger value」；`idle_in_transaction_session_timeout` 終止整個 session。T09 的連線逾時（`DECISIONS.md` §13.8） |
 | S81 | [PostgreSQL — Error Codes（Appendix A）](https://www.postgresql.org/docs/current/errcodes-appendix.html) | 55P03 `lock_not_available`、57014 `query_canceled`、25P03 `idle_in_transaction_session_timeout`、23505 `unique_violation`、40P01 `deadlock_detected`。T09 把等鎖與查詢逾時對應到 503 |
 | S82 | [PostgreSQL — CREATE TABLE](https://www.postgresql.org/docs/current/sql-createtable.html) | `GENERATED ALWAYS AS IDENTITY`：INSERT 指定的值只在 `OVERRIDING SYSTEM VALUE` 時接受，UPDATE 成 DEFAULT 以外的值一律拒絕；「MATCH SIMPLE allows any of the foreign key columns to be null; if any of them are null, the row is not required to have a match」，MATCH SIMPLE 是預設；`ON DELETE RESTRICT`。T09 的 `queue_position` 與 scan 的複合 FK |
+| S83 | [wollomatic/socket-proxy — README](https://github.com/wollomatic/socket-proxy)；[Releases](https://github.com/wollomatic/socket-proxy/releases)；Docker Hub `wollomatic/socket-proxy` | 每個 HTTP method 一個 regex（`-allowGET` 等），「`^` and `$` are added automatically」，沒有設定的 method 一律拒絕；`-allowfrom` 預設只允許 127.0.0.1，可以寫主機名稱；`-allowbindmountfrom` 檢查 container create 等端點的 body，只放行列出目錄下的 host bind，`VolumesFrom` 拒絕，named volume 不算 bind，「is a request filter, not a sandbox」；不限制 privileged、host namespace、capability 與 device；scratch 映像、`-allowhealthcheck`、`-watchdoginterval` 與 `-stoponwatchdog`。1.13.0（2026-08-08）修補 bind mount 的檢查；1.13.1（2026-08-15，`sha256:3935b709…`）只升 Go。T10 的 socket-proxy（`DECISIONS.md` §14.1） |
+| S84 | [Tecnativa/docker-socket-proxy — haproxy.cfg](https://github.com/Tecnativa/docker-socket-proxy/blob/master/haproxy.cfg) | `http-request deny unless METH_GET \|\| { env(POST) -m bool }`：POST 是全域開關；`CONTAINERS` 的規則 `^(/v[\d.]+)?/containers` 沒有結尾錨點，`/containers/{id}/exec`、`/containers/{id}/archive` 也會放行。T10 不採用的理由 |
+| S85 | [Docker SDK for Python — Change log](https://docker-py.readthedocs.io/en/stable/change-log.html)；[PyPI docker](https://pypi.org/project/docker/) | 7.2.0（2026-07-09）：「Added subpath support for volumes」；「docker.from_env() now honors the active Docker CLI context when DOCKER_HOST is not set」。7.1.0 的預設 API 版本 1.44。T10 的 runner 用低階 `APIClient`、版本固定 1.45 |
+| S86 | [Docker Engine API — Version history](https://docs.docker.com/reference/api/engine/version-history/) | v1.45：`POST /containers/create` 的 `Mounts` 可以用 `VolumeOptions.Subpath` 只掛載 volume 的子目錄。T10 的掃描容器只以 subpath 掛載該 run 的目錄 |
 
 ## 需要在 M0–M2 實際確認的事項
 
-> T03（2026-10-17）已完成以下 1–6 針對三個引擎與 egress 的 M0 部分，結果與證據見 `TOOLS.md`。第 7 項（docker-socket-proxy 的最小開關組合）屬 runner 範疇，T03 未做，留待 M2／T10。DNS/IP 綁定、redirect 重檢、HTTPS CA 等也留待 M2。
+> T03（2026-10-17）已完成以下 1–6 針對三個引擎與 egress 的 M0 部分，結果與證據見 `TOOLS.md`。第 7 項由 T10（2026-10-27）完成：改用 wollomatic/socket-proxy，逐一放行 method＋path（`DECISIONS.md` §14.1），以 live 測試確認。DNS/IP 綁定、redirect 重檢、HTTPS CA 等留待 T11。
 
 
 1. 三個引擎的映像版本、digest、arm64 支援與授權條款。
@@ -109,7 +113,7 @@
    - IP 綁定與 redirect 檢查
    - 日後 HTTPS 的 CA 信任與上游憑證驗證
 6. 各映像與非 root、唯讀 rootfs、必要可寫目錄、volume subpath 的相容性（OrbStack 的 Docker Engine）。
-7. docker-socket-proxy 讓 runner 能 create/start/stop/wait/取回 archive 所需的最小開關組合。
+7. docker-socket-proxy 讓 runner 能 create/start/stop/wait/取回 archive 所需的最小開關組合（T10：只放行 create、start、stop、刪除與查詢；不用 wait 與 archive，改為輪詢狀態、從 volume 收集輸出）。
 
 ## 來源與推論的界線
 

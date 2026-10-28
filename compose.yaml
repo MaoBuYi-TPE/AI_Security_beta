@@ -1,9 +1,41 @@
-# 控制平面的本機資源（T04 只有 PostgreSQL；M2 再加入 api/worker/runner 與 control_net）。
-# 只綁 127.0.0.1，不對外；映像以 tag@digest 鎖定。密碼來自 .env（make env 產生，不進 git）。
+# 控制平面的本機資源。只綁 127.0.0.1，不對外；映像以 tag@digest 鎖定（secscan 由 Dockerfile 建立）。
+# 密碼與金鑰來自 .env（make env 產生，不進 git）。
 #   make db-up        啟動開發用 db（持久 volume）
 #   make test-db-up   啟動整合測試用 db-test（tmpfs，停掉即清空）
 #   make db-down      停止兩者（保留開發資料 volume）
+#   make up / down    app stack：api、runner、worker、socket-proxy（profile app；docs/DECISIONS.md §14.8）
+#
+# 權限分離（DoD：api、worker、掃描容器都沒有 Docker socket，也不是 privileged）：
+# - 只有 socket-proxy 掛 docker.sock，而且只接 docker_net；只接受 runner 連線，只放行掃描容器需要的
+#   API（docs/DECISIONS.md §14.1）。runner 不掛 docker.sock，經 socket-proxy 操作容器。
+# - control_net、docker_net 都是 internal；api 與 db 另外接 default，只為了發布 127.0.0.1 的 port
+#   （internal network 上 publish 的 port 不會生效）。
+# - 掃描容器由 runner 建立，只接 scan_net（internal＋gateway isolated，由 make scan-net 建立）。
 name: secscan
+
+x-app: &app
+  # 本機建立的映像（make build，只由 api 建立一次）；不從 registry pull。
+  image: secscan:${SECSCAN_IMAGE_TAG:-dev}
+  pull_policy: never
+  profiles: [app]
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp
+  pids_limit: 128
+  restart: unless-stopped
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-prod}
+  DB_HOST: db
+  DB_PORT: "5432"
+  DB_NAME: ${DB_NAME:-secscan}
+  DB_USER: ${DB_USER:-secscan_app}
+  DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
+  LAB_CIDR: ${LAB_CIDR:-10.89.7.0/24}
 
 x-postgres: &postgres
   image: postgres:18.6-trixie@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
@@ -40,6 +72,7 @@ services:
       SECSCAN_APP_DB_NAME: ${DB_NAME:-secscan}
     ports:
       - "127.0.0.1:${DB_PORT:-55432}:5432"
+    networks: [default, control_net]
     volumes:
       - db_data:/var/lib/postgresql
       # 只在第一次初始化資料目錄時執行；之後改 .env 的密碼不會自動同步（見 README）。
@@ -77,5 +110,125 @@ services:
       - /tmp:mode=1777
     mem_limit: 512m
 
+  api:
+    <<: *app
+    build:
+      context: .
+    command:
+      ["uvicorn", "--factory", "secscan.main:create_app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *app-env
+      SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    networks: [default, control_net]
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 512m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/live',timeout=3).status==200 else 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  runner:
+    <<: *app
+    command: ["secscan-admin", "runner"]
+    environment:
+      <<: *app-env
+      SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      RUNNER_DOCKER_URL: tcp://socket-proxy:2375
+      RUNNER_SCAN_NETWORK: ${SECSCAN_SCAN_NET:-secscan_scan_net}
+      RUNNER_RUNS_VOLUME: ${SECSCAN_RUNS_VOLUME:-secscan_runs}
+      RUNNER_SECRETS_VOLUME: ${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}
+      RUNNER_FAKE_OUTCOME: ${RUNNER_FAKE_OUTCOME:-succeed}
+      RUNNER_FAKE_HOLD_SECONDS: ${RUNNER_FAKE_HOLD_SECONDS:-0}
+    volumes:
+      - runs:/runs
+      - run_secrets:/run-secrets
+    networks: [control_net, docker_net]
+    depends_on:
+      db:
+        condition: service_healthy
+      socket-proxy:
+        condition: service_healthy
+    # 收到 SIGTERM 時停止並刪除執行中的容器（最多寬限 5 秒），再標成 interrupted。
+    stop_grace_period: 30s
+    mem_limit: 256m
+
+  worker:
+    <<: *app
+    command: ["secscan-admin", "worker"]
+    environment:
+      <<: *app-env
+    networks: [control_net]
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 256m
+
+  # 只放行 runner 需要的 Docker API（docs/DECISIONS.md §14.1）：regex 會自動加上 ^ 與 $，只比對 path。
+  # 容器一律以 secscan-run-<uuid> 指定；不放行 exec、archive、logs、build、pull，也不能建立 network
+  # 或 volume。映像只放行核准清單（和 runner/domain/policy.py 相同，逐字比對、. 已跳脫）。
+  # -allowbindmountfrom 指向不存在的目錄：create 的 Binds 與 type 為 bind 的 Mounts 都拒絕；它不檢查
+  # privileged、namespace、capability 與 volume 的 driver 選項，這些只由 runner 的驗證負責。
+  socket-proxy:
+    image: wollomatic/socket-proxy:1.13.1@sha256:3935b709275e4ec35d6ed5a5c4a1f0d01ed31eec5e7234efc3357ecd47689002
+    profiles: [app]
+    # OrbStack VM 內的 docker.sock 是 root:root 0660：非 root 的 uid、group 0 才連得到。
+    user: "65534:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker_net]
+    command:
+      - -loglevel=INFO
+      - -listenip=0.0.0.0
+      - -allowfrom=runner
+      - -allowhealthcheck
+      - -watchdoginterval=30
+      - -stoponwatchdog
+      - -shutdowngracetime=5
+      - -allowbindmountfrom=/nonexistent-secscan-no-host-binds
+      - '-allowGET=/v1\.[0-9]+/(version|containers/secscan-run-[0-9a-f-]{36}/json|images/(busybox:1\.38\.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e)/json|networks/${SECSCAN_SCAN_NET:-secscan_scan_net}|volumes/(${SECSCAN_RUNS_VOLUME:-secscan_runs}|${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}))'
+      - '-allowPOST=/v1\.[0-9]+/containers/(create|secscan-run-[0-9a-f-]{36}/(start|stop))'
+      - '-allowDELETE=/v1\.[0-9]+/containers/secscan-run-[0-9a-f-]{36}'
+    healthcheck:
+      test: ["CMD", "./healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    mem_limit: 64m
+    pids_limit: 64
+    restart: unless-stopped
+
+networks:
+  control_net:
+    internal: true
+  docker_net:
+    internal: true
+  # 掃描容器的網路：由 make scan-net 建立（internal＋gateway isolated＋固定網段），這裡只引用。
+  # T11 的 egress guard 會接上它與 lab_net。
+  scan_net:
+    name: ${SECSCAN_SCAN_NET:-secscan_scan_net}
+    external: true
+
 volumes:
   db_data:
+  runs:
+    name: ${SECSCAN_RUNS_VOLUME:-secscan_runs}
+  # secret 只存在記憶體（tmpfs）：刪除之後不會留在磁碟上。擁有者是 runner 與掃描容器的 uid 10001。
+  run_secrets:
+    name: ${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,uid=10001,gid=10001,mode=0700

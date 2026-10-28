@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.20.0",
     "cryptography>=50.0.2",
+    "docker>=7.2.0",
     "fastapi>=0.143.3",
     "psycopg[binary]>=3.3.6",
     "pydantic>=2.14.1",
@@ -34,6 +35,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-socket>=0.8.1",
     "ruff>=0.17.1",
+    "types-docker>=7.2.0.20261006",
     "types-pyyaml>=6.0.12.20260906",
 ]
 
@@ -74,8 +76,8 @@ warn_required_dynamic_aliases = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # unit/contract 測試不得出網：pytest-socket 封鎖 TCP/UDP 與 DNS 查詢。
-# AF_UNIX 必須整個放行（asyncio 需要 socketpair），所以本機 Unix socket 的 connect 不受限制；
-# M2 出現 Docker SDK 前要補上守衛（見 docs/TASKS.md T10）。
+# AF_UNIX 必須整個放行（asyncio 需要 socketpair）：tests/isolation.py 另外只允許 connect 到 pytest
+# 暫存目錄底下的 Unix socket，並把 DOCKER_HOST 指向不存在的 socket（docs/DECISIONS.md §14.9）。
 # coverage 門檻放在 make test；單獨執行某個測試檔時不會因門檻而失敗。
 addopts = [
     "--strict-markers",
@@ -88,6 +90,7 @@ xfail_strict = true
 # 整合測試只連 loopback 上 cluster_name=secscan-test 的 db-test（tests/integration/database.py）。
 markers = [
     "integration: 需要 db-test（make test-db-up）；以 -m 'not integration' 可只跑離線測試",
+    "live: 連到真的 Docker 或 lab；要 ENABLE_LIVE_LAB_TESTS=1 才執行，make test 不跑",
 ]
 
 [tool.coverage.run]
@@ -101,11 +104,13 @@ root_package = "secscan"
 # forbidden contract 要檢查第三方套件（fastapi、sqlalchemy…），必須把它們納入 import graph。
 include_external_packages = true
 
-# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7、§11.7、§12.7、§13.9）：
+# 依賴方向（上層可以 import 下層，反之不行；理由見 docs/DECISIONS.md §8、§9.4、§10.7、§11.7、§12.7、§13.9、
+# §14.10）：
 # - main 組裝 app，cli 是本機管理指令；兩者都是程序入口。migrations 登記所有 ORM model。
 # - 功能模組依實際呼叫關係排列：scans 建立 scan 時要用 gate（grants）、inventory（specs）與
-#   profile 的版本（auth_profiles）；runner 只經 scans 的佇列操作 run；specs 要鎖住 target，並以 grant 預覽 inventory；auth_profiles
-#   要鎖住 target、得知所屬 project（與 specs 同一層、互不依賴）；
+#   profile 的版本（auth_profiles）；runner（容器）與 worker（解析）只經 scans 的佇列操作 run，
+#   並以 scanners 建 ExecutionPlan、寫心跳；specs 要鎖住 target，並以 grant 預覽 inventory；
+#   auth_profiles 要鎖住 target、得知所屬 project（與 specs 同一層、互不依賴）；
 #   grants 要鎖住 target、得知所屬 project；targets 要確認 project
 #   存在；projects 會用 api_keys 的身分驗證與 audit；api_keys 撤銷 key 時寫 audit；
 #   audit 依賴 security 的遮罩。
@@ -113,7 +118,7 @@ include_external_packages = true
 #   與 cryptography。
 # - 跨功能的 FK 以資料表名稱引用，不 import 對方的 model。
 # exhaustive：secscan 底下每個頂層模組都必須列在 layers，新模組不會默默繞過檢查；
-# 同一層以 "a | b" 並列（彼此獨立）。runner 與 Docker 的限制在 M2 加入。
+# 同一層以 "a | b" 並列（彼此獨立）。只有 runner.docker_runtime 能 import docker（見下方）。
 [[tool.importlinter.contracts]]
 name = "Layers: main -> migrations -> features -> security -> core"
 type = "layers"
@@ -122,7 +127,8 @@ exhaustive = true
 layers = [
     "main | cli",
     "migrations",
-    "health | runner",
+    "health | runner | worker",
+    "scanners",
     "scans",
     "specs | auth_profiles",
     "grants",
@@ -159,6 +165,15 @@ type = "forbidden"
 source_modules = ["secscan"]
 forbidden_modules = ["cryptography"]
 ignore_imports = ["secscan.security.secret_cipher -> cryptography"]
+
+# Docker 只經由 runner.docker_runtime（CLAUDE.md §5、docs/DECISIONS.md §14.2）：api、worker 與其他模組
+# 都不能 import Docker SDK。預設也檢查間接 import，所以只忽略 docker_runtime 自己的那一條。
+[[tool.importlinter.contracts]]
+name = "Only runner.docker_runtime uses the Docker SDK"
+type = "forbidden"
+source_modules = ["secscan"]
+forbidden_modules = ["docker"]
+ignore_imports = ["secscan.runner.docker_runtime -> docker"]
 
 [tool.alembic]
 # migration 放在套件內，和其他程式一樣受 ruff、mypy 與 coverage 檢查。
