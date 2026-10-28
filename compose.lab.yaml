@@ -1,22 +1,15 @@
 # 隔離 lab 靶場（T03 建立，M2 之後沿用）。
 # 只接 internal network、不發布任何 port，映像以 tag@digest 鎖定。
 # 啟動：make lab-up（預設 profiles：juice-shop vampi）。
-# 注意：lab_net 與掃描流程共用，egress guard（M2）會接上同一個網路名稱。
+# lab_net 與掃描流程共用：egress guard（compose.yaml）接上同一個網路，靶機只收得到 guard 轉送的請求。
 name: secscan-lab
 
 networks:
+  # lab_net 由 make lab-net 建立（internal＋gateway isolated＋10.89.7.0/24＋只配發下半段的 ip-range；
+  # docs/DECISIONS.md §15.6），egress guard 固定在最後一個主機位址。app stack 也以同一個名稱引用。
   lab_net:
-    name: secscan_lab_net
-    internal: true
-    enable_ipv6: false
-    driver: bridge
-    driver_opts:
-      # internal 網路預設仍會配 gateway 位址，容器能連到宿主在該位址上的服務。
-      # isolated 模式不配 gateway，切斷這條路徑（需 Engine 支援；不支援時 lab-up 會報錯，改記為限制）。
-      com.docker.network.bridge.gateway_mode_ipv4: isolated
-    ipam:
-      config:
-        - subnet: 10.89.7.0/24
+    name: ${SECSCAN_LAB_NET:-secscan_lab_net}
+    external: true
 
 services:
   juice-shop:

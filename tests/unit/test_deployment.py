@@ -7,19 +7,24 @@
 """
 
 import re
+from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
+from secscan.guard.config import GUARD_PORT
+from secscan.runner.config import RunnerSettings
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy
+from secscan.targets.domain import LabNetwork
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE: dict[str, Any] = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
 SERVICES: dict[str, dict[str, Any]] = COMPOSE["services"]
 APP_SERVICES = ("api", "runner", "worker")
-HARDENED = (*APP_SERVICES, "socket-proxy")
+HARDENED = (*APP_SERVICES, "socket-proxy", "guard")
+MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
 RUN = "secscan-run-6f1c2d3e-4b5a-4c6d-8e7f-001122334455"
 IMAGE = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
 _DEFAULT = re.compile(r"\$\{[A-Z_]+:-([^}]*)\}")
@@ -61,7 +66,7 @@ def test_app_services_are_hardened(name: str) -> None:
     assert "pids_limit" in service
 
 
-@pytest.mark.parametrize("name", APP_SERVICES)
+@pytest.mark.parametrize("name", [*APP_SERVICES, "guard"])
 def test_app_services_have_no_host_paths(name: str) -> None:
     for volume in _volumes(SERVICES[name]):
         assert not volume.startswith(("/", ".", "~"))
@@ -70,17 +75,19 @@ def test_app_services_have_no_host_paths(name: str) -> None:
 @pytest.mark.parametrize("name", sorted(SERVICES))
 def test_images_are_pinned_or_built_here(name: str) -> None:
     service = SERVICES[name]
-    if str(service["image"]).startswith("secscan:"):
+    if str(service["image"]).startswith(("secscan:", "secscan-guard:")):
         # 本機建立的映像：不從 registry pull（同名的映像不會被換成別人的）。
         assert service["pull_policy"] == "never"
     else:
         assert "@sha256:" in service["image"]
 
 
-def test_the_app_image_is_built_once() -> None:
-    builders = [name for name, service in SERVICES.items() if "build" in service]
+def test_only_the_app_and_the_guard_images_are_built_here() -> None:
+    builders = {name: service["build"] for name, service in SERVICES.items() if "build" in service}
 
-    assert builders == ["api"]
+    assert set(builders) == {"api", "guard"}
+    assert builders["guard"] == {"context": ".", "dockerfile": "deploy/guard/Dockerfile"}
+    assert str(SERVICES["guard"]["image"]).startswith("secscan-guard:")
 
 
 def test_networks_separate_the_processes() -> None:
@@ -93,8 +100,13 @@ def test_networks_separate_the_processes() -> None:
     assert SERVICES["runner"]["networks"] == ["control_net", "docker_net"]
     assert SERVICES["worker"]["networks"] == ["control_net"]
     assert SERVICES["api"]["networks"] == ["default", "control_net"]
-    # 掃描容器的網路上沒有任何常駐服務（T11 的 guard 之前）。
-    assert all("scan_net" not in service.get("networks", []) for service in SERVICES.values())
+    # 掃描容器與靶機的網路上，只有 egress guard（docs/DECISIONS.md §15.6）。
+    for network in ("scan_net", "lab_net"):
+        assert networks[network]["external"] is True
+        users = {
+            name for name, service in SERVICES.items() if network in service.get("networks", [])
+        }
+        assert users == {"guard"}
 
 
 def test_published_ports_are_loopback_only() -> None:
@@ -245,3 +257,132 @@ def test_secrets_live_only_in_memory() -> None:
     assert volume["driver_opts"]["device"] == "tmpfs"
     options = dict(item.split("=", 1) for item in volume["driver_opts"]["o"].split(","))
     assert options == {"size": "1m", "uid": "10001", "gid": "10001", "mode": "0700"}
+
+
+# --- egress guard（docs/DECISIONS.md §15）---------------------------------------------------
+
+
+def _default(value: object) -> str:
+    """compose 的 ${VAR:-default} 以預設值展開。"""
+    return _DEFAULT.sub(r"\1", str(value))
+
+
+def _make(name: str) -> str:
+    [line] = [line for line in MAKEFILE.splitlines() if re.match(rf"{name}\s*\??:?=", line)]
+    return line.split("=", 1)[1].strip()
+
+
+def test_the_guard_sits_only_on_the_scan_and_lab_networks_at_fixed_addresses() -> None:
+    guard = SERVICES["guard"]
+    networks = guard["networks"]
+
+    assert set(networks) == {"scan_net", "lab_net"}
+    scan_ip = IPv4Address(_default(networks["scan_net"]["ipv4_address"]))
+    lab_ip = IPv4Address(_default(networks["lab_net"]["ipv4_address"]))
+    scan_net, lab_net = IPv4Network(_make("SCAN_SUBNET")), IPv4Network(_make("LAB_SUBNET"))
+    assert scan_ip == scan_net.broadcast_address - 1
+    assert lab_ip == LabNetwork(lab_net).guard_address
+    assert scan_ip not in IPv4Network(_make("SCAN_IP_RANGE"))
+    assert lab_ip not in IPv4Network(_make("LAB_IP_RANGE"))
+    environment = {key: _default(value) for key, value in guard["environment"].items()}
+    assert environment == {
+        "LAB_CIDR": str(lab_net),
+        "GUARD_SCAN_CIDR": str(scan_net),
+        "GUARD_SCAN_IP": str(scan_ip),
+        "GUARD_LAB_IP": str(lab_ip),
+    }
+    assert "ports" not in guard
+    assert "expose" not in guard
+
+
+def test_the_runner_points_at_the_guard() -> None:
+    runner = {key: _default(value) for key, value in SERVICES["runner"]["environment"].items()}
+    guard_ip = _default(SERVICES["guard"]["networks"]["scan_net"]["ipv4_address"])
+    defaults = RunnerSettings()
+
+    assert runner["RUNNER_GUARD_PROXY"] == f"{guard_ip}:{GUARD_PORT}"
+    assert defaults.guard_proxy == runner["RUNNER_GUARD_PROXY"]
+    assert str(defaults.guard_policies_dir) in _volumes(SERVICES["runner"])[2]
+    assert str(defaults.guard_status_dir) in _volumes(SERVICES["runner"])[3]
+
+
+def test_policies_flow_from_the_runner_to_the_guard_and_status_back() -> None:
+    """policy：runner 讀寫、guard 唯讀；status：guard 讀寫、runner 唯讀；其他服務都不掛。"""
+    mounts = {
+        name: [volume for volume in _volumes(service) if volume.startswith("guard_")]
+        for name, service in SERVICES.items()
+    }
+
+    assert {name for name, found in mounts.items() if found} == {"runner", "guard"}
+    assert mounts["runner"] == ["guard_policies:/guard/policies", "guard_status:/guard/status:ro"]
+    assert mounts["guard"] == ["guard_policies:/guard/policies:ro", "guard_status:/guard/status"]
+
+
+@pytest.mark.parametrize("volume", ["guard_policies", "guard_status"])
+def test_guard_volumes_live_only_in_memory(volume: str) -> None:
+    options = COMPOSE["volumes"][volume]["driver_opts"]
+
+    assert (options["type"], options["device"]) == ("tmpfs", "tmpfs")
+    parsed = dict(item.split("=", 1) for item in options["o"].split(","))
+    assert (parsed["uid"], parsed["gid"], parsed["mode"]) == ("10001", "10001", "0700")
+
+
+def test_the_guard_keeps_its_scratch_space_in_memory_and_is_health_checked() -> None:
+    guard = SERVICES["guard"]
+
+    targets = [str(entry).split(":", 1)[0] for entry in guard["tmpfs"]]
+    assert targets == ["/tmp", "/home/mitmproxy/.mitmproxy"]  # noqa: S108
+    assert guard["healthcheck"]["test"] == [
+        "CMD",
+        "python3",
+        "-I",
+        "-B",
+        "/opt/secscan-guard/run_guard.py",
+        "--check",
+    ]
+    assert guard["restart"] == "unless-stopped"
+
+
+@pytest.mark.parametrize(
+    ("network", "subnet", "ip_range"),
+    [
+        ("SCAN_NET", "SCAN_SUBNET", "SCAN_IP_RANGE"),
+        ("LAB_NET", "LAB_SUBNET", "LAB_IP_RANGE"),
+        ("LIVE_SCAN_NET", "LIVE_SCAN_SUBNET", "LIVE_SCAN_IP_RANGE"),
+        ("LIVE_LAB_NET", "LIVE_LAB_SUBNET", "LIVE_LAB_IP_RANGE"),
+    ],
+)
+def test_networks_reserve_the_upper_half_for_fixed_addresses(
+    network: str, subnet: str, ip_range: str
+) -> None:
+    """動態配發只在下半段：guard 停機時，掃描容器也拿不到 guard 的 IP（§15.6）。"""
+    whole, dynamic = IPv4Network(_make(subnet)), IPv4Network(_make(ip_range))
+
+    assert _make(network)
+    assert dynamic.subnet_of(whole)
+    assert dynamic.prefixlen == whole.prefixlen + 1
+    assert dynamic.network_address == whole.network_address
+
+
+def test_networks_are_created_internal_isolated_and_with_an_ip_range() -> None:
+    [create] = [line for line in MAKEFILE.splitlines() if "docker network create" in line]
+
+    for flag in ("--internal", "gateway_mode_ipv4=isolated", "--subnet", "--ip-range"):
+        assert flag in create
+    for target in ("scan-net:", "lab-net:"):
+        assert any(line.startswith(target) for line in MAKEFILE.splitlines())
+
+
+def test_the_lab_compose_file_uses_the_shared_lab_network() -> None:
+    lab: dict[str, Any] = yaml.safe_load((ROOT / "compose.lab.yaml").read_text(encoding="utf-8"))
+
+    assert lab["networks"]["lab_net"] == {
+        "name": "${SECSCAN_LAB_NET:-secscan_lab_net}",
+        "external": True,
+    }
+
+
+def test_the_guard_build_context_is_allowed() -> None:
+    lines = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+
+    assert "!deploy/guard/" in lines

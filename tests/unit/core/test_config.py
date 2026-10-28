@@ -201,11 +201,11 @@ def test_lab_only_by_default_with_the_lab_network() -> None:
     assert settings.lab_cidr == IPv4Network("10.89.7.0/24")
 
 
-def test_default_lab_cidr_is_the_lab_compose_network() -> None:
-    """預設值必須是 compose.lab.yaml 的 lab_net；只改其中一邊時，這裡會失敗。"""
-    compose = (REPO_ROOT / "compose.lab.yaml").read_text(encoding="utf-8")
+def test_default_lab_cidr_is_the_lab_network() -> None:
+    """預設值必須是 make lab-net 建立的 lab_net；只改其中一邊時，這裡會失敗。"""
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
 
-    assert re.findall(r"subnet:\s*(\S+)", compose) == [str(DEFAULT_LAB_CIDR)]
+    assert re.findall(r"^LAB_SUBNET \?= (\S+)$", makefile, flags=re.M) == [str(DEFAULT_LAB_CIDR)]
 
 
 @pytest.mark.parametrize("value", ["false", "0", "no"])

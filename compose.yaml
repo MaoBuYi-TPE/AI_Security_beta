@@ -3,14 +3,18 @@
 #   make db-up        啟動開發用 db（持久 volume）
 #   make test-db-up   啟動整合測試用 db-test（tmpfs，停掉即清空）
 #   make db-down      停止兩者（保留開發資料 volume）
-#   make up / down    app stack：api、runner、worker、socket-proxy（profile app；docs/DECISIONS.md §14.8）
+#   make up / down    app stack：api、runner、worker、socket-proxy、guard（profile app；docs/DECISIONS.md
+#                     §14.8、§15）
 #
 # 權限分離（DoD：api、worker、掃描容器都沒有 Docker socket，也不是 privileged）：
 # - 只有 socket-proxy 掛 docker.sock，而且只接 docker_net；只接受 runner 連線，只放行掃描容器需要的
 #   API（docs/DECISIONS.md §14.1）。runner 不掛 docker.sock，經 socket-proxy 操作容器。
 # - control_net、docker_net 都是 internal；api 與 db 另外接 default，只為了發布 127.0.0.1 的 port
 #   （internal network 上 publish 的 port 不會生效）。
-# - 掃描容器由 runner 建立，只接 scan_net（internal＋gateway isolated，由 make scan-net 建立）。
+# - 掃描容器由 runner 建立，只接 scan_net（internal＋gateway isolated，由 make scan-net 建立）；
+#   scan_net 與 lab_net 上只有 egress guard（固定在兩個網段的最後一個主機位址），掃描流量都經它檢查。
+# - runner 與 guard 不經網路交換資料：policy（runner 讀寫、guard 唯讀）、status（guard 讀寫、runner
+#   唯讀）兩個 tmpfs volume（docs/DECISIONS.md §15.3）。
 name: secscan
 
 x-app: &app
@@ -148,9 +152,12 @@ services:
       RUNNER_SECRETS_VOLUME: ${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}
       RUNNER_FAKE_OUTCOME: ${RUNNER_FAKE_OUTCOME:-succeed}
       RUNNER_FAKE_HOLD_SECONDS: ${RUNNER_FAKE_HOLD_SECONDS:-0}
+      RUNNER_GUARD_PROXY: ${SECSCAN_GUARD_IP:-10.89.8.254}:8080
     volumes:
       - runs:/runs
       - run_secrets:/run-secrets
+      - guard_policies:/guard/policies
+      - guard_status:/guard/status:ro
     networks: [control_net, docker_net]
     depends_on:
       db:
@@ -171,6 +178,49 @@ services:
       db:
         condition: service_healthy
     mem_limit: 256m
+
+  # egress guard（docs/DECISIONS.md §15）：官方 mitmproxy 映像加上我們的 addon（deploy/guard/Dockerfile）。
+  # 只接 scan_net 與 lab_net、只聽 scan 那一側、不發布 port；不接 control_net 與 docker_net，碰不到
+  # db、api 與 Docker。policy 唯讀；不持有目標的 secret。位址必須是兩個網段的最後一個主機位址
+  # （--ip-range 之外：guard 停機時，掃描容器也拿不到它的 IP）。
+  guard:
+    build:
+      context: .
+      dockerfile: deploy/guard/Dockerfile
+    image: secscan-guard:${SECSCAN_IMAGE_TAG:-dev}
+    pull_policy: never
+    profiles: [app]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,uid=10001,gid=10001,mode=0700
+      # 映像宣告的 VOLUME：掛一個空的 tmpfs，不讓 Docker 每次建立匿名 volume（guard 不使用它）。
+      - /home/mitmproxy/.mitmproxy:size=1m,mode=0700
+    environment:
+      LAB_CIDR: ${LAB_CIDR:-10.89.7.0/24}
+      GUARD_SCAN_CIDR: ${SECSCAN_SCAN_SUBNET:-10.89.8.0/24}
+      GUARD_SCAN_IP: ${SECSCAN_GUARD_IP:-10.89.8.254}
+      GUARD_LAB_IP: ${SECSCAN_GUARD_LAB_IP:-10.89.7.254}
+    volumes:
+      - guard_policies:/guard/policies:ro
+      - guard_status:/guard/status
+    networks:
+      scan_net:
+        ipv4_address: ${SECSCAN_GUARD_IP:-10.89.8.254}
+      lab_net:
+        ipv4_address: ${SECSCAN_GUARD_LAB_IP:-10.89.7.254}
+    healthcheck:
+      test: ["CMD", "python3", "-I", "-B", "/opt/secscan-guard/run_guard.py", "--check"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    stop_grace_period: 10s
+    mem_limit: 256m
+    pids_limit: 64
+    restart: unless-stopped
 
   # 只放行 runner 需要的 Docker API（docs/DECISIONS.md §14.1）：regex 會自動加上 ^ 與 $，只比對 path。
   # 容器一律以 secscan-run-<uuid> 指定；不放行 exec、archive、logs、build、pull，也不能建立 network
@@ -215,10 +265,13 @@ networks:
     internal: true
   docker_net:
     internal: true
-  # 掃描容器的網路：由 make scan-net 建立（internal＋gateway isolated＋固定網段），這裡只引用。
-  # T11 的 egress guard 會接上它與 lab_net。
+  # 掃描容器與靶機的網路：由 make scan-net、make lab-net 建立（internal＋gateway isolated＋固定網段＋
+  # 只配發下半段的 ip-range），這裡只引用。兩個網路上只有 egress guard。
   scan_net:
     name: ${SECSCAN_SCAN_NET:-secscan_scan_net}
+    external: true
+  lab_net:
+    name: ${SECSCAN_LAB_NET:-secscan_lab_net}
     external: true
 
 volumes:
@@ -228,6 +281,19 @@ volumes:
   # secret 只存在記憶體（tmpfs）：刪除之後不會留在磁碟上。擁有者是 runner 與掃描容器的 uid 10001。
   run_secrets:
     name: ${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,uid=10001,gid=10001,mode=0700
+  # runner 寫給 guard 的 policy（每個 run 一個檔案）與 guard 的 status：都只存在記憶體。
+  guard_policies:
+    name: ${SECSCAN_GUARD_POLICIES_VOLUME:-secscan_guard_policies}
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=8m,uid=10001,gid=10001,mode=0700
+  guard_status:
+    name: ${SECSCAN_GUARD_STATUS_VOLUME:-secscan_guard_status}
     driver_opts:
       type: tmpfs
       device: tmpfs
