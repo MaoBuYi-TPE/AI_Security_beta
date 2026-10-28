@@ -1,7 +1,9 @@
-# 映像只需要 pyproject.toml、uv.lock 與 src/；秘密、測試、文件與執行產物一律排除。
+# 映像只需要 pyproject.toml、uv.lock 與 src/（guard 的映像另外需要 deploy/guard/）；
+# 秘密、測試、文件與執行產物一律排除。
 *
 !pyproject.toml
 !uv.lock
 !src/
+!deploy/guard/
 **/__pycache__/
 **/*.py[cod]

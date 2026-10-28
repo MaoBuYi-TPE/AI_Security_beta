@@ -1174,7 +1174,7 @@ T11 不從產品路徑送出任何掃描流量：live 測試用自己的 live la
 | 例外 | 每個 hook 只捕捉 `Exception`（`CancelledError` 照常傳遞），一律拒絕或中止連線；log 只記 hook 名稱與例外類別（`# noqa: BLE001`，理由寫在程式中）。放行要有正向的核准紀錄：後面的 hook 找不到核准就拒絕 | mitmproxy 吞掉例外之後會放行（實測 3） |
 | 紀錄 | 自己的 JSON handler（`propagate=False`），只記：canonical 的 run_id、決定、原因、method、host、port、path（截斷、不含 query）、上游 IP、status。不記 header 的值、query、token。mitmproxy 自己的 termlog 只輸出 warn 以上 | repo 沒有 logging 設定；mitmproxy 的訊息可能含請求的內容 |
 | Python | 映像是 3.14、測試環境是 3.12：guard 的程式只用兩邊都有的功能。subprocess 測試確認 guard 載入的模組；live 測試在映像中實際執行 | 使用者接受的取捨 |
-| confdir | tmpfs 掛在映像宣告的 VOLUME（`/home/mitmproxy/.mitmproxy`，uid 10001、0700），也是 `confdir` | 不讓 Docker 每次建立匿名 volume；P0 不用 CA |
+| confdir | `/tmp/mitmproxy`（`/tmp` 是 tmpfs）；映像宣告的 VOLUME（`/home/mitmproxy/.mitmproxy`）另外掛一個空的 tmpfs | VOLUME 所在的 `/home/mitmproxy` 是 0700、屬於 mitmproxy 使用者，uid 10001 進不去（實測）；掛 tmpfs 是為了不讓 Docker 每次建立匿名 volume。P0 不用 CA |
 
 ### 15.2 mitmproxy 的 options
 

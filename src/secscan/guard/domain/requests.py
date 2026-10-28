@@ -19,7 +19,7 @@ from types import MappingProxyType
 from urllib.parse import unquote_plus
 
 from secscan.grants.domain.matching import IneligibleReason
-from secscan.grants.domain.scope import InvalidScopeError, path_problem
+from secscan.grants.domain.scope import path_problem
 from secscan.guard.domain.policy import CompiledPolicy, Policy, PolicyState
 from secscan.targets.domain import DEFAULT_HTTP_PORT, HTTP_SCHEME, Origin
 
@@ -183,10 +183,7 @@ def _scope_reason(view: RequestView, compiled: CompiledPolicy) -> Reason | None:
     # 字面的 {x} 會被 parse_route 當成佔位（涵蓋任何一段），所以請求中不接受大括號。
     if path_problem(path) is not None or "{" in path or "}" in path:
         return Reason.PATH_AMBIGUOUS
-    try:
-        ineligible = compiled.rules.classify(method=view.method, path=path)
-    except InvalidScopeError:
-        return Reason.PATH_AMBIGUOUS
+    ineligible = compiled.rules.classify(method=view.method, path=path)
     return None if ineligible is None else _SCOPE_REASONS[ineligible]
 
 
@@ -195,9 +192,10 @@ def _visible_ascii(text: str) -> bool:
 
 
 def _fully_unquoted(text: str) -> str:
+    """解碼到不再改變；超過上限還在變就當成 `_method`（fail closed）。"""
     for _ in range(_MAX_UNQUOTE_ROUNDS):
         decoded = unquote_plus(text)
         if decoded == text:
-            break
+            return text
         text = decoded
-    return text
+    return _METHOD_OVERRIDE_KEY
