@@ -51,7 +51,7 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 | 服務 | 網路 | 掛載 | 說明 |
 |---|---|---|---|
 | api | default（只為了發布 127.0.0.1:8000）、control_net | 無 | internal network 上 publish 的 port 不會生效（實測） |
-| runner | control_net、docker_net | runs、run_secrets 兩個 named volume | 經 socket-proxy 操作 Docker；不掛 docker.sock |
+| runner | control_net、docker_net | runs、run_secrets（tmpfs）兩個 named volume | 經 socket-proxy 操作 Docker；不掛 docker.sock |
 | worker | control_net | 無 | T10 只處理 fake 的 normalizing |
 | socket-proxy | docker_net | `/var/run/docker.sock`（唯讀） | 唯一接觸 Docker daemon 的服務 |
 | db | default（127.0.0.1:55432）、control_net | db_data | 保留 127.0.0.1 的 port 給 `make dev` 與 `make migrate` |
@@ -465,7 +465,8 @@ T09 已實作（`DECISIONS.md` §13.4）：
 **T10 已實作**（`DECISIONS.md` §14.6）：
 
 - `secscan-admin runner`：容器版的 runner。每 2 秒輪詢，只認領 capability probe 通過的引擎；每個 run 一個容器（名稱 `secscan-run-<run_id>`，重複建立會得到 409）。監看時每秒查狀態、每 5 秒心跳：要求取消 → 先轉 cancelling 再停止容器（5 秒寬限）→ cancelled；超過時間上限 → timed_out；收到 SIGTERM → 停止並刪除容器 → interrupted（`RUNNER_STOPPED`）。live 測試中取消後 5–6 秒內刪除容器。
-- lease 失效或 Docker 中途不可用時，runner 停止處理並刪除 secret，但無法 fencing，run 留在 running；有容器的 run 不被既有的對帳碰觸（lease 過期不代表容器已停止），由 T13 依 label 對帳。
+- 容器與 secret 在 finally 中刪除；會停止容器的結果都要確認容器已刪除才轉換。查不到容器的狀態時重試 3 次，已確認刪除容器就標成 interrupted。執行中每秒檢查 out/ 的用量，超過就停止容器。
+- lease 失效或無法確認容器已停止時，runner 停止處理並刪除 secret，但無法 fencing，run 留在 running；有容器的 run 不被既有的對帳碰觸（lease 過期不代表容器已停止），由 T13 依 label 對帳。
 - `secscan-admin worker`：只把 lease 過期的 normalizing 退回 collected，再把 fake 的 collected 標成 succeeded。
 - in-process 的 `fake-runner` 保留；兩者都會認領 fake，擇一執行。
 

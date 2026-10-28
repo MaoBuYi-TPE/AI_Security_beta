@@ -1024,12 +1024,13 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `ENGINE_FAILED` | 引擎失敗（fake 的失敗腳本；容器版是 exit code 不是 0） |
 | `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止；已要求取消的 scan 也是 `interrupted`，不是 `cancelled`（沒有確認停止） |
 | `PLAN_REJECTED` | ExecutionPlan 或建立容器的設定不符合政策；沒有呼叫 Docker（T10） |
-| `RUNTIME_UNAVAILABLE` | 啟動容器之前 Docker 出錯（例如 socket-proxy 拒絕、映像不見了），或容器在執行中消失（T10） |
+| `RUNTIME_UNAVAILABLE` | 啟動容器之前 Docker 出錯（例如 socket-proxy 拒絕、映像不見了）、容器在執行中消失，或執行中連續查不到容器的狀態、已確認刪除容器（`interrupted`）（T10） |
 | `SECRET_UNAVAILABLE` | runner 解不開綁定版本的密文（金鑰不對或沒有設定）；沒有啟動容器（T10） |
 | `TIME_LIMIT_EXCEEDED` | 超過 scan 的時間上限，容器已停止（`timed_out`，T10） |
 | `RESOURCE_LIMIT_EXCEEDED` | 容器因記憶體上限被終止（T10） |
-| `ARTIFACT_REJECTED` | 輸出有 symlink、hardlink、特殊檔，或超過數量、大小的上限（T10） |
+| `ARTIFACT_REJECTED` | 輸出有 symlink、hardlink、特殊檔、讀不到的條目，或超過條目數、深度、大小的上限（執行中超過時容器會被停止）（T10） |
 | `RUNNER_STOPPED` | runner 被要求停止，已停止並刪除容器（`interrupted`，T10） |
+| `WORKSPACE_UNAVAILABLE` | runner 的工作目錄不可用（權限、磁碟滿），或寫不出收集的 manifest（T10） |
 
 ### 17.3 事件
 
@@ -1109,9 +1110,10 @@ uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-
 
 - 經 `RUNNER_DOCKER_URL`（預設 `tcp://socket-proxy:2375`）操作 Docker；compose 的 `runner` 服務以這個指令執行。
 - 啟動時刪除上一個 runner 留下的 secret、做 capability probe（§18.4）；只認領 probe 通過的引擎，probe 每 60 秒重做。
-- 每個 run：認領 → 重新判斷 gate、綁定的 profile 版本與建立者的 key（同 T09）→ 記下容器名稱 `secscan-run-<run_id>` 與映像 → 驗證 ExecutionPlan → 解密 target 的 secret（有 auth profile 時），寫成 0400 的檔案 → 建立並啟動容器 → 每秒查一次狀態、每 5 秒心跳 → 結束之後收集輸出 → `collected`。容器與 secret 不論結果都刪除。
+- 每個 run：認領 → 重新判斷 gate、綁定的 profile 版本與建立者的 key（同 T09）→ 記下容器名稱 `secscan-run-<run_id>` 與映像 → 驗證 ExecutionPlan → 解密 target 的 secret（有 auth profile 時），寫成 0400 的檔案 → 建立並啟動容器 → 啟動後立刻、之後每 5 秒心跳，每秒查一次狀態與 out/ 的用量 → 結束之後收集輸出 → `collected`。容器與 secret 不論結果、不論例外都刪除。
+- 查不到容器的狀態時重試，連續 3 次才放棄：已確認刪除容器時是 `interrupted`（`RUNTIME_UNAVAILABLE`），刪不掉就不轉換。out/ 超過上限時停止容器（`ARTIFACT_REJECTED`）。
 - 要求取消：轉到 `cancelling`、停止容器（SIGTERM，5 秒後 SIGKILL）、刪除容器 → `cancelled`。超過時間上限：`timed_out`（`TIME_LIMIT_EXCEEDED`）。收到 SIGTERM：停止並刪除容器 → `interrupted`（`RUNNER_STOPPED`）。
-- lease 失效、或執行中 Docker 不可用：停止處理、刪除 secret，run 停在 `running`，由 T13 的容器對帳處理。
+- lease 失效、或無法確認容器已停止：停止處理、刪除 secret，run 停在 `running`，由 T13 的容器對帳處理。
 - `--once`：最多處理一個 run。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。fake 的腳本預設依 `RUNNER_FAKE_OUTCOME`、`RUNNER_FAKE_HOLD_SECONDS`。
 
 ### 18.2 worker
@@ -1128,9 +1130,9 @@ uv run secscan-admin worker [--once]
 |---|---|
 | 映像 | 核准的 `repo:tag@sha256:…`（fake 是 busybox 1.38.0）；runner 不 pull，由 `make images` 事先 pull |
 | 指令 | 只能是引擎政策的樣板：fake 是 `/bin/sleep <秒數>` 或 `/bin/false` |
-| 使用者與權限 | `10001:10001`、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges`、`init` |
+| 使用者與權限 | `10001:10001`、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges`、`init`、IPC 與 cgroup namespace 都是 private |
 | 網路 | 只接 scan_net（internal、gateway isolated）；T11 之前沒有任何可以連的對象 |
-| 掛載 | volume subpath：`/scan/in`（唯讀）、`/scan/out`（可寫）、`/scan/secret`（唯讀，有 secret 時）；沒有任何 host path |
+| 掛載 | volume subpath：`/scan/in`（唯讀）、`/scan/out`（可寫）、`/scan/secret`（唯讀，有 secret 時；secrets volume 是 tmpfs）；沒有任何 host path |
 | 上限 | 記憶體（不能用 swap）、CPU、pids、`nofile`、log 大小、時間（scan 的 `max_duration_seconds`，fake 最多 600 秒） |
 
 ### 18.4 GET /api/v1/scanners
@@ -1149,5 +1151,5 @@ uv run secscan-admin worker [--once]
 ```
 
 - 引擎依執行順序列出（zap、nuclei、schemathesis、fake）。可用與否依「最近一個 30 秒內有心跳的 runner」回報的 capability probe。
-- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`IMAGE_MISSING`（映像不在本機或架構不符）。
+- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`RUN_VOLUME_NOT_WRITABLE`（runner 寫不進掛載的目錄）、`IMAGE_MISSING`（映像不在本機或架構不符）。
 - `/api/v1/scan-profiles` 仍延到 M3（要依 ZAP 實際的設定調整 profile）。

@@ -112,11 +112,11 @@ T09 已涵蓋：
 
 T10 已涵蓋：
 - **ExecutionPlan 的驗證（SEC-12 的應用層）**：拒絕對照表，每一類至少一例：沒有政策的引擎、未核准的映像（tag 或 digest 不同、只差 repository）、shell 當 entrypoint、多或少一個 arg、arg 不符樣板（`5;id`、`1000`、前後空白、換行）、不在白名單的環境變數或值、輸入檔的名稱、數量與大小、不接受認證的引擎卻掛 secret、超過上限。Hypothesis：fake 建出的每個 plan 都通過驗證，組出的 body 都通過不變式。被拒絕的訊息不含值。
-- **create body 的不變式（SEC-21 的應用層）**：逐一竄改 55 種危險的欄位（privileged、Binds、CapAdd、seccomp、可寫的 rootfs、host／其他網路、PID／IPC／userns 的 host 模式、device、sysctl、extra hosts、port、VolumesFrom、Tmpfs、Runtime、root 或其他 user、沒有記憶體或 pids 上限、swap、bind 的 mount、其他 volume、其他 run 的 subpath、路徑穿越、可寫的輸入、多出或少掉的 mount…）都被擋下；政策的 user 被改成 root 時也被擋下。
-- **Docker runtime**：以假的 HTTP adapter 確認每個請求的 method、path、query 與 body；create 遇到缺少的映像不 pull；409 是同名容器；403、500 與連線錯誤都轉成不含回應內容的錯誤；不讀環境變數的 proxy；只接受 `tcp://` 與 `unix:///`。
-- **工作目錄與收集（SEC-18 的 runner 這一側）**：目錄 0700、輸入與 secret 0400、`O_EXCL`；收集拒絕指向其他 run 的 secret 的 symlink、symlink 的目錄、被換成 symlink 的 out/、hardlink、FIFO、讀不到的檔案、含控制字元或非 UTF-8 的檔名、超過深度、數量與大小的上限，開檔之後被換掉也會發現；拒絕的訊息不含檔名；不覆寫既有的 manifest。
-- **capability probe**：Docker 不可用、API 版本不含 1.45、scan_net 不是 internal 或沒有 isolated、少一個 volume、映像不在或架構不符，各自回報原因。
-- **部署設定的靜態檢查**：只有 socket-proxy 掛 docker.sock（唯讀）；沒有服務是 privileged、有 host 模式或 device；app 服務都非 root、唯讀、`cap_drop: ALL`、`no-new-privileges`；映像以 digest 鎖定或本機建立（不 pull）；網路與 port；socket-proxy 的放行清單以相同的語意（自動加 `^$`、只比對 path）核對 10 個該放行與 28 個該拒絕的端點。
+- **create body 的不變式（SEC-21 的應用層）**：逐一竄改 59 種危險的欄位（privileged、Binds、CapAdd、seccomp、可寫的 rootfs、host／其他網路、PID／IPC／userns 的 host 模式、device、sysctl、extra hosts、port、VolumesFrom、Tmpfs、Runtime、root 或其他 user、沒有記憶體或 pids 上限、swap、bind 的 mount、其他 volume、其他 run 的 subpath、路徑穿越、可寫的輸入、多出或少掉的 mount…）都被擋下；政策的 user 被改成 root 時也被擋下；IPC 或 cgroup namespace 不是 private、mount 被改成 bind 也擋下。審查後補上：組 body 的常數或掛載函式被改錯時，送出前的檢查（自己的一份字面值）仍然擋下；保留的網路名稱（host、bridge、none、default）與含 `.` 的名稱被拒絕。
+- **Docker runtime**：以假的 HTTP adapter 確認每個請求的 method、path、query 與 body；create 遇到缺少的映像不 pull；409 是同名容器；403、500、連線錯誤與格式不符的回應都轉成不含回應內容的錯誤；刪除容器一併刪除匿名 volume；不讀環境變數的 proxy；只接受 `tcp://` 與 `unix:///`。
+- **工作目錄與收集（SEC-18 的 runner 這一側）**：目錄 0700、輸入與 secret 0400、`O_EXCL`；收集拒絕指向其他 run 的 secret 的 symlink、symlink 的目錄、被換成 symlink 的 out/、hardlink、FIFO、讀不到的檔案、含控制字元或非 UTF-8 的檔名、超過深度、數量與大小的上限，開檔之後被換掉也會發現；拒絕的訊息不含檔名；不覆寫既有的 manifest。審查後補上：r-- 的目錄與 I/O 錯誤都是 UNREADABLE；目錄也計入條目數，超過上限就停（以無窮的目錄確認不會先讀完整個目錄；原本的程式 300 秒內沒有結束）；Unicode 的格式字元（bidi 覆寫、零寬字元）被拒絕；權限錯誤與磁碟滿轉成不含路徑的 WorkspaceError，寫 secret 失敗時不留下檔案；短寫會寫完；執行中的用量檢查（只 lstat、不跟隨 symlink）。
+- **capability probe**：Docker 不可用、API 版本不含 1.45、scan_net 不是 internal 或沒有 isolated、少一個 volume、volume 不可寫、映像不在或架構不符，各自回報原因。
+- **部署設定的靜態檢查**：只有 socket-proxy 掛 docker.sock（唯讀）；沒有服務是 privileged、有 host 模式或 device；app 服務都非 root、唯讀、`cap_drop: ALL`、`no-new-privileges`；映像以 digest 鎖定或本機建立（不 pull）；網路與 port；socket-proxy 的放行清單以相同的語意（自動加 `^$`、只比對 path）核對 10 個該放行與 33 個該拒絕的端點（含路徑穿越與未核准的映像），映像的規則是核准清單的逐字比對；內插到 regex 的名稱沒有特殊字元；secrets volume 是 tmpfs。
 
 guard policy 比對與 policy budget，留給 T11、T12。
 
@@ -181,8 +181,8 @@ T09 已涵蓋 scan 與工作佇列（佇列、FakeRunner 與需要 runner 的 AP
 T10 已涵蓋 runner 與 worker（真的 DB 佇列加上記憶體中的容器 runtime；每個測試用自己的資料庫）：
 - **容器版的 prepare**：記下容器名稱與映像、以 FOR SHARE 讀出密文（PATCH 的清除等它 commit，以 `pg_stat_activity` 確認）；取消、gate 不通過、版本被取代時都沒有容器也沒有密文；in-process 的 prepare 不記容器。
 - **分階段的對帳**：有容器的 run，lease 過期也不被標成 interrupted（容器可能還在執行）；worker 只把過期的解析退回 collected，不碰 runner 階段。
-- **ContainerRunner**：成功（collected → worker → completed，事件依序）、失敗、OOM、超過時間上限、取消（在心跳時看到，先轉 cancelling 再停止容器）、prepare 時看到取消、gate 不通過、runner 被要求停止（interrupted）、lease 失效（停止容器、run 留在 running）、plan 被拒（Docker 收到 0 個請求）、create 或 start 失敗、容器消失、Docker 中途不可用、輸出被拒絕；每個情境都確認容器已刪除、secret 已刪除。secret 只在容器存在時存在，0400，不在 create body 中；沒有認證的 scan 不掛 secret；解不開或沒有金鑰時不建立容器。
-- **常駐迴圈與 CLI**：啟動時清掉殘留的 secret、probe 不通過不認領而且 60 秒後重新 probe、lease 失效或 Docker 失敗之後繼續；`runner --once`、`worker --once` 的 exit code、DB 不可用、設定錯誤、SIGTERM 的處理。
+- **ContainerRunner**：成功（collected → worker → completed，事件依序）、失敗、OOM、超過時間上限、取消（在心跳時看到，先轉 cancelling 再停止容器）、prepare 時看到取消、gate 不通過、runner 被要求停止（interrupted）、lease 失效（停止容器、run 留在 running）、plan 被拒（Docker 收到 0 個請求）、create 或 start 失敗、容器消失、Docker 中途不可用、輸出被拒絕；每個情境都確認容器已刪除、secret 已刪除。審查後補上：工作目錄不可寫（runs 或 secrets）時 run 失敗、不建立容器；啟動前、執行中的未預期例外仍先清掉容器與 secret；查不到狀態時重試、持續失敗但刪除成功時 interrupted；執行中超過輸出上限就停止容器；寫不出 manifest；沒有 plan 的引擎不記下容器；啟動後立刻心跳、收集前延長 lease；stop 失敗時由強制刪除收尾；刪不掉 secret 不影響 run。secret 只在容器存在時存在，0400，不在 create body 中；沒有認證的 scan 不掛 secret；解不開或沒有金鑰時不建立容器。
+- **常駐迴圈與 CLI**：啟動時清掉殘留的 secret（還有其他存活的 runner 時不清）、probe 不通過（含 volume 不可寫）不認領而且 60 秒後重新 probe、lease 失效或 Docker 失敗之後繼續；`runner --once`、`worker --once` 的 exit code、DB 不可用、設定錯誤、SIGTERM 的處理。
 - **心跳與 `GET /scanners`**：同一個 owner 一列、最新的存活 runner、30 秒沒有心跳就不算存活、7 天後刪除；任何角色都 200、沒有 key 401、未整合的引擎回 `NOT_INTEGRATED`。
 - **migration 0006**：容器欄位的每個 CHECK、trigger 只允許在 preparing → running 記下一次；runner_instances 的每個 CHECK 與 unique。
 - **reveal 的呼叫者**：AST 檢查 src 中只有 `runner/service.py` 呼叫 `reveal`。
@@ -204,14 +204,14 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。模板的 allowlist 在 M4（Nuclei）加入。
 - **SEC-18**：T10 只涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；artifact 的 storage key、下載與 worker 的解析在 M3、M5。
-- **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單等 25 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒、沒有產生容器（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
+- **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
 - **SEC-06、SEC-07**：T10 只以 live 測試確認掃描容器解析不到 socket-proxy、db、api、runner，也沒有預設路由；guard 與收包證據在 T11。
 
 ### 4.4 Live E2E
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。
 
-T10 已涵蓋（`make test-live-runner`，`tests/live/`；獨立的 compose 專案、自己的 DB，跑完一律拆除；fake 引擎，不連 lab）：api、runner、worker 沒有 docker.sock、不是 privileged；socket-proxy 唯讀掛 socket、只接 docker_net；runner 容器內呼叫不該開放的 API 都是 403／405、沒有產生容器；api、worker 連不到 socket-proxy；`GET /scanners` 顯示 fake 可用；fake scan 的容器非 root、唯讀、無 capability、只有三個 volume subpath、secret 0400、解析不到 proxy／db／api／runner、沒有預設路由，完成後容器與 secret 都刪除；取消後 30 秒內刪除容器；canary secret 不在任何容器的 log 與設定中。
+T10 已涵蓋（`make test-live-runner`，`tests/live/`；獨立的 compose 專案、自己的 DB，跑完一律拆除；fake 引擎，不連 lab）：api、runner、worker 沒有 docker.sock、不是 privileged；socket-proxy 唯讀掛 socket、只接 docker_net；runner 容器內呼叫不該開放的 API 都是 403／405、沒有產生容器；api、worker 連不到 socket-proxy；`GET /scanners` 顯示 fake 可用；fake scan 的容器非 root、唯讀、無 capability、IPC 與 cgroup namespace 是 private、只有三個 volume subpath（只看得到自己的 in/、out/ 與 secret）、secret 0400、解析不到 proxy／db／api／runner、沒有預設路由，完成後容器與 secret 都刪除；取消後 30 秒內刪除容器；secrets volume 是 tmpfs；canary secret 不在任何容器的 log 與設定中。
 
 ### 4.5 故障注入
 

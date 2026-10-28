@@ -814,12 +814,100 @@
 
 前置：T03、T06、T09。
 
-- [ ] T10 建立 runner、docker-socket-proxy、ExecutionPlan 驗證與容器限制。
+- [x] T10 建立 runner、docker-socket-proxy、ExecutionPlan 驗證與容器限制。
   - DoD：
     - api、worker、掃描容器都沒有 Docker socket，也不是 privileged。
     - socket-proxy 只開放容器需要的區段。
     - 未核准的映像、path、args、網路都會被拒絕（SEC-12、SEC-21）。
     - 測試隔離：unit/contract 測試不能連到 Docker daemon。pytest-socket 目前整個放行 AF_UNIX（asyncio 需要），所以要在 conftest 拒絕 `tmp_path` 以外的 AF_UNIX connect、把測試時的 `DOCKER_HOST` 設為無效值，並禁止未標記 `live` 的測試使用 `enable_socket`。
+  - 交付（2026-10-28，done）：
+    - 範圍：
+      - 容器版的 runner（`secscan-admin runner`）與 fake 的 worker（`secscan-admin worker`）：沿用 `ScanQueue` 的認領、lease 與 fencing；prepare 在同一個 transaction 記下容器與映像、以 `FOR SHARE` 讀出密文；runner 是 `reveal` 唯一的呼叫者，secret 以 0400 檔注入、容器刪除後刪除。
+      - ExecutionPlan（`scanners/domain/`）、引擎政策與 create body 的獨立檢查（`runner/domain/`）、經 socket-proxy 的 Docker runtime（唯一 import Docker SDK 的模組）、工作目錄與安全的輸出收集、capability probe、`runner_instances` 與 `GET /api/v1/scanners`。
+      - 容器化：Dockerfile、compose 的 `app` profile（api、runner、worker、wollomatic socket-proxy 1.13.1）、Makefile 的 `build`、`images`、`scan-net`、`up`、`down`、`test-live-runner`。
+      - 測試程序連不到 Docker daemon（`tests/isolation.py`）；`tests/live/` 的 live 測試。
+      - migration `0006`（scanner_runs 的 `container_name`、`image_ref` 與 trigger；`runner_instances`）。
+      - 使用者的決定（2026-10-27）：socket-proxy 改用 wollomatic（文件原本寫 Tecnativa）；容器化 api、runner、worker；secret 注入在 T10 做。
+      - 設計決定見 `DECISIONS.md` §14，API 見 `API_CONTRACT.md` §18。T10 不送出任何掃描流量（只有 fake 引擎，不連 lab）。
+    - 檔案：
+      - 程式：
+        - `src/secscan/scanners/`：`domain/plan.py`（ExecutionPlan、ImageReference、ResourceLimits、InputFile）、`domain/fake.py`（FakeScript 與 fake 的 plan，從 `runner/fake.py` 移來）、`domain/instances.py`（能力與 GET /scanners 的引擎狀態）、`models.py`、`repository.py`、`service.py`（`Fleet`、`ScannerCatalog`）、`schemas.py`、`router.py`
+        - `src/secscan/runner/`：`domain/policy.py`（引擎與容器政策）、`domain/admission.py`（驗證、create body、獨立的檢查）、`domain/runtime.py`（介面）、`docker_runtime.py`、`workspace.py`、`probe.py`、`service.py`（`ContainerRunner`）、`loop.py`、`config.py`（`RunnerSettings`）；`fake.py` 改用 scanners 的 FakeScript
+        - `src/secscan/worker/`：`service.py`、`loop.py`
+        - `src/secscan/scans/`：`queue.py`（`prepare_launch`、`Launch`、`RunReport`、分階段的對帳）、`progress.py`（`ContainerAssignment`）、`models.py`、`domain/lifecycle.py`（8 個錯誤碼）、`domain/model.py`
+        - `src/secscan/auth_profiles/repository.py`（`sealed_secret`）；`src/secscan/cli/`（`cli.py` 改成套件，`services.py` 放 runner 與 worker）；`main.py`；`migrations/versions/v0006_runner.py`、`migrations/metadata.py`
+      - 部署與設定：`Dockerfile`、`.dockerignore`、`compose.yaml`、`Makefile`、`pyproject.toml`（`docker` 7.2.0、`types-docker`、layers 加入 `runner | worker` 與 `scanners`、「只有 runner.docker_runtime 能 import docker」、`live` marker）、`uv.lock`、`.env.example`
+      - 測試：
+        - `tests/isolation.py`（pytest plugin）、`tests/runner_fakes.py`（假時鐘與記憶體中的容器 runtime）
+        - unit：`tests/unit/test_docker_isolation.py`、`test_deployment.py`、`tests/unit/runner/`（admission、container_spec、docker_runtime 與 `docker_stub.py`、workspace、probe）、`tests/unit/scanners/`（plan、fake、instances、fake_script）、`tests/unit/scans/test_progress_container.py`
+        - integration：`test_runner_schema.py`、`test_queue_launch.py`、`test_container_runner.py`、`test_worker.py`、`test_runner_instances.py`、`test_scanners_api.py`、`test_runner_loop.py`、`test_runner_cli.py`
+        - live：`tests/live/`（`support.py`、`proxy_probe.py`、`test_runner_live.py`）
+        - 既有測試：`V1_ROUTES`、`test_migrations.py`、`test_schema_constraints.py`（CHECK 83 → 92、索引）、`test_secret_reveal_callers.py`（允許的呼叫者只有 `runner/service.py`）、`test_admin_key_callers.py`（`cli/__init__.py`）、`tests/conftest.py`（載入 isolation、清掉 `RUNNER_*`）
+      - 文件：`DECISIONS.md` §14、`API_CONTRACT.md` §2、§17.2、§18、`ARCHITECTURE.md` §2、§4、§6、§6.2、§7、§9、`SECURITY_AND_TESTING.md` §1、§4.1、§4.3、§4.4、§4.5、`SOURCES.md`（S83–S86、M0–M2 確認事項第 7 項）、`TOOLS.md`、`README.md`、`START_HERE.md` §7、`CLAUDE.md` §1、§13
+    - 端點（新增）：`GET /api/v1/scanners`。`/health/ready` 不納入 runner 心跳（留給 T13）；`GET /scan-profiles` 仍在 M3。
+    - DoD 對照：
+      - **api、worker、掃描容器沒有 Docker socket、不是 privileged**：
+        - 靜態檢查（`test_deployment.py`）：只有 socket-proxy 掛 docker.sock；沒有服務是 privileged、有 host 模式或 device；app 服務都非 root、唯讀、`cap_drop: ALL`、`no-new-privileges`、有記憶體與 pids 上限。
+        - live：`docker inspect` api、runner、worker 沒有指向 docker.sock 的掛載、`Privileged` false；掃描容器 `10001:10001`、唯讀、`CapDrop` ALL、只有三個 volume subpath、沒有 Binds。
+      - **socket-proxy 只開放容器需要的區段**：放行清單只有 version、核准映像／scan_net／兩個 volume 的查詢，與 `secscan-run-<uuid>` 容器的建立、啟動、停止、刪除。unit 以相同的語意核對 10 個該放行、33 個該拒絕的端點；live 在 runner 容器內呼叫 31 個不該開放的端點（exec、archive、logs、kill、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像…）都是 403 或 405，api、worker 連不到 proxy。
+      - **未核准的映像、path、args、網路都會被拒絕**：unit 的拒絕對照表（映像、指令、環境變數、輸入檔、上限、59 種危險的 create body）；被拒時 Docker 收到 0 個請求、run 標成 `PLAN_REJECTED`。live：帶 host bind、bind 的 Mounts、VolumesFrom 的 create 被 proxy 拒絕，探針前後 daemon 上的容器完全相同。
+      - **測試隔離**：AF_UNIX 只能 connect 到 pytest 暫存目錄（含 symlink、相對路徑、abstract namespace 的對照）；`DOCKER_HOST` 無效，Docker SDK 與 `docker` CLI 都連不到；沒標 live 的 `enable_socket` 讓 session 失敗；沒有開關時 live 測試在收集時 skip；session 範圍的 fixture 也受限。實作前，SDK 與 CLI 的兩個測試失敗，證明當時的測試程序連得到 daemon。
+    - 實際執行：
+      - 實作前先實測（結果寫進 `DECISIONS.md` §14）：OrbStack VM 內的 docker.sock 是 `root:root 0660`；wollomatic 只比對 path（不含 query）；`-allowfrom` 的主機名稱在每個請求時解析；`-allowbindmountfrom` 指向不存在的目錄時，Binds 與 bind 的 Mounts 都回 403；只接 internal network 的容器，publish 的 port 不生效。
+      - TDD：每一步先寫測試並確認失敗，例如：
+        - 測試隔離：15 個中 14 failed（SDK 與 CLI 兩個表示 daemon 連得到）。
+        - ExecutionPlan、驗證、Docker runtime、workspace、ContainerRunner、probe 與能力、心跳與 `/scanners`、常駐迴圈：先寫測試，collection error（模組不存在）。
+        - migration `0006`：9 failed、14 errors（還沒有欄位與資料表）。容器版的 prepare：`ImportError`（還沒有 `Launch`）。
+      - TDD 沒有做到的地方（如實記錄）：
+        - `test_worker.py`、`test_runner_cli.py`（14 個）在實作之後才寫，第一次執行就通過；worker 與 CLI 的行為先由 `test_container_runner.py` 走到。
+        - `test_deployment.py`（64 個）在 Dockerfile 與 compose 之後才寫，第一次執行就通過；鑑別力由突變檢查（D1–D5、N17、N23）確認。
+        - live 測試在手動驗證之後才寫。第一次執行 `make test-live-runner` 在建置失敗：三個服務同時建立同一個映像（`AlreadyExists`），改成只由 api 建立、其他服務 `pull_policy: never`。
+        - 「政策的 user 被改成 root」「worker 不碰 runner 階段」兩個測試在突變檢查之前補上，第一次就通過。
+      - 測試本身的問題（都已修正）：浮點數的 hold 讓「最多多 1 秒」的斷言在極小值失敗（改成比較 `ceil`）；macOS 的 AF_UNIX 路徑最多 104 bytes（改用短的暫存目錄）；同一個程序中測不到「live 不受限」（改用子程序）。
+      - 突變檢查（腳本不進 repo，跑完還原檔案，執行期間不修改 src 與 tests）：
+        - 第一輪 49 項：46 被抓到。「沒有 `O_EXCL`」存活，補上「不覆寫既有的 manifest」；「不檢查 volume」是腳本的原文對不上；「收集時 lstat 跟隨 symlink」存活，因為開檔仍有 `O_NOFOLLOW`（兩層防線，行為相同），另加「三層都跟隨」的突變確認被抓到。
+        - 審查修正後的完整重跑：73 項（審查前 50 項，其中 14 項的原文隨修正改變；新增 23 項）全部被抓到。第一輪存活的「lstat 跟隨 symlink」這次也被抓到：執行中的用量檢查只 lstat，跟隨 symlink 就會把連結的大檔案算進去。新增的項目中，「mount 可以是 bind」與「收集前不心跳」第一次存活，補上只改 Type 的不安全案例，以及「收集前 lease 被延長」的測試之後被抓到。
+        - 涵蓋：驗證（映像、樣板、環境變數、固定的 HostConfig、網路、上限、mounts、非 root、最後的檢查、多餘的欄位、牆鐘時間、共用常數、bind、保留的名稱）、runtime（名稱、proxy 的環境變數、強制刪除、404、格式不符、匿名 volume）、workspace（symlink、hardlink、0600、`O_EXCL`、總大小、開檔後的確認、OSError、目錄計數、格式字元、短寫、寫失敗的清理）、runner（取消、時間上限、lease、secret、runner 的停止、OOM、收集、刪除、沒有金鑰、立刻心跳、重試、刪不掉時的轉換、執行中的用量、finally、收集前心跳、收集的錯誤）、佇列（記下容器、對帳、FOR SHARE、worker 的對帳）、probe 與心跳（isolated、架構、volume、可寫、存活、重新 probe、其他 runner）、測試隔離（AF_UNIX、DOCKER_HOST、enable_socket、symlink、session 範圍）、部署（docker.sock、proxy 的放行、allowfrom、privileged、internal、映像的規則、tmpfs）、schema（trigger）。
+      - 檢查結果（審查修正後，2026-10-28）：
+        - `make test`：3321 passed、1 skipped（非 UTF-8 檔名：macOS 的檔案系統不接受，改以直接檢查判斷的函式涵蓋）、12 deselected（live）；coverage 100%（7255 statements、1398 branches，0 未涵蓋）；`runner`、`scanners`、`worker` 1288 statements、244 branches 全部涵蓋。
+        - `make lint`（ruff、import-linter 4 kept, 0 broken）、`make typecheck`（mypy strict，276 個檔案無問題）、`pre-commit run --all-files` 全部通過。
+        - `ENABLE_LIVE_LAB_TESTS=1 make test-live-runner`：12 passed（29 秒）；結束後沒有殘留的容器、volume 與網路。
+        - 沒有執行：`make test-contract`、`make test-live-lab`、`make bench`（Makefile 還沒有這些目標，依 CLAUDE.md §13 分別在 M1–M2、M3、M5 才建立）。
+      - 手動端到端（審查之前；審查修正之後以 live 測試重跑同樣的檢查）：
+        - 以 `secscan-live` 的獨立 compose 專案啟動 app stack（自己的 DB、網路 `secscan_live_scan_net` 與 volume，API 綁 127.0.0.1:8765）；沒有動開發用的 db、127.0.0.1:8000 的其他專案容器與 [::1]:8765 的程式。key 與 canary 只在 0600 的檔案中，curl 以 `-H @檔案` 帶入。
+        - `GET /scanners`：fake 可用、映像是鎖定的 busybox，runner 與 worker 存活；zap、nuclei、schemathesis 是 `NOT_INTEGRATED`。
+        - 有 bearer profile 的 fake scan：busybox 容器 `secscan-run-<run_id>` 以 `10001:10001`、唯讀、`CapDrop` ALL、`no-new-privileges`、`Init`、64 MiB、64 pids 執行，只接 scan_net、三個 volume subpath；容器內 secret 是 0400，沒有 docker.sock，解析不到 socket-proxy 與 db，寫不了 rootfs，只有 scan_net 的 link route；`docker inspect` 中找不到 canary。scan 跑完 completed，secret 目錄清空。
+        - runner 容器內呼叫 25 個不該開放的端點：除 `PUT archive` 回 405 之外都是 403，帶 bind 的 create 沒有產生容器。
+        - 取消：執行中取消回 202，5.5 秒後容器刪除，事件依序 cancelling → cancelled。停止 runner（`docker stop`，1.3 秒）：容器刪除，run 是 interrupted（`RUNNER_STOPPED`）。
+        - canary 在 5 個容器的 log 與設定中都出現 0 次；結束後 `down -v`，沒有殘留。
+    - 審查（code-reviewer、security-reviewer，2026-10-28）：
+      - code-reviewer：REQUEST CHANGES（0 CRITICAL、1 HIGH、2 MEDIUM、6 LOW）。
+        - HIGH：prepare 之後的非預期例外沒有收斂（權限錯誤、磁碟滿、r-- 的目錄、manifest 已存在會讓 runner 結束、run 卡住、啟動前的例外不清理 secret）。
+        - MEDIUM：一次暫時的 Docker 錯誤就放棄整個 run（已確認刪除容器也不標記）；收集時沒有條目數的上限、也不心跳。
+        - LOW：第一次心跳可能晚於 lease 到期；`sweep_secrets` 靠只有一個 runner 的慣例；檢查和組 body 共用常數；`image_ref` 寫死 fake；runs 的目錄不清理；`run_runner` 超過 50 行、文件的檔名。
+      - security-reviewer：APPROVE（0 CRITICAL、0 HIGH、3 MEDIUM、11 LOW，另有 5 項加固建議）。
+        - MEDIUM：proxy 的映像規則允許 `/` 與 `..`（離線以 regex 確認會放行到 `/distribution`、`/exec`）；容器可以讓 runner 收集時耗盡記憶體、out/ 沒有磁碟上限；未預期的例外會略過清理，secret 留在 volume。
+        - LOW：保留的網路名稱；`:ro` 不是防線；`-allowbindmountfrom` 的描述太樂觀；放行的查詢洩漏環境資訊；刪除不等於抹除；reveal 之後的 PATCH；刪除容器沒有刪 volume；`/scanners` 轉出未驗證的映像字串；檔名的格式字元；runs 沒有保留期限；隔離只在 function 範圍。
+        - 加固：明確設定 IpcMode、CgroupnsMode；live 測試確認 subpath 生效；Linux 用 `group_add`；regex 內插的名稱要跳脫；確認 daemon 沒有被觸發。
+      - 已修正（HIGH、所有 MEDIUM，LOW 與加固建議中可以在 T10 處理的），都有先失敗的測試與突變檢查：
+        - 例外與清理：容器與 secret 在 finally 中刪除；工作目錄的 OSError 轉成 `WORKSPACE_UNAVAILABLE`（不含路徑）；r-- 目錄與 I/O 錯誤是 `UNREADABLE`；manifest 寫不出是 `WORKSPACE_UNAVAILABLE`；寫 secret 失敗不留檔、處理短寫；probe 檢查 volume 可寫（`RUN_VOLUME_NOT_WRITABLE`）；Docker 格式不符的回應轉成 `RuntimeUnavailableError`。
+        - Docker 的暫時錯誤：查不到狀態重試 3 次；已確認刪除容器就標成 interrupted（`RUNTIME_UNAVAILABLE`），刪不掉才留給對帳；會停止容器的結果都要確認容器已刪除。
+        - 輸出：逐一走訪、目錄計入條目數，超過上限就停；執行中每秒檢查用量，超過就停止容器；收集前延長 lease；拒絕格式字元。
+        - 其他：啟動後立刻心跳；還有其他存活的 runner 時不清 secret；送出前的檢查改用獨立的字面值與掛載規則；明確的 IpcMode、CgroupnsMode；拒絕保留的名稱與含 `.` 的名稱；沒有 plan 的引擎不記下容器；proxy 的映像規則逐字比對；secrets volume 改成 tmpfs；`/scanners` 只轉出合格的映像 ref；刪除容器一併刪除匿名 volume；隔離在整個 session 生效；live 測試補上路徑穿越的探針、subpath 生效、tmpfs 與「沒有產生任何容器」；`run_runner` 拆短；文件的措辭。
+        - 修正的測試先寫：56 failed（workspace 17，另有「超過上限就停止走訪」在原本的程式上 300 秒內沒有結束；runner 10；probe、runtime 與迴圈 10；admission 9；instances 3；部署 6；隔離 1）。「執行中的未預期例外仍會清理」原本就通過（監看已在 finally 中），「啟動前」的版本先失敗。
+      - 沒有修正、記入後續（`DECISIONS.md` §14.12）：out/ 的硬性磁碟配額（M3）；runs 的保留期限（M5、T23）；reveal 之後的 PATCH 不影響已啟動的 run（同 §13.11 的語意）；api 與 runner 同樣持有金鑰與 DB 角色、trigger 只擋 UPDATE（T23）；放行的查詢讓被攻陷的 runner 看得到 scan_net 與 volume 的路徑（記錄為殘餘風險）。
+    - 限制：
+      - runner 被攻陷時仍可以建立 privileged 容器：proxy 不檢查 body 中的 privileged、namespace、capability 與 volume 的 driver 選項，只靠 runner 的驗證（`ARCHITECTURE.md` §2 的殘餘風險）。
+      - lease 失效、或無法確認容器已停止時，run 停在 running：有容器的 run 要等 T13 的容器對帳。
+      - 時間上限是每個 run 各自計算；跨引擎共用的預算在 T12。out/ 的用量是每秒檢查的軟性上限。
+      - in-process 的 `fake-runner` 與容器版的 runner 都會認領 fake，擇一執行。
+      - `65534:0` 是 OrbStack 的做法；原生 Linux 改用 `group_add`。`make dev` 仍在宿主執行 API，不具容器的權限隔離。
+    - 給後續任務：
+      - **T11**：guard 與 policy（scan_net 與 lab_net）；取消時在停止容器之前先封鎖 guard（`runner/service.py` 的 `_beat` 已標記插入點）；SEC-06、SEC-07 的收包證據（T10 只確認掃描容器解析不到 proxy、db、api、runner）。
+      - **T12**：共享預算與 telemetry、preflight 的實際執行；時間上限改成跨引擎共用。
+      - **T13**：有容器的 run 的對帳（依 label 找容器、確認停止之後才標 interrupted）、孤兒容器清理；`/health/ready` 是否納入 runner 心跳。
+      - **M3**：worker 的 parser 與 artifacts 資料表（manifest 目前寫在 run 的目錄）；ZAP 的映像、指令樣板、secret 的格式與 uid 10001 的相容性；out/ 的硬性配額。`ENGINE_IMAGES` 與 `_plan` 一起加入新引擎。
+      - **M5／T23**：runs 的保留期限；分開 api 與 runner 的金鑰與 DB 角色；compose `secrets:`。
 - [ ] T11 完成 internal networks、egress guard，以及 DNS/IP/path/method/redirect 檢查。
   - DoD：
     - SEC-02 到 SEC-10 中適用的項目都通過。
