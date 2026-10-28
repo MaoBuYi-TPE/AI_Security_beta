@@ -64,12 +64,13 @@ class DockerRuntime:
     def version(self) -> EngineVersion:
         with _translate("查詢版本"):
             info = self._client.version()
-        return EngineVersion(
-            api_version=str(info["ApiVersion"]),
-            min_api_version=str(info["MinAPIVersion"]),
-            os=str(info["Os"]),
-            arch=str(info["Arch"]),
-        )
+        with _parsing("查詢版本"):
+            return EngineVersion(
+                api_version=str(info["ApiVersion"]),
+                min_api_version=str(info["MinAPIVersion"]),
+                os=str(info["Os"]),
+                arch=str(info["Arch"]),
+            )
 
     def image_architecture(self, reference: str) -> str | None:
         try:
@@ -78,7 +79,8 @@ class DockerRuntime:
                 info = self._client.inspect_image(reference)  # type: ignore[no-untyped-call]
         except _NotFoundError:
             return None
-        return str(info["Architecture"])
+        with _parsing("查詢映像"):
+            return str(info["Architecture"])
 
     def network(self, name: str) -> NetworkState | None:
         try:
@@ -86,11 +88,12 @@ class DockerRuntime:
                 info = self._client.inspect_network(name)
         except _NotFoundError:
             return None
-        options: Mapping[str, Any] = info.get("Options") or {}
-        return NetworkState(
-            internal=info.get("Internal") is True,
-            isolated_gateway=options.get(_GATEWAY_MODE) == "isolated",
-        )
+        with _parsing("查詢網路"):
+            options: Mapping[str, Any] = info.get("Options") or {}
+            return NetworkState(
+                internal=info.get("Internal") is True,
+                isolated_gateway=options.get(_GATEWAY_MODE) == "isolated",
+            )
 
     def volume_exists(self, name: str) -> bool:
         try:
@@ -116,14 +119,15 @@ class DockerRuntime:
                 info = self._client.inspect_container(name)
         except _NotFoundError:
             return None
-        state: Mapping[str, Any] = info["State"]
-        if state["Status"] not in _FINISHED:
-            return ContainerState(running=True, exit_code=None, oom_killed=False)
-        return ContainerState(
-            running=False,
-            exit_code=int(state["ExitCode"]),
-            oom_killed=state.get("OOMKilled") is True,
-        )
+        with _parsing("查詢容器"):
+            state: Mapping[str, Any] = info["State"]
+            if state["Status"] not in _FINISHED:
+                return ContainerState(running=True, exit_code=None, oom_killed=False)
+            return ContainerState(
+                running=False,
+                exit_code=int(state["ExitCode"]),
+                oom_killed=state.get("OOMKilled") is True,
+            )
 
     def stop(self, name: str, *, grace_seconds: int) -> None:
         """送 SIGTERM，grace_seconds 後 SIGKILL。已停止或不存在都不算錯誤。"""
@@ -134,16 +138,25 @@ class DockerRuntime:
             return
 
     def remove(self, name: str) -> None:
-        """強制刪除（還在執行就 SIGKILL）。不存在不算錯誤。"""
+        """強制刪除（還在執行就 SIGKILL），連同映像宣告的匿名 volume。不存在不算錯誤。"""
         try:
             with _translate("刪除容器", absent_ok=True):
-                self._client.remove_container(name, force=True)
+                self._client.remove_container(name, force=True, v=True)
         except _NotFoundError:
             return
 
 
 class _NotFoundError(Exception):
     """Docker 回 404（在這個模組內部使用）。"""
+
+
+@contextmanager
+def _parsing(action: str) -> Iterator[None]:
+    """回應的格式不符（少了欄位、型別不對）：當成 Docker 不可用，不讓 KeyError 結束 runner。"""
+    try:
+        yield
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise RuntimeUnavailableError(f"{action}失敗（回應的格式不符）") from None
 
 
 @contextmanager

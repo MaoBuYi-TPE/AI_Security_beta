@@ -105,6 +105,7 @@ class RunErrorCode(StrEnum):
     RESOURCE_LIMIT_EXCEEDED = "RESOURCE_LIMIT_EXCEEDED"
     ARTIFACT_REJECTED = "ARTIFACT_REJECTED"
     RUNNER_STOPPED = "RUNNER_STOPPED"
+    WORKSPACE_UNAVAILABLE = "WORKSPACE_UNAVAILABLE"
 
 
 # runner 啟動前重新判斷 gate（§10.6）不通過的原因。grant 不屬於這個 target、origin 不在範圍內，

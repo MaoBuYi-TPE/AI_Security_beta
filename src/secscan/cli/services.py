@@ -93,30 +93,9 @@ def run_runner(
         if not _ready(engine, report):
             return EXIT_FAILURE
         sessions = sessionmaker(engine, expire_on_commit=False)
-        owner = _owner(InstanceRole.RUNNER)
-        workspace = Workspace(runner_settings.runs_dir, runner_settings.secrets_dir)
-        policy = runner_settings.container_policy()
         with stop_signals() as stop:
-            loop = RunnerLoop(
-                _fleet(sessions, owner, InstanceRole.RUNNER),
-                runtime=runtime,
-                workspace=workspace,
-                policy=policy,
-                stop_requested=stop.is_set,
-                poll_seconds=runner_settings.poll_seconds,
-            )
-            loop.attach(
-                ContainerRunner(
-                    _queue(sessions, settings),
-                    runtime,
-                    workspace,
-                    owner=owner,
-                    policy=policy,
-                    script=script,
-                    cipher=cipher,
-                    stop_requested=stop.is_set,
-                    on_heartbeat=loop.beat,
-                )
+            loop = _runner_loop(
+                sessions, settings, runner_settings, runtime, script, cipher, stop.is_set
             )
             reports = loop.run(once=once, on_report=lambda item: report(describe(item)))
     except SQLAlchemyError as exc:
@@ -125,6 +104,42 @@ def run_runner(
     finally:
         engine.dispose()
     return _runner_exit(loop, reports, once=once, report=report)
+
+
+def _runner_loop(
+    sessions: sessionmaker[Session],
+    settings: Settings,
+    runner_settings: RunnerSettings,
+    runtime: DockerRuntime,
+    script: FakeScript,
+    cipher: SecretCipher | None,
+    stop_requested: Callable[[], bool],
+) -> RunnerLoop:
+    owner = _owner(InstanceRole.RUNNER)
+    workspace = Workspace(runner_settings.runs_dir, runner_settings.secrets_dir)
+    policy = runner_settings.container_policy()
+    loop = RunnerLoop(
+        _fleet(sessions, owner, InstanceRole.RUNNER),
+        runtime=runtime,
+        workspace=workspace,
+        policy=policy,
+        stop_requested=stop_requested,
+        poll_seconds=runner_settings.poll_seconds,
+    )
+    loop.attach(
+        ContainerRunner(
+            _queue(sessions, settings),
+            runtime,
+            workspace,
+            owner=owner,
+            policy=policy,
+            script=script,
+            cipher=cipher,
+            stop_requested=stop_requested,
+            on_heartbeat=loop.beat,
+        )
+    )
+    return loop
 
 
 def run_worker(settings: Settings, *, once: bool, report: Report) -> int:

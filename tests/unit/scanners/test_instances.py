@@ -61,6 +61,10 @@ def test_the_json_is_small_and_has_no_paths() -> None:
         {"engines": {"fake": "available"}},
         {"engines": {"fake": {"image": 1, "issue": None}}},
         {"engines": {"fake": {"image": IMAGE, "issue": "ON_FIRE"}}},
+        # 能寫 DB 的元件不能經由 GET /scanners 把任意文字轉給所有使用者（審查建議）。
+        {"engines": {"fake": {"image": "<script>", "issue": None}}},
+        {"engines": {"fake": {"image": "busybox:latest", "issue": None}}},
+        {"engines": {"fake": {"image": IMAGE + "x" * 4000, "issue": None}}},
     ],
 )
 def test_unexpected_documents_report_nothing(document: JsonObject) -> None:

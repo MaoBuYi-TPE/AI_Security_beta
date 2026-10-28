@@ -16,8 +16,8 @@ from secscan.runner.domain.policy import ContainerPolicy
 from secscan.runner.loop import RunnerLoop
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
-from secscan.scanners.domain.fake import FakeScript
-from secscan.scanners.domain.instances import InstanceRole
+from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript
+from secscan.scanners.domain.instances import Capabilities, InstanceRole
 from secscan.scanners.service import Fleet
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.queue import ScanQueue
@@ -205,7 +205,7 @@ def test_a_lost_lease_or_docker_failure_does_not_stop_the_loop(
     clock: FakeClock,
 ) -> None:
     queue_seed.scan(world.operator_a, scannable)
-    runtime.failing.add("state")
+    runtime.failing.update({"state", "remove"})
     clock.at(5, runtime.failing.clear)
 
     loop = _runner_loop(queue, queue_engine, runtime, workspace, clock, stop_after=20)
@@ -300,3 +300,50 @@ def test_reports_are_passed_on_and_a_lost_lease_is_counted(
     assert seen == [RunStatus.COLLECTED]
     assert runtime_hold == []
     assert loop.failures == 1
+
+
+def test_secrets_are_not_swept_while_another_runner_is_alive(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    clock: FakeClock,
+    tmp_path: Path,
+) -> None:
+    """第二個 runner（例如手動的 --once）不能刪掉正在執行的 run 的 secret（審查發現）。"""
+    Fleet(
+        sessionmaker(queue_engine, expire_on_commit=False),
+        owner="runner:other",
+        role=InstanceRole.RUNNER,
+        software_version="0.1.0",
+    ).beat(Capabilities(engines=()))
+    (tmp_path / "secrets" / "in-use").mkdir()
+
+    _runner_loop(queue, queue_engine, runtime, workspace, clock).run(once=True)
+
+    assert [path.name for path in (tmp_path / "secrets").iterdir()] == ["in-use"]
+
+
+def test_an_unwritable_volume_claims_nothing(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    clock: FakeClock,
+    tmp_path: Path,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    (tmp_path / "runs").chmod(0o500)
+    try:
+        reports = _runner_loop(queue, queue_engine, runtime, workspace, clock).run(once=True)
+    finally:
+        (tmp_path / "runs").chmod(0o700)
+
+    assert reports == []
+    assert runtime.created == []
+    assert _capabilities(queue_seed)["engines"] == {
+        "fake": {"image": str(FAKE_IMAGE), "issue": "RUN_VOLUME_NOT_WRITABLE"}
+    }

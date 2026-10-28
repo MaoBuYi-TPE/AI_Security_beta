@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import yaml
 
-from secscan.runner.domain.policy import ENGINE_POLICIES
+from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE: dict[str, Any] = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
@@ -157,6 +157,12 @@ DENIED = [
     ("GET", "/v1.45/system/df"),
     ("GET", "/v1.45/events"),
     ("GET", "/v1.45/version/../info"),
+    # 路徑穿越：映像的規則不能讓 /、.. 通過（審查發現：原本放行到 /distribution、/exec）。
+    ("GET", f"/v1.45/images/x/../../distribution/evil.example/y:t@sha256:{'0' * 64}/json"),
+    ("GET", f"/v1.45/images/a/../../exec/abc:t@sha256:{'0' * 64}/json"),
+    ("GET", f"/v1.45/images/busybox:1.38.0@sha256:{'0' * 64}/json"),
+    ("GET", "/v1.45/images/busybox:1x38x0@sha256:" + IMAGE.split("@sha256:")[1] + "/json"),
+    ("GET", f"/v1.45/containers/{RUN}/../secscan-db-1/json"),
     ("POST", "/v1.45/containers/secscan-run-x/start"),
     ("HEAD", "/v1.45/version"),
 ]
@@ -208,3 +214,34 @@ def test_the_build_context_excludes_everything_but_the_source() -> None:
     assert rules[0] == "*"
     assert {"!pyproject.toml", "!uv.lock", "!src/"} <= set(rules)
     assert not any(".env" in rule for rule in rules if rule.startswith("!"))
+
+
+def test_the_proxy_allows_exactly_the_approved_images() -> None:
+    """映像的規則是核准清單的逐字比對（. 已跳脫），不是通式。"""
+    approved = sorted(image for policy in ENGINE_POLICIES.values() for image in policy.images)
+    rule = _allowlist()["GET"]
+
+    for image in approved:
+        assert rule.fullmatch(f"/v1.45/images/{image}/json")
+    assert all(re.escape(image) in rule.pattern for image in approved)
+
+
+def test_names_in_the_proxy_rules_are_literal() -> None:
+    """compose 內插到 regex 的名稱（scan_net、兩個 volume）不能有 regex 的特殊字元。"""
+    command = " ".join(str(argument) for argument in SERVICES["socket-proxy"]["command"])
+    defaults = _DEFAULT.findall(command)
+
+    assert defaults
+    for name in defaults:
+        assert ContainerPolicy(scan_network=name, runs_volume=name, secrets_volume=name)
+        assert re.escape(name) == name
+
+
+def test_secrets_live_only_in_memory() -> None:
+    """secret 的 volume 是 tmpfs：刪除檔案之後不會留在磁碟上（審查建議）。"""
+    volume = COMPOSE["volumes"]["run_secrets"]
+
+    assert volume["driver_opts"]["type"] == "tmpfs"
+    assert volume["driver_opts"]["device"] == "tmpfs"
+    options = dict(item.split("=", 1) for item in volume["driver_opts"]["o"].split(","))
+    assert options == {"size": "1m", "uid": "10001", "gid": "10001", "mode": "0700"}

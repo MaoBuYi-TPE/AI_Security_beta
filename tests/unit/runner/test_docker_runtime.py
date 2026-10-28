@@ -3,6 +3,8 @@
 以假的 adapter 取代 Docker SDK 的 HTTP 傳輸，確認實際的 method、path、query 與 body。
 """
 
+from collections.abc import Callable
+
 import pytest
 import requests
 
@@ -84,7 +86,9 @@ def test_start_stop_and_remove_address_the_container_by_name(
         ("DELETE", f"{PREFIX}/containers/{NAME}"),
     ]
     assert docker_api.requests_seen[1].query == {"t": "5"}
+    # 強制刪除，連同映像宣告的匿名 volume（審查建議：M3 的映像可能有 VOLUME）。
     assert docker_api.requests_seen[2].query["force"] == "True"
+    assert docker_api.requests_seen[2].query["v"] == "True"
 
 
 @pytest.mark.parametrize("status", [304, 404])
@@ -250,3 +254,35 @@ def test_connecting_does_not_call_the_daemon(url: str) -> None:
 def test_only_tcp_and_unix_urls_are_accepted(url: str) -> None:
     with pytest.raises(ValueError, match="tcp"):
         DockerRuntime.connect(url)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload", "call"),
+    [
+        ("GET", f"{PREFIX}/version", {"ApiVersion": "1.54"}, "version"),
+        ("GET", f"{PREFIX}/containers/{NAME}/json", {"Id": "x"}, "state"),
+        ("GET", f"{PREFIX}/containers/{NAME}/json", {"State": {"Status": "exited"}}, "state"),
+        ("GET", f"{PREFIX}/containers/{NAME}/json", {"State": "running"}, "state"),
+        ("GET", f"{PREFIX}/images/{IMAGE}/json", {"Os": "linux"}, "image"),
+        ("GET", f"{PREFIX}/networks/secscan_scan_net", ["not", "an", "object"], "network"),
+    ],
+)
+def test_malformed_responses_become_runtime_unavailable(
+    runtime: DockerRuntime,
+    docker_api: StubDocker,
+    method: str,
+    path: str,
+    payload: object,
+    call: str,
+) -> None:
+    """格式不符的回應不會變成未攔截的 KeyError，讓 runner 結束（審查發現）。"""
+    docker_api.reply(method, path, 200, payload)
+    calls: dict[str, Callable[[], object]] = {
+        "version": runtime.version,
+        "state": lambda: runtime.state(NAME),
+        "image": lambda: runtime.image_architecture(IMAGE),
+        "network": lambda: runtime.network("secscan_scan_net"),
+    }
+
+    with pytest.raises(RuntimeUnavailableError, match="格式"):
+        calls[call]()

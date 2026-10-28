@@ -15,8 +15,10 @@ from secscan.scans.domain.catalog import Engine
 
 # 掃描容器的 user：和 runner 相同（隔離靠掛載，不靠 uid；docs/DECISIONS.md §14.4）。
 SCAN_USER = "10001:10001"
-# Docker 的物件名稱（network、volume）。
-_DOCKER_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
+# Docker 的物件名稱（network、volume）。不接受 .：名稱也會放進 socket-proxy 的 regex（. 是萬用
+# 字元）。host、bridge、none 會讓容器接上宿主或預設的網路（審查發現）。
+_DOCKER_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}")
+_RESERVED_NAMES = frozenset({"host", "bridge", "none", "default"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,8 +70,10 @@ class ContainerPolicy:
 
     def __post_init__(self) -> None:
         for name in (self.scan_network, self.runs_volume, self.secrets_volume):
-            if _DOCKER_NAME.fullmatch(name) is None:
-                raise ValueError("network 與 volume 的名稱只能有英數字與 _ . -")
+            if _DOCKER_NAME.fullmatch(name) is None or name.lower() in _RESERVED_NAMES:
+                raise ValueError(
+                    "network 與 volume 的名稱只能有英數字、_ 與 -，也不能是 host、bridge、none"
+                )
 
 
 ENGINE_POLICIES: Mapping[Engine, EnginePolicy] = MappingProxyType(

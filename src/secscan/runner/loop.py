@@ -1,6 +1,7 @@
 """runner 的常駐迴圈（docs/DECISIONS.md §14.6、§14.7）。
 
-- 啟動時：清掉上一個 runner 留下的 secret、刪掉過期的心跳列、probe 一次。
+- 啟動時：清掉上一個 runner 留下的 secret（沒有其他存活的 runner 時）、刪掉過期的心跳列、
+  probe 一次（也確認兩個 volume 可寫）。
 - 每圈寫心跳（含最近一次 probe 的結果），只認領 probe 通過的引擎；probe 每 60 秒重做一次。
 - lease 失效或監看途中 Docker 不可用時記下、重新 probe，繼續處理下一個（run 留給 T13 的對帳）。
   DB 錯誤直接往外拋：程序結束，由 compose 重啟。
@@ -71,9 +72,7 @@ class RunnerLoop:
         """處理排隊中的 run，直到要求停止（once：最多處理一個，沒有工作就回來）。"""
         if self._runner is None:
             raise RuntimeError("先以 attach() 指定 runner")
-        removed = self._workspace.sweep_secrets()
-        if removed:
-            logger.warning("已刪除上一個 runner 留下的 %d 個 secret 目錄", removed)
+        self._sweep()
         self._fleet.prune()
         self._probe()
         reports: list[RunReport] = []
@@ -92,8 +91,22 @@ class RunnerLoop:
                 self._sleep(self._poll_seconds)
         return reports
 
+    def _sweep(self) -> None:
+        """刪除上一個 runner 留下的 secret；還有其他存活的 runner 時不刪（可能正在使用）。"""
+        if self._fleet.others_alive():
+            logger.warning("還有其他存活的 runner：不清除 secret 目錄")
+            return
+        removed = self._workspace.sweep_secrets()
+        if removed:
+            logger.warning("已刪除上一個 runner 留下的 %d 個 secret 目錄", removed)
+
     def _probe(self) -> None:
-        self._capabilities = probe(self._runtime, self._policy, self._engines)
+        self._capabilities = probe(
+            self._runtime,
+            self._policy,
+            self._engines,
+            volumes_writable=self._workspace.writable(),
+        )
         self._probed_at = self._monotonic()
         for item in self._capabilities.engines:
             if item.issue is not None:

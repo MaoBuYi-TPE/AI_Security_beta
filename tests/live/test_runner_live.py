@@ -75,7 +75,13 @@ def test_only_the_socket_proxy_has_the_socket_and_read_only() -> None:
     ]
 
 
+def _all_containers() -> set[str]:
+    return set(docker("ps", "-a", "--format", "{{.ID}}").split())
+
+
 def test_the_proxy_refuses_everything_but_the_container_api() -> None:
+    before = _all_containers()
+
     results: dict[str, Any] = json.loads(
         docker("exec", "-i", container("runner"), "python", "-I", "-", stdin=PROBE)
     )
@@ -84,9 +90,8 @@ def test_the_proxy_refuses_everything_but_the_container_api() -> None:
     assert results, "探針沒有回報任何結果"
     for label, status in results.items():
         assert status in (403, 405), (label, status)
-    assert (
-        docker("ps", "-a", "--filter", "name=secscan-run-00000000", "--format", "{{.Names}}") == ""
-    )
+    # 被拒絕的 create 沒有在 daemon 上產生任何容器（不只看狀態碼）。
+    assert _all_containers() == before
 
 
 @pytest.mark.parametrize("service", ["api", "worker"])
@@ -147,6 +152,20 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         ("volume", "/scan/secret", False),
     ]
     assert CANARY not in json.dumps(info)
+    # subpath 確實生效：容器只看得到自己的 in/ 與 out/，看不到其他 run 的目錄（審查建議）。
+    listing = docker("exec", name, "sh", "-c", "ls -A /scan; echo ---; ls -A /scan/in /scan/secret")
+    assert listing.split() == [
+        "in",
+        "out",
+        "secret",
+        "---",
+        "/scan/in:",
+        "run.json",
+        "/scan/secret:",
+        "target-auth",
+    ]
+    assert host["IpcMode"] == "private"
+    assert host["CgroupnsMode"] == "private"
     checks = docker(
         "exec",
         name,
@@ -215,3 +234,10 @@ def test_the_canary_secret_never_reaches_logs_or_container_settings() -> None:
         logs = docker("logs", name, check=False)
         assert CANARY not in logs
         assert CANARY not in json.dumps(inspect(name))
+
+
+def test_the_secrets_volume_is_in_memory() -> None:
+    """secret 的 volume 是 tmpfs：刪除之後不會留在磁碟上。"""
+    [volume] = json.loads(docker("volume", "inspect", SECRETS_VOLUME))
+
+    assert volume["Options"]["type"] == "tmpfs"

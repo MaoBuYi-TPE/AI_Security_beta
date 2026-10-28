@@ -2,7 +2,7 @@
 
 - daemon 的 API 版本範圍包含 1.45；
 - scan_net 存在、internal、gateway 是 isolated（掃描容器連不到宿主與其他網路）；
-- runs 與 secrets 兩個 volume 存在；
+- runs 與 secrets 兩個 volume 存在，而且 runner 掛載的目錄可寫（權限錯了要在認領之前發現）；
 - 每個核准的映像都在本機（runner 不 pull），而且是 daemon 的架構。
 回報只有引擎、映像 ref 與原因代碼。
 """
@@ -24,10 +24,14 @@ def probe(
     runtime: ContainerRuntime,
     policy: ContainerPolicy,
     engines: Mapping[Engine, EnginePolicy] = ENGINE_POLICIES,
+    *,
+    volumes_writable: bool = True,
 ) -> Capabilities:
     try:
         version = runtime.version()
         environment = _environment_issue(runtime, policy, version)
+        if environment is None and not volumes_writable:
+            environment = CapabilityIssue.RUN_VOLUME_NOT_WRITABLE
         items = tuple(
             _engine(runtime, engine, engines[engine], version, environment)
             for engine in sorted(engines)

@@ -79,3 +79,10 @@ def test_both_volumes_must_exist(missing: str) -> None:
 @pytest.mark.parametrize("images", [{}, {str(FAKE_IMAGE): "amd64"}])
 def test_the_image_must_be_present_for_this_architecture(images: dict[str, str]) -> None:
     assert _issue(FakeContainerRuntime(images=images)) is CapabilityIssue.IMAGE_MISSING
+
+
+def test_volumes_the_runner_cannot_write_make_engines_unavailable() -> None:
+    """volume 的權限錯了，要在認領之前發現，而不是在 prepare 之後（審查發現）。"""
+    [capability] = probe(FakeContainerRuntime(), POLICY, volumes_writable=False).engines
+
+    assert capability.issue is CapabilityIssue.RUN_VOLUME_NOT_WRITABLE

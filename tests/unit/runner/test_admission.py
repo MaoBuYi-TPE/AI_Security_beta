@@ -174,7 +174,24 @@ def test_templates_match_whole_arguments_only() -> None:
     assert not template.matches(("/bin/sleep", "x"), ("12",))
 
 
-@pytest.mark.parametrize("name", ["", "bad name", "-leading", "a/b", "x" * 129])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "bad name",
+        "-leading",
+        "a/b",
+        "x" * 129,
+        # 保留的網路名稱：host、bridge、none 會讓容器接上宿主或預設的網路（審查發現）。
+        "host",
+        "bridge",
+        "none",
+        "default",
+        "HOST",
+        # 名稱會放進 socket-proxy 的 regex：不接受 regex 的特殊字元（. 會變成萬用字元）。
+        "secscan.scan.net",
+    ],
+)
 def test_container_policy_names_are_docker_names(name: str) -> None:
     with pytest.raises(ValueError, match="名稱"):
         ContainerPolicy(scan_network=name, runs_volume="runs", secrets_volume="secrets")

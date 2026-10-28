@@ -180,3 +180,39 @@ def test_the_switch_must_be_exactly_one(
     result = _run(pytester)
 
     result.assert_outcomes(skipped=1)
+
+
+_SESSION_FIXTURE = """
+import os
+import socket
+
+import pytest
+
+
+@pytest.fixture(scope="session")
+def early_connection():
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect("/nonexistent/secscan-session.sock")
+
+
+def test_uses_a_session_fixture(early_connection):
+    pass
+
+
+def test_docker_host_is_blocked_for_the_whole_session():
+    assert os.environ["DOCKER_HOST"].startswith("unix:///nonexistent/")
+"""
+
+
+def test_session_fixtures_are_guarded_too(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """防護在整個 session 生效，不只在每個測試的 fixture 裡（審查建議）。"""
+    monkeypatch.delenv(LIVE_SWITCH, raising=False)
+    monkeypatch.setenv("PYTHONPATH", str(PROJECT_ROOT))
+    pytester.makepyfile(_SESSION_FIXTURE)
+
+    result = pytester.runpytest_subprocess(*_INNER_ARGS)
+
+    result.assert_outcomes(passed=1, errors=1)
+    result.stdout.fnmatch_lines(["*UnixSocketBlockedError*"])

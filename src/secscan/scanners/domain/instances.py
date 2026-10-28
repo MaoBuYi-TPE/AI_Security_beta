@@ -8,6 +8,7 @@ from datetime import timedelta
 from enum import StrEnum
 
 from secscan.core.json_types import JsonObject, JsonValue
+from secscan.scanners.domain.plan import ImageReference
 from secscan.scans.domain.catalog import AVAILABLE_ENGINES, ENGINE_ORDER, Engine, ScanProfile
 
 HEARTBEAT_EVERY = timedelta(seconds=5)
@@ -29,6 +30,7 @@ class CapabilityIssue(StrEnum):
     DOCKER_API_UNSUPPORTED = "DOCKER_API_UNSUPPORTED"
     SCAN_NETWORK_NOT_ISOLATED = "SCAN_NETWORK_NOT_ISOLATED"
     RUN_VOLUME_MISSING = "RUN_VOLUME_MISSING"
+    RUN_VOLUME_NOT_WRITABLE = "RUN_VOLUME_NOT_WRITABLE"
     IMAGE_MISSING = "IMAGE_MISSING"
 
 
@@ -81,7 +83,7 @@ def _engine_capability(name: str, entry: JsonValue) -> EngineCapability | None:
     if name not in Engine.__members__.values() or not isinstance(entry, dict):
         return None
     image, issue = entry.get("image"), entry.get("issue")
-    if not (image is None or isinstance(image, str)):
+    if image is not None and not (isinstance(image, str) and _is_image(image)):
         return None
     if issue is not None and issue not in CapabilityIssue.__members__.values():
         return None
@@ -122,3 +124,12 @@ def _status(engine: Engine, capability: EngineCapability | None) -> EngineStatus
         return EngineStatus(engine, True, False, None, profiles, RUNNER_UNAVAILABLE)
     reason = capability.issue.value if capability.issue is not None else None
     return EngineStatus(engine, True, capability.available, capability.image, profiles, reason)
+
+
+def _is_image(value: str) -> bool:
+    """只轉出合格的映像 ref（repo:tag@sha256:…），不把任意文字經由 GET /scanners 傳給使用者。"""
+    try:
+        ImageReference.parse(value)
+    except ValueError:
+        return False
+    return True

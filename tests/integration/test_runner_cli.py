@@ -152,7 +152,7 @@ def test_docker_lost_mid_run_fails_the_command(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     queue_seed.scan(world.operator_a, scannable)
-    runtime.failing.add("state")
+    runtime.failing.update({"state", "remove"})
 
     assert main(["runner", "--once"]) == EXIT_FAILURE
     assert "對帳" in capsys.readouterr().err

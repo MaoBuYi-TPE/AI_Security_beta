@@ -50,6 +50,8 @@ _HOST_CONFIG_KEYS = frozenset(
         "LogConfig",
         "RestartPolicy",
         "AutoRemove",
+        "IpcMode",
+        "CgroupnsMode",
     }
 )
 _MOUNT_KEYS = frozenset({"Type", "Source", "Target", "ReadOnly", "VolumeOptions"})
@@ -64,6 +66,26 @@ _FIXED_HOST_CONFIG: Mapping[str, JsonValue] = MappingProxyType(
         "LogConfig": LOG_CONFIG,
         "RestartPolicy": {"Name": "no"},
         "AutoRemove": False,
+        # 明確指定，不依賴 daemon 的預設值（審查建議）。
+        "IpcMode": "private",
+        "CgroupnsMode": "private",
+    }
+)
+# 送出前的檢查用自己的一份（刻意重複，不引用上面組 body 用的常數）：組 body 的程式或常數被改錯，
+# 檢查不會跟著一起放行（審查發現）。改動時兩邊都要改，test_container_spec.py 會核對。
+_REQUIRED_HOST_CONFIG: Mapping[str, JsonValue] = MappingProxyType(
+    {
+        "ReadonlyRootfs": True,
+        "CapDrop": ["ALL"],
+        "SecurityOpt": ["no-new-privileges:true"],
+        "Privileged": False,
+        "Init": True,
+        "Ulimits": [{"Name": "nofile", "Soft": 1024, "Hard": 1024}],
+        "LogConfig": {"Type": "json-file", "Config": {"max-size": "1m", "max-file": "1"}},
+        "RestartPolicy": {"Name": "no"},
+        "AutoRemove": False,
+        "IpcMode": "private",
+        "CgroupnsMode": "private",
     }
 )
 
@@ -196,7 +218,7 @@ def _safe(spec: ContainerSpec, plan: ExecutionPlan, policy: ContainerPolicy) -> 
         and body["User"] == policy.user
         and _non_root(policy.user)
         and body["Labels"] == dict(_labels(plan))
-        and all(host[key] == value for key, value in _FIXED_HOST_CONFIG.items())
+        and all(host[key] == value for key, value in _REQUIRED_HOST_CONFIG.items())
         and host["NetworkMode"] == policy.scan_network
         and _bounded(host)
         and _mounts_safe(host["Mounts"], plan, policy)
@@ -217,15 +239,27 @@ def _bounded(host: JsonObject) -> bool:
 
 
 def _mounts_safe(mounts: JsonValue, plan: ExecutionPlan, policy: ContainerPolicy) -> bool:
-    if not isinstance(mounts, list):
+    """只能是這個 run 的 volume subpath：in/ 與 secret 唯讀、out/ 可寫，順序固定。
+
+    不呼叫組 body 用的 _mounts：各自寫一次，任一邊寫錯都會被另一邊擋下。
+    """
+    run = str(plan.run_id)
+    allowed = [
+        (IN_DIR, policy.runs_volume, f"{run}/in", True),
+        (OUT_DIR, policy.runs_volume, f"{run}/out", False),
+    ]
+    if plan.target_auth:
+        allowed.append((SECRET_DIR, policy.secrets_volume, run, True))
+    if not isinstance(mounts, list) or len(mounts) != len(allowed):
         return False
-    expected = _mounts(plan, policy)
-    if len(mounts) != len(expected):
-        return False
-    for mount, wanted in zip(mounts, expected, strict=True):
-        if not isinstance(mount, dict) or set(mount) != _MOUNT_KEYS or mount != wanted:
-            return False
-    return True
+    return all(
+        isinstance(mount, dict)
+        and set(mount) == _MOUNT_KEYS
+        and mount["Type"] == "volume"
+        and (mount["Target"], mount["Source"], mount["ReadOnly"]) == (target, source, read_only)
+        and mount["VolumeOptions"] == {"Subpath": subpath, "NoCopy": True}
+        for mount, (target, source, subpath, read_only) in zip(mounts, allowed, strict=True)
+    )
 
 
 def _mounts(plan: ExecutionPlan, policy: ContainerPolicy) -> list[JsonValue]:

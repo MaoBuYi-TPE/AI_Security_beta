@@ -10,6 +10,8 @@ import json
 
 RUN = "secscan-run-00000000-0000-4000-8000-0000000000aa"
 CREATE = f"/v1.45/containers/create?name={RUN}"
+DIGEST = "sha256:" + "0" * 64
+BUSYBOX = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
 REQUESTS: dict[str, tuple[str, str, object]] = {
     "version": ("GET", "/v1.45/version", None),
     "info": ("GET", "/v1.45/info", None),
@@ -49,6 +51,17 @@ REQUESTS: dict[str, tuple[str, str, object]] = {
             },
         },
     ),
+    # 路徑穿越、編碼與重複的斜線（審查建議）：proxy 都不能放行到其他端點。
+    "traversal_distribution": (
+        "GET",
+        f"/v1.45/images/x/../../distribution/e.x/y:t@{DIGEST}/json",
+        None,
+    ),
+    "traversal_exec": ("GET", f"/v1.45/images/a/../../exec/abc:t@{DIGEST}/json", None),
+    "traversal_container": ("GET", f"/v1.45/containers/{RUN}/../secscan-db-1/json", None),
+    "encoded_traversal": ("GET", f"/v1.45/images/{BUSYBOX}/json/%2e%2e/%2e%2e/info", None),
+    "double_slash": ("GET", "/v1.45//info", None),
+    "unapproved_image": ("GET", f"/v1.45/images/busybox:1.38.0@{DIGEST}/json", None),
     "volumes_from_create": (
         "POST",
         CREATE,

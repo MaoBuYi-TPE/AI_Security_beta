@@ -174,7 +174,9 @@ services:
 
   # 只放行 runner 需要的 Docker API（docs/DECISIONS.md §14.1）：regex 會自動加上 ^ 與 $，只比對 path。
   # 容器一律以 secscan-run-<uuid> 指定；不放行 exec、archive、logs、build、pull，也不能建立 network
-  # 或 volume。-allowbindmountfrom 指向不存在的目錄：所有 host bind mount 都拒絕。
+  # 或 volume。映像只放行核准清單（和 runner/domain/policy.py 相同，逐字比對、. 已跳脫）。
+  # -allowbindmountfrom 指向不存在的目錄：create 的 Binds 與 type 為 bind 的 Mounts 都拒絕；它不檢查
+  # privileged、namespace、capability 與 volume 的 driver 選項，這些只由 runner 的驗證負責。
   socket-proxy:
     image: wollomatic/socket-proxy:1.13.1@sha256:3935b709275e4ec35d6ed5a5c4a1f0d01ed31eec5e7234efc3357ecd47689002
     profiles: [app]
@@ -196,7 +198,7 @@ services:
       - -stoponwatchdog
       - -shutdowngracetime=5
       - -allowbindmountfrom=/nonexistent-secscan-no-host-binds
-      - '-allowGET=/v1\.[0-9]+/(version|containers/secscan-run-[0-9a-f-]{36}/json|images/[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9_][A-Za-z0-9_.-]*@sha256:[0-9a-f]{64}/json|networks/${SECSCAN_SCAN_NET:-secscan_scan_net}|volumes/(${SECSCAN_RUNS_VOLUME:-secscan_runs}|${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}))'
+      - '-allowGET=/v1\.[0-9]+/(version|containers/secscan-run-[0-9a-f-]{36}/json|images/(busybox:1\.38\.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e)/json|networks/${SECSCAN_SCAN_NET:-secscan_scan_net}|volumes/(${SECSCAN_RUNS_VOLUME:-secscan_runs}|${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}))'
       - '-allowPOST=/v1\.[0-9]+/containers/(create|secscan-run-[0-9a-f-]{36}/(start|stop))'
       - '-allowDELETE=/v1\.[0-9]+/containers/secscan-run-[0-9a-f-]{36}'
     healthcheck:
@@ -223,5 +225,10 @@ volumes:
   db_data:
   runs:
     name: ${SECSCAN_RUNS_VOLUME:-secscan_runs}
+  # secret 只存在記憶體（tmpfs）：刪除之後不會留在磁碟上。擁有者是 runner 與掃描容器的 uid 10001。
   run_secrets:
     name: ${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,uid=10001,gid=10001,mode=0700

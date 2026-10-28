@@ -12,6 +12,8 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from secscan.core.json_types import JsonValue
+from secscan.runner.domain import admission
 from secscan.runner.domain.admission import (
     ContainerSpec,
     PlanRejectedError,
@@ -21,7 +23,9 @@ from secscan.runner.domain.admission import (
     container_name,
     container_spec,
 )
+from secscan.runner.domain.policy import ContainerPolicy
 from secscan.scanners.domain.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
+from secscan.scanners.domain.plan import ExecutionPlan
 from tests.unit.runner.plans import POLICY, RUN_ID, SCAN_ID, fake_plan
 
 PLAN = fake_plan()
@@ -58,6 +62,9 @@ def test_the_body_is_hardened() -> None:
     assert host["CapDrop"] == ["ALL"]
     assert host["SecurityOpt"] == ["no-new-privileges:true"]
     assert host["Init"] is True
+    # 不依賴 daemon 的預設值（審查建議）。
+    assert host["IpcMode"] == "private"
+    assert host["CgroupnsMode"] == "private"
     assert host["NetworkMode"] == "secscan_scan_net"
     assert host["Memory"] == host["MemorySwap"] == 64 * 1024 * 1024
     assert host["NanoCpus"] == 500_000_000
@@ -205,6 +212,7 @@ _UNSAFE: dict[str, Callable[[Body], None]] = {
     "env_injected": _set("Env", ["LD_PRELOAD=/scan/in/x.so"]),
     "bind_mount": _add_mount({"Type": "bind", "Source": "/", "Target": "/host"}),
     "other_volume": _mount(0, "Source", "secscan_db_data"),
+    "volume_turned_bind": _mount(0, "Type", "bind"),
     "other_run": _subpath(0, "00000000-0000-4000-8000-000000000000/in"),
     "traversal": _subpath(1, f"{RUN_ID}/../../x"),
     "volume_root": _subpath(0, ""),
@@ -230,6 +238,9 @@ _UNSAFE: dict[str, Callable[[Body], None]] = {
     "tmpfs": _set("HostConfig.Tmpfs", {"/run": "exec"}),
     "cgroup_parent": _set("HostConfig.CgroupParent", "/"),
     "runtime": _set("HostConfig.Runtime", "runc-unsafe"),
+    "ipc_shareable": _set("HostConfig.IpcMode", "shareable"),
+    "ipc_host_explicit": _set("HostConfig.IpcMode", "host"),
+    "cgroupns_host": _set("HostConfig.CgroupnsMode", "host"),
     "host_config_not_an_object": _set("HostConfig", ["Privileged"]),
     "mounts_not_a_list": _set("HostConfig.Mounts", {"Type": "volume"}),
     "mount_not_an_object": lambda body: body["HostConfig"]["Mounts"].__setitem__(0, "volume"),
@@ -280,3 +291,47 @@ def test_a_root_or_malformed_user_in_the_policy_is_refused(user: str) -> None:
         build_container(PLAN, policy=policy)
 
     assert caught.value.reason is PlanRejection.UNSAFE_CONTAINER
+
+
+def test_the_check_does_not_share_constants_with_the_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """送出前的檢查以自己的字面值判斷：改了組 body 用的常數，檢查仍然擋下（審查發現）。"""
+    unsafe = {**admission._FIXED_HOST_CONFIG, "Privileged": True}
+    monkeypatch.setattr(admission, "_FIXED_HOST_CONFIG", unsafe)
+
+    with pytest.raises(PlanRejectedError) as caught:
+        build_container(PLAN, policy=POLICY)
+
+    assert caught.value.reason is PlanRejection.UNSAFE_CONTAINER
+
+
+def test_the_check_does_not_rebuild_mounts_with_the_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builder = admission._mounts
+
+    def with_host_root(plan: ExecutionPlan, policy: ContainerPolicy) -> list[JsonValue]:
+        return [*builder(plan, policy), {"Type": "bind", "Source": "/", "Target": "/host"}]
+
+    monkeypatch.setattr(admission, "_mounts", with_host_root)
+
+    with pytest.raises(PlanRejectedError) as caught:
+        build_container(PLAN, policy=POLICY)
+
+    assert caught.value.reason is PlanRejection.UNSAFE_CONTAINER
+
+
+def test_a_writable_secret_or_input_from_the_builder_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builder = admission._mounts
+
+    def all_writable(plan: ExecutionPlan, policy: ContainerPolicy) -> list[JsonValue]:
+        mounts = builder(plan, policy)
+        return [{**mount, "ReadOnly": False} for mount in mounts if isinstance(mount, dict)]
+
+    monkeypatch.setattr(admission, "_mounts", all_writable)
+
+    with pytest.raises(PlanRejectedError):
+        build_container(AUTH_PLAN, policy=POLICY)

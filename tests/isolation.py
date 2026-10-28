@@ -1,16 +1,20 @@
 """測試程序連不到 Docker daemon（TASKS T10 的 DoD、docs/DECISIONS.md §14.9）。
 
 pytest-socket 封鎖 TCP/UDP，但 AF_UNIX 必須整個放行（asyncio 需要 socketpair），Docker daemon 的
-Unix socket 因此連得到。這個 plugin（由 tests/conftest.py 載入）在每個測試：
+Unix socket 因此連得到。這個 plugin（由 tests/conftest.py 載入）：
 
 - 只允許 connect 到 pytest 暫存目錄底下的 AF_UNIX 路徑（解析 symlink 與相對路徑之後判斷）；
 - 把 DOCKER_HOST 指向不存在的 socket，清掉其他 Docker 設定（子程序的 docker CLI 也連不到）；
 - 沒有標記 live 的測試不能用 enable_socket；live 測試要 ENABLE_LIVE_LAB_TESTS=1 才執行（否則在
   收集時就 skip），只有它們解除上述限制（CLAUDE.md §12）。
+
+沒有開關時（例如 make test），防護在 pytest_configure 就套用到整個 session：session 與 module
+範圍的 fixture 也受限制（審查建議）。開關打開時只在每個非 live 的測試套用，live 測試不受限。
 """
 
 import os
 import socket
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -31,6 +35,23 @@ _REAL_CONNECT_EX = _SOCKET_CLASS.connect_ex
 
 class UnixSocketBlockedError(RuntimeError):
     """測試嘗試 connect 到暫存目錄以外的 Unix socket（例如 Docker daemon）。"""
+
+
+_SESSION_GUARD = pytest.StashKey[pytest.MonkeyPatch]()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if os.environ.get(LIVE_SWITCH) == "1":
+        return
+    patch = pytest.MonkeyPatch()
+    _block_docker(patch, Path(tempfile.gettempdir()).resolve())
+    config.stash[_SESSION_GUARD] = patch
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    patch = config.stash.get(_SESSION_GUARD, None)
+    if patch is not None:
+        patch.undo()
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -68,14 +89,18 @@ def _isolate_from_docker(
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """每個非 live 的測試：只允許這次 session 的暫存目錄（比 session 範圍的防護更窄）。"""
     if request.node.get_closest_marker(LIVE_MARKER) is not None:
         return
-    monkeypatch.setenv("DOCKER_HOST", BLOCKED_DOCKER_HOST)
+    _block_docker(monkeypatch, tmp_path_factory.getbasetemp().resolve())
+
+
+def _block_docker(patch: pytest.MonkeyPatch, allowed: Path) -> None:
+    patch.setenv("DOCKER_HOST", BLOCKED_DOCKER_HOST)
     for key in DOCKER_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    allowed = tmp_path_factory.getbasetemp().resolve()
-    monkeypatch.setattr(_SOCKET_CLASS, "connect", _guarded(_REAL_CONNECT, allowed))
-    monkeypatch.setattr(_SOCKET_CLASS, "connect_ex", _guarded(_REAL_CONNECT_EX, allowed))
+        patch.delenv(key, raising=False)
+    patch.setattr(_SOCKET_CLASS, "connect", _guarded(_REAL_CONNECT, allowed))
+    patch.setattr(_SOCKET_CLASS, "connect_ex", _guarded(_REAL_CONNECT_EX, allowed))
 
 
 def _guarded[R](connect: Callable[..., R], allowed: Path) -> Callable[[socket.socket, object], R]:

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from cryptography.fernet import Fernet
@@ -20,13 +20,15 @@ from secscan.runner.domain.admission import SECRET_FILE, ContainerSpec
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy
 from secscan.runner.domain.runtime import RuntimeUnavailableError
 from secscan.runner.service import ContainerRunner
-from secscan.runner.workspace import Workspace
+from secscan.runner.workspace import CollectionLimits, Workspace, WorkspaceError
 from secscan.scanners.domain.fake import FakeOutcome, FakeScript
 from secscan.scans.domain.catalog import Engine as ScanEngine
+from secscan.scans.domain.catalog import ScanProfile, plan_runs
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
-from secscan.scans.domain.model import Lease
+from secscan.scans.domain.model import Lease, NewScan
 from secscan.scans.domain.request import BudgetRequest
 from secscan.scans.queue import Launch, LeaseLostError, RunReport, ScanQueue
+from secscan.scans.repository import ScanRepository
 from secscan.scans.service import ScanService
 from secscan.security.secret_cipher import SecretCipher
 from secscan.worker.service import Worker
@@ -205,9 +207,10 @@ def test_heartbeats_keep_the_lease_and_the_instance_alive(
         make_runner(script=FakeScript(hold_seconds=40), on_heartbeat=lambda: beats.append(1))
     )
 
-    # lease 是 30 秒：停留 40 秒仍然成功，代表期間有延長；每 5 秒心跳一次（第 40 秒容器已結束）。
+    # lease 是 30 秒：停留 40 秒仍然成功，代表期間有延長。啟動後立刻心跳一次，之後每 5 秒一次
+    # （第 0 到 40 秒共 9 次；心跳在查狀態之前），收集之前再心跳一次。
     assert report.run_status is R.COLLECTED
-    assert len(beats) == 7
+    assert len(beats) == 10
 
 
 # --- secret --------------------------------------------------------------------------------
@@ -567,3 +570,325 @@ def test_only_the_requested_engines_are_claimed(
 
 def test_engine_policies_default_to_the_shared_table() -> None:
     assert ScanEngine.FAKE in ENGINE_POLICIES
+
+
+# --- 審查後補上 -------------------------------------------------------------------------------
+
+
+def test_the_first_heartbeat_comes_right_after_the_start(
+    make_runner: Callable[..., ContainerRunner],
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """lease 從認領起算：建立與啟動容器很慢時，等到第 5 秒才心跳可能已經過期（審查發現）。"""
+    queue_seed.scan(world.operator_a, scannable)
+    beats: list[int] = []
+
+    report = _report(
+        make_runner(script=FakeScript(hold_seconds=1), on_heartbeat=lambda: beats.append(1))
+    )
+
+    assert report.run_status is R.COLLECTED
+    assert len(beats) == 2
+
+
+@pytest.mark.parametrize("volume", ["runs", "secrets"])
+def test_an_unwritable_volume_fails_the_run_without_a_container(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    tmp_path: Path,
+    volume: str,
+) -> None:
+    """權限錯誤或磁碟滿：run 失敗、不建立容器、不留 secret；runner 不會因此結束（審查發現）。"""
+    queue_seed.scan(world.operator_a, scannable)
+    (tmp_path / volume).chmod(0o500)
+    try:
+        report = _report(make_runner())
+    finally:
+        (tmp_path / volume).chmod(0o700)
+
+    assert (report.run_status, report.scan_status) == (R.FAILED, S.FAILED)
+    assert _run(queue_seed, report.run_id).error_code == RunErrorCode.WORKSPACE_UNAVAILABLE
+    assert runtime.created == []
+    assert list((tmp_path / "secrets").iterdir()) == []
+
+
+@pytest.mark.parametrize("operation", ["start", "state"])
+def test_an_unexpected_error_still_removes_the_container_and_the_secret(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: FakeContainerRuntime,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """程式錯誤一樣往外拋，但容器與 secret 先清掉（審查發現：啟動之前的例外原本不清理）。"""
+    queue_seed.scan(world.operator_a, scannable)
+
+    def broken(_name: str) -> None:
+        raise KeyError("State")
+
+    if operation == "start":
+        monkeypatch.setattr(runtime, "start", broken)
+    else:
+        clock.at(2, lambda: monkeypatch.setattr(runtime, "state", broken))
+
+    with pytest.raises(KeyError):
+        make_runner(script=FakeScript(hold_seconds=60)).run_once(FAKE)
+
+    assert runtime.containers == {}
+    assert list((tmp_path / "secrets").iterdir()) == []
+
+
+def test_a_brief_docker_error_is_retried(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: FakeContainerRuntime,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """socket-proxy 一次逾時不放棄整個 run（審查發現）。"""
+    queue_seed.scan(world.operator_a, scannable)
+    clock.at(2, lambda: runtime.failing.add("state"))
+    clock.at(4, lambda: runtime.failing.discard("state"))
+
+    report = _report(make_runner(script=FakeScript(hold_seconds=6)))
+
+    assert report.run_status is R.COLLECTED
+
+
+def test_docker_lost_but_the_container_removed_interrupts_the_run(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: FakeContainerRuntime,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """查不到狀態，但刪除容器成功：容器確定已停止，可以標成 interrupted（審查發現）。"""
+    queue_seed.scan(world.operator_a, scannable)
+    clock.at(2, lambda: runtime.failing.add("state"))
+
+    report = _report(make_runner(script=FakeScript(hold_seconds=60)))
+
+    assert (report.run_status, report.scan_status) == (R.INTERRUPTED, S.INTERRUPTED)
+    assert _run(queue_seed, report.run_id).error_code == RunErrorCode.RUNTIME_UNAVAILABLE
+    assert runtime.containers == {}
+
+
+def test_output_over_the_limits_stops_the_container(
+    queue: ScanQueue,
+    runtime: FakeContainerRuntime,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    tmp_path: Path,
+) -> None:
+    """out/ 沒有磁碟配額：執行中就檢查用量，超過時停止容器（審查發現）。"""
+    queue_seed.scan(world.operator_a, scannable)
+    for name in ("runs", "secrets"):
+        (tmp_path / name).mkdir()
+    small = Workspace(
+        tmp_path / "runs", tmp_path / "secrets", limits=CollectionLimits(max_total_bytes=4)
+    )
+
+    def flood() -> None:
+        [out] = (tmp_path / "runs").glob("*/out")
+        (out / "flood").write_bytes(b"x" * 5)
+
+    clock.at(2, flood)
+    runner = ContainerRunner(
+        queue,
+        runtime,
+        small,
+        owner=OWNER,
+        policy=POLICY,
+        script=FakeScript(hold_seconds=60),
+        cipher=shared_cipher(),
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    report = _report(runner)
+
+    assert (report.run_status, report.scan_status) == (R.FAILED, S.FAILED)
+    assert _run(queue_seed, report.run_id).error_code == RunErrorCode.ARTIFACT_REJECTED
+    assert len(runtime.stopped) == 1
+    assert clock.now <= 4
+    assert runtime.containers == {}
+
+
+def test_a_manifest_that_cannot_be_written_fails_the_run(
+    make_runner: Callable[..., ContainerRunner],
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    tmp_path: Path,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+
+    def occupy() -> None:
+        [run_dir] = (tmp_path / "runs").iterdir()
+        (run_dir / "manifest.json").write_bytes(b"{}")
+
+    clock.at(1, occupy)
+    report = _report(make_runner())
+
+    assert _run(queue_seed, report.run_id).error_code == RunErrorCode.WORKSPACE_UNAVAILABLE
+
+
+def test_engines_without_a_planner_are_rejected_before_recording_a_container(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """目前只有 fake 有 plan：其他引擎的 run 不能拿到 fake 的映像與指令（審查發現）。"""
+    with Session(queue_engine, expire_on_commit=False) as session, session.begin():
+        ScanRepository(session).create(
+            NewScan(
+                project_id=world.project_a.id,
+                target_id=scannable.target.id,
+                target_origin=scannable.target.origin,
+                scope_grant_id=scannable.grant.id,
+                api_spec_id=scannable.spec.id,
+                auth=None,
+                profile=ScanProfile.API_ACTIVE_LAB,
+                budget=scannable.grant.budget,
+                runs=plan_runs((ScanEngine.ZAP,), available=frozenset(ScanEngine)),
+                operations=(),
+                idempotency_key=uuid4().hex,
+                request_sha256=bytes(32),
+                created_by_key_id=world.operator_a.principal.key_id,
+            )
+        )
+
+    report = make_runner().run_once(frozenset({ScanEngine.ZAP}))
+
+    assert report is not None
+    assert (report.run_status, report.scan_status) == (R.FAILED, S.FAILED)
+    run = _run(queue_seed, report.run_id)
+    assert (run.error_code, run.container_name, run.image_ref) == ("PLAN_REJECTED", None, None)
+    assert runtime.created == []
+
+
+def test_a_failed_stop_is_finished_by_the_forced_removal(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable, budget=BudgetRequest(max_duration_seconds=3))
+    runtime.failing.add("stop")
+
+    report = _report(make_runner(script=FakeScript(hold_seconds=60)))
+
+    assert (report.run_status, report.scan_status) == (R.TIMED_OUT, S.TIMED_OUT)
+    assert runtime.containers == {}
+
+
+def test_a_secret_that_cannot_be_deleted_does_not_fail_the_run(
+    make_runner: Callable[..., ContainerRunner],
+    workspace: Workspace,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """刪不掉的 secret 留給下次啟動時清除（記在 log），run 照常完成。"""
+    queue_seed.scan(world.operator_a, scannable)
+
+    def stuck(_run_id: UUID) -> None:
+        raise WorkspaceError("無法刪除 secret（EBUSY）")
+
+    monkeypatch.setattr(workspace, "discard_secret", stuck)
+
+    assert _report(make_runner()).run_status is R.COLLECTED
+
+
+def test_a_lease_lost_before_collecting_leaves_the_run(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    advance = queue.advance
+
+    def expire_after_collecting(lease: Lease, to: R, **options: Any) -> Any:
+        progress = advance(lease, to, **options)
+        if to is R.COLLECTING:
+            queue_seed.execute(
+                "UPDATE scanner_runs SET lease_expires_at = now() - interval '1 second' "
+                "WHERE id = :id",
+                id=lease.run_id,
+            )
+        return progress
+
+    monkeypatch.setattr(queue, "advance", expire_after_collecting)
+
+    with pytest.raises(LeaseLostError):
+        make_runner().run_once(FAKE)
+
+    [row] = queue_seed.query("SELECT status FROM scanner_runs")
+    assert row.status == "collecting"
+    assert runtime.containers == {}
+
+
+def test_the_lease_is_renewed_before_collecting(
+    make_runner: Callable[..., ContainerRunner],
+    workspace: Workspace,
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """收集可能要計算大量檔案的 hash：開始之前先延長 lease，不靠監看時最後一次的心跳。"""
+    queue_seed.scan(world.operator_a, scannable)
+    advance = queue.advance
+    remaining: list[float] = []
+
+    def nearly_expired(lease: Lease, to: R, **options: Any) -> Any:
+        progress = advance(lease, to, **options)
+        if to is R.COLLECTING:
+            queue_seed.execute(
+                "UPDATE scanner_runs SET lease_expires_at = now() + interval '2 seconds' "
+                "WHERE id = :id",
+                id=lease.run_id,
+            )
+        return progress
+
+    collect = workspace.collect
+
+    def measure(run_id: UUID) -> Any:
+        [row] = queue_seed.query(
+            "SELECT extract(epoch FROM lease_expires_at - clock_timestamp()) AS left "
+            "FROM scanner_runs WHERE id = :id",
+            id=run_id,
+        )
+        remaining.append(float(row.left))
+        return collect(run_id)
+
+    monkeypatch.setattr(queue, "advance", nearly_expired)
+    monkeypatch.setattr(workspace, "collect", measure)
+
+    assert _report(make_runner()).run_status is R.COLLECTED
+    [left] = remaining
+    assert left > 20
