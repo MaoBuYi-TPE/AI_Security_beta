@@ -44,7 +44,20 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 | scan_net（internal） | 單次掃描容器、egress guard | 掃描器唯一能連到的對象是 guard |
 | lab_net（internal） | egress guard、靶機、canary | 靶機與 canary 不能連到其他網路 |
 
-**T04 的開發階段**：api 仍在宿主以 `make dev` 執行，PostgreSQL 由 `compose.yaml` 啟動，只綁 127.0.0.1（開發 55432、整合測試 55433），不接 lab_net 或 scan_net。應用程式以非 superuser 的資料庫擁有者角色連線（`DECISIONS.md` §7）。M2 把 api/worker/runner 容器化之後，PostgreSQL 改成只接 control_net。
+**T04 的開發階段**：api 仍在宿主以 `make dev` 執行，PostgreSQL 由 `compose.yaml` 啟動，只綁 127.0.0.1（開發 55432、整合測試 55433），不接 lab_net 或 scan_net。應用程式以非 superuser 的資料庫擁有者角色連線（`DECISIONS.md` §7）。
+
+**T10 已實作**（`DECISIONS.md` §14.8）：`compose.yaml` 的 `app` profile（`make up`）以同一個映像執行 api、runner、worker，另加 socket-proxy：
+
+| 服務 | 網路 | 掛載 | 說明 |
+|---|---|---|---|
+| api | default（只為了發布 127.0.0.1:8000）、control_net | 無 | internal network 上 publish 的 port 不會生效（實測） |
+| runner | control_net、docker_net | runs、run_secrets 兩個 named volume | 經 socket-proxy 操作 Docker；不掛 docker.sock |
+| worker | control_net | 無 | T10 只處理 fake 的 normalizing |
+| socket-proxy | docker_net | `/var/run/docker.sock`（唯讀） | 唯一接觸 Docker daemon 的服務 |
+| db | default（127.0.0.1:55432）、control_net | db_data | 保留 127.0.0.1 的 port 給 `make dev` 與 `make migrate` |
+| 掃描容器 | scan_net（`make scan-net` 建立：internal＋gateway isolated） | runs、run_secrets 的 subpath | 由 runner 建立，見 §4 |
+
+全部非 root、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges`，並有記憶體與 pids 上限。`make dev` 仍在宿主執行 API（開發用），不具這樣的權限隔離。lab_net 與 egress guard 在 T11 接上。
 
 ### 掃描容器
 
@@ -57,6 +70,7 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 
 - 唯一有 Docker API 權限的程序，而且只能經 docker-socket-proxy 存取，只開放容器相關的 API 區段（不開 exec、volumes、networks、build 等）。[S27]
 - socket-proxy 只依 API 區段與 HTTP method 過濾，不檢查 request body，所以擋不住 container create 裡的 bind mount。這部分由 runner 的 ExecutionPlan 驗證負責，而 runner 本身不解析任何不可信資料。
+- **T10 已實作**（`DECISIONS.md` §14.1）：改用 wollomatic/socket-proxy [S83]，逐一放行 method＋path：只有 version、映像／scan_net／兩個 volume 的查詢，與 `secscan-run-<uuid>` 容器的建立、啟動、停止、刪除；只接受 runner 連線；host bind mount 在 proxy 也會被拒絕（它檢查 create 的 body 中的 bind）。proxy 不檢查 privileged、namespace、capability，這些只由 runner 的驗證負責（§4）。
 
 ### worker
 
@@ -214,6 +228,12 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - 鎖的順序：建立 scan 是 target（`FOR NO KEY UPDATE`：同一個 target 的建立彼此排隊，撤銷與停用不會被持續的建立請求餓死）→ grant → profile（`FOR SHARE`）→ 新增 scan；忙碌與上限在取鎖之前先查一次。所有改 scan 或 run 的寫入都是 scan（`FOR UPDATE`）→ run，prepare 之後再加 target、grant、profile 版本與建立者的 key（`FOR SHARE`）；心跳只改 run 的列。沒有任何 transaction 先鎖 target、grant 再等 scan。
   - 只有 prepare 能讓 run 開始執行；run 與凍結的 operation 只能在建立 scan 的 transaction 中新增（trigger）。
   - `runner/fake.py` 的 FakeRunner 只經 `ScanQueue` 操作 run；M2 的真 runner 也放在 `runner/`。
+- **runner、worker 與 ExecutionPlan（T10，`DECISIONS.md` §14）**：
+  - 分層更新為 `main | cli → migrations → health | runner | worker → scanners → scans → …`。`scanners/` 放 ExecutionPlan 與各引擎的建構（純函式）、`runner_instances` 與 `GET /scanners`；`runner/docker_runtime.py` 是唯一 import Docker SDK 的模組；worker 不能 import docker（import-linter）。
+  - ExecutionPlan（`scanners/domain/plan.py`）只描述映像、指令、非秘密的環境變數、輸入檔、是否掛載 secret 與上限；網路、user、掛載、權限由 runner 固定的容器政策決定。`runner/domain/admission.py` 先依引擎政策驗證 plan，再以獨立的不變式檢查組好的 create body，才送出。
+  - 容器版的 prepare（`QueueOperations.prepare_launch`）在移到 running 的同一個 UPDATE 記下 `container_name` 與 `image_ref`，並以 `FOR SHARE` 讀出綁定版本的密文；runner 在建立容器前才解密（唯一的 `reveal` 呼叫者），寫成 0400 的檔案，容器刪除後立刻刪除。
+  - 收集輸出在容器刪除之後，以 dir fd 加 `O_NOFOLLOW` 進行（`runner/workspace.py`）；runner 只計算 hash，不解析。
+  - runner 與 worker 每 5 秒在 `runner_instances` 寫心跳（含 capability probe 的結果）；`GET /scanners` 依它顯示引擎是否可用。
 - **DB 逾時（T09，`DECISIONS.md` §13.8）**：每個連線以 libpq 的 options 設定 `statement_timeout`、`lock_timeout`、`idle_in_transaction_session_timeout`；等鎖或查詢逾時回 503 加 `Retry-After`。
 
 建議介面（概念契約，不是已存在的程式）：
@@ -284,7 +304,8 @@ ExecutionPlan 只能包含：
 | auth_profiles | id、target_id、name、role_label（同一個 target 內唯一）、建立的 key 與時間；建立後不可變（T08 已建立） |
 | auth_profile_versions | profile_id、version、type、header_name、preflight（method、path、expected_status、expected_json）、encrypted_secret（Fernet token，被取代就清除）、secret_erased_at、建立的 key 與時間（T08 已建立；原規劃的單一資料表改成兩張，理由見 `DECISIONS.md` §12.3） |
 | scans | id、queue_position（identity，佇列的先後）、project_id、target_id、凍結的 target_origin、scope_grant_id、api_spec_id、auth_profile_id 與版本、auth_role、scan_profile、預算、status、idempotency_key 與 request_sha256、cancel_requested_at、建立的 key 與時間、finished_at（T09 已建立；快照以複合 FK 引用不可變的資料，不另存 snapshot JSON，理由見 `DECISIONS.md` §13.1；manifest 在 M2） |
-| scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code；同時是 runner 與 worker 的工作佇列（T09 已建立；engine_version、container_label、proxy_credential_hash 在 M2，coverage 在 T12；不自動重跑，所以沒有 attempt） |
+| scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code、container_name、image_ref；同時是 runner 與 worker 的工作佇列（T09 已建立；容器名稱與映像在 T10 加入，engine_version、proxy_credential_hash 在 M2 之後，coverage 在 T12；不自動重跑，所以沒有 attempt） |
+| runner_instances | id、role（runner/worker）、owner（唯一）、software_version、capabilities（引擎、映像與不可用的原因）、heartbeat_at、created_at；每個程序一列，30 秒內有心跳才算存活（T10 新增） |
 | scan_operations | scan_id、ordinal、method、path、operation_id、ineligible_reason；建立 scan 時凍結的 inventory 與 grant 的判斷，coverage 的分母（T09 新增） |
 | findings | id、target_id、fingerprint、kind、normalized_severity、owasp_2025、owasp_api_2023、mapping_source、mapping_version、triage/lifecycle、first/last_seen |
 | observations | id、finding_id（可以先為 null）、scan_id、scanner_run_id、source_rule、rule_group、位置、auth_role、evidence_ref、raw_severity、raw_confidence、parser_version |
@@ -345,6 +366,9 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - scanner_runs：CHECK 涵蓋引擎與狀態的白名單、sequence 範圍、lease 的三個欄位同時有值而且只在持有 lease 的狀態有值、終止 ⇔ `finished_at`、失敗類的狀態 ⇔ `error_code`（只檢查格式）、開始的時間與狀態一致、時間先後。trigger `scanner_runs_guard`：INSERT 必須是 queued、沒有 lease；身分欄位不能改；終止之後不能再改；DELETE、TRUNCATE 一律拒絕。
   - scan_events：主鍵 `(scan_id, sequence)`；`(scanner_run_id, scan_id)` 引用 run（事件的 run 一定屬於同一個 scan）；CHECK 涵蓋事件類型的白名單、run.status ⇔ 有 run、payload 是物件且最多 1 KiB。scan_operations：主鍵 `(scan_id, ordinal)`、`(scan_id, method, path)` 唯一。兩張表都是 append-only。
   - 和其他 trigger 一樣只防程式錯誤造成的誤改（`DECISIONS.md` §7）；FK 一律 `ON DELETE RESTRICT`。
+- **T10（migration `0006`）**：
+  - scanner_runs 新增 `container_name`、`image_ref`（可為 null：in-process 的 fake runner 沒有容器）。CHECK：名稱一定是 `secscan-run-<id>`、映像有 tag 與 digest、兩者同時有值或同時為 null、queued 與 preparing 沒有容器。trigger `scanner_runs_container_guard`：只能在 preparing → running 的那一次寫入，之後不能改，也不能清除。
+  - runner_instances：`owner` 唯一；CHECK 涵蓋 role 的白名單、owner 與版本不空白、capabilities 是 4 KiB 以內的物件、心跳不早於建立。
 - **其餘資料表由各功能任務以自己的 migration 加入**：findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照
@@ -361,7 +385,7 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
 T09 已實作的部分（`DECISIONS.md` §13.1）：
 - 快照以引用不可變的資料為主：複合 FK 指向 target（含 project）、grant、規格、auth profile（含 role_label）與它的版本；另外凍結 target 的 origin（targets 沒有 trigger），並以 `scan_operations` 保存每個 operation 與建立當時的判斷。grant 的範圍、規格與 inventory、profile 的版本都已由 trigger 保證不可變，不另外複製。
 - runner 啟動前（`QueueOperations.prepare`）以 `FOR SHARE` 重新判斷 gate、origin 是否和快照相同、綁定的 profile 版本是否還有密文；不通過就 failed（fail closed）。停止已在執行的 scan 在 T13。
-- 引擎與模板、映像 digest、guard policy hash、parser 與 mapping 的版本在 M2 之後加入。
+- 引擎與模板、映像 digest、guard policy hash、parser 與 mapping 的版本在 M2 之後加入。T10 已在 run 上記下實際使用的映像（`image_ref`，tag 與 digest）與容器名稱。
 
 ## 8. 任務狀態機
 
@@ -437,6 +461,13 @@ T09 已實作（`DECISIONS.md` §13.4）：
 - 對帳（`reconcile_expired`）只對已確定停止的引擎：T09 只有 fake（不發流量、沒有容器），runner 階段 → interrupted（`LEASE_EXPIRED`），解析中 → collected（可以重試）。容器的對帳、孤兒容器與 guard 封鎖在 T13。
 - 取消：排隊中的 run 直接取消；runner 在心跳或 prepare 時看到取消才停止，之後 scan 才是 cancelled；已收集的引擎繼續解析完。
 - 目前只有 FakeRunner（`secscan-admin fake-runner`），以輪詢處理工作；真的 runner 程序與 docker-socket-proxy 在 T10。
+
+**T10 已實作**（`DECISIONS.md` §14.6）：
+
+- `secscan-admin runner`：容器版的 runner。每 2 秒輪詢，只認領 capability probe 通過的引擎；每個 run 一個容器（名稱 `secscan-run-<run_id>`，重複建立會得到 409）。監看時每秒查狀態、每 5 秒心跳：要求取消 → 先轉 cancelling 再停止容器（5 秒寬限）→ cancelled；超過時間上限 → timed_out；收到 SIGTERM → 停止並刪除容器 → interrupted（`RUNNER_STOPPED`）。live 測試中取消後 5–6 秒內刪除容器。
+- lease 失效或 Docker 中途不可用時，runner 停止處理並刪除 secret，但無法 fencing，run 留在 running；有容器的 run 不被既有的對帳碰觸（lease 過期不代表容器已停止），由 T13 依 label 對帳。
+- `secscan-admin worker`：只把 lease 過期的 normalizing 退回 collected，再把 fake 的 collected 標成 succeeded。
+- in-process 的 `fake-runner` 保留；兩者都會認領 fake，擇一執行。
 
 **取消的驗收目標**：
 

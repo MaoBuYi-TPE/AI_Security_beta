@@ -39,7 +39,7 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | 方法 | 路徑 | 權限 | 回應與要點 |
 |---|---|---|---|
 | GET | /health/live | 可僅本機公開 | 200；僅程序存活，不含敏感依賴資訊 |
-| GET | /health/ready | 管理網 | 200/503；DB、runner heartbeat、必要配置可用。T04 已實作 DB 可連線且 schema 在目前的 migration 版本，不符時回 503 `DEPENDENCY_UNAVAILABLE`；runner heartbeat 在 M2 加入 |
+| GET | /health/ready | 管理網 | 200/503；DB、runner heartbeat、必要配置可用。T04 已實作 DB 可連線且 schema 在目前的 migration 版本，不符時回 503 `DEPENDENCY_UNAVAILABLE`。runner 與 worker 的心跳在 T10 改由 `GET /api/v1/scanners` 呈現；是否也列入 ready（沒有 runner 時 API 仍能接受並排入 scan）在 T13 決定 |
 | POST | /api/v1/projects | platform_admin | 201 建立專案（T05 已實作） |
 | GET | /api/v1/projects | 已授權 key | 200，只列可存取專案（T05 已實作） |
 | GET | /api/v1/projects/{project_id} | 同專案 | 200；其他 project 與不存在的一樣回 404（T05 新增並實作） |
@@ -64,7 +64,7 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | PATCH | /api/v1/auth-profiles/{profile_id} | operator/admin | 200；產生新版本，上一版的密文清除，舊 scan 快照不修改（T08 已實作） |
 | GET | /api/v1/auth-profiles/{profile_id}/versions | 同專案 | 200；版本的歷史，新版本在前（T08 新增並實作） |
 | GET | /api/v1/scan-profiles | 同專案 | 200；只列當前 Runner 已驗證支援的 profile（要有 runner 的 capability probe 才有意義，延到 M3） |
-| GET | /api/v1/scanners | 已授權 key | 200；各引擎的版本、映像 digest、可用 profile 與 capability probe 結果（延到 T10） |
+| GET | /api/v1/scanners | 已授權 key | 200；各引擎是否已整合、是否可用、映像 digest、可用的 scan profile 與 capability probe 的結果，以及 runner、worker 是否存活（T10 已實作，§18.4）；工具的版本在各引擎整合時加入 |
 | POST | /api/v1/scans | operator/admin | 202 + 完整的 scan；必須 Idempotency-Key，已終止的重送回 200（T09 已實作，§17.1；T09 只開放 fake 引擎） |
 | GET | /api/v1/scans | 同專案 | 200；target/status/time filter（T09 已實作） |
 | GET | /api/v1/scans/{scan_id} | 同專案 | 200；引擎狀態、coverage、停止理由（T09 已實作；預算用量在 T12） |
@@ -1021,8 +1021,15 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `SCOPE_MISMATCH` | grant 或 target 的 origin 和快照不符（只有直接改了 DB 才會發生） |
 | `AUTH_PROFILE_SUPERSEDED` | 綁定的 profile 版本已被取代（密文已清除）；不會改用新版本 |
 | `CREATOR_KEY_REVOKED` | 建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不會開始（key 到期不算） |
-| `ENGINE_FAILED` | 引擎失敗（T09 是 fake 的失敗腳本） |
+| `ENGINE_FAILED` | 引擎失敗（fake 的失敗腳本；容器版是 exit code 不是 0） |
 | `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止；已要求取消的 scan 也是 `interrupted`，不是 `cancelled`（沒有確認停止） |
+| `PLAN_REJECTED` | ExecutionPlan 或建立容器的設定不符合政策；沒有呼叫 Docker（T10） |
+| `RUNTIME_UNAVAILABLE` | 啟動容器之前 Docker 出錯（例如 socket-proxy 拒絕、映像不見了），或容器在執行中消失（T10） |
+| `SECRET_UNAVAILABLE` | runner 解不開綁定版本的密文（金鑰不對或沒有設定）；沒有啟動容器（T10） |
+| `TIME_LIMIT_EXCEEDED` | 超過 scan 的時間上限，容器已停止（`timed_out`，T10） |
+| `RESOURCE_LIMIT_EXCEEDED` | 容器因記憶體上限被終止（T10） |
+| `ARTIFACT_REJECTED` | 輸出有 symlink、hardlink、特殊檔，或超過數量、大小的上限（T10） |
+| `RUNNER_STOPPED` | runner 被要求停止，已停止並刪除容器（`interrupted`，T10） |
 
 ### 17.3 事件
 
@@ -1089,3 +1096,58 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 
 - 欄位名稱避開遮罩規則：含 `auth`、`key` 這類片段的欄位整個會被遮掉，所以 auth profile 記為 `identity`。Idempotency-Key 不寫進 audit。
 - runner 的狀態轉換不寫 audit，由事件記錄。
+
+## 18. Runner、worker 與掃描器（T10 已實作）
+
+設計與理由見 `DECISIONS.md` §14。T10 只有 fake 引擎，不送出任何掃描流量。
+
+### 18.1 runner
+
+```bash
+uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-300]
+```
+
+- 經 `RUNNER_DOCKER_URL`（預設 `tcp://socket-proxy:2375`）操作 Docker；compose 的 `runner` 服務以這個指令執行。
+- 啟動時刪除上一個 runner 留下的 secret、做 capability probe（§18.4）；只認領 probe 通過的引擎，probe 每 60 秒重做。
+- 每個 run：認領 → 重新判斷 gate、綁定的 profile 版本與建立者的 key（同 T09）→ 記下容器名稱 `secscan-run-<run_id>` 與映像 → 驗證 ExecutionPlan → 解密 target 的 secret（有 auth profile 時），寫成 0400 的檔案 → 建立並啟動容器 → 每秒查一次狀態、每 5 秒心跳 → 結束之後收集輸出 → `collected`。容器與 secret 不論結果都刪除。
+- 要求取消：轉到 `cancelling`、停止容器（SIGTERM，5 秒後 SIGKILL）、刪除容器 → `cancelled`。超過時間上限：`timed_out`（`TIME_LIMIT_EXCEEDED`）。收到 SIGTERM：停止並刪除容器 → `interrupted`（`RUNNER_STOPPED`）。
+- lease 失效、或執行中 Docker 不可用：停止處理、刪除 secret，run 停在 `running`，由 T13 的容器對帳處理。
+- `--once`：最多處理一個 run。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。fake 的腳本預設依 `RUNNER_FAKE_OUTCOME`、`RUNNER_FAKE_HOLD_SECONDS`。
+
+### 18.2 worker
+
+```bash
+uv run secscan-admin worker [--once]
+```
+
+- 先把 lease 過期的 `normalizing` 退回 `collected`（解析可以重試），再把 fake 的 `collected` 標成 `succeeded`。T10 不讀任何輸出（parser 在 M3）。
+
+### 18.3 掃描容器
+
+| 項目 | 設定 |
+|---|---|
+| 映像 | 核准的 `repo:tag@sha256:…`（fake 是 busybox 1.38.0）；runner 不 pull，由 `make images` 事先 pull |
+| 指令 | 只能是引擎政策的樣板：fake 是 `/bin/sleep <秒數>` 或 `/bin/false` |
+| 使用者與權限 | `10001:10001`、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges`、`init` |
+| 網路 | 只接 scan_net（internal、gateway isolated）；T11 之前沒有任何可以連的對象 |
+| 掛載 | volume subpath：`/scan/in`（唯讀）、`/scan/out`（可寫）、`/scan/secret`（唯讀，有 secret 時）；沒有任何 host path |
+| 上限 | 記憶體（不能用 swap）、CPU、pids、`nofile`、log 大小、時間（scan 的 `max_duration_seconds`，fake 最多 600 秒） |
+
+### 18.4 GET /api/v1/scanners
+
+任何有效的平台 key 都可以讀（內容不分 project，也不含路徑或秘密），200，`meta` 是 null：
+
+```json
+{
+  "engines": [
+    {"engine": "zap", "integrated": false, "available": false, "image": null, "profiles": [], "unavailable_reason": "NOT_INTEGRATED"},
+    {"engine": "fake", "integrated": true, "available": true, "image": "busybox:1.38.0@sha256:…", "profiles": ["api_active_lab", "web_active_lab"], "unavailable_reason": null}
+  ],
+  "runner": {"alive": true, "last_heartbeat_at": "2026-12-15T08:00:00Z"},
+  "worker": {"alive": true, "last_heartbeat_at": "2026-12-15T08:00:01Z"}
+}
+```
+
+- 引擎依執行順序列出（zap、nuclei、schemathesis、fake）。可用與否依「最近一個 30 秒內有心跳的 runner」回報的 capability probe。
+- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`IMAGE_MISSING`（映像不在本機或架構不符）。
+- `/api/v1/scan-profiles` 仍延到 M3（要依 ZAP 實際的設定調整 profile）。
