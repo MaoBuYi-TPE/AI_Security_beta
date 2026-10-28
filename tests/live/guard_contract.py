@@ -136,6 +136,16 @@ def main() -> None:
         denied.status_code == 407 and "Proxy-Authenticate" in denied.headers
     )
 
+    allowed.response = http.Response.make(200, b"ok", {"x-secscan-guard": "PATH_EXCLUDED"})
+    addon.response(allowed)
+    checks["upstream_cannot_impersonate_the_guard"] = (
+        "X-Secscan-Guard" not in allowed.response.headers
+    )
+    addon.response(excluded)
+    checks["guard_denials_keep_the_reason"] = (
+        excluded.response.headers.get("X-Secscan-Guard") == "PATH_EXCLUDED"
+    )
+
     tcp = tflow.ttcpflow()
     addon.tcp_start(tcp)
     checks["tcp_is_killed"] = tcp.error is not None

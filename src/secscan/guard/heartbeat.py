@@ -1,7 +1,8 @@
 """guard 的 status（docs/DECISIONS.md §15.3）：每 5 秒原子寫入 status.json。
 
 enforcing 由注入的自我檢查決定（addon 已開始監聽、路由仍然只有 scan 與 lab、policy 目錄可讀）；
-檢查拋出例外就是 false。寫入失敗只記下來，下一輪再試：runner 看到 status 過期就不再認領。
+檢查拋出例外就是 false。從 true 變成 false（與恢復）時記一行，只記例外的類別。寫入失敗只記下來，
+下一輪再試：runner 看到 status 過期就不再認領。
 """
 
 import asyncio
@@ -30,11 +31,16 @@ class StatusWriter:
         enforcing: Callable[[], bool],
         boot_id: UUID | None = None,
         clock: Callable[[], float] = time.time,
+        log: GuardLog | None = None,
     ) -> None:
         self._directory = directory
         self._listen = listen
         self._enforcing = enforcing
         self._clock = clock
+        self._log = log
+        self._was_enforcing = False
+        self._lost = False
+        self.listen = listen
         self.boot_id = boot_id if boot_id is not None else uuid4()
         self._started_at = int(clock())
 
@@ -70,10 +76,19 @@ class StatusWriter:
                 wake.clear()
 
     def _check(self) -> bool:
+        error = "self_check_failed"
         try:
-            return bool(self._enforcing())
-        except Exception:  # noqa: BLE001 - 自我檢查失敗就是不能保證流量受控
-            return False
+            enforcing = bool(self._enforcing())
+        except Exception as exc:  # noqa: BLE001 - 自我檢查失敗就是不能保證流量受控
+            enforcing, error = False, type(exc).__name__
+        if self._log is not None and self._was_enforcing and not enforcing:
+            self._log.refused("enforcement_lost", error=error)
+            self._lost = True
+        elif self._log is not None and self._lost and enforcing:
+            self._log.info("enforcement_restored")
+            self._lost = False
+        self._was_enforcing = enforcing
+        return enforcing
 
 
 async def _wait_any(stop: asyncio.Event, wake: asyncio.Event | None, timeout: float) -> None:

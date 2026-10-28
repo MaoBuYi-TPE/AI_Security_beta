@@ -173,6 +173,33 @@ def test_writer_loop_survives_write_errors(config: GuardConfig, tmp_path: Path) 
     assert '"event": "status_write_failed"' in stream.getvalue()
 
 
+def test_losing_enforcement_is_logged_once(config: GuardConfig) -> None:
+    """自我檢查失敗時 log 一次原因（只記類別），恢復時也記一次（審查建議）。"""
+    state: list[object] = [True]
+
+    def check() -> bool:
+        if isinstance(state[0], BaseException):
+            raise state[0]
+        return bool(state[0])
+
+    stream = io.StringIO()
+    log = GuardLog(guard_logger(f"transitions-{id(stream)}", stream))
+    writer = StatusWriter(config.status_dir, listen=config.listen, enforcing=check, log=log)
+
+    writer.write()
+    state[0] = OSError("route table")
+    writer.write()
+    writer.write()
+    state[0] = True
+    writer.write()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert [(e["event"], e.get("error")) for e in events] == [
+        ("enforcement_lost", "OSError"),
+        ("enforcement_restored", None),
+    ]
+
+
 # --- serve() ----------------------------------------------------------------------------------
 
 

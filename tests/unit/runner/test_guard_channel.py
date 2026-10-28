@@ -17,7 +17,7 @@ import pytest
 
 from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard.domain.credentials import parse_proxy_authorization, token_digest
-from secscan.guard.domain.policy import PolicyState, policy_file_name
+from secscan.guard.domain.policy import Policy, PolicyState, policy_file_name
 from secscan.guard.domain.status import STATUS_FILE_NAME, StatusIssue
 from secscan.guard.files import write_atomic
 from secscan.runner.egress import GuardEndpoint, RunEgress
@@ -285,3 +285,29 @@ def test_sweep_removes_policies_and_temp_files_only(guard: GuardDouble) -> None:
 
     assert removed == 3
     assert guard.policy_files() == ["README", "subdir.json"]
+
+
+def test_a_policy_written_despite_an_error_can_still_be_blocked_and_removed(
+    guard: GuardDouble, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """os.replace 成功、之後的 fsync 失敗：檔案已經生效，封鎖與刪除仍要處理它（審查發現）。"""
+    channel = guard.channel()
+    egress = _open(channel)
+    real_write = channel.write
+
+    def write_then_fail(policy: Policy) -> None:
+        real_write(policy)
+        raise GuardUnavailableError("無法寫入 guard 的 policy（EIO）")
+
+    monkeypatch.setattr(channel, "write", write_then_fail)
+    with pytest.raises(GuardUnavailableError):
+        egress.activate()
+    monkeypatch.setattr(channel, "write", real_write)
+
+    egress.block()
+    blocked = guard.policy(LEASE.run_id)
+    egress.discard()
+
+    assert blocked is not None
+    assert blocked.state is PolicyState.BLOCKED
+    assert guard.policy_files() == []

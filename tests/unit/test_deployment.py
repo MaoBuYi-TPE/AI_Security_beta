@@ -386,3 +386,11 @@ def test_the_guard_build_context_is_allowed() -> None:
     lines = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
 
     assert "!deploy/guard/" in lines
+
+
+def test_guard_logs_are_rotated() -> None:
+    """每個請求一行 log：被拒的請求不計預算，log 必須有大小上限（審查發現）。"""
+    logging = SERVICES["guard"]["logging"]
+
+    assert logging["driver"] == "json-file"
+    assert logging["options"] == {"max-size": "10m", "max-file": "3"}

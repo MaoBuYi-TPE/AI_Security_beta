@@ -221,6 +221,12 @@ services:
     mem_limit: 256m
     pids_limit: 64
     restart: unless-stopped
+    # 每個請求一行 log，被拒絕的請求不計入預算：限制大小（審查發現）。
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   # 只放行 runner 需要的 Docker API（docs/DECISIONS.md §14.1）：regex 會自動加上 ^ 與 $，只比對 path。
   # 容器一律以 secscan-run-<uuid> 指定；不放行 exec、archive、logs、build、pull，也不能建立 network

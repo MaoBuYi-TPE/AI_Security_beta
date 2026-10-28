@@ -115,8 +115,10 @@ class RunEgress:
         return proxy_url(self._credentials, host=self._endpoint.address, port=self._endpoint.port)
 
     def activate(self) -> None:
-        self._channel.write(self._policy)
+        # 先記下：寫入失敗時檔案仍可能已經生效（os.replace 之後的 fsync 失敗），之後的封鎖與刪除
+        # 都要處理它（審查發現）。
         self._written = True
+        self._channel.write(self._policy)
 
     def renew(self, renew_until: float) -> None:
         if self._policy.state is PolicyState.BLOCKED:

@@ -98,3 +98,15 @@ def test_the_image_is_pinned_and_runs_the_bootstrap_as_non_root() -> None:
     assert "USER 10001:10001" in lines
     assert lines[-1] == 'ENTRYPOINT ["python3", "-I", "-B", "/opt/secscan-guard/run_guard.py"]'
     assert not any(line.startswith(("RUN pip", "RUN apt", "ADD ")) for line in lines)
+
+
+def test_the_healthcheck_does_not_load_mitmproxy() -> None:
+    """`--check` 每 5 秒執行一次：mitmproxy 只在真的啟動 guard 時才載入（審查建議）。"""
+    tree = ast.parse(BOOTSTRAP.read_text(encoding="utf-8"))
+    top_level = [
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    ]
+
+    assert not [name for name in top_level if name.startswith("mitmproxy")]

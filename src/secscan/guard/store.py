@@ -27,6 +27,10 @@ DEFAULT_MAX_CACHED = 256
 _OPEN = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
+class ReplacedError(PolicyError):
+    """stat 與開檔之間檔案被換掉（runner 每次寫入都是新的 inode）。"""
+
+
 class Decode(Protocol):
     def __call__(self, raw: bytes, *, run_id: UUID) -> Policy: ...
 
@@ -58,6 +62,18 @@ class PolicyStore:
         """run 的 policy；檔案不存在時 None，損毀或不是一般檔案時拋 PolicyError。"""
         path = self._directory / policy_file_name(run_id)
         try:
+            entry = self._lookup(path, run_id)
+        except ReplacedError:
+            # runner 續約（os.replace）剛好落在 stat 與開檔之間：再讀一次（審查建議）。
+            entry = self._lookup(path, run_id)
+        if entry is None:
+            return None
+        if isinstance(entry.result, str):
+            raise PolicyError(entry.result)
+        return entry.result
+
+    def _lookup(self, path: Path, run_id: UUID) -> _Entry | None:
+        try:
             info = os.stat(path, follow_symlinks=False)
         except FileNotFoundError:
             self._cache.pop(run_id, None)
@@ -71,9 +87,7 @@ class PolicyStore:
             self._remember(run_id, entry)
         else:
             self._cache.move_to_end(run_id)
-        if isinstance(entry.result, str):
-            raise PolicyError(entry.result)
-        return entry.result
+        return entry
 
     def _read(self, path: Path, run_id: UUID, info: os.stat_result) -> CompiledPolicy | str:
         if not stat.S_ISREG(info.st_mode):
@@ -82,6 +96,8 @@ class PolicyStore:
             return "policy 超過大小上限"
         try:
             raw = _read_regular(path, info)
+        except ReplacedError:
+            raise
         except PolicyError as exc:
             return str(exc)
         try:
@@ -108,7 +124,7 @@ def _read_regular(path: Path, expected: os.stat_result) -> bytes:
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or _key(info) != _key(expected):
-            raise PolicyError("policy 必須是一般檔案（讀取時被換掉）")
+            raise ReplacedError("policy 必須是一般檔案（讀取時被換掉）")
         chunks: list[bytes] = []
         remaining = MAX_POLICY_BYTES + 1
         while remaining > 0 and (chunk := os.read(descriptor, remaining)):

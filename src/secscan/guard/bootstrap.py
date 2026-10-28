@@ -30,7 +30,7 @@ from secscan.guard.events import GuardLog
 from secscan.guard.files import AtomicWriteError
 from secscan.guard.flows import ResponseFactory
 from secscan.guard.heartbeat import StatusWriter
-from secscan.guard.resolver import resolve_ipv4
+from secscan.guard.resolver import BoundedResolver
 from secscan.guard.store import PolicyStore
 
 EXIT_OK = 0
@@ -84,7 +84,7 @@ async def serve(
     wake = asyncio.Event()
     addon = GuardAddon(
         store=PolicyStore(config.policies_dir),
-        resolve=resolve_ipv4,
+        resolve=BoundedResolver(),
         lab=config.lab,
         scan_network=config.scan_network,
         guard_ips=config.guard_ips,
@@ -97,21 +97,32 @@ async def serve(
         config.status_dir,
         listen=config.listen,
         enforcing=lambda: addon.ready and _self_check(config, routes),
+        log=log,
     )
-    loop = asyncio.get_running_loop()
     for number in signals:
-        loop.add_signal_handler(number, master.shutdown)
+        asyncio.get_running_loop().add_signal_handler(number, master.shutdown)
+    await _run_with_status(master, writer, wake, log, status_interval)
+    return EXIT_OK
+
+
+async def _run_with_status(
+    master: Master,
+    writer: StatusWriter,
+    wake: asyncio.Event,
+    log: GuardLog,
+    status_interval: float | None,
+) -> None:
+    """mitmproxy 執行期間持續寫 status；結束時標成不再檢查。"""
     stop = asyncio.Event()
     interval = {} if status_interval is None else {"interval": status_interval}
     status = asyncio.create_task(writer.run(stop, log=log, wake=wake, **interval))
-    log.info("guard_started", listen=config.listen, boot_id=str(writer.boot_id))
+    log.info("guard_started", listen=writer.listen, boot_id=str(writer.boot_id))
     try:
         await master.run()
     finally:
         stop.set()
         await status
         _final_status(writer, log)
-    return EXIT_OK
 
 
 def check_status(config: GuardConfig, *, clock: Callable[[], float] = time.time) -> int:

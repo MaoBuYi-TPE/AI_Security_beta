@@ -155,7 +155,7 @@ def test_the_addon_works_with_real_mitmproxy_flows() -> None:
     )
 
     checks = json.loads(output.splitlines()[-1])
-    assert len(checks) >= 14
+    assert len(checks) >= 16
     assert all(checks.values()), checks
 
 

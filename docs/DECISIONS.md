@@ -1225,11 +1225,12 @@ T11 不從產品路徑送出任何掃描流量：live 測試用自己的 live la
 1. **帳密與 policy**：帳密缺少或錯誤、run 不存在、policy 損毀，一律 407，附 `Proxy-Authenticate: Basic realm="secscan-guard"`（ZAP 的 reactive auth 需要）。真正的原因只寫進 guard 的 log，不讓 client 知道哪些 run 存在。
 2. **run 的狀態**（token 驗證通過之後才回 403＋原因）：已封鎖 → `RUN_BLOCKED`；`now >= not_after` → `RUN_EXPIRED`；`now >= renew_until` → `POLICY_STALE`。
 3. **請求的形狀**：
+   - header 的名稱必須是 token、值不可含 CR、LF、NUL 與其他控制字元（tab 除外）→ 否則 `HEADER_INVALID`（審查後補上：mitmproxy 只檢查名稱，值中的 bare CR、合併的 obs-fold 會原樣轉送，把 CR 當成換行的靶機會看到 guard 沒有檢查的 header 或第二個請求）。
    - CONNECT 在 `http_connect` 一律 403（`CONNECT_DENIED`，P0 不支援 HTTPS）。
    - 有 `Upgrade`、`HTTP2-Settings`，或 `Connection` 含 `upgrade` → `UPGRADE_DENIED`。
    - scheme 不是 http → `SCHEME_DENIED`。
    - method 或 request target 不是可見的 ASCII、含 `#` → `PATH_AMBIGUOUS`。
-4. **改寫目的地的 header**：`X-HTTP-Method-Override`、`X-HTTP-Method`、`X-Method-Override`、`X-Original-URL`、`X-Rewrite-URL`、`X-Forwarded-Host`、`X-Host`、`X-Forwarded-Server`、`X-Forwarded-Prefix`、`Forwarded`，或 query 中解碼後（不分大小寫）是 `_method` 的 key → `OVERRIDE_HEADER`。這些會讓靶機改用別的 method 或 path，繞過 grant。body 中的 `_method` 是殘餘風險（§15.10）。
+4. **改寫目的地的 header**：`X-HTTP-Method-Override`、`X-HTTP-Method`、`X-Method-Override`、`X-Original-Method`、`X-Original-URL`、`X-Rewrite-URL`、`X-Forwarded-Host`、`X-Forwarded-Path`、`X-Forwarded-URI`、`X-Forwarded-Prefix`、`X-Forwarded-Server`、`X-Host`、`Forwarded`，或 query 中解碼後（不分大小寫）是 `_method` 的 key → `OVERRIDE_HEADER`。這些會讓靶機改用別的 method 或 path，繞過 grant。header 名稱比對前把 `_` 換成 `-`（CGI／WSGI 把兩者對應到同一個變數；審查發現原本 `X_HTTP_Method_Override` 會放行），刪除 `Proxy-*` 時也一樣。黑名單本身有極限，body 中的 `_method` 也擋不到，都是殘餘風險（§15.10）。
 5. **authority**（parser differential）：三個來源都必須和 policy 的 origin 逐字相同，不符 → `ORIGIN_MISMATCH`：
    - mitmproxy 解出的 host 與 port（大小寫、結尾的點都算不同）；
    - 唯一一個 `Host` header（port 是 80 時也接受 `host:80`）；
@@ -1251,7 +1252,9 @@ T11 不從產品路徑送出任何掃描流量：live 測試用自己的 live la
 - `server_connect`：目的位址必須是這條 client 連線核准過的，而且 run 仍然有效；否則（含例外）設定 `data.server.error`。
 - `client_connected`：來源不在 scan_net 的網段就中止；`client_disconnected` 時清掉核准。
 - `tcp_start`、`udp_start`、`websocket_start`：一律中止（縱深防禦；這些協定都已關閉）。
-- `response`、`error`：記錄 status 與實際的上游 IP。
+- `response`：刪除靶機回應中的 `X-Secscan-Guard`（審查發現：靶機可以冒充 guard 的拒絕，讓 M3 的 parser 丟掉自己的回應），guard 自己的拒絕保留；刪不掉就中止。記錄 status 與實際的上游 IP。
+- `request`：拒絕的旗標存在、卻沒有回應（建立回應與中止都失敗過）時中止，不只相信旗標（審查發現）。
+- `error`：記錄。
 - redirect 不改寫、也不另外分類：工具跟隨 redirect 送出的下一個請求，照上面的順序重新檢查（SEC-03）。
 
 拒絕的回應：403，附 `X-Secscan-Guard: <原因>` 與一行純文字。M3 的 parser 依這個 header 排除 guard 的回應。
@@ -1290,7 +1293,7 @@ T11 不從產品路徑送出任何掃描流量：live 測試用自己的 live la
 
 guard 的拒絕原因只出現在 guard 的 log 與回應的 header：
 - 帳密與 policy：`PROXY_AUTH_REQUIRED`（log 中再細分 `RUN_NOT_ACTIVE`、`POLICY_INVALID`、`TOKEN_MISMATCH`）、`RUN_BLOCKED`、`RUN_EXPIRED`、`POLICY_STALE`。
-- 請求的形狀與 origin：`CONNECT_DENIED`、`UPGRADE_DENIED`、`SCHEME_DENIED`、`OVERRIDE_HEADER`、`ORIGIN_MISMATCH`。
+- 請求的形狀與 origin：`CONNECT_DENIED`、`HEADER_INVALID`、`UPGRADE_DENIED`、`SCHEME_DENIED`、`OVERRIDE_HEADER`、`ORIGIN_MISMATCH`。
 - path 與 method：`PATH_AMBIGUOUS`、`PATH_EXCLUDED`、`METHOD_NOT_AUTHORIZED`、`PATH_NOT_AUTHORIZED`。
 - 位址：`DNS_FAILED`、`ADDRESS_NOT_ALLOWED`。
 - 內部：`NOT_APPROVED`、`TRAILERS_DENIED`、`GUARD_ERROR`。
@@ -1313,6 +1316,10 @@ main | cli → migrations → health | runner | worker → scanners → scans �
 - proxy 憑證沒有綁定來源 IP：P0 只有一個 runner、一次一個掃描容器；ip-range 讓掃描容器拿不到 guard 的 IP。
 - mitmproxy 本身可能被惡意的靶機回應攻陷：guard 不接 control_net、docker_net；非 root、唯讀、沒有 capability；policy 唯讀；不持有目標的 secret。
 - guard 以 `DumpMaster` 這個半內部的 API 嵌入：以 digest 鎖定版本、啟動時讀回 options 核對、live 的 contract 測試涵蓋。
+- 掃描容器若在 proxy 連線上先送 TLS，mitmproxy 會建立 client 端的 TLS（沒有 option 可以關）。內層的請求照樣經過所有 hook（origin-form 的 scheme 是 https 而被拒；absolute 的 `http://` 照常檢查、上游仍是明文），不是繞過，只是掃描容器接觸得到的程式多了 TLS 與憑證產生的部分（審查指出）。
+- policy 的時間以 runner 與 guard 共用的 VM 時鐘計算（實測差距 0.05 秒以內）。時鐘往前跳是 fail closed；往後大幅跳會延長 dead-man switch 的時間，延長的量等於跳動的量。
+- live 測試的接收端與探針每個請求一條新連線：同一條 keep-alive 連線上交錯的放行與拒絕、pipelining，以及 header 值中夾帶的第二個請求，目前只有單元測試（`HEADER_INVALID`、`request` 與 `server_connect` 的重查）與原始碼的閱讀，沒有 live 的收包證據（安全審查 M2，留待後續補上）。
+- 被拒絕的請求不計預算：guard 的 log 以 json-file 限制大小（10 MB × 3）；`body_size_limit=16m` 加上 256 MiB 的記憶體上限，大量同時上傳可能讓 guard OOM（fail closed，run 變成 interrupted），T12 的預算與速率上限之後再量測。
 
 不在 T11 範圍：
 - T12：policy schema 2（預算：速率、burst、總請求數、跨引擎共用；額外的 origin 與跨 origin 的認證 header 規則）；telemetry 與計數（以 `boot_id` 銜接重啟）；preflight 的實際執行；ZAP 的 reactive 407 讓請求數加倍，計數時要考慮。

@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from secscan.grants.domain.scope import HttpMethod, Scope
+from secscan.guard import store as store_module
 from secscan.guard.domain.policy import (
     MAX_POLICY_BYTES,
     Policy,
@@ -262,3 +263,37 @@ def test_cache_is_bounded(tmp_path: Path, decode: _CountingDecode) -> None:
 
     assert decode.calls == 4
     assert store.cached == 2
+
+
+def test_a_file_replaced_while_reading_is_read_again(
+    tmp_path: Path, store: PolicyStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """runner 每 5 秒換一次檔：stat 與開檔之間剛好被換掉時重讀一次，不誤拒（審查建議）。"""
+    _write(tmp_path, _policy())
+    real = store_module._read_regular
+    calls: list[int] = []
+
+    def replaced_once(path: Path, expected: os.stat_result) -> bytes:
+        calls.append(1)
+        if len(calls) == 1:
+            raise store_module.ReplacedError
+        return real(path, os.stat(path, follow_symlinks=False))
+
+    monkeypatch.setattr(store_module, "_read_regular", replaced_once)
+
+    assert store.load(RUN_ID) is not None
+    assert len(calls) == 2
+
+
+def test_a_file_that_keeps_changing_is_an_error(
+    tmp_path: Path, store: PolicyStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, _policy())
+
+    def always(path: Path, expected: os.stat_result) -> bytes:
+        raise store_module.ReplacedError
+
+    monkeypatch.setattr(store_module, "_read_regular", always)
+
+    with pytest.raises(store_module.ReplacedError):
+        store.load(RUN_ID)

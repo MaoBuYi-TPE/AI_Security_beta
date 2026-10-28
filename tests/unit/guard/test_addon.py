@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from secscan.grants.domain.scope import HttpMethod, Scope
-from secscan.guard.addon import APPROVAL_KEY, Approval, GuardAddon
+from secscan.guard.addon import APPROVAL_KEY, DENIAL_KEY, Approval, GuardAddon
 from secscan.guard.domain.credentials import token_digest
 from secscan.guard.domain.policy import Policy, PolicyState, encode_policy, policy_file_name
 from secscan.guard.events import GuardLog, guard_logger
@@ -422,7 +422,8 @@ def test_request_hook_rechecks_the_run(harness: Harness, change: str) -> None:
 
     harness.addon.request(flow)
 
-    assert _reason(flow) in {"RUN_BLOCKED", "POLICY_STALE"}
+    expected = {"block": "RUN_BLOCKED", "remove": "RUN_BLOCKED", "expire": "POLICY_STALE"}
+    assert _reason(flow) == expected[change]
     assert APPROVAL_KEY not in flow.metadata
 
 
@@ -572,3 +573,42 @@ def test_running_marks_the_addon_ready_and_notifies(tmp_path: Path) -> None:
 
     assert addon.ready is True
     assert calls == ["ready"]
+
+
+def test_underscore_proxy_headers_are_removed_too(harness: Harness) -> None:
+    flow = _flow(headers=[("Host", "lab-target:8080"), ("Proxy_Connection", "keep-alive")])
+
+    _screen(harness, flow)
+
+    assert flow.response is None
+    assert [n for n in flow.request.headers.names() if n.lower().startswith("proxy")] == []
+
+
+def test_a_denial_without_a_response_is_killed_by_the_request_hook(harness: Harness) -> None:
+    """建立回應與中止都失敗時，request hook 不能只相信拒絕的旗標（審查發現）。"""
+    flow = _flow("/api/admin")
+    flow.metadata[DENIAL_KEY] = "PATH_EXCLUDED"
+
+    harness.addon.request(flow)
+
+    assert flow.killed
+
+
+def test_upstream_responses_cannot_impersonate_the_guard(harness: Harness) -> None:
+    """靶機自己加上 X-Secscan-Guard 時刪除：M3 的 parser 依它排除 guard 的回應（審查發現）。"""
+    flow = _approved(harness)
+    flow.response = FakeResponse(200, b"ok", {"X-Secscan-Guard": "PATH_EXCLUDED", "A": "b"})
+
+    harness.addon.response(flow)
+
+    assert isinstance(flow.response, FakeResponse)
+    assert "X-Secscan-Guard" not in flow.response.headers
+    assert flow.response.headers["A"] == "b"
+
+
+def test_guard_denials_keep_their_reason_header(harness: Harness) -> None:
+    flow = _screen(harness, _flow("/api/admin"))
+
+    harness.addon.response(flow)
+
+    assert _reason(flow) == "PATH_EXCLUDED"

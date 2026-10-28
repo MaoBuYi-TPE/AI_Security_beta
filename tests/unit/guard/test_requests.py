@@ -202,6 +202,53 @@ def test_query_values_mentioning_method_are_fine() -> None:
     assert request_reason(_view("/api/items?q=_method"), POLICY) is None
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "X_HTTP_Method_Override",
+        "x_original_url",
+        "X-Original-Method",
+        "X-Forwarded-Path",
+        "X_Forwarded_Uri",
+    ],
+)
+def test_override_headers_are_matched_with_underscores_too(name: str) -> None:
+    """CGI／WSGI 把 `_` 與 `-` 對應到同一個變數（審查發現：底線的寫法原本會放行）。"""
+    headers = (("Host", "lab-target:8080"), (name, "DELETE"))
+
+    assert request_reason(_view(headers=headers), POLICY) is Reason.OVERRIDE_HEADER
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "a\rX-HTTP-Method-Override: DELETE",  # bare CR：部分 parser 當成換行（審查發現）
+        "a\r\n Transfer-Encoding: chunked",  # mitmproxy 合併的 obs-fold
+        "a\nb",
+        "a\x00b",
+        "a\x01b",
+        "a\x7fb",
+    ],
+)
+def test_control_characters_in_header_values_are_denied(value: str) -> None:
+    headers = (("Host", "lab-target:8080"), ("X-Note", value))
+
+    assert request_reason(_view(headers=headers), POLICY) is Reason.HEADER_INVALID
+
+
+def test_tabs_and_visible_text_in_header_values_are_fine() -> None:
+    headers = (("Host", "lab-target:8080"), ("X-Note", "a\tb c"), ("Accept", "*/*"))
+
+    assert request_reason(_view(headers=headers), POLICY) is None
+
+
+@pytest.mark.parametrize("name", ["X-Note\r", "X Note", "X:Note", ""])
+def test_header_names_must_be_tokens(name: str) -> None:
+    headers = (("Host", "lab-target:8080"), (name, "v"))
+
+    assert request_reason(_view(headers=headers), POLICY) is Reason.HEADER_INVALID
+
+
 # --- authority（SEC-02、SEC-05）---------------------------------------------------------------
 
 

@@ -3,7 +3,8 @@
 順序固定（拒絕時回報第一個不符的原因）：
 1. 帳密與 policy（addon：要讀檔）→ 407。
 2. run 的狀態：run_state_reason。
-3. 請求的形狀 → 4. 改寫目的地的 header → 5. authority → 6. path 與 method：request_reason。
+3. 請求的形狀（含 header 的名稱與值）→ 4. 改寫目的地的 header → 5. authority → 6. path 與 method：
+   request_reason。
 7. DNS 與 8. 綁定在 addon 與 addresses。
 
 authority 逐字比對（parser differential，SEC-05）：mitmproxy 解出的 host、port、scheme，以及唯一的
@@ -32,6 +33,7 @@ class Reason(StrEnum):
     RUN_EXPIRED = "RUN_EXPIRED"
     POLICY_STALE = "POLICY_STALE"
     CONNECT_DENIED = "CONNECT_DENIED"
+    HEADER_INVALID = "HEADER_INVALID"
     UPGRADE_DENIED = "UPGRADE_DENIED"
     SCHEME_DENIED = "SCHEME_DENIED"
     OVERRIDE_HEADER = "OVERRIDE_HEADER"
@@ -56,21 +58,27 @@ DENY_STATUS: Mapping[Reason, int] = MappingProxyType(
     }
 )
 
-# 會讓靶機改用別的 method、path 或 host 處理請求的 header（小寫）。
+# 會讓靶機改用別的 method、path 或 host 處理請求的 header（小寫、以 - 連接）。比對前名稱中的 `_`
+# 換成 `-`：CGI／WSGI 把兩者對應到同一個變數（審查發現）。
 OVERRIDE_HEADERS = frozenset(
     {
         "x-http-method-override",
         "x-http-method",
         "x-method-override",
+        "x-original-method",
         "x-original-url",
         "x-rewrite-url",
         "x-forwarded-host",
-        "x-host",
-        "x-forwarded-server",
+        "x-forwarded-path",
+        "x-forwarded-uri",
         "x-forwarded-prefix",
+        "x-forwarded-server",
+        "x-host",
         "forwarded",
     }
 )
+# RFC 9110 §5.6.2 的 token：header 的名稱只能由這些字元組成。
+_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 _UPGRADE_HEADERS = frozenset({"upgrade", "http2-settings"})
 _METHOD_OVERRIDE_KEY = "_method"
 _QUERY_SEPARATORS = re.compile(r"[&;]")
@@ -97,12 +105,17 @@ class RequestView:
     headers: tuple[tuple[str, str], ...]
 
     def values(self, name: str) -> tuple[str, ...]:
-        """header 的所有值（名稱不分大小寫）。"""
-        wanted = name.lower()
-        return tuple(value for key, value in self.headers if key.lower() == wanted)
+        """header 的所有值（名稱不分大小寫，`_` 與 `-` 視為相同）。"""
+        wanted = header_key(name)
+        return tuple(value for key, value in self.headers if header_key(key) == wanted)
 
     def has(self, names: frozenset[str]) -> bool:
-        return any(key.lower() in names for key, _ in self.headers)
+        return any(header_key(key) in names for key, _ in self.headers)
+
+
+def header_key(name: str) -> str:
+    """比對用的 header 名稱：小寫，`_` 換成 `-`。"""
+    return name.lower().replace("_", "-")
 
 
 def run_state_reason(policy: Policy, *, now: float) -> Reason | None:
@@ -139,6 +152,8 @@ def split_target(target: str) -> tuple[str, str]:
 
 
 def _shape_reason(view: RequestView) -> Reason | None:
+    if not all(_valid_header(name, value) for name, value in view.headers):
+        return Reason.HEADER_INVALID
     if view.has(_UPGRADE_HEADERS) or any(
         token.strip().lower() == "upgrade"
         for value in view.values("connection")
@@ -185,6 +200,19 @@ def _scope_reason(view: RequestView, compiled: CompiledPolicy) -> Reason | None:
         return Reason.PATH_AMBIGUOUS
     ineligible = compiled.rules.classify(method=view.method, path=path)
     return None if ineligible is None else _SCOPE_REASONS[ineligible]
+
+
+def _valid_header(name: str, value: str) -> bool:
+    """名稱是 token；值不含 CR、LF、NUL 與其他控制字元（tab 除外）。
+
+    mitmproxy 只檢查名稱：值中的 bare CR、合併的 obs-fold 會原樣轉送，有些靶機的 parser 把 CR
+    當成換行，就會看到 guard 沒有檢查的 header 或第二個請求（審查發現）。
+    """
+    if _TOKEN.fullmatch(name) is None:
+        return False
+    return not any(
+        (character < " " and character != "\t") or character == "\x7f" for character in value
+    )
 
 
 def _visible_ascii(text: str) -> bool:

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from secscan.guard.resolver import ResolveError, resolve_ipv4
+from secscan.guard.resolver import BoundedResolver, ResolveError, resolve_ipv4
 
 _Info = tuple[Any, Any, Any, Any, tuple[str, int]]
 
@@ -67,3 +67,25 @@ def test_empty_answers_are_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ResolveError):
         _run(resolve_ipv4("lab-target"))
+
+
+def test_concurrent_lookups_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DNS 卡住時，同時進行的解析有上限（不佔滿執行緒池與 pids；審查建議）。"""
+    active = [0, 0]
+
+    async def slow(self: object, host: str, port: object, **kwargs: Any) -> list[_Info]:
+        active[0] += 1
+        active[1] = max(active[1], active[0])
+        await asyncio.sleep(0.01)
+        active[0] -= 1
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.89.7.20", 0))]
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", slow)
+
+    async def scenario() -> None:
+        resolver = BoundedResolver(limit=2)
+        await asyncio.gather(*(resolver("lab-target") for _ in range(10)))
+
+    asyncio.run(scenario())
+
+    assert active[1] == 2

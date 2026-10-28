@@ -403,6 +403,7 @@ def test_a_failed_block_still_stops_the_container(
 def test_a_policy_that_cannot_be_removed_is_left_for_the_next_start(
     make_runner: Callable[..., ContainerRunner],
     channel: SpyChannel,
+    guard: GuardDouble,
     queue_seed: Seeder,
     world: World,
     scannable: Scannable,
@@ -410,7 +411,12 @@ def test_a_policy_that_cannot_be_removed_is_left_for_the_next_start(
     queue_seed.scan(world.operator_a, scannable)
     channel.fail_remove = True
 
-    assert _report(make_runner(script=FakeScript(hold_seconds=1))).run_status is R.COLLECTED
+    report = _report(make_runner(script=FakeScript(hold_seconds=1)))
+
+    assert report.run_status is R.COLLECTED
+    leftover = guard.policy(report.run_id)
+    assert leftover is not None
+    assert leftover.state is PolicyState.BLOCKED
 
 
 # --- guard 不可用 -----------------------------------------------------------------------------

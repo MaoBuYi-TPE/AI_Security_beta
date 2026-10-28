@@ -28,6 +28,7 @@ from secscan.guard.domain.requests import (
     Reason,
     RequestView,
     canonical_authority,
+    header_key,
     request_reason,
     run_state_reason,
 )
@@ -145,6 +146,9 @@ class GuardAddon:
     def request(self, flow: Flow) -> None:
         try:
             if DENIAL_KEY in flow.metadata:
+                # 拒絕時建立回應與中止都失敗過：不能只相信旗標（審查發現）。
+                if flow.response is None:
+                    self._kill(flow, "request")
                 return
             approval = flow.metadata.get(APPROVAL_KEY)
             if not isinstance(approval, Approval) or (flow.request.host, flow.request.port) != (
@@ -177,6 +181,14 @@ class GuardAddon:
         self._kill(flow, "websocket_start")
 
     def response(self, flow: Flow) -> None:
+        """靶機的回應不能冒充 guard：M3 的 parser 依 X-Secscan-Guard 排除 guard 的回應。"""
+        try:
+            headers = getattr(flow.response, "headers", None)
+            if DENIAL_KEY not in flow.metadata and headers is not None and GUARD_HEADER in headers:
+                del headers[GUARD_HEADER]
+        except Exception as exc:  # noqa: BLE001 - 刪不掉就不轉給 client
+            self._log.hook_failed("response", exc)
+            self._kill(flow, "response")
         self._exchange("response", flow)
 
     def error(self, flow: Flow) -> None:
@@ -239,7 +251,7 @@ class GuardAddon:
         names = {
             name.decode("latin-1").lower()
             for name, _ in request.headers.fields
-            if name.decode("latin-1").lower().startswith(_PROXY_HEADER_PREFIX)
+            if header_key(name.decode("latin-1")).startswith(_PROXY_HEADER_PREFIX)
         }
         for name in names:
             del request.headers[name]
