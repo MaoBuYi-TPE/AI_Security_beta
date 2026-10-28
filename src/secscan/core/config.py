@@ -6,6 +6,8 @@ from typing import Literal, Self
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from secscan.core.network import lab_cidr_problem
+
 AppEnv = Literal["dev", "test", "prod"]
 
 # 相對於工作目錄的 .env；測試會關閉它（tests/conftest.py），避免讀到真實的本機密碼。
@@ -27,17 +29,9 @@ DEFAULT_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
 MAX_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 3_600
 MAX_TCP_PORT = 65535
 
-# 靶場網段（docs/DECISIONS.md §10.1）：預設是 compose.lab.yaml 的 lab_net。只接受 RFC 1918
-# 私有網段內、前綴 /16 到 /30 的網段：太寬（例如 10.0.0.0/8）可能涵蓋校園網路，/31、/32 沒有
-# 一般意義的網段與廣播位址。
+# 靶場網段（docs/DECISIONS.md §10.1）：預設是 lab_net（make lab-net）。規則在 core/network.py，
+# egress guard 也用同一個函式檢查。
 DEFAULT_LAB_CIDR = IPv4Network("10.89.7.0/24")
-RFC1918_NETWORKS = (
-    IPv4Network("10.0.0.0/8"),
-    IPv4Network("172.16.0.0/12"),
-    IPv4Network("192.168.0.0/16"),
-)
-MIN_LAB_PREFIX_LENGTH = 16
-MAX_LAB_PREFIX_LENGTH = 30
 
 
 class Settings(BaseSettings):
@@ -91,12 +85,9 @@ class Settings(BaseSettings):
     @field_validator("lab_cidr")
     @classmethod
     def _lab_cidr_is_a_narrow_private_network(cls, value: IPv4Network) -> IPv4Network:
-        if not any(value.subnet_of(network) for network in RFC1918_NETWORKS):
-            raise ValueError("LAB_CIDR 必須在 RFC 1918 私有網段內（10/8、172.16/12、192.168/16）")
-        if not MIN_LAB_PREFIX_LENGTH <= value.prefixlen <= MAX_LAB_PREFIX_LENGTH:
-            raise ValueError(
-                f"LAB_CIDR 的前綴長度必須介於 /{MIN_LAB_PREFIX_LENGTH} 與 /{MAX_LAB_PREFIX_LENGTH}"
-            )
+        problem = lab_cidr_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
         return value
 
     @model_validator(mode="after")

@@ -288,3 +288,12 @@ def test_ips_are_checked_against_the_current_lab_network() -> None:
     check_usable(grant, target=target, lab=LAB, now=NOW)
     with pytest.raises(OutsideLabError):
         check_usable(grant, target=target, lab=LabNetwork(IPv4Network("10.89.7.0/25")), now=NOW)
+
+
+def test_grants_approved_before_the_guard_address_was_reserved_are_unusable() -> None:
+    """T11 之前核准、IP 是 LAB_CIDR 最後一個主機位址的 grant：gate 一律拒絕（§15.6）。"""
+    target = _target()
+    grant = _grant(target, ip="10.89.7.254")
+
+    with pytest.raises(OutsideLabError, match="egress guard"):
+        check_usable(grant, target=target, lab=LAB, now=NOW)

@@ -113,7 +113,9 @@ def test_invalid_base_url_is_rejected_without_echoing_it(
     assert "hunter2-secret" not in response.text
 
 
-@pytest.mark.parametrize("base_url", ["http://192.168.1.10:5000", "http://10.89.7.255"])
+@pytest.mark.parametrize(
+    "base_url", ["http://192.168.1.10:5000", "http://10.89.7.255", "http://10.89.7.254:8080"]
+)
 def test_ip_hosts_outside_the_lab_are_rejected(
     api_client: TestClient, world: World, base_url: str
 ) -> None:
