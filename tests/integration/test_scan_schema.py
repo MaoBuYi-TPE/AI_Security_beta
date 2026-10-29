@@ -20,6 +20,7 @@ from secscan.auth_profiles.domain.credentials import AuthType, SecretValue
 from secscan.auth_profiles.domain.model import ProfileInput
 from secscan.auth_profiles.service import AuthProfileService
 from secscan.grants.service import ScopeGrantService
+from secscan.scans.domain.catalog import Engine
 from secscan.specs.domain.documents import SpecFormat
 from secscan.specs.domain.model import SpecUpload
 from secscan.specs.service import ApiSpecService
@@ -212,7 +213,9 @@ def _rejected(session: Session, statement: str, params: Mapping[str, object]) ->
     return error.sqlstate or "", error.diag.constraint_name or ""
 
 
-def _blocked(session: Session, statement: str, params: Mapping[str, object], table: str) -> None:
+def _blocked(
+    session: Session, statement: str, params: Mapping[str, object], table: str | tuple[str, ...]
+) -> None:
     error = violation(session, statement, params)
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
     assert str(error).startswith(table)
@@ -529,7 +532,7 @@ def test_run_checks(
     [
         ({"engine": "burp"}, "ck_scanner_runs_engine_valid"),
         ({"sequence": 0}, "ck_scanner_runs_sequence_valid"),
-        ({"sequence": 5}, "ck_scanner_runs_sequence_valid"),
+        ({"sequence": len(Engine) + 1}, "ck_scanner_runs_sequence_valid"),
     ],
 )
 def test_run_identity_checks(
@@ -738,15 +741,21 @@ def test_operations_are_unique_per_scan(db_session: Session, snap: Snapshot) -> 
 
 
 @pytest.mark.parametrize(
-    "statement",
+    ("statement", "tables"),
     [
-        "UPDATE scan_operations SET ineligible_reason = NULL WHERE scan_id = :id",
-        "DELETE FROM scan_operations WHERE scan_id = :id",
-        "TRUNCATE scan_operations",
+        (
+            "UPDATE scan_operations SET ineligible_reason = NULL WHERE scan_id = :id",
+            "scan_operations",
+        ),
+        ("DELETE FROM scan_operations WHERE scan_id = :id", "scan_operations"),
+        # run_coverage 以外鍵引用 scan_operations（T12）：要 CASCADE，由其中一個表的 trigger 擋下。
+        ("TRUNCATE scan_operations CASCADE", ("scan_operations", "run_coverage")),
     ],
 )
-def test_operations_are_append_only(db_session: Session, snap: Snapshot, statement: str) -> None:
+def test_operations_are_append_only(
+    db_session: Session, snap: Snapshot, statement: str, tables: str | tuple[str, ...]
+) -> None:
     scan_id = _insert_scan(db_session, snap)
     db_session.execute(text(INSERT_OPERATION), _operation_params(scan_id, reason="PATH_EXCLUDED"))
 
-    _blocked(db_session, statement, {"id": scan_id}, "scan_operations")
+    _blocked(db_session, statement, {"id": scan_id}, tables)

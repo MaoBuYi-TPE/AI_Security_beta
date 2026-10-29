@@ -42,6 +42,7 @@ pytestmark = pytest.mark.integration
 
 OWNER = "runner-launch-1"
 FAKE = frozenset({ScanEngine.FAKE})
+PREFLIGHT = frozenset({ScanEngine.PREFLIGHT})
 IMAGE = "busybox:1.38.0@sha256:" + "ab" * 32
 RACER = "secscan-launch-racer"
 R = RunStatus
@@ -67,9 +68,17 @@ def scannable(queue_seed: Seeder, world: World) -> Scannable:
     return queue_seed.scannable(world)
 
 
-def _claimed(queue: ScanQueue) -> Lease:
-    lease = queue.claim(OWNER, FAKE)
+def _claimed(queue: ScanQueue, engines: frozenset[ScanEngine] = FAKE) -> Lease:
+    lease = queue.claim(OWNER, engines)
     assert lease is not None
+    return lease
+
+
+def _preflight(queue: ScanQueue, seed: Seeder, world: World, scannable: Scannable) -> Lease:
+    """綁定 auth profile 的 scan：第一個 run 是 preflight（docs/DECISIONS.md §16.5）。"""
+    seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
+    lease = _claimed(queue, PREFLIGHT)
+    assert lease.engine is ScanEngine.PREFLIGHT
     return lease
 
 
@@ -92,13 +101,12 @@ def _expire(seed: Seeder, run_id: UUID) -> None:
 def test_launch_records_the_container_and_returns_the_sealed_secret(
     queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
-    scan = queue_seed.scan(world.operator_a, scannable)
-    lease = _claimed(queue)
+    lease = _preflight(queue, queue_seed, world, scannable)
 
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
 
     assert launch.progress == Progress(R.RUNNING, S.RUNNING)
-    assert launch.max_duration_seconds == scan.budget.max_duration_seconds
+    assert launch.preflight == scannable.profile.current.definition.preflight
     assert launch.secret is not None
     assert launch.secret.profile_id == scannable.profile.id
     assert shared_cipher().reveal(launch.secret.token, context=launch.secret.context) == (
@@ -117,8 +125,8 @@ def test_launch_carries_the_grant_scope_for_the_guard(
     queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
     """gate 剛以 FOR SHARE 確認過的 grant：guard 的 policy 以它產生（docs/DECISIONS.md §15.7）。"""
-    scan = queue_seed.scan(world.operator_a, scannable)
-    lease = _claimed(queue)
+    lease = _preflight(queue, queue_seed, world, scannable)
+    [scan] = queue_seed.query("SELECT requests_per_second, max_requests FROM scans")
 
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
 
@@ -127,9 +135,7 @@ def test_launch_carries_the_grant_scope_for_the_guard(
         scope=scannable.grant.scope,
         valid_until=scannable.grant.window.valid_until,
         budget=RunBudget(
-            requests_per_second=scan.budget.requests_per_second,
-            burst=1,
-            max_requests=scan.budget.max_requests,
+            requests_per_second=scan.requests_per_second, burst=1, max_requests=scan.max_requests
         ),
         auth_header="authorization",  # 預設的 profile 是 bearer
     )
@@ -207,14 +213,14 @@ def _patch(world: World, profile: AuthProfile) -> Callable[[Session], AuthProfil
 def test_a_superseded_version_gets_no_secret(
     queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
-    queue_seed.scan(world.operator_a, scannable)
-    lease = _claimed(queue)
+    lease = _preflight(queue, queue_seed, world, scannable)
     with Session(queue_engine, expire_on_commit=False) as session, session.begin():
         _patch(world, scannable.profile)(session)
 
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
 
-    assert launch.progress == Progress(R.FAILED, S.FAILED)
+    # 之後的 fake run 還在排隊（它自己的 prepare 也會因同樣的原因失敗）。
+    assert launch.progress == Progress(R.FAILED, S.RUNNING)
     assert launch.secret is None
     assert launch.egress is None
     assert _run(queue_seed, lease.run_id).error_code == RunErrorCode.AUTH_PROFILE_SUPERSEDED
@@ -229,8 +235,7 @@ def test_a_patch_waits_until_the_secret_is_read(
     queue: ScanQueue,
 ) -> None:
     """prepare_launch 以 FOR SHARE 讀密文：PATCH 的清除等它 commit，讀到的一定是還沒清除的密文。"""
-    queue_seed.scan(world.operator_a, scannable)
-    lease = _claimed(queue)
+    lease = _preflight(queue, queue_seed, world, scannable)
     race = Race(queue_database, RACER, _patch(world, scannable.profile))
     with Session(queue_engine, expire_on_commit=False) as holder, holder.begin():
         launch = QueueOperations(holder, lab=LAB).prepare_launch(lease, clock=_now, image_ref=IMAGE)

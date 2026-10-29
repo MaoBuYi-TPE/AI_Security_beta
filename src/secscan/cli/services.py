@@ -38,6 +38,8 @@ from secscan.scanners.service import Fleet
 from secscan.scans.queue import RunReport, ScanQueue
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
 from secscan.targets.domain import LabNetwork
+from secscan.worker.artifacts import ArtifactReader
+from secscan.worker.config import WorkerSettings
 from secscan.worker.loop import WorkerLoop
 from secscan.worker.service import Worker
 
@@ -155,7 +157,11 @@ def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
         owner = _owner(InstanceRole.WORKER)
         with stop_signals() as stop:
             reports = WorkerLoop(
-                Worker(_queue(sessions, settings), owner=owner),
+                Worker(
+                    _queue(sessions, settings),
+                    owner=owner,
+                    artifacts=ArtifactReader(WorkerSettings().runs_dir),
+                ),
                 _fleet(sessions, owner, InstanceRole.WORKER),
                 stop_requested=stop.is_set,
                 poll_seconds=WORKER_POLL_SECONDS,

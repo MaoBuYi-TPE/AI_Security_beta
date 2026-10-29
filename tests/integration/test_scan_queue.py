@@ -442,10 +442,9 @@ def _move_origin(engine: Engine, world: World, scannable: Scannable) -> None:
     [
         (_revoke, RunErrorCode.SCOPE_REVOKED),
         (_disable, RunErrorCode.TARGET_DISABLED),
-        (_replace_profile, RunErrorCode.AUTH_PROFILE_SUPERSEDED),
         (_move_origin, RunErrorCode.SCOPE_MISMATCH),
     ],
-    ids=["revoked", "disabled", "superseded", "moved"],
+    ids=["revoked", "disabled", "moved"],
 )
 def test_prepare_fails_closed_after_the_snapshot_stops_being_valid(
     queue: ScanQueue,
@@ -465,6 +464,22 @@ def test_prepare_fails_closed_after_the_snapshot_stops_being_valid(
     run = _run(queue_seed, lease.run_id)
     assert (run.status, run.error_code, run.lease_owner) == ("failed", error_code.value, None)
     assert _scan(queue_seed, scan_id).finished_at is not None
+
+
+def test_a_superseded_profile_stops_every_run_before_any_traffic(
+    queue: ScanQueue, queue_seed: Seeder, queue_engine: Engine, world: World, scannable: Scannable
+) -> None:
+    """PATCH profile 之後：preflight 與之後的 run 都在 prepare 失敗（T08 的交接；§16.5）。"""
+    scan = queue_seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
+    preflight = _claimed(queue, engines=frozenset({ScanEngine.PREFLIGHT}))
+    _replace_profile(queue_engine, world, scannable)
+
+    assert queue.prepare(preflight) == Progress(R.FAILED, S.RUNNING)
+    assert queue.prepare(_claimed(queue)) == Progress(R.FAILED, S.FAILED)
+    errors = queue_seed.query(
+        "SELECT error_code FROM scanner_runs WHERE scan_id = :id ORDER BY sequence", id=scan.id
+    )
+    assert [row.error_code for row in errors] == ["AUTH_PROFILE_SUPERSEDED"] * 2
 
 
 def test_prepare_fails_after_the_grant_expires(

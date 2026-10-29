@@ -18,6 +18,7 @@ from secscan.guard.config import GUARD_PORT
 from secscan.runner.config import RunnerSettings
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy
 from secscan.targets.domain import LabNetwork
+from secscan.worker.config import WorkerSettings
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE: dict[str, Any] = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
@@ -205,7 +206,8 @@ def test_the_proxy_rejects_host_binds_and_unknown_clients() -> None:
 def test_the_makefile_pulls_exactly_the_approved_images() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     [line] = [line for line in makefile.splitlines() if line.startswith("SCANNER_IMAGES :=")]
-    approved = sorted(image for policy in ENGINE_POLICIES.values() for image in policy.images)
+    # fake 與 preflight 共用同一個 busybox：每個映像只 pull 一次。
+    approved = sorted({image for policy in ENGINE_POLICIES.values() for image in policy.images})
 
     assert sorted(line.split(":=", 1)[1].split()) == approved
 
@@ -411,3 +413,12 @@ def test_guard_logs_are_rotated() -> None:
 
     assert logging["driver"] == "json-file"
     assert logging["options"] == {"max-size": "10m", "max-file": "3"}
+
+
+def test_the_worker_reads_collected_runs_read_only() -> None:
+    """preflight 的回應由 worker 判斷（DECISIONS §16.5）：runs 唯讀，不碰 secret 與 guard。"""
+    worker = SERVICES["worker"]
+
+    assert _volumes(worker) == ["runs:/runs:ro"]
+    assert str(WorkerSettings().runs_dir) == "/runs"
+    assert worker["networks"] == ["control_net"]

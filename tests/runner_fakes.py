@@ -1,6 +1,7 @@
 """runner 測試共用的假實作：時鐘與記憶體中的容器 runtime（不碰 Docker）。
 
-假的容器照 busybox 的指令行為：`/bin/sleep N` 在 N 秒後以 0 結束，`/bin/false` 立刻以 1 結束；
+假的容器照 busybox 的指令行為：`/bin/sleep N` 在 N 秒後以 0 結束，`/bin/false` 立刻以 1 結束，
+preflight 的 `/bin/sh -c` 在 3 秒後以 0 結束；
 stop 之後以 143 結束。時間由 FakeClock 控制：runner 呼叫 sleep 時時間前進，到點的 hook 依序執行。
 """
 
@@ -18,6 +19,7 @@ from secscan.runner.domain.runtime import (
 from secscan.scanners.domain.fake import FAKE_IMAGE
 
 SIGTERM_EXIT = 143
+PREFLIGHT_SECONDS = 3
 OOM_EXIT = 137
 
 
@@ -132,7 +134,8 @@ class FakeContainerRuntime:
             return ContainerState(running=False, exit_code=1, oom_killed=False)
         arguments = container.spec.body["Cmd"]
         assert isinstance(arguments, list)
-        duration = int(str(arguments[0]))
+        # preflight 的 script（/bin/sh -c）：送完兩個請求就結束，這裡當成 3 秒。
+        duration = PREFLIGHT_SECONDS if entrypoint == ["/bin/sh", "-c"] else int(str(arguments[0]))
         if self.clock.now - container.started_at < duration:
             return None
         if self.out_of_memory:

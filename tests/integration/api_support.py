@@ -80,7 +80,9 @@ class Scannable:
             "target_id": self.target.id,
             "scope_grant_id": self.grant.id,
             "api_spec_id": self.spec.id,
-            "auth_profile_id": self.profile.id,
+            # 預設是匿名的 scan：綁定 auth profile 時最前面多一個 preflight 的 run
+            # （docs/DECISIONS.md §16.5），需要認證的測試自己指定 auth_profile_id。
+            "auth_profile_id": None,
             "profile": ScanProfile.API_ACTIVE_LAB,
             "engines": (ScanEngine.FAKE,),
             "budget": BudgetRequest(),

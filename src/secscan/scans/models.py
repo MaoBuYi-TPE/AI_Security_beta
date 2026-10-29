@@ -50,6 +50,7 @@ from secscan.scans.domain.model import (
     MAX_EVENT_PAYLOAD_BYTES,
     EventType,
 )
+from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.domain.request import IDEMPOTENCY_KEY_MAX_LENGTH, IDEMPOTENCY_KEY_MIN_LENGTH
 from secscan.specs.domain.openapi import MAX_OPERATIONS, OPERATION_ID_MAX_LENGTH, OPERATION_METHODS
 from secscan.targets.domain import ORIGIN_MAX_LENGTH
@@ -64,6 +65,7 @@ EVENT_TYPE_MAX_LENGTH = 64
 SHA256_BYTES = 32
 CONTAINER_NAME_MAX_LENGTH = 64
 IMAGE_REF_MAX_LENGTH = 255
+PREFLIGHT_RESULT_MAX_LENGTH = 32
 # repo:tag@sha256:<64 hex>（完整的文法在 scanners.domain.plan；DB 是最後一道防線）。
 IMAGE_REF_PATTERN = (
     "^[a-z0-9][a-z0-9._/:-]{0,180}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}@sha256:[0-9a-f]{64}$"
@@ -90,6 +92,7 @@ _ENGINES = _in_list(engine.value for engine in Engine)
 _PROFILES = _in_list(profile.value for profile in ScanProfile)
 _EVENT_TYPES = _in_list(event.value for event in EventType)
 _REASONS = _in_list(reason.value for reason in IneligibleReason)
+_PREFLIGHT_RESULTS = _in_list(result.value for result in PreflightResult)
 _METHODS = _in_list(method.upper() for method in OPERATION_METHODS)
 
 
@@ -302,6 +305,12 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             "AND requests_sent <= requests_allotted)",
             name="sent_within_allotment",
         ),
+        # preflight 的結果（docs/DECISIONS.md §16.5）：只有 preflight 的 run 有值。
+        CheckConstraint(
+            f"preflight_result IS NULL OR (engine = '{Engine.PREFLIGHT.value}' "
+            f"AND preflight_result IN ({_PREFLIGHT_RESULTS}))",
+            name="preflight_result_valid",
+        ),
     )
 
     scan_id: Mapped[UUID] = mapped_column(ForeignKey("scans.id", ondelete="RESTRICT"))
@@ -320,6 +329,7 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     requests_sent: Mapped[int | None]
     requests_denied: Mapped[int | None]
     traffic_seconds: Mapped[int | None]
+    preflight_result: Mapped[str | None] = mapped_column(String(PREFLIGHT_RESULT_MAX_LENGTH))
 
 
 class ScanEventModel(Base):
@@ -380,3 +390,29 @@ class ScanOperationModel(Base):
     operation_id: Mapped[str | None] = mapped_column(String(OPERATION_ID_MAX_LENGTH))
     # NULL 代表在 grant 的範圍內（coverage 的分母）。
     ineligible_reason: Mapped[str | None] = mapped_column(String(LABEL_MAX_LENGTH))
+
+
+class RunCoverageModel(Base):
+    """一個 run 轉送的請求涵蓋的 operation（docs/DECISIONS.md §16.6）；不可修改或刪除。"""
+
+    __tablename__ = "run_coverage"
+    __table_args__ = (
+        PrimaryKeyConstraint("scanner_run_id", "ordinal"),
+        ForeignKeyConstraint(
+            ["scanner_run_id", "scan_id"],
+            ["scanner_runs.id", "scanner_runs.scan_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["scan_id", "ordinal"],
+            ["scan_operations.scan_id", "scan_operations.ordinal"],
+            ondelete="RESTRICT",
+        ),
+        Index("ix_run_coverage_scan_id", "scan_id"),
+    )
+
+    scanner_run_id: Mapped[UUID]
+    scan_id: Mapped[UUID]
+    ordinal: Mapped[int] = mapped_column(autoincrement=False)
+    authenticated: Mapped[bool]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

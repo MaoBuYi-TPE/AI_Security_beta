@@ -16,6 +16,7 @@ from secscan.auth_profiles.domain.credentials import (
     Credential,
     SecretValue,
     check_secret,
+    header_line,
 )
 from secscan.auth_profiles.domain.errors import InvalidAuthProfileError
 
@@ -405,3 +406,20 @@ def test_wire_header_names_the_header_that_carries_the_secret(
 ) -> None:
     """guard 據此判斷請求是否帶著目標的憑證（telemetry 的 auth 欄位，docs/DECISIONS.md §16）。"""
     assert credential.wire_header == header
+
+
+@pytest.mark.parametrize(
+    ("credential", "secret", "line"),
+    [
+        (BEARER, "abc.def", "Authorization: Bearer abc.def"),
+        (API_KEY, "k 1", "X-API-Key: k 1"),
+        (COOKIE, "a=1; b=2", "Cookie: a=1; b=2"),
+    ],
+)
+def test_header_line_is_the_header_preflight_sends(
+    credential: Credential, secret: str, line: str
+) -> None:
+    value = header_line(credential, SecretValue(secret))
+
+    assert value.value == line
+    assert secret not in repr(value)

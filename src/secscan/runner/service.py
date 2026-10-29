@@ -23,12 +23,15 @@ from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
+from secscan.auth_profiles.domain.credentials import SecretValue, header_line
 from secscan.auth_profiles.domain.model import StoredSecret
 from secscan.runner.domain.admission import (
+    AUTH_HEADER_FILE,
     PROXY_FILE,
     SECRET_FILE,
     ContainerSpec,
     PlanRejectedError,
+    PlanRejection,
     build_container,
 )
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
@@ -38,6 +41,7 @@ from secscan.runner.guard import GuardChannel, GuardUnavailableError
 from secscan.runner.workspace import ArtifactRejectedError, Workspace, WorkspaceError
 from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript, plan_fake_run
 from secscan.scanners.domain.plan import ExecutionPlan, ImageReference
+from secscan.scanners.domain.preflight import PREFLIGHT_IMAGE, plan_preflight_run
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.model import Lease
@@ -45,6 +49,7 @@ from secscan.scans.queue import (
     HEARTBEAT_INTERVAL,
     LEASE_DURATION,
     EgressScope,
+    Launch,
     LeaseLostError,
     RunReport,
     RunUsage,
@@ -60,7 +65,9 @@ POLL_SECONDS = 1.0
 # 連續幾次查不到容器的狀態才放棄（socket-proxy 或 Docker 的暫時錯誤不放棄整個 run）。
 MAX_STATE_FAILURES = 3
 # 有 plan 的引擎與它的映像。M3 起加入 ZAP 時，在這裡與 _plan 一起加。
-ENGINE_IMAGES: Mapping[Engine, ImageReference] = MappingProxyType({Engine.FAKE: FAKE_IMAGE})
+ENGINE_IMAGES: Mapping[Engine, ImageReference] = MappingProxyType(
+    {Engine.FAKE: FAKE_IMAGE, Engine.PREFLIGHT: PREFLIGHT_IMAGE}
+)
 
 
 class _Ending(StrEnum):
@@ -187,7 +194,7 @@ class ContainerRunner:
         if launch.progress.run_status is not RunStatus.RUNNING or launch.egress is None:
             return RunReport.of(lease, launch.progress)
         try:
-            plan = self._plan(lease, launch.secret is not None, launch.max_duration_seconds)
+            plan = self._plan(lease, launch)
             spec = build_container(plan, policy=self._policy, engines=self._engine_policies)
         except PlanRejectedError as exc:
             logger.warning("ExecutionPlan 被拒絕：run %s，%s", lease.run_id, exc.reason.value)
@@ -195,14 +202,27 @@ class ContainerRunner:
             return self._fail(lease, RunErrorCode.PLAN_REJECTED)
         return self._execute(_Attempt(lease, spec.name), launch.secret, launch.egress, plan, spec)
 
-    def _plan(self, lease: Lease, target_auth: bool, max_duration_seconds: int) -> ExecutionPlan:
-        return plan_fake_run(
-            run_id=lease.run_id,
-            scan_id=lease.scan_id,
-            script=self._script,
-            target_auth=target_auth,
-            max_duration_seconds=max_duration_seconds,
-        )
+    def _plan(self, lease: Lease, launch: Launch) -> ExecutionPlan:
+        if lease.engine is not Engine.PREFLIGHT:
+            return plan_fake_run(
+                run_id=lease.run_id,
+                scan_id=lease.scan_id,
+                script=self._script,
+                target_auth=launch.secret is not None,
+                max_duration_seconds=launch.max_duration_seconds,
+            )
+        # preflight 一定有綁定的 profile 與 secret；缺少就是資料不一致，不啟動（fail closed）。
+        if launch.preflight is None or launch.secret is None or launch.egress is None:
+            raise PlanRejectedError(PlanRejection.ENGINE_NOT_ALLOWED)
+        try:
+            return plan_preflight_run(
+                run_id=lease.run_id,
+                scan_id=lease.scan_id,
+                url=f"{launch.egress.origin}{launch.preflight.path}",
+                max_duration_seconds=launch.max_duration_seconds,
+            )
+        except ValueError:
+            raise PlanRejectedError(PlanRejection.INPUT_NOT_ALLOWED) from None
 
     def _execute(
         self,
@@ -289,7 +309,9 @@ class ContainerRunner:
         try:
             files = {PROXY_FILE: egress.proxy_url}
             if secret is not None:
-                files[SECRET_FILE] = self._reveal(secret)
+                value = SecretValue(self._reveal(secret))
+                files[SECRET_FILE] = value.value
+                files[AUTH_HEADER_FILE] = header_line(secret.credential, value).value
             self._workspace.write_secrets(lease.run_id, files)
             self._workspace.prepare(lease.run_id, plan.inputs)
         except _SecretUnavailableError:

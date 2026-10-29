@@ -29,6 +29,7 @@ from secscan.guard.domain.credentials import (
 from secscan.guard.domain.policy import CompiledPolicy, Policy, PolicyError
 from secscan.guard.domain.requests import (
     DENY_STATUS,
+    GUARD_HEADER,
     Reason,
     RequestView,
     canonical_authority,
@@ -55,7 +56,6 @@ APPROVAL_KEY = "secscan.guard.approval"
 DENIAL_KEY = "secscan.guard.denial"
 PENDING_KEY = "secscan.guard.pending"
 FORWARDED_KEY = "secscan.guard.forwarded"
-GUARD_HEADER = "X-Secscan-Guard"
 _PROXY_HEADER_PREFIX = "proxy-"
 _KILLED = "blocked by secscan egress guard"
 

@@ -35,8 +35,9 @@ pytestmark = pytest.mark.integration
 # （targets 與 scope_grants 的在 test_scope_schema.py，api_specs 與 api_spec_operations 的在
 # test_spec_schema.py，auth_profiles 與 auth_profile_versions 的在 test_auth_profile_schema.py）；
 # scans、scanner_runs、scan_events、scan_operations 共 31（test_scan_schema.py）；
-# T10 的 scanner_runs 容器 4 與 runner_instances 5（test_runner_schema.py）。
-EXPECTED_CHECK_COUNT = 92
+# T10 的 scanner_runs 容器 4 與 runner_instances 5（test_runner_schema.py）；
+# T12 的用量 2 與 preflight 的結果 1（test_budget_schema.py）。
+EXPECTED_CHECK_COUNT = 95
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "

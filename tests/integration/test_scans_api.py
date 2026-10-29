@@ -39,7 +39,8 @@ def _body(scannable: Scannable, **overrides: object) -> dict[str, object]:
         "target_id": str(scannable.target.id),
         "scope_grant_id": str(scannable.grant.id),
         "api_spec_id": str(scannable.spec.id),
-        "auth_profile_id": str(scannable.profile.id),
+        # 預設是匿名的 scan；綁定 auth profile 時最前面多一個 preflight 的 run（§16.5）。
+        "auth_profile_id": None,
         "profile": "api_active_lab",
         "engines": ["fake"],
     }
@@ -80,7 +81,9 @@ def scannable(seed: Seeder, world: World) -> Scannable:
 def test_creating_a_scan_returns_202_with_the_full_scan(
     api_client: TestClient, world: World, scannable: Scannable
 ) -> None:
-    response = _create(api_client, world.operator_a, scannable)
+    response = _create(
+        api_client, world.operator_a, scannable, auth_profile_id=str(scannable.profile.id)
+    )
 
     assert response.status_code == 202
     body = response.json()
@@ -105,10 +108,12 @@ def test_creating_a_scan_returns_202_with_the_full_scan(
         "max_requests": 5_000,
         "max_duration_seconds": 1_500,
     }
-    [run] = scan["engines"]
-    assert {key: run[key] for key in ("engine", "sequence", "status", "error_code")} == {
-        "engine": "fake",
-        "sequence": 1,
+    preflight, run = scan["engines"]
+    assert [(item["engine"], item["sequence"]) for item in (preflight, run)] == [
+        ("preflight", 1),  # 綁定 auth profile（§16.5）
+        ("fake", 2),
+    ]
+    assert {key: run[key] for key in ("status", "error_code")} == {
         "status": "queued",
         "error_code": None,
     }

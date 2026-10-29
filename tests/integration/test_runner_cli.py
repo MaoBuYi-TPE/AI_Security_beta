@@ -195,12 +195,17 @@ def test_without_encryption_keys_authenticated_scans_fail(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    scan = queue_seed.scan(world.operator_a, scannable)
+    scan = queue_seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
     monkeypatch.delenv("SECRET_ENCRYPTION_KEYS")
 
     assert main(["runner", "--once"]) == EXIT_OK
     assert "SECRET_UNAVAILABLE" in capsys.readouterr().err
-    assert _run_status(queue_seed, scan.id) == ("failed", "SECRET_UNAVAILABLE")
+    # 第一個 run 是 preflight（§16.5）：解不開 secret 就不建立容器。
+    [preflight] = queue_seed.query(
+        "SELECT status, error_code FROM scanner_runs WHERE scan_id = :id AND sequence = 1",
+        id=scan.id,
+    )
+    assert (preflight.status, preflight.error_code) == ("failed", "SECRET_UNAVAILABLE")
     assert runtime.created == []
 
 

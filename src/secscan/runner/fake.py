@@ -12,9 +12,11 @@ from secscan.scanners.domain.fake import FakeOutcome, FakeScript
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.model import Lease
+from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, Progress, RunReport, ScanQueue
 
-ENGINES = frozenset({Engine.FAKE})
+# preflight 的 run 也在這裡處理：in-process 不送任何流量，結果一律 not_executed（§16.5）。
+ENGINES = frozenset({Engine.FAKE, Engine.PREFLIGHT})
 
 
 class FakeRunner:
@@ -66,7 +68,7 @@ class FakeRunner:
         """worker 的工作：解析所有等待中的 fake run（例如解析中斷、對帳退回 collected 的）。"""
         reports = []
         while (lease := self._queue.claim_collected(self._owner, ENGINES)) is not None:
-            reports.append(self._advance(lease, RunStatus.SUCCEEDED))
+            reports.append(self._normalize(lease))
         return reports
 
     def run_once(self) -> RunReport | None:
@@ -79,17 +81,27 @@ class FakeRunner:
             return self._advance(lease, RunStatus.CANCELLED)
         if progress.run_status is not RunStatus.RUNNING:
             return _report(lease, progress)
+        if lease.engine is Engine.PREFLIGHT:
+            return self._collect(lease)
         if self._hold(lease):
             self._queue.advance(lease, RunStatus.CANCELLING)
             return self._advance(lease, RunStatus.CANCELLED)
         if self._script.outcome is FakeOutcome.FAIL:
             return self._advance(lease, RunStatus.FAILED, RunErrorCode.ENGINE_FAILED)
+        return self._collect(lease)
+
+    def _collect(self, lease: Lease) -> RunReport:
         self._queue.advance(lease, RunStatus.COLLECTING)
         collected = self._advance(lease, RunStatus.COLLECTED)
         parsing = self._queue.claim_collected(self._owner, ENGINES, run_id=lease.run_id)
         if parsing is None:
             return collected
-        return self._advance(parsing, RunStatus.SUCCEEDED)
+        return self._normalize(parsing)
+
+    def _normalize(self, lease: Lease) -> RunReport:
+        if lease.engine is Engine.PREFLIGHT:
+            self._queue.record_preflight(lease, PreflightResult.NOT_EXECUTED)
+        return self._advance(lease, RunStatus.SUCCEEDED)
 
     def _hold(self, lease: Lease) -> bool:
         """在 running 停留 hold_seconds，每 5 秒以內心跳一次；回傳是否被要求取消。"""

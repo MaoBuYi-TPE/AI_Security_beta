@@ -9,7 +9,7 @@
 """
 
 from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from secscan.api_keys.repository import ApiKeyRepository
 from secscan.auth_profiles.domain.model import StoredSecret
+from secscan.auth_profiles.domain.preflight import Preflight
 from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.grants.domain.lifecycle import GrantUnusableError, ScopeGrant, check_usable
 from secscan.grants.domain.scope import Scope
@@ -33,6 +34,7 @@ from secscan.scans.domain.lifecycle import (
     ScanStatus,
 )
 from secscan.scans.domain.model import CONTAINER_NAME_PREFIX, Lease
+from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.models import ScanModel, ScannerRunModel
 from secscan.scans.progress import (
     LEASE_DURATION,
@@ -141,6 +143,8 @@ class Launch:
     max_duration_seconds: int
     secret: StoredSecret | None
     egress: EgressScope | None = None
+    # preflight 的 run 要送的請求（綁定版本的定義；docs/DECISIONS.md §16.5）。
+    preflight: Preflight | None = None
 
 
 class QueueOperations:
@@ -196,6 +200,29 @@ class QueueOperations:
         ).scalar()
         if updated is None:
             raise LeaseLostError("lease 已過期或不屬於這個 runner")
+
+    def record_preflight(self, lease: Lease, result: PreflightResult) -> None:
+        """worker 判斷之後、run 結束之前寫入 preflight 的結果；lease 失效時拋 LeaseLostError。"""
+        updated = self._session.execute(
+            update(ScannerRunModel)
+            .where(*_holds(lease), ScannerRunModel.engine == Engine.PREFLIGHT.value)
+            .values(preflight_result=result.value)
+            .returning(ScannerRunModel.id)
+            .execution_options(synchronize_session=False)
+        ).scalar()
+        if updated is None:
+            raise LeaseLostError("lease 已過期、不屬於這個 worker，或不是 preflight 的 run")
+
+    def bound_preflight(self, lease: Lease) -> Preflight | None:
+        """scan 綁定的 auth profile 版本的 preflight 定義；沒有綁定時是 None。"""
+        row = self._session.execute(
+            select(ScanModel.auth_profile_id, ScanModel.auth_profile_version).where(
+                ScanModel.id == lease.scan_id
+            )
+        ).first()
+        if row is None or row.auth_profile_id is None or row.auth_profile_version is None:
+            return None
+        return self._profiles.preflight(row.auth_profile_id, version=row.auth_profile_version)
 
     def prepare(self, lease: Lease, *, clock: Callable[[], datetime]) -> Progress:
         """runner 啟動前：要求過取消 → cancelling；gate、綁定的 profile 版本或建立者的 key
@@ -254,7 +281,16 @@ class QueueOperations:
             ),
             auth_header=secret.credential.wire_header.lower() if secret is not None else None,
         )
-        return self._launch(scan, progress, secret, egress, seconds=seconds)
+        launch = self._launch(scan, progress, secret, egress, seconds=seconds)
+        if run.engine is not Engine.PREFLIGHT or scan.auth_profile_id is None:
+            return launch
+        version = scan.auth_profile_version
+        preflight = (
+            None
+            if version is None
+            else self._profiles.preflight(scan.auth_profile_id, version=version)
+        )
+        return replace(launch, preflight=preflight)
 
     def _remaining(self, scan: LockedScan, run: RunState) -> tuple[int, int]:
         """scan 的上限減去同一個 scan 之前的 run 用掉的（docs/DECISIONS.md §16.4）。
@@ -493,6 +529,14 @@ class ScanQueue:
     def record_usage(self, lease: Lease, usage: RunUsage) -> None:
         with self._sessions.begin() as session:
             self._operations(session).record_usage(lease, usage)
+
+    def record_preflight(self, lease: Lease, result: PreflightResult) -> None:
+        with self._sessions.begin() as session:
+            self._operations(session).record_preflight(lease, result)
+
+    def bound_preflight(self, lease: Lease) -> Preflight | None:
+        with self._sessions.begin() as session:
+            return self._operations(session).bound_preflight(lease)
 
     def prepare(self, lease: Lease) -> Progress:
         with self._sessions.begin() as session:

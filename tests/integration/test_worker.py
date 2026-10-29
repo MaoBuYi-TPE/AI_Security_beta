@@ -4,15 +4,20 @@
 """
 
 from datetime import UTC, datetime
+from pathlib import Path
+from uuid import UUID
 
 import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
+from secscan.runner.workspace import Workspace
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
-from secscan.scans.queue import RunReport, ScanQueue
+from secscan.scans.domain.preflight import PreflightResult
+from secscan.scans.queue import LeaseLostError, RunReport, ScanQueue
+from secscan.worker.artifacts import ArtifactReader
 from secscan.worker.service import Worker
 from tests.integration.api_support import LAB, Seeder, World
 
@@ -110,3 +115,105 @@ def test_the_worker_leaves_expired_runner_stages_alone(
     assert Worker(queue, owner="worker-1").drain() == []
     [row] = queue_seed.query("SELECT status FROM scanner_runs WHERE id = :id", id=lease.run_id)
     assert row.status == "running"
+
+
+# --- preflight（docs/DECISIONS.md §16.5）-----------------------------------------------------
+
+ME = b'{"data": {"username": "name1"}, "status": "success"}'
+DENIED = b'{"status": "fail", "message": "Invalid token"}'
+
+
+def _http(status: int, body: bytes, headers: str = "") -> bytes:
+    return f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{headers}\r\n".encode() + body
+
+
+def _collected_preflight(
+    queue: ScanQueue, seed: Seeder, world: World, runs: Path, outputs: dict[str, bytes]
+) -> Lease:
+    """綁定 auth profile 的 scan：preflight 的 run 收集好 outputs（runner 的 workspace）。"""
+    scannable = seed.scannable(world)
+    seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
+    lease = queue.claim("runner-1", frozenset({ScanEngine.PREFLIGHT}))
+    assert lease is not None
+    queue.prepare_launch(lease, image_ref=IMAGE)
+    workspace = Workspace(runs, runs.parent / "secrets")
+    workspace.prepare(lease.run_id, ())
+    for name, content in outputs.items():
+        (runs / str(lease.run_id) / "out" / name).write_bytes(content)
+    queue.advance(lease, RunStatus.COLLECTING)
+    workspace.collect(lease.run_id)
+    queue.advance(lease, RunStatus.COLLECTED)
+    return lease
+
+
+@pytest.fixture
+def runs(tmp_path: Path) -> Path:
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "secrets").mkdir()
+    return tmp_path / "runs"
+
+
+def _result(seed: Seeder, run_id: UUID) -> tuple[str, str | None]:
+    [row] = seed.query(
+        "SELECT status, preflight_result FROM scanner_runs WHERE id = :id", id=run_id
+    )
+    return row.status, row.preflight_result
+
+
+@pytest.mark.parametrize(
+    ("outputs", "expected"),
+    [
+        ({"authenticated.http": _http(200, ME), "anonymous.http": _http(401, DENIED)}, "passed"),
+        ({"authenticated.http": _http(200, ME), "anonymous.http": _http(200, ME)}, "inconclusive"),
+        (
+            {"authenticated.http": _http(401, DENIED), "anonymous.http": _http(401, DENIED)},
+            "failed",
+        ),
+        (
+            {
+                "authenticated.http": _http(403, b"blocked", "X-Secscan-Guard: RUN_BLOCKED\r\n"),
+                "anonymous.http": _http(403, b"blocked", "X-Secscan-Guard: RUN_BLOCKED\r\n"),
+            },
+            "blocked",
+        ),
+        ({}, "not_executed"),
+    ],
+    ids=["passed", "inconclusive", "failed", "blocked", "no-output"],
+)
+def test_the_worker_judges_the_preflight(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    runs: Path,
+    outputs: dict[str, bytes],
+    expected: str,
+) -> None:
+    lease = _collected_preflight(queue, queue_seed, world, runs, outputs)
+
+    [report] = Worker(queue, owner="worker-1", artifacts=ArtifactReader(runs)).drain()
+
+    assert report.run_id == lease.run_id
+    assert _result(queue_seed, lease.run_id) == ("succeeded", expected)
+
+
+def test_without_a_reader_the_preflight_was_not_executed(
+    queue: ScanQueue, queue_seed: Seeder, world: World, runs: Path
+) -> None:
+    outputs = {"authenticated.http": _http(200, ME), "anonymous.http": _http(401, DENIED)}
+    lease = _collected_preflight(queue, queue_seed, world, runs, outputs)
+
+    Worker(queue, owner="worker-1").drain()
+
+    assert _result(queue_seed, lease.run_id) == ("succeeded", "not_executed")
+
+
+def test_only_preflight_runs_can_have_a_result(
+    queue: ScanQueue, queue_seed: Seeder, world: World
+) -> None:
+    lease = _collected(queue, queue_seed, world)
+    parsing = queue.claim_collected("worker-1", FAKE)
+    assert parsing is not None
+
+    with pytest.raises(LeaseLostError):
+        queue.record_preflight(parsing, PreflightResult.PASSED)
+    assert _result(queue_seed, lease.run_id) == ("normalizing", None)

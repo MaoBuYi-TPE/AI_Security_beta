@@ -412,7 +412,7 @@ def test_a_patch_waits_for_a_scan_binding_the_current_version(
         queue_engine,
         queue_database,
         queue_seed,
-        _create(world, scannable, str(uuid4())),
+        _create(world, scannable, str(uuid4()), auth_profile_id=scannable.profile.id),
         _patch(world, scannable.profile),
     )
 
@@ -436,7 +436,7 @@ def test_a_scan_created_while_a_patch_is_open_binds_the_new_version(
         queue_database,
         queue_seed,
         _patch(world, scannable.profile),
-        _create(world, scannable, str(uuid4())),
+        _create(world, scannable, str(uuid4()), auth_profile_id=scannable.profile.id),
     )
 
     assert race.errors == []

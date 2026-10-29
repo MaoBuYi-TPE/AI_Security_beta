@@ -53,6 +53,8 @@ class Reason(StrEnum):
 
 PROXY_AUTH_STATUS = 407
 FORBIDDEN_STATUS = 403
+# guard 拒絕時回應的 header（值是原因）；M3 的 parser 與 preflight 的判斷依此排除 guard 的回應。
+GUARD_HEADER = "X-Secscan-Guard"
 DENY_STATUS: Mapping[Reason, int] = MappingProxyType(
     {
         reason: PROXY_AUTH_STATUS if reason is Reason.PROXY_AUTH_REQUIRED else FORBIDDEN_STATUS

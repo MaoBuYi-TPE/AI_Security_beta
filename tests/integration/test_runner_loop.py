@@ -160,8 +160,10 @@ def test_the_runner_loop_processes_queued_runs_until_stopped(
 
     assert [report.run_status for report in reports] == [RunStatus.COLLECTED] * 2
     assert list((tmp_path / "secrets").iterdir()) == []
+    # fake 與 preflight 用同一個 busybox 與環境（docs/DECISIONS.md §16.5）。
     assert _capabilities(queue_seed)["engines"] == {
-        "fake": {"image": str(runtime.created[0].body["Image"]), "issue": None}
+        "fake": {"image": str(runtime.created[0].body["Image"]), "issue": None},
+        "preflight": {"image": str(runtime.created[0].body["Image"]), "issue": None},
     }
 
 
@@ -207,8 +209,10 @@ def test_an_unready_environment_claims_nothing_and_probes_again(
     # 第 60 秒重新 probe 之後才認領。
     assert len(reports) == 1
     assert runtime.created
+    # fake 與 preflight 用同一個 busybox 與環境（docs/DECISIONS.md §16.5）。
     assert _capabilities(queue_seed)["engines"] == {
-        "fake": {"image": str(runtime.created[0].body["Image"]), "issue": None}
+        "fake": {"image": str(runtime.created[0].body["Image"]), "issue": None},
+        "preflight": {"image": str(runtime.created[0].body["Image"]), "issue": None},
     }
 
 
@@ -370,8 +374,10 @@ def test_an_unwritable_volume_claims_nothing(
 
     assert reports == []
     assert runtime.created == []
+    # fake 與 preflight 用同一個 busybox 與環境（docs/DECISIONS.md §16.5）。
     assert _capabilities(queue_seed)["engines"] == {
-        "fake": {"image": str(FAKE_IMAGE), "issue": "RUN_VOLUME_NOT_WRITABLE"}
+        "fake": {"image": str(FAKE_IMAGE), "issue": "RUN_VOLUME_NOT_WRITABLE"},
+        "preflight": {"image": str(FAKE_IMAGE), "issue": "RUN_VOLUME_NOT_WRITABLE"},
     }
 
 
@@ -407,8 +413,10 @@ def test_an_unavailable_guard_claims_nothing(
 
     assert reports == []
     assert runtime.created == []
+    # fake 與 preflight 用同一個 busybox 與環境（docs/DECISIONS.md §16.5）。
     assert _capabilities(queue_seed)["engines"] == {
-        "fake": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"}
+        "fake": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"},
+        "preflight": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"},
     }
 
 
@@ -459,8 +467,10 @@ def test_a_guard_that_stops_is_noticed_before_the_next_claim(
 
     assert reports == []
     assert runtime.created == []
+    # fake 與 preflight 用同一個 busybox 與環境（docs/DECISIONS.md §16.5）。
     assert _capabilities(queue_seed)["engines"] == {
-        "fake": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"}
+        "fake": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"},
+        "preflight": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"},
     }
 
 

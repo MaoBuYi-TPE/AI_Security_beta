@@ -119,6 +119,15 @@ class Credential:
         return "Cookie" if self.type is AuthType.COOKIE else "Authorization"
 
 
+def header_line(credential: Credential, secret: SecretValue) -> SecretValue:
+    """送出 secret 的那一行 header（不含換行），例如 `Authorization: Bearer <token>`。
+
+    secret 已通過 check_secret：字元集排除 CR、LF 與 NUL，不會注入其他 header。
+    """
+    prefix = "Bearer " if credential.type is AuthType.BEARER else ""
+    return SecretValue(f"{credential.wire_header}: {prefix}{secret.value}")
+
+
 def check_secret(credential: Credential, secret: SecretValue) -> None:
     """secret 符合這種送出方式的格式；不符合時拋出 InvalidAuthProfileError（不含 secret）。"""
     value = secret.value
