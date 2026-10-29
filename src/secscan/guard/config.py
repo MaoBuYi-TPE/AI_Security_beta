@@ -19,7 +19,8 @@ from secscan.core.network import lab_cidr_problem
 from secscan.targets.domain import LabNetwork, parse_ipv4
 
 GUARD_PORT = 8080
-# 請求與回應的 body 都受這個上限（mitmproxy 的 body_size_limit）：回應不能太小，ZAP 要爬大型的 JS。
+# mitmproxy 的 body_size_limit，審查者指出它可能也限制回應（未驗證，DECISIONS §16.8）：所以不降低，
+# ZAP 要爬大型的 JS。
 # 同時上傳太多時 guard 可能被 OOM 終止（fail closed）；DECISIONS §16.8。
 BODY_SIZE_LIMIT = "16m"
 DEFAULT_POLICIES_DIR = Path("/guard/policies")
