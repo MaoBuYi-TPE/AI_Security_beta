@@ -4,7 +4,8 @@
 名稱、來源 IP、method、path、Host、header 的名稱（不含值）、是否帶 Proxy-Authorization。
   python3 receiver.py <名稱> <port>
 固定的 path 會回 redirect（SEC-03）：/api/items/redirect → canary；/api/items/redirect-excluded →
-同一個 origin 的排除 path。
+同一個 origin 的排除 path。/me 是 preflight 的受保護端點（T12）：帶 Authorization 回 200 與
+{"status": "success"}，沒帶回 401。
 """
 
 import json
@@ -46,7 +47,15 @@ def _record(name: str, peer: str, head: bytes) -> dict[str, object]:
     }
 
 
-def _respond(connection: socket.socket, path: str) -> None:
+def _respond(connection: socket.socket, path: str, *, authorized: bool) -> None:
+    if path == "/me":
+        status, body = (
+            ("200 OK", b'{"status": "success"}') if authorized else ("401 Unauthorized", b"{}")
+        )
+        head = f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\n"
+        head += f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+        connection.sendall(head.encode("ascii") + body)
+        return
     location = REDIRECTS.get(path)
     if location is not None:
         head = f"HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n"
@@ -77,7 +86,8 @@ def main(name: str, port: int) -> None:
             sys.stdout.write(json.dumps(record) + "\n")
             sys.stdout.flush()
             try:
-                _respond(connection, str(record["path"]))
+                authorized = b"\r\nauthorization:" in head.split(b"\r\n\r\n", 1)[0].lower()
+                _respond(connection, str(record["path"]), authorized=authorized)
             except OSError:
                 continue
 

@@ -215,7 +215,7 @@ Engine/profile 只能從伺服器已驗證 allowlist 選擇。Budget 不可超�
 
 ## 8. 狀態查詢
 
-T09 已實作狀態、引擎與凍結的 operation 數（§17.2）；`budget_usage`、`observed_operations`、`authenticated_operations` 要有 guard 的實際計數（T11、T12）。以下是原規劃的格式示意。
+T09 已實作狀態、引擎與凍結的 operation 數（§17.2）；T12 加上 `budget_usage`、`observed_operations`、`authenticated_operations`（guard 的實際計數，§17.1 的說明）與 `auth.preflight`。以下是原規劃的格式示意（實際的欄位以 §17.1 為準：`budget_usage` 另有 `requests_denied`）。
 
 ```json
 {
@@ -930,7 +930,7 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 
 | 欄位 | 規則 |
 |---|---|
-| `engines` | 1–4 個，不可重複。T09 只有 `fake` 可用，而且必須單獨使用；其他引擎回 422 `ENGINE_UNSUPPORTED`。執行順序固定為 zap → nuclei → schemathesis，與請求的順序無關 |
+| `engines` | 1–4 個，不可重複。T09 只有 `fake` 可用，而且必須單獨使用；其他引擎回 422 `ENGINE_UNSUPPORTED`。執行順序固定為 zap → nuclei → schemathesis，與請求的順序無關。`preflight` 不能指定（422 `ENGINE_UNSUPPORTED`）：綁定 auth profile 時由平台自動排在第一個（T12，`DECISIONS.md` §16.5） |
 | `profile` | `api_active_lab`：必須有 `api_spec_id`，target 是 api 或 hybrid，至少一個 operation 在 grant 的範圍內。`web_active_lab`：不帶 `api_spec_id`，target 是 web 或 hybrid。不符合回 422 `PROFILE_INCOMPATIBLE` |
 | `scope_grant_id` | 必須是這個 target 目前可用的 grant（§14.5 的 gate） |
 | `api_spec_id` | 必須屬於這個 target |
@@ -950,18 +950,22 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
   "profile": "api_active_lab",
   "scope_grant": {"id": "<uuid>", "version": 1},
   "api_spec": {"id": "<uuid>", "version": 1},
-  "auth": {"profile_id": "<uuid>", "version": 3, "role_label": "standard_user"},
+  "auth": {"profile_id": "<uuid>", "version": 3, "role_label": "standard_user", "preflight": null},
   "auth_role": "standard_user",
   "budget": {"requests_per_second": 2, "max_requests": 1000, "max_duration_seconds": 1500},
   "engines": [
-    {"engine": "fake", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null}
+    {"engine": "preflight", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null},
+    {"engine": "fake", "sequence": 2, "status": "queued", "error_code": null, "started_at": null, "finished_at": null}
   ],
   "coverage": {
     "eligible_operations": 13,
     "ineligible_operations": 1,
+    "observed_operations": null,
+    "authenticated_operations": null,
     "coverage_measured": false,
-    "limitations": ["TRAFFIC_TELEMETRY_UNAVAILABLE"]
+    "limitations": ["TRAFFIC_TELEMETRY_UNAVAILABLE", "AUTHENTICATION_NOT_VERIFIED"]
   },
+  "budget_usage": {"requests_sent": 0, "requests_denied": 0, "traffic_duration_seconds": 0},
   "fixture": true,
   "results_complete": false,
   "cancel_requested_at": null,
@@ -974,7 +978,12 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 - 回應是完整的 scan（§7 原本只回 `scan_id`、`status`、`status_url`；和其他資源的建立一致改成完整的表示）。
 - 快照：`scope_grant`、`api_spec`、`auth` 引用的版本都不可變；`target_origin` 是建立時凍結的 origin。規格中每個 operation 與建立時的判斷（在範圍內，或不在的原因）另外保存，作為 coverage 的分母。
 - `auth` 是 null 時 `auth_role` 是 `anonymous`。`web_active_lab` 的 `api_spec` 與 coverage 的數字是 null，`limitations` 多一個 `NO_API_SPEC`。
-- `coverage_measured` 一律 false：還沒有量測實際的流量（T12）。`eligible_operations` 是建立時在範圍內的 operation 數，不代表實際測到了。
+- **用量與 coverage**（T12，`DECISIONS.md` §16.4 至 §16.6；以 egress guard 的計數為準，不採用工具自報的數字）：
+  - `budget_usage`：各容器 run 實際轉送與被 guard 拒絕的請求數、容器啟動到停止的秒數。開始過的 run 的轉送數不明（guard 重啟、telemetry 讀不出來）時 `requests_sent` 是 null，不以 0 冒充。
+  - `auth.preflight`：`passed`、`failed`、`inconclusive`（匿名的請求也符合期望，端點沒有受保護）、`blocked`（guard 拒絕）、`not_executed`（沒有可用的回應；in-process 的 runner 一律如此）；還沒結束是 null。
+  - `coverage_measured`：有規格、至少一個容器 run，而且每個容器 run 的 telemetry 都已對應到 operation。`observed_operations` 是實際有請求對應到的 operation 數（不代表所有漏洞種類都測過了）；`authenticated_operations` 要 preflight 是 `passed`（否則是 0），匿名的 scan 是 null。沒有量測依據時兩者都是 null。
+  - `limitations`：`NO_API_SPEC`、`TRAFFIC_TELEMETRY_UNAVAILABLE`（沒有量測依據）、`AUTHENTICATION_NOT_VERIFIED`（綁定了 profile，但 preflight 不是 `passed`）。
+  - `eligible_operations` 是建立時在範圍內的 operation 數，不代表實際測到了。
 - `fixture`：有 fake 引擎就是 true，表示結果不是真的掃描。`results_complete` 只有 `completed` 才是 true。
 - scan、每個引擎的 run、凍結的 operation、事件 `scan.created` 與 audit 在同一個 transaction 寫入；中途失敗時什麼都不留下。
 - 一個 target 同時只有一個進行中的 scan：409 `TARGET_BUSY`。每個 target 在 24 小時內最多 50 個 scan：409 `QUOTA_EXCEEDED`。
@@ -1032,6 +1041,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `RUNNER_STOPPED` | runner 被要求停止，已停止並刪除容器（`interrupted`，T10） |
 | `WORKSPACE_UNAVAILABLE` | runner 的工作目錄不可用（權限、磁碟滿），或寫不出收集的 manifest（T10） |
 | `GUARD_UNAVAILABLE` | egress guard 不可用（T11，`DECISIONS.md` §15.8）：建立容器之前（status 過期、不再檢查、寫不出 policy）→ `failed`；執行中 guard 中斷、重啟或續約失敗 → 封鎖、停止容器 → `interrupted` |
+| `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0 → `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out` |
 
 ### 17.3 事件
 

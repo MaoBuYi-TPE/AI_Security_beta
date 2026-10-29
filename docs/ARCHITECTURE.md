@@ -78,12 +78,14 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 ### worker
 
 - 負責解析不可信的工具輸出，但沒有 Docker 權限，對 runs volume 只有唯讀權限。
+- **T12 已實作**（`DECISIONS.md` §16.5、§16.6）：worker 唯讀掛載 runs 與 guard 的 telemetry volume。preflight 的回應依 manifest 讀取（大小與 sha256 相符、不跟隨 symlink），以 §12.5 的純函式判斷；每個 run 的轉送請求對應到凍結的 operation，寫入 `run_coverage`。不掛 secrets、policy 與 status。
 
 ### egress guard
 
 - 在 scan_net 與 lab_net 之間轉送流量，不接 control_net。
 - policy 與 telemetry 都透過 volume 交換（§3.1），不經由網路連線。
 - **T11 已實作**（`DECISIONS.md` §15.1）：guard 以官方 mitmproxy 12.2.3 映像（digest 鎖定）執行，映像只 COPY guard 載入的模組（標準函式庫與純 domain）。啟動程式自己嵌入 mitmproxy：路由只有 scan 與 lab 兩條直連的路由 → 設定 options 並逐一讀回核對 → 最後才加入 addon；任何一步失敗都以非 0 結束，不會變成沒有檢查的 proxy。guard 不持有目標的 secret，policy 對它是唯讀的。
+- **T12 已實作**（`DECISIONS.md` §16.2、§16.3）：guard 依 policy 強制每個 run 的請求數（放行之前先保留名額）與 scan 共用的速率（超過就等待，最多 5 秒），並在 `guard_telemetry` volume 寫每個 run 的 summary（原子寫入）與 jsonl（每個轉送的請求與回應一行）。寫不出 telemetry 的請求不放行；guard 重啟時由 summary 接續計數。
 
 ### 殘餘風險
 
@@ -118,7 +120,7 @@ guard 以 mitmproxy 的 addon/event 機制實作本專題的 scope、budget 與 
   - 預算
   - 狀態
 - **讀取 policy**：guard 以唯讀方式掛載 policy volume，每個請求都檢查檔案是否有更新。
-- **T11 已實作**（`DECISIONS.md` §15.3）：policy 是每個 run 一個 `<run_id>.json`（schema 1），guard 嚴格解析（key 完全相符、canonical 寫法、以 Scope 重建）。`not_after` = min(grant 的期限, 啟動時間＋牆鐘上限)；`renew_until` 只在 DB 心跳成功之後延長 30 秒，runner 當掉時 guard 最晚在 lease 到期時停止放行（dead-man switch）。guard 每 5 秒寫 `status.json`（`boot_id`、listen、`enforcing`），runner 每一輪認領之前讀它。預算與 telemetry 在 T12。
+- **T11 已實作**（`DECISIONS.md` §15.3）：policy 是每個 run 一個 `<run_id>.json`（schema 1），guard 嚴格解析（key 完全相符、canonical 寫法、以 Scope 重建）。`not_after` = min(grant 的期限, 啟動時間＋牆鐘上限)；`renew_until` 只在 DB 心跳成功之後延長 30 秒，runner 當掉時 guard 最晚在 lease 到期時停止放行（dead-man switch）。guard 每 5 秒寫 `status.json`（`boot_id`、listen、`enforcing`），runner 每一輪認領之前讀它。預算與 telemetry 在 T12（schema 2：`requests_per_second`、`burst`、`max_requests`、`auth_header`；`DECISIONS.md` §16.1）。
 - **telemetry**：guard 把每個請求的決策與統計，以 JSONL 寫進 telemetry volume；worker 與 runner 以唯讀方式讀取。
 
 ### 3.2 每次實際出站必須處理
@@ -182,6 +184,8 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 1. runner 先把 policy 狀態改為 blocked，guard 立即拒絕該 run 的所有請求。
 2. 再通知引擎，stop/kill 對應的容器。
 
+**T12 已實作**（`DECISIONS.md` §16.4）：policy 的 `max_requests` 是這個 run 分到的剩下數量（scan 的上限減去之前的 run 實際轉送的；不明時以分到的數量扣除），preflight 也計入。runner 每次心跳讀 summary，用盡就封鎖 → 停止 → `timed_out`（`BUDGET_EXHAUSTED`）；剩 0 時不建立容器（`failed`）。run 結束之前把 guard 的計數寫進 scanner_runs。速率以 scan 為 key，同一個 scan 的 run 共用。
+
 **T11 已實作**（`DECISIONS.md` §15.7）：取消是封鎖 → cancelling → stop；逾時、runner 停止、輸出超過上限、lease 失效、guard 中斷也都在停止容器之前先封鎖。容器確認刪除之後才刪 policy，刪不掉就保留 blocked。live 測試以掃描容器的 proxy-url 從探針送請求：取消之後 guard 在容器收到 kill 之前就開始回 `RUN_BLOCKED`。
 
 已經送到靶場的操作無法撤銷；靶場資料的重置由受控的 fixture 程序另外處理。
@@ -191,6 +195,7 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 - **實際請求數與耗時**：實驗的成本指標，以 guard 的計數為準，不只看 CLI 自報的統計。
 - **API operation coverage**：把請求的 method + path 對應到 OpenAPI operation。
 - **安全測試證據**：被拒絕的請求與原因，搭配 canary 的收包紀錄。
+- **T12 已實作**（`DECISIONS.md` §16.3、§16.6）：前兩項都由 guard 的 telemetry 計算，API 以 `budget_usage` 與 coverage 的 `observed_operations`、`authenticated_operations` 揭露；拒絕只計數（不逐行記）。
 
 ## 4. 模組與依賴方向
 
@@ -321,7 +326,7 @@ ExecutionPlan 只能包含：
 | auth_profiles | id、target_id、name、role_label（同一個 target 內唯一）、建立的 key 與時間；建立後不可變（T08 已建立） |
 | auth_profile_versions | profile_id、version、type、header_name、preflight（method、path、expected_status、expected_json）、encrypted_secret（Fernet token，被取代就清除）、secret_erased_at、建立的 key 與時間（T08 已建立；原規劃的單一資料表改成兩張，理由見 `DECISIONS.md` §12.3） |
 | scans | id、queue_position（identity，佇列的先後）、project_id、target_id、凍結的 target_origin、scope_grant_id、api_spec_id、auth_profile_id 與版本、auth_role、scan_profile、預算、status、idempotency_key 與 request_sha256、cancel_requested_at、建立的 key 與時間、finished_at（T09 已建立；快照以複合 FK 引用不可變的資料，不另存 snapshot JSON，理由見 `DECISIONS.md` §13.1；manifest 在 M2） |
-| scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code、container_name、image_ref；同時是 runner 與 worker 的工作佇列（T09 已建立；容器名稱與映像在 T10 加入，engine_version、proxy_credential_hash 在 M2 之後，coverage 在 T12；不自動重跑，所以沒有 attempt） |
+| scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code、container_name、image_ref、用量（requests_allotted、requests_sent、requests_denied、traffic_seconds）、preflight_result、coverage_recorded；同時是 runner 與 worker 的工作佇列（T09 已建立；容器名稱與映像在 T10 加入，用量、preflight 與 coverage 在 T12，engine_version 在 M3；不自動重跑，所以沒有 attempt） |
 | runner_instances | id、role（runner/worker）、owner（唯一）、software_version、capabilities（引擎、映像與不可用的原因）、heartbeat_at、created_at；每個程序一列，30 秒內有心跳才算存活（T10 新增） |
 | scan_operations | scan_id、ordinal、method、path、operation_id、ineligible_reason；建立 scan 時凍結的 inventory 與 grant 的判斷，coverage 的分母（T09 新增） |
 | findings | id、target_id、fingerprint、kind、normalized_severity、owasp_2025、owasp_api_2023、mapping_source、mapping_version、triage/lifecycle、first/last_seen |
@@ -386,6 +391,9 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
 - **T10（migration `0006`）**：
   - scanner_runs 新增 `container_name`、`image_ref`（可為 null：in-process 的 fake runner 沒有容器）。CHECK：名稱一定是 `secscan-run-<id>`、映像有 tag 與 digest、兩者同時有值或同時為 null、queued 與 preparing 沒有容器。trigger `scanner_runs_container_guard`：只能在 preparing → running 的那一次寫入，之後不能改，也不能清除。
   - runner_instances：`owner` 唯一；CHECK 涵蓋 role 的白名單、owner 與版本不空白、capabilities 是 4 KiB 以內的物件、心跳不早於建立。
+- **T12（migration `0007`、`0008`）**：
+  - scanner_runs 新增 `requests_allotted`、`requests_sent`、`requests_denied`、`traffic_seconds`（非負；有 sent 就有 allotted 且不超過它）、`preflight_result`（只有 preflight 的 run）、`coverage_recorded`；engine 加上 `preflight`，sequence 上限改成 5。
+  - run_coverage：主鍵 `(scanner_run_id, ordinal)`；`(scanner_run_id, scan_id)` 引用 run、`(scan_id, ordinal)` 引用凍結的 operation；不可修改、刪除或 TRUNCATE。
 - **其餘資料表由各功能任務以自己的 migration 加入**：findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照

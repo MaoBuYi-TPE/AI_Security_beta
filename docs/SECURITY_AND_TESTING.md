@@ -126,7 +126,11 @@ T11 已涵蓋（`tests/unit/guard/`，guard 的程式 branch coverage 100%）：
 - **store、status、路由與啟動**：symlink、FIFO、目錄、超過大小、讀不到；只在檔案改變時重讀、損毀也快取、快取有上限；status 的新鮮度、版本、listen 與 enforcing；`/proc/net/route` 的預設路由、多一個網路、經 gateway；options 逐一核對（eager、upstream_cert、rawtcp、非空的 ignore_hosts、聽 0.0.0.0、streaming…）；路由或 options 不安全時不加入 addon、以非 0 結束；guard 載入的模組正好等於映像 COPY 的清單（`python -I -W error`）。
 - **runner 的 guard 通道**：policy 以 0400 原子寫入、寫不出去就是 guard 不可用；封鎖與續約可以重複、封鎖之後不再續約、還沒寫入就封鎖不產生檔案；`not_after` 受 grant 的期限限制；proxy-url 帶著新的 token；sweep 只刪 policy 與暫存檔。
 
-policy budget 留給 T12。
+T12 已涵蓋（guard 的程式 line 與 branch coverage 100%；`DECISIONS.md` §16）：
+- **預算與速率（SEC-13 的應用層）**：policy schema 2 的嚴格解析（速率、burst、剩下的請求數、認證 header 的名稱）；GCRA 的間隔、burst、等待的上限（超過不保留位置）、閒置不累積、依 scan 分開、過期的 key 清除；名額先保留、轉送才確定，拒絕、DNS 失敗、`request` hook 的重查、trailer、`error` hook 與取消（`CancelledError`）都釋放；用盡時不解析 DNS；等待之後重查 run（等待中被封鎖就拒絕）。
+- **telemetry**：summary 與每一行的嚴格解析；轉送時先寫 summary 再附加一行，寫不出來就拒絕這個請求、名額回到轉送之前；拒絕只計 token 驗證過的 run，定期寫入；guard 重啟時由 summary 接續計數與序號，summary 損毀或屬於別的 scan 時 fail closed；過期的檔案與閒置的計數清除；path 不含 query，telemetry 中沒有 header 的值；telemetry 目錄不可寫時 status 不是 enforcing、結束時再寫一次。
+- **preflight（§12.5）**：JSON Pointer 的嚴格比對（型別、陣列索引的前導 0 與 `-`、跳脫、指不到不等於 null）；原始 HTTP 回應的解析（chunked、header 的折行、缺少結尾、超過 64 KiB）；`passed`、`failed`（含登入頁的 HTML）、`inconclusive`、`blocked`、`not_executed` 的判斷；plan 只接受 `http://<origin><path>`（沒有 query、帳密、換行）；runner 以 sha256 核准 script，改一個字就被拒絕。
+- **coverage 與用量**：請求對應到最具體的 operation（佔位符、結尾的斜線、method）；`budget_usage` 遇到不明的轉送數就是 null；`coverage_measured` 要每個容器 run 都已對應；`authenticated_operations` 要 preflight 是 `passed`。
 
 ### 4.2 Contract / Parser
 
@@ -223,7 +227,8 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method` 與 path 中的 `%`（`DECISIONS.md` §15.10 的取捨，T14 量測）。
 - **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約；grant 撤銷時停止執行中的 scan 在 T13。
 - **SEC-19（T11 的部分）**：取消時先封鎖 guard、再停止容器（live 以時間線證明）；孤兒容器的回收在 T13。
-- **SEC-15**：T11 的 guard 只放行 scan 的 target origin，任何帶著認證的請求都送不到其他 origin；跨 origin 的認證 header 規則（多個 origin）在 T12，工具實際送出的認證在 M3。
+- **SEC-15**：T11 的 guard 只放行 scan 的 target origin，任何帶著認證的請求都送不到其他 origin。T12 以 live 證明（§4.4）：帶著 `Authorization` 的請求只到達 target，另一個 origin 的接收端沒有任何連線；preflight 的帶認證請求只送到 target。使用者決定維持只放行 target origin，跨 origin 的認證 header 規則（多個 origin）延後；工具實際送出的認證在 M3。
+- **SEC-13（T12）**：guard 強制 scan 共用的請求數與速率，preflight 也計入；以 live 的接收端與 guard 的 telemetry 證明（§4.4）。仍未涵蓋：多個真的引擎依序共用預算（M3、M4；目前以 preflight 加上不送流量的 fake 證明分配與扣除的規則）、依量測調整 lab profile 的預算（M3）。
 
 ### 4.4 Live E2E
 

@@ -24,6 +24,7 @@ LAB_NET = "secscan_live_lab_net"
 SECRETS_VOLUME = "secscan_live_run_secrets"
 POLICIES_VOLUME = "secscan_live_guard_policies"
 STATUS_VOLUME = "secscan_live_guard_status"
+TELEMETRY_VOLUME = "secscan_live_guard_telemetry"
 # live stack 的 lab 網段（LAB_CIDR）與 guard 的固定位址（Makefile 的 LIVE_*）。
 LAB_CIDR = "10.89.10.0/24"
 GUARD_IP = "10.89.9.254"
@@ -58,10 +59,12 @@ def inspect(name: str) -> dict[str, Any]:
     return dict(info)
 
 
-def scan_containers(scan_id: str) -> list[str]:
-    output = docker(
-        "ps", "-a", "--filter", f"label=secscan.scan_id={scan_id}", "--format", "{{.Names}}"
-    )
+def scan_containers(scan_id: str, engine: str | None = None) -> list[str]:
+    """scan 的容器（engine 給定時只看那個引擎的，例如 preflight 或 fake）。"""
+    filters = ["--filter", f"label=secscan.scan_id={scan_id}"]
+    if engine is not None:
+        filters += ["--filter", f"label=secscan.engine={engine}"]
+    output = docker("ps", "-a", *filters, "--format", "{{.Names}}")
     return output.split()
 
 
@@ -116,6 +119,7 @@ def admin_key() -> str:
 @dataclass(frozen=True)
 class Scannable:
     operator: Api
+    host: str
     target_id: str
     grant_id: str
     spec_id: str
@@ -191,4 +195,4 @@ def scannable(admin: Api, secret: str) -> Scannable:
             },
         },
     )
-    return Scannable(operator, target["id"], grant["id"], spec["id"], profile["id"])
+    return Scannable(operator, host, target["id"], grant["id"], spec["id"], profile["id"])

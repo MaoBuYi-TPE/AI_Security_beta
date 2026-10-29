@@ -105,7 +105,7 @@ def test_the_guard_is_hardened_and_sits_only_on_scan_and_lab() -> None:
         LAB_NET: GUARD_LAB_IP,
     }
     mounts = {mount["Destination"]: mount["RW"] for mount in info["Mounts"]}
-    assert mounts == {"/guard/policies": False, "/guard/status": True}
+    assert mounts == {"/guard/policies": False, "/guard/status": True, "/guard/telemetry": True}
     assert "docker.sock" not in json.dumps(info["Mounts"])
 
 

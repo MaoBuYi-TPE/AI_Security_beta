@@ -226,7 +226,7 @@ def test_preflight_plans_are_admitted() -> None:
     "arguments",
     [
         (PREFLIGHT_SCRIPT + "\ncat /scan/secret/target-auth",),  # 多一行
-        (PREFLIGHT_SCRIPT.replace("nc -w 10", "nc -w 99"),),
+        (PREFLIGHT_SCRIPT.replace("sleep 5", "sleep 50"),),
         ("true",),
         (PREFLIGHT_SCRIPT, "extra"),
     ],

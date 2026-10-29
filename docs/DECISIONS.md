@@ -1342,6 +1342,7 @@ T12 讓 guard 強制整個 scan 共用的速率與請求數，記下實際轉送
 - **實測**（OrbStack，T10 的 busybox 映像、同一個 digest，以 uid 10001、唯讀 rootfs、`--network none` 執行，2026-10-29）：
   - `base64 -w 0` 輸出單行（`<uuid>:<43 字元 token>` 編碼後 108 字元），可以組出 `Proxy-Authorization: Basic …`。
   - `nc <ip> <port>` 搭配 `printf` 送出 HTTP/1.0 請求、讀回完整回應；`printf` 是 ash 的內建指令，`cat` 從檔案讀進管線：secret 不會出現在任何程序的 argv（`/proc/*/cmdline`）。
+  - **live 實測（實作之後）**：busybox 的 nc 在 stdin 結束時會半關閉連線（shutdown 寫入端），mitmproxy 把它當成 client 斷線，放行之後丟掉回應（guard 的 log 只有放行、沒有回應；兩個輸出檔都是 0 bytes，結果是 `not_executed`）。對另一個 nc 測試時看不出來（它不理會半關閉）。改成送完請求之後 stdin 再開著 5 秒（`sleep 5`，`nc -w 5`），每個請求最多多花 5 秒；靶機超過 5 秒才回應時沒有回應（`not_executed`）。
 
 ### 16.1 policy schema 2
 
@@ -1371,13 +1372,13 @@ T12 讓 guard 強制整個 scan 共用的速率與請求數，記下實際轉送
 
 ### 16.3 telemetry
 
-- **volume** `guard_telemetry`：tmpfs（64 MiB、uid 10001、0700）；guard 讀寫，runner 唯讀。掃描容器與 worker 都不掛。
+- **volume** `guard_telemetry`：tmpfs（64 MiB、uid 10001、0700）；guard 讀寫，runner（summary）與 worker（jsonl，§16.6）唯讀。掃描容器不掛。
 - **檔案**（每個 run 兩個）：
   - `<run_id>.summary.json`（原子寫入，0400）：`forwarded`、各原因的 `denied`、`exhausted`（已轉送到上限）、`first_at`／`last_at`、`boot_id`、`scan_id`。
   - `<run_id>.jsonl`（附加，0600）：每個轉送的請求一行 `{"e":"request","seq","t","method","path","auth"}`；上游的回應一行 `{"e":"response","seq","t","status"}`。path 不含 query；不記 header 的值、body、query。
 - **寫入的順序**：轉送時先寫 summary、再附加那一行。中途失敗時 summary 最多多算一個（對預算是保守的方向），記憶體的計數回到轉送之前。拒絕的計數由每 5 秒的 flush 寫入，最多落後一個間隔（只用於報告，不影響預算）。
 - **guard 重啟**：第一次看到某個 run 時，由既有的 summary 接續計數與序號：重啟不會讓 run 重新拿到整份預算。summary 讀不出來或屬於別的 scan → fail closed（該 run 的請求回 `GUARD_ERROR`）。runner 仍依 `boot_id` 的改變把 run 標成 interrupted（§15.7）。
-- **保留期限**：6 小時沒有更新的檔案由 guard 刪除；runner 在 run 結束時把兩個檔案複製進 run 的工作目錄（不可變的 artifact，worker 從那裡讀），所以 guard 的 volume 只需要撐過一個 run。
+- **保留期限**：6 小時沒有更新的檔案由 guard 刪除（每 5 秒的 flush 一併檢查）。runner 在 run 結束之前把 summary 的計數寫進 DB；worker 在解析時直接讀 jsonl（實作時改的：原本打算由 runner 複製進 run 的工作目錄，但 run 結束之後 guard 不會再寫這個檔案，直接唯讀掛載比較簡單）。worker 停擺超過 6 小時，該 run 的 coverage 就沒有量測依據。
 - telemetry 目錄不可寫時，guard 的自我檢查失敗（status 的 `enforcing` 是 false），runner 不認領。
 - 讀的一方嚴格解析（key 完全相符、型別、canonical），訊息不含內容。
 
@@ -1385,43 +1386,61 @@ T12 讓 guard 強制整個 scan 共用的速率與請求數，記下實際轉送
 
 ### 16.4 runner：剩下的預算與結束時的計數
 
-- **剩下的請求數**：scan 的 `max_requests` 減去同一個 scan 之前的 run 用掉的數量。用掉的數量：有 `requests_sent` 就用它；沒有（例如 runner 中斷、telemetry 遺失）就以該 run 當初分到的 `requests_allotted` 計算（保守）。剩 0 時不建立容器，run 以 `timed_out`（`BUDGET_EXHAUSTED`）結束。
-- **剩下的時間**：scan 的 `max_duration_seconds` 減去之前的 run 的 `traffic_seconds`（容器啟動到停止的時間）；plan 的牆鐘上限與 policy 的 `not_after` 都用剩下的時間。
-- **執行中**：每次心跳讀 summary；`exhausted` 為 true（或剩下的時間用完）→ 封鎖 → 停止容器 → `timed_out`（`BUDGET_EXHAUSTED`）。
-- **結束時**（任何結果）：封鎖之後讀 summary，把 `requests_sent`、`requests_denied`、`traffic_seconds` 寫回 scanner_runs，再複製 telemetry 檔。讀不到 summary 時 `requests_sent` 留空（下一個 run 以分到的數量扣除）。
-- migration 0007：scanner_runs 加上 `requests_allotted`、`requests_sent`、`requests_denied`、`traffic_seconds`（都是非負整數或 null；`requests_sent ≤ requests_allotted`）。
+- **剩下的請求數**：scan 的 `max_requests` 減去同一個 scan 之前的容器 run 用掉的數量。用掉的數量：有 `requests_sent` 就用它；沒有（runner 中斷、guard 重啟、telemetry 讀不出來）就以該 run 當初分到的 `requests_allotted` 計算（保守）。只有容器版的 run 記下 `requests_allotted`；in-process 的 fake 不送流量、不佔預算。
+- **剩下的時間**：scan 的 `max_duration_seconds` 減去之前的容器 run 的 `traffic_seconds`（不明時以開始到結束的時間計算）；plan 的牆鐘上限與 policy 的 `not_after` 都用剩下的時間。
+- **剩 0**（請求數或時間）：不建立容器，run 以 `failed`（`BUDGET_EXHAUSTED`）結束（`preparing` 只能轉到 failed；實作時修正，原本寫 timed_out）。
+- **執行中**：每次心跳在續約之後讀 summary；`exhausted` 為 true → 封鎖 → 停止容器 → `timed_out`（`BUDGET_EXHAUSTED`）。summary 讀不出來時不停止（上限仍由 guard 強制），只記 log。
+- **結束時**（任何結果，終止的 run 不能再改，所以在最後一次轉換之前寫入）：清理之後讀 summary，把 `requests_sent`、`requests_denied`、`traffic_seconds` 寫回 scanner_runs。
+  - 沒寫過 policy（guard 不可用、plan 被拒絕、啟動前取消）：0。
+  - 有 summary：以它為準；屬於別的 scan 或超過分到的數量就是不可信，留空。
+  - 沒有 summary：guard 每轉送一個請求都先寫 summary，所以同一個 guard（`boot_id` 相同、沒有中斷）就是 0；guard 重啟或中斷過則留空。
+- migration 0007：scanner_runs 加上 `requests_allotted`、`requests_sent`、`requests_denied`、`traffic_seconds`（都是非負整數或 null；有 `requests_sent` 就一定有 `requests_allotted`，而且不超過它）。
 
 ### 16.5 preflight 的執行路徑
 
-- **何時**：scan 綁定 auth profile 時，`plan_runs` 在引擎之前加上一個 `preflight` run（sequence 1）。preflight 是內部的引擎：不能在請求中指定、不出現在 `GET /scanners`。共用 scan 的預算與速率，並計入請求數。
+- **何時**：scan 綁定 auth profile 時，`plan_runs` 在引擎之前加上一個 `preflight` run（sequence 1），fake 的 scan 也一樣（M2 唯一真的送出的流量，只到 lab 的 target，經 grant 與 guard）。preflight 是內部的引擎：請求中指定會回 422 `ENGINE_UNSUPPORTED`、不出現在 `GET /scanners`；runner 的能力回報仍包含它（認領要用）。共用 scan 的預算與速率，並計入請求數。
 - **容器**：T10 的 busybox 映像（同一個 digest）與強化設定，命令是 `/bin/sh -c <固定的 script>`（script 是程式中的常數，不含任何輸入）。
-  - 輸入：`in/request`（preflight 的 path，已確認在 grant 的範圍內）；secrets 目錄的 `proxy-url` 與 `auth-header`（完整的一行 header，0400）。
+  - 輸入：`in/request`（target 的 origin 加上 preflight 的 path；path 在建立 scan 時已確認在 grant 的範圍內，plan 再檢查一次格式）；secrets 目錄的 `proxy-url` 與 `auth-header`（完整的一行 header，例如 `Authorization: Bearer <token>`，0400）。有認證的 run 都會拿到 `auth-header`（M3 的引擎也可以用）。
+  - runner 的白名單以 script 的 sha256 核准（`ArgumentDigest`，不在兩處各寫一次全文）；單元測試核對兩者一致，任何改動都要重新審查。
   - 送出兩個 HTTP/1.0 GET（經 guard）：帶認證一次、不帶認證一次，回應存成 `out/authenticated.http`、`out/anonymous.http`（各有大小上限）。
   - secret 只從檔案讀進管線，不進 argv、env、label 或 log。
-- **判斷**（worker；§12.5 的純函式）：回應的 status 與 `expected_status` 相同、body 是 JSON 且每個 JSON Pointer 都相等 → `passed`；否則 `failed`。匿名的請求也通過 → `inconclusive`（端點沒有受保護，證明不了認證有效）。guard 拒絕（`X-Secscan-Guard`）→ `blocked`；容器失敗或沒有輸出 → `not_executed`。結果寫進 `scan_preflights`，API 以 `auth.preflight` 揭露。
+- **判斷**（worker；§12.5 的純函式）：回應的 status 與 `expected_status` 相同、body 是嚴格的 JSON 且每個 JSON Pointer 都嚴格相等 → `passed`；否則 `failed`。匿名的請求也通過 → `inconclusive`（端點沒有受保護，證明不了認證有效）；匿名的請求沒有回應不影響 `passed`。guard 拒絕（`X-Secscan-Guard`）→ `blocked`；容器失敗、沒有輸出、回應不是 HTTP 或超過 64 KiB → `not_executed`。
+  - worker 以唯讀掛載 runs volume，只讀 manifest 列出的檔案（大小與 sha256 相符、不跟隨 symlink）。
+  - 結果寫在 preflight run 的 `scanner_runs.preflight_result`（CHECK：只有 preflight 的 run 有值；實作時改的：原本打算另建 `scan_preflights` 表，一個 scan 只有一個 preflight run，欄位就夠了）。API 以 `auth.preflight` 揭露；還沒結束是 null，結束了卻沒有結果（失敗、取消）是 `not_executed`。
 - preflight 不是 `passed` 時，之後的引擎照常執行，但 coverage 的 authenticated 計為 0（不以匿名結果冒充，CLAUDE.md §9）。
 - in-process 的 fake runner（不送流量）把 preflight run 標成成功、結果 `not_executed`。
+- 測試資料：integration 測試的 scan 預設改成匿名；需要認證的測試明確綁定 profile，並處理最前面的 preflight run。
 
 ### 16.6 coverage
 
-worker 由 telemetry 的每一行算出：
-- `observed`：轉送過的請求涵蓋的 `scan_operations` 數（method 相同、path 符合 route；以 §10.8 的 `covers()` 比對）。
-- `authenticated`：其中帶著認證 header、而且 preflight 是 `passed` 的數量。
-沒有 telemetry 時 coverage 的這兩項是 null（未量測），不是 0。
+worker 解析每個 run 時，把 telemetry 中轉送的請求對應到 scan 凍結、在範圍內的 operation：method 相同，operation 的 route 以 §11.6 的規則（不寬鬆）涵蓋請求的 path；同時符合多個時只算最具體的（佔位符最少）。結果寫進 `run_coverage`（run、operation、是否帶認證 header；不可修改或刪除），並把 run 標成 `coverage_recorded`：
+- guard 記下沒有轉送任何請求（`requests_sent = 0`）→ 已量測、涵蓋 0 個。
+- 有轉送、jsonl 完整（嚴格解析、最後一行有換行）而且行數不超過轉送數 → 對應並標記。
+- 轉送數不明或 telemetry 不完整 → 不標記。
+
+API（跨 run 去重）：
+- `coverage_measured`：有規格、至少一個容器 run，而且每個容器 run 都已標記。
+- `observed_operations`：有量測依據時的涵蓋數，否則 null。
+- `authenticated_operations`：匿名的 scan 是 null；preflight 是 `passed` 時是帶認證 header 的涵蓋數；否則是 0，limitations 加上 `AUTHENTICATION_NOT_VERIFIED`。
+- 帶認證 header 不代表伺服器接受了它：認證是否有效由 preflight 判斷（scan 層級），不逐請求推論。
 
 ### 16.7 錯誤碼與 API
 
 - guard 的拒絕原因新增 `BUDGET_EXHAUSTED`、`RATE_LIMITED`（只在 guard 的回應 header 與 telemetry 中）。
-- run 的錯誤碼 `BUDGET_EXHAUSTED`：剩下的請求數或時間用完（`timed_out`）。DB 只檢查格式。
-- API：scan 的 `budget_usage`（requests_sent、requests_denied、traffic_seconds，跨 run 加總）、coverage 的 `observed`／`authenticated`、`auth.preflight`。
+- run 的錯誤碼 `BUDGET_EXHAUSTED`：開始之前剩 0 → `failed`；執行中用盡 → `timed_out`。DB 只檢查格式。
+- API：scan 的 `budget_usage`（`requests_sent`、`requests_denied`、`traffic_duration_seconds`，跨容器 run 加總；有開始過的 run 不明時是 null）、coverage 的 `observed_operations`／`authenticated_operations`、`auth.preflight`。
+- migration 0008：engine 的 CHECK 加上 `preflight`、sequence 的上限改成 5；`scanner_runs.preflight_result` 與 `coverage_recorded`；`run_coverage` 表。
 
 ### 16.8 取捨與不在 T12 範圍
 
 - 名額在 `request` hook 才確定：少數在兩個 hook 之間失敗、又沒有觸發 `error` 的 flow 會佔著名額直到 run 結束（只會少放行）。
-- telemetry 在 tmpfs：VM 重啟會遺失還沒複製的檔案；預算以 DB 的 `requests_allotted` 保守扣除，coverage 標成未量測。
+- telemetry 在 tmpfs：VM 重啟會遺失還沒解析的 run 的檔案；預算以 DB 的 `requests_allotted` 保守扣除，coverage 標成未量測。
+- 只有被 worker 解析（collected）的 run 會對應 coverage：逾時、失敗、中斷的 run 送過的請求不計入 observed（`coverage_measured` 因此是 false，不會高估）。
+- preflight 只送兩個請求：證明的是「這組憑證在這個端點有效」，不證明之後的引擎整段都維持登入狀態（M3 依量測再加上掃描中的重新驗證）。
 - 拒絕的計數最多落後 5 秒；不影響預算。
 - 速率以 scan 為 key、存在 guard 的記憶體：guard 重啟後第一個請求不必等待（最多多出一個 burst）。
 - ZAP 的 reactive 407（先送一次不帶帳密的請求）不計入 run（還不知道是哪個 run）。
+- **同時上傳的記憶體上限**（T11 的交接）：mitmproxy 把 body 讀進記憶體，被拒絕的請求 body 也會讀完（§15 實測 2）。`body_size_limit` 從 16 MiB 降到 1 MiB（超過回 413）：guard 的記憶體上限是 256 MiB，要約 200 個同時上傳才會 OOM；OOM 時 guard 重啟，runner 依 `boot_id` 把 run 標成 interrupted（fail closed）。沒有限制每個 run 的同時連線數；M3 依工具的量測再調整上限。
 - 不在 T12：grant 的其他 origin 與跨 origin 的認證規則；依量測調整 lab profile 的預算（M3）；`/health/ready`（T13）。
 
 ## 來源

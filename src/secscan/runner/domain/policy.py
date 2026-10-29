@@ -90,7 +90,7 @@ class ContainerPolicy:
 _BUSYBOX = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
 # preflight 的 script（scanners.domain.preflight.PREFLIGHT_SCRIPT）的 sha256：script 改了，這裡要
 # 重新審查、更新（tests/unit/runner/test_engine_policy.py 核對兩者一致）。
-PREFLIGHT_SCRIPT_SHA256 = "c944a7f97be582410ebd7f8e73139a626131e4abe9c934d67b2fb6c93ca5bd1f"
+PREFLIGHT_SCRIPT_SHA256 = "5cfd3e5bc89770e36c1b8f523248a554b12dd8da0948a6ac79ee3711fd1ae2cc"
 
 ENGINE_POLICIES: Mapping[Engine, EnginePolicy] = MappingProxyType(
     {

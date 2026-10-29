@@ -33,10 +33,13 @@ REQUEST_FILE = "request"
 AUTHENTICATED_OUTPUT = "authenticated.http"
 ANONYMOUS_OUTPUT = "anonymous.http"
 MAX_RESPONSE_BYTES = 64 * 1024
+RESPONSE_WAIT_SECONDS = 5
 _HTTP_PREFIX = "http://"
 
 # busybox ash。set -u：變數沒有值就停止；每個請求失敗都繼續（沒有回應由 worker 判斷）。
-# nc -w 10：連線閒置 10 秒就結束；head -c：回應最多 MAX_RESPONSE_BYTES + 1 bytes。
+# 送完請求之後 stdin 再開著 RESPONSE_WAIT_SECONDS 秒：nc 在 stdin 結束時會半關閉連線，mitmproxy
+# 把它當成 client 斷線、丟掉回應（live 實測）。nc -w：連線與最後的讀取最多等這麼久；
+# head -c：回應最多 MAX_RESPONSE_BYTES + 1 bytes。
 PREFLIGHT_SCRIPT = f"""set -u
 umask 077
 proxy=$(cat /scan/secret/proxy-url)
@@ -58,7 +61,9 @@ send() {{
       printf '\\r\\n'
     fi
     printf 'Accept: application/json\\r\\nConnection: close\\r\\n\\r\\n'
-  }} | nc -w 10 "$host" "$port" | head -c {MAX_RESPONSE_BYTES + 1} > "/scan/out/$1.http" || true
+    sleep {RESPONSE_WAIT_SECONDS}
+  }} | nc -w {RESPONSE_WAIT_SECONDS} "$host" "$port" | head -c {MAX_RESPONSE_BYTES + 1} \\
+    > "/scan/out/$1.http" || true
 }}
 send authenticated
 send anonymous
