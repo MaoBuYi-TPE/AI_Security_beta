@@ -304,21 +304,38 @@ def test_the_runner_points_at_the_guard() -> None:
     assert defaults.guard_proxy == runner["RUNNER_GUARD_PROXY"]
     assert str(defaults.guard_policies_dir) in _volumes(SERVICES["runner"])[2]
     assert str(defaults.guard_status_dir) in _volumes(SERVICES["runner"])[3]
+    assert str(defaults.guard_telemetry_dir) in _volumes(SERVICES["runner"])[4]
 
 
 def test_policies_flow_from_the_runner_to_the_guard_and_status_back() -> None:
-    """policy：runner 讀寫、guard 唯讀；status：guard 讀寫、runner 唯讀；其他服務都不掛。"""
+    """policy：runner 讀寫、guard 唯讀；status 與 telemetry：guard 讀寫、runner 唯讀；其他服務
+    （含 worker 與掃描容器）都不掛。"""
     mounts = {
         name: [volume for volume in _volumes(service) if volume.startswith("guard_")]
         for name, service in SERVICES.items()
     }
 
     assert {name for name, found in mounts.items() if found} == {"runner", "guard"}
-    assert mounts["runner"] == ["guard_policies:/guard/policies", "guard_status:/guard/status:ro"]
-    assert mounts["guard"] == ["guard_policies:/guard/policies:ro", "guard_status:/guard/status"]
+    assert mounts["runner"] == [
+        "guard_policies:/guard/policies",
+        "guard_status:/guard/status:ro",
+        "guard_telemetry:/guard/telemetry:ro",
+    ]
+    assert mounts["guard"] == [
+        "guard_policies:/guard/policies:ro",
+        "guard_status:/guard/status",
+        "guard_telemetry:/guard/telemetry",
+    ]
 
 
-@pytest.mark.parametrize("volume", ["guard_policies", "guard_status"])
+def test_the_guard_writes_telemetry_where_the_runner_reads_it() -> None:
+    guard = {key: _default(value) for key, value in SERVICES["guard"]["environment"].items()}
+
+    assert guard.get("GUARD_TELEMETRY_DIR", "/guard/telemetry") == "/guard/telemetry"
+    assert str(RunnerSettings().guard_telemetry_dir) == "/guard/telemetry"
+
+
+@pytest.mark.parametrize("volume", ["guard_policies", "guard_status", "guard_telemetry"])
 def test_guard_volumes_live_only_in_memory(volume: str) -> None:
     options = COMPOSE["volumes"][volume]["driver_opts"]
 

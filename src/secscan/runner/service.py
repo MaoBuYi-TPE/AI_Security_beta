@@ -15,6 +15,7 @@
 """
 
 import logging
+import math
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from secscan.scans.queue import (
     EgressScope,
     LeaseLostError,
     RunReport,
+    RunUsage,
     ScanQueue,
 )
 from secscan.security.secret_cipher import SecretCipher, SecretUnreadableError
@@ -70,6 +72,7 @@ class _Ending(StrEnum):
     REJECTED = "rejected"
     LOST = "lost"
     GUARD_LOST = "guard_lost"
+    BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 # 容器可能還在執行的結果：要確認容器已刪除，才能宣稱已停止。
@@ -81,6 +84,7 @@ _NEEDS_REMOVAL = frozenset(
         _Ending.REJECTED,
         _Ending.LOST,
         _Ending.GUARD_LOST,
+        _Ending.BUDGET_EXHAUSTED,
     }
 )
 
@@ -95,6 +99,8 @@ _STOPPED_ENDINGS: Mapping[_Ending, tuple[RunStatus, RunErrorCode | None]] = Mapp
         _Ending.REJECTED: (RunStatus.FAILED, RunErrorCode.ARTIFACT_REJECTED),
         _Ending.LOST: (RunStatus.INTERRUPTED, RunErrorCode.RUNTIME_UNAVAILABLE),
         _Ending.GUARD_LOST: (RunStatus.INTERRUPTED, RunErrorCode.GUARD_UNAVAILABLE),
+        # guard 的 summary 說已轉送到上限（docs/DECISIONS.md §16.4）：之後的請求都會被拒絕。
+        _Ending.BUDGET_EXHAUSTED: (RunStatus.TIMED_OUT, RunErrorCode.BUDGET_EXHAUSTED),
     }
 )
 
@@ -108,12 +114,15 @@ class _Outcome:
 
 @dataclass(slots=True)
 class _Attempt:
-    """執行中的一個 run：容器名稱，以及開始之後才有的出站設定與 guard 的 boot_id。"""
+    """執行中的一個 run：容器名稱，以及開始之後才有的出站設定、guard 的 boot_id 與容器啟動的時間
+    （monotonic）。
+    """
 
     lease: Lease
     name: str
     egress: RunEgress | None = None
     boot_id: UUID | None = None
+    started_at: float | None = None
 
 
 class _SecretUnavailableError(Exception):
@@ -182,6 +191,7 @@ class ContainerRunner:
             spec = build_container(plan, policy=self._policy, engines=self._engine_policies)
         except PlanRejectedError as exc:
             logger.warning("ExecutionPlan 被拒絕：run %s，%s", lease.run_id, exc.reason.value)
+            self._queue.record_usage(lease, RunUsage(0, 0, 0))  # 沒有流量
             return self._fail(lease, RunErrorCode.PLAN_REJECTED)
         return self._execute(_Attempt(lease, spec.name), launch.secret, launch.egress, plan, spec)
 
@@ -208,6 +218,7 @@ class ContainerRunner:
                 outcome = self._supervise(attempt, plan.limits.wall_clock_seconds)
         finally:
             removed = self._cleanup(attempt)
+        self._queue.record_usage(attempt.lease, self._usage(attempt, outcome))
         if outcome.ending in _NEEDS_REMOVAL and not removed:
             raise RuntimeUnavailableError("無法確認容器已停止：run 留給對帳")
         return self._conclude(attempt.lease, outcome)
@@ -235,6 +246,7 @@ class ContainerRunner:
         try:
             self._runtime.create(spec)
             self._runtime.start(spec.name)
+            attempt.started_at = self._monotonic()
         except RuntimeUnavailableError as exc:
             logger.warning("無法啟動容器：run %s，%s", attempt.lease.run_id, exc)
             return _Outcome(_Ending.NOT_STARTED, error_code=RunErrorCode.RUNTIME_UNAVAILABLE)
@@ -384,7 +396,19 @@ class ContainerRunner:
         if not self._renewed(attempt, renew_until):
             self._stop(attempt)
             return _Ending.GUARD_LOST
+        if self._exhausted(attempt):
+            self._stop(attempt)
+            return _Ending.BUDGET_EXHAUSTED
         return None
+
+    def _exhausted(self, attempt: _Attempt) -> bool:
+        """guard 的 summary 說已轉送到上限。讀不出來時不停止：上限仍由 guard 強制。"""
+        try:
+            summary = self._guard.summary(attempt.lease.run_id)
+        except GuardUnavailableError as exc:
+            logger.warning("讀不到 run %s 的 telemetry（%s）", attempt.lease.run_id, exc)
+            return False
+        return summary is not None and summary.exhausted
 
     def _renewed(self, attempt: _Attempt, renew_until: float) -> bool:
         """guard 仍可用、沒有重啟過（boot_id 相同），而且續約寫得出去。"""
@@ -424,6 +448,40 @@ class ContainerRunner:
             except GuardUnavailableError as exc:
                 logger.error("無法刪除 run %s 的 guard policy（%s）：下次啟動時清除", run_id, exc)
         return True
+
+    def _usage(self, attempt: _Attempt, outcome: _Outcome) -> RunUsage:
+        """run 用掉的預算（docs/DECISIONS.md §16.4），在最後一次轉換之前寫入。
+
+        - 沒寫過 policy：沒有任何流量，0。
+        - 有 summary：以 guard 記下的為準（超過分到的數量就是不可信，留空）。
+        - 沒有 summary：guard 每轉送一個請求都先寫 summary，所以同一個 guard（boot_id 相同、沒有
+          中斷）就是 0；guard 重啟或中斷過則留空，之後的 run 以分到的數量扣除。
+        """
+        seconds = (
+            0 if attempt.started_at is None else math.ceil(self._monotonic() - attempt.started_at)
+        )
+        egress = attempt.egress
+        if egress is None or not egress.activated:
+            return RunUsage(requests_sent=0, requests_denied=0, traffic_seconds=seconds)
+        run_id = attempt.lease.run_id
+        unknown = RunUsage(requests_sent=None, requests_denied=None, traffic_seconds=seconds)
+        try:
+            summary = self._guard.summary(run_id)
+        except GuardUnavailableError as exc:
+            logger.error("讀不到 run %s 的 telemetry（%s）：用量留空", run_id, exc)
+            return unknown
+        if summary is None:
+            same_guard = (
+                outcome.ending is not _Ending.GUARD_LOST
+                and self._guard.health().boot_id == attempt.boot_id
+            )
+            return RunUsage(0, 0, seconds) if same_guard else unknown
+        if summary.scan_id != attempt.lease.scan_id or (
+            summary.forwarded > egress.policy.budget.max_requests
+        ):
+            logger.error("run %s 的 telemetry 和 policy 不符：用量留空", run_id)
+            return unknown
+        return RunUsage(summary.forwarded, summary.denied_total, seconds)
 
     def _conclude(self, lease: Lease, outcome: _Outcome) -> RunReport:
         if outcome.ending is _Ending.NOT_STARTED:

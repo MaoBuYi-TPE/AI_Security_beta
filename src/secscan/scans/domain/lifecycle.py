@@ -109,6 +109,9 @@ class RunErrorCode(StrEnum):
     # egress guard（docs/DECISIONS.md §15.8）：啟動之前不可用 → failed；執行中中斷、重啟或續約失敗
     # → interrupted。
     GUARD_UNAVAILABLE = "GUARD_UNAVAILABLE"
+    # 共享預算（docs/DECISIONS.md §16.4）：剩下的請求數或時間用完。開始之前 → failed；
+    # 執行中由 guard 的 summary 得知 → timed_out。
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
 
 
 # runner 啟動前重新判斷 gate（§10.6）不通過的原因。grant 不屬於這個 target、origin 不在範圍內，

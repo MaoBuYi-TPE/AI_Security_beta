@@ -289,6 +289,19 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             f"('{RunStatus.QUEUED.value}', '{RunStatus.PREPARING.value}')",
             name="container_after_start",
         ),
+        # 共享預算（docs/DECISIONS.md §16.4）：分到的請求數與 guard 記下的用量。
+        CheckConstraint(
+            "(requests_allotted IS NULL OR requests_allotted >= 0) "
+            "AND (requests_sent IS NULL OR requests_sent >= 0) "
+            "AND (requests_denied IS NULL OR requests_denied >= 0) "
+            "AND (traffic_seconds IS NULL OR traffic_seconds >= 0)",
+            name="usage_not_negative",
+        ),
+        CheckConstraint(
+            "requests_sent IS NULL OR (requests_allotted IS NOT NULL "
+            "AND requests_sent <= requests_allotted)",
+            name="sent_within_allotment",
+        ),
     )
 
     scan_id: Mapped[UUID] = mapped_column(ForeignKey("scans.id", ondelete="RESTRICT"))
@@ -303,6 +316,10 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     error_code: Mapped[str | None] = mapped_column(String(ERROR_CODE_MAX_LENGTH))
     container_name: Mapped[str | None] = mapped_column(String(CONTAINER_NAME_MAX_LENGTH))
     image_ref: Mapped[str | None] = mapped_column(String(IMAGE_REF_MAX_LENGTH))
+    requests_allotted: Mapped[int | None]
+    requests_sent: Mapped[int | None]
+    requests_denied: Mapped[int | None]
+    traffic_seconds: Mapped[int | None]
 
 
 class ScanEventModel(Base):

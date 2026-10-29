@@ -112,6 +112,11 @@ class RunEgress:
         return self._policy
 
     @property
+    def activated(self) -> bool:
+        """policy 可能已經生效（寫入過，即使寫入時出錯）。"""
+        return self._written
+
+    @property
     def proxy_url(self) -> str:
         """寫進掃描容器的 proxy-url 檔（含 token；不可寫進 log、label 或事件）。"""
         return proxy_url(self._credentials, host=self._endpoint.address, port=self._endpoint.port)

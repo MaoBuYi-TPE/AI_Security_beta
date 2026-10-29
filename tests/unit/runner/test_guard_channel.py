@@ -20,6 +20,7 @@ from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.credentials import parse_proxy_authorization, token_digest
 from secscan.guard.domain.policy import Policy, PolicyState, policy_file_name
 from secscan.guard.domain.status import STATUS_FILE_NAME, StatusIssue
+from secscan.guard.domain.telemetry import summary_file_name
 from secscan.guard.files import write_atomic
 from secscan.runner.egress import GuardEndpoint, RunEgress
 from secscan.runner.guard import GuardChannel, GuardUnavailableError
@@ -322,3 +323,40 @@ def test_a_policy_written_despite_an_error_can_still_be_blocked_and_removed(
     assert blocked is not None
     assert blocked.state is PolicyState.BLOCKED
     assert guard.policy_files() == []
+
+
+# --- telemetry 的 summary（docs/DECISIONS.md §16.4）------------------------------------------
+
+
+def test_a_run_without_a_summary_has_none(guard: GuardDouble) -> None:
+    assert guard.channel().summary(LEASE.run_id) is None
+
+
+def test_the_summary_is_read_strictly(guard: GuardDouble) -> None:
+    guard.write_summary(
+        LEASE.run_id, LEASE.scan_id, forwarded=3, denied={"PATH_EXCLUDED": 2}, exhausted=True
+    )
+
+    summary = guard.channel().summary(LEASE.run_id)
+
+    assert summary is not None
+    assert (summary.forwarded, summary.denied_total, summary.exhausted) == (3, 2, True)
+
+
+@pytest.mark.parametrize("content", [b"{", b"{}", b" " * 70_000])
+def test_unreadable_summaries_mean_the_guard_is_unavailable(
+    guard: GuardDouble, content: bytes
+) -> None:
+    (guard.telemetry / summary_file_name(LEASE.run_id)).write_bytes(content)
+
+    with pytest.raises(GuardUnavailableError):
+        guard.channel().summary(LEASE.run_id)
+
+
+def test_symlinked_summaries_are_refused(guard: GuardDouble, tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_bytes(b"{}")
+    (guard.telemetry / summary_file_name(LEASE.run_id)).symlink_to(elsewhere)
+
+    with pytest.raises(GuardUnavailableError):
+        guard.channel().summary(LEASE.run_id)

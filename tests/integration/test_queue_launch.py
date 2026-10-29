@@ -13,6 +13,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import Engine, Row
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.auth_profiles.domain.credentials import SecretValue
@@ -23,7 +24,15 @@ from secscan.guard.domain.budget import RunBudget
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
-from secscan.scans.queue import EgressScope, Launch, Progress, QueueOperations, ScanQueue
+from secscan.scans.queue import (
+    EgressScope,
+    Launch,
+    LeaseLostError,
+    Progress,
+    QueueOperations,
+    RunUsage,
+    ScanQueue,
+)
 from tests.integration.api_support import DEFAULT_SECRET, LAB, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 from tests.integration.locks import Race, wait_until_waiting_for_a_lock
@@ -279,3 +288,93 @@ def test_the_worker_reconciles_only_parsing(
     assert queue.reconcile_expired_parsing(FAKE) == 1
     assert _run(queue_seed, parsing.run_id).status == "collected"
     assert _run(queue_seed, running.run_id).status == "running"
+
+
+# --- 共享預算（docs/DECISIONS.md §16.4）------------------------------------------------------
+
+
+def _usage(seed: Seeder, run_id: UUID) -> Row[Any]:
+    [row] = seed.query(
+        "SELECT requests_allotted, requests_sent, requests_denied, traffic_seconds "
+        "FROM scanner_runs WHERE id = :id",
+        id=run_id,
+    )
+    return row
+
+
+def test_a_container_run_is_allotted_the_remaining_budget(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    scan = queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.max_duration_seconds == scan.budget.max_duration_seconds
+    assert launch.egress is not None
+    assert launch.egress.budget.max_requests == scan.budget.max_requests
+    assert _usage(queue_seed, lease.run_id).requests_allotted == scan.budget.max_requests
+
+
+def test_in_process_runs_send_nothing_and_are_allotted_nothing(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+
+    queue.prepare(lease)
+
+    assert _usage(queue_seed, lease.run_id).requests_allotted is None
+
+
+def test_usage_is_recorded_before_the_run_ends(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+
+    queue.record_usage(lease, RunUsage(requests_sent=7, requests_denied=2, traffic_seconds=31))
+    queue.advance(lease, R.TIMED_OUT, error_code=RunErrorCode.BUDGET_EXHAUSTED)
+
+    row = _usage(queue_seed, lease.run_id)
+    assert (row.requests_sent, row.requests_denied, row.traffic_seconds) == (7, 2, 31)
+
+
+def test_unknown_usage_is_left_empty(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+
+    queue.record_usage(lease, RunUsage(requests_sent=None, requests_denied=None, traffic_seconds=4))
+
+    row = _usage(queue_seed, lease.run_id)
+    assert (row.requests_sent, row.requests_denied, row.traffic_seconds) == (None, None, 4)
+
+
+def test_usage_needs_the_lease(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+    _expire(queue_seed, lease.run_id)
+
+    with pytest.raises(LeaseLostError):
+        queue.record_usage(lease, RunUsage(requests_sent=1, requests_denied=0, traffic_seconds=1))
+
+
+def test_the_database_refuses_usage_beyond_the_allotment(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    scan = queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+    too_many = scan.budget.max_requests + 1
+
+    with pytest.raises(IntegrityError, match="sent_within_allotment"):
+        queue.record_usage(
+            lease, RunUsage(requests_sent=too_many, requests_denied=0, traffic_seconds=1)
+        )

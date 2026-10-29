@@ -498,6 +498,12 @@ def test_a_rejected_plan_never_reaches_docker(
     assert _run(queue_seed, report.run_id).error_code == RunErrorCode.PLAN_REJECTED
     assert runtime.created == []
     assert list((tmp_path / "secrets").iterdir()) == []
+    # 沒有流量：之後的 run 不必保守扣掉這個 run 分到的預算（docs/DECISIONS.md §16.4）。
+    [usage] = queue_seed.query(
+        "SELECT requests_sent, traffic_seconds FROM scanner_runs WHERE id = :id",
+        id=report.run_id,
+    )
+    assert tuple(usage) == (0, 0)
 
 
 @pytest.mark.parametrize("operation", ["create", "start"])

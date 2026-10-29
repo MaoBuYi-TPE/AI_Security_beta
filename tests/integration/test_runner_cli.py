@@ -63,6 +63,7 @@ def environment(
     guard = GuardDouble.create(tmp_path)
     monkeypatch.setenv("RUNNER_GUARD_POLICIES_DIR", str(guard.policies))
     monkeypatch.setenv("RUNNER_GUARD_STATUS_DIR", str(guard.status_dir))
+    monkeypatch.setenv("RUNNER_GUARD_TELEMETRY_DIR", str(guard.telemetry))
     return tmp_path
 
 
@@ -157,7 +158,12 @@ def test_an_unavailable_guard_claims_nothing(
 ) -> None:
     """guard 停機（status 標成不再檢查）：runner 不認領，run 留在 queued（DECISIONS §15.7）。"""
     scan = queue_seed.scan(world.operator_a, scannable)
-    GuardDouble(environment / "guard-policies", environment / "guard-status", uuid4()).stop()
+    GuardDouble(
+        environment / "guard-policies",
+        environment / "guard-status",
+        environment / "guard-telemetry",
+        uuid4(),
+    ).stop()
 
     assert main(["runner", "--once"]) == EXIT_FAILURE
     assert "沒有可用的引擎" in capsys.readouterr().err

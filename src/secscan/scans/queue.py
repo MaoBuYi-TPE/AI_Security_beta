@@ -55,6 +55,7 @@ __all__ = [
     "Progress",
     "QueueOperations",
     "RunReport",
+    "RunUsage",
     "ScanQueue",
 ]
 
@@ -99,6 +100,17 @@ class RunReport:
             run_status=progress.run_status,
             scan_status=progress.scan_status,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RunUsage:
+    """run 用掉的預算（docs/DECISIONS.md §16.4）：guard 的 telemetry 記下的轉送與拒絕數，以及
+    容器啟動到停止的秒數。轉送數不明（telemetry 遺失）時是 None：之後的 run 以分到的數量扣除。
+    """
+
+    requests_sent: int | None
+    requests_denied: int | None
+    traffic_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +181,22 @@ class QueueOperations:
         )
         return Heartbeat(valid=True, cancel_requested=cancel_requested_at is not None)
 
+    def record_usage(self, lease: Lease, usage: RunUsage) -> None:
+        """在 run 結束之前（終止的 run 不能再改）記下用量；lease 失效時拋 LeaseLostError。"""
+        updated = self._session.execute(
+            update(ScannerRunModel)
+            .where(*_holds(lease))
+            .values(
+                requests_sent=usage.requests_sent,
+                requests_denied=usage.requests_denied,
+                traffic_seconds=usage.traffic_seconds,
+            )
+            .returning(ScannerRunModel.id)
+            .execution_options(synchronize_session=False)
+        ).scalar()
+        if updated is None:
+            raise LeaseLostError("lease 已過期或不屬於這個 runner")
+
     def prepare(self, lease: Lease, *, clock: Callable[[], datetime]) -> Progress:
         """runner 啟動前：要求過取消 → cancelling；gate、綁定的 profile 版本或建立者的 key
         不再有效 → failed；都通過 → running（唯一能讓 run 開始執行的路徑）。
@@ -196,6 +224,9 @@ class QueueOperations:
         if error_code is None:
             error_code, secret = self._binding(scan, read_secret=image_ref is not None)
         error_code = error_code or self._creator(scan)
+        requests, seconds = self._remaining(scan, run)
+        if error_code is None and (requests == 0 or seconds == 0):
+            error_code = RunErrorCode.BUDGET_EXHAUSTED
         if error_code is not None or grant is None:
             failed = error_code or RunErrorCode.SCOPE_MISMATCH
             return self._launch(scan, self._move(scan, run, RunStatus.FAILED, failed))
@@ -205,19 +236,59 @@ class QueueOperations:
             else None
         )
         self._progress.move(scan, run, RunStatus.RUNNING, container=container)
+        if container is not None:
+            # 只有容器版的 run 會送流量；in-process 的 fake 不佔預算。
+            self._session.execute(
+                update(ScannerRunModel)
+                .where(ScannerRunModel.id == run.id)
+                .values(requests_allotted=requests)
+                .execution_options(synchronize_session=False)
+            )
         progress = Progress(run_status=RunStatus.RUNNING, scan_status=self._progress.settle(scan))
         egress = EgressScope(
             origin=scan.target_origin,
             scope=grant.scope,
             valid_until=grant.window.valid_until,
             budget=RunBudget(
-                requests_per_second=scan.requests_per_second,
-                burst=1,
-                max_requests=scan.max_requests,
+                requests_per_second=scan.requests_per_second, burst=1, max_requests=requests
             ),
             auth_header=secret.credential.wire_header.lower() if secret is not None else None,
         )
-        return self._launch(scan, progress, secret, egress)
+        return self._launch(scan, progress, secret, egress, seconds=seconds)
+
+    def _remaining(self, scan: LockedScan, run: RunState) -> tuple[int, int]:
+        """scan 的上限減去同一個 scan 之前的 run 用掉的（docs/DECISIONS.md §16.4）。
+
+        轉送數不明的 run 以分到的數量計算（保守）；秒數不明的以開始到結束（或現在）的時間計算。
+        """
+        elapsed = func.ceil(
+            func.extract(
+                "epoch",
+                func.coalesce(ScannerRunModel.finished_at, func.clock_timestamp())
+                - ScannerRunModel.started_at,
+            )
+        )
+        used_requests, used_seconds = self._session.execute(
+            select(
+                func.coalesce(
+                    func.sum(
+                        func.coalesce(
+                            ScannerRunModel.requests_sent, ScannerRunModel.requests_allotted
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(func.sum(func.coalesce(ScannerRunModel.traffic_seconds, elapsed)), 0),
+            ).where(
+                ScannerRunModel.scan_id == scan.id,
+                ScannerRunModel.id != run.id,
+                ScannerRunModel.container_name.is_not(None),
+            )
+        ).one()
+        return (
+            max(0, scan.max_requests - int(used_requests)),
+            max(0, scan.max_duration_seconds - int(used_seconds)),
+        )
 
     @staticmethod
     def _launch(
@@ -225,10 +296,12 @@ class QueueOperations:
         progress: Progress,
         secret: StoredSecret | None = None,
         egress: EgressScope | None = None,
+        *,
+        seconds: int | None = None,
     ) -> Launch:
         return Launch(
             progress=progress,
-            max_duration_seconds=scan.max_duration_seconds,
+            max_duration_seconds=scan.max_duration_seconds if seconds is None else seconds,
             secret=secret,
             egress=egress,
         )
@@ -416,6 +489,10 @@ class ScanQueue:
     def heartbeat(self, lease: Lease) -> Heartbeat:
         with self._sessions.begin() as session:
             return self._operations(session).heartbeat(lease)
+
+    def record_usage(self, lease: Lease, usage: RunUsage) -> None:
+        with self._sessions.begin() as session:
+            self._operations(session).record_usage(lease, usage)
 
     def prepare(self, lease: Lease) -> Progress:
         with self._sessions.begin() as session:
