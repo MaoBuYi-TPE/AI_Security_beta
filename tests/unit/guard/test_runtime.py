@@ -7,10 +7,11 @@
 import asyncio
 import io
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -23,15 +24,18 @@ from secscan.guard.bootstrap import (
     serve,
 )
 from secscan.guard.config import GuardConfig, config_from_env, expected_options
+from secscan.guard.domain.policy import POLICY_SCHEMA, encode_policy, policy_file_name
 from secscan.guard.domain.status import (
     STATUS_FILE_NAME,
     GuardStatus,
     decode_status,
     encode_status,
 )
+from secscan.guard.domain.telemetry import decode_summary, summary_file_name
 from secscan.guard.events import GuardLog, guard_logger
 from secscan.guard.files import write_atomic
 from secscan.guard.heartbeat import StatusWriter
+from tests.unit.guard.addon_support import make_flow, make_policy
 from tests.unit.guard.flows import make_response
 
 NOW = 1_767_598_800.0
@@ -45,7 +49,7 @@ DEFAULT_ROUTE = "eth0\t00000000\t0108590A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
 
 @pytest.fixture
 def config(tmp_path: Path) -> GuardConfig:
-    for name in ("policies", "status", "conf"):
+    for name in ("policies", "status", "telemetry", "conf"):
         (tmp_path / name).mkdir()
     return config_from_env(
         {
@@ -55,6 +59,7 @@ def config(tmp_path: Path) -> GuardConfig:
             "GUARD_LAB_IP": "10.89.7.254",
             "GUARD_POLICIES_DIR": str(tmp_path / "policies"),
             "GUARD_STATUS_DIR": str(tmp_path / "status"),
+            "GUARD_TELEMETRY_DIR": str(tmp_path / "telemetry"),
             "GUARD_CONFDIR": str(tmp_path / "conf"),
         }
     )
@@ -84,7 +89,7 @@ def test_writer_records_the_boot_and_enforcement(config: GuardConfig) -> None:
         started_at=int(NOW),
         updated_at=int(NOW),
         listen=config.listen,
-        policy_schema=1,
+        policy_schema=POLICY_SCHEMA,
         enforcing=True,
     )
     assert _status(config) == status
@@ -355,7 +360,7 @@ def test_every_expected_option_is_applied(config: GuardConfig) -> None:
 
 
 def test_check_passes_with_a_fresh_enforcing_status(config: GuardConfig) -> None:
-    status = GuardStatus(UUID(int=1), int(NOW), int(NOW), config.listen, 1, True)
+    status = GuardStatus(UUID(int=1), int(NOW), int(NOW), config.listen, POLICY_SCHEMA, True)
     write_atomic(config.status_dir, STATUS_FILE_NAME, encode_status(status))
 
     assert check_status(config, clock=lambda: NOW) == 0
@@ -368,3 +373,50 @@ def test_check_fails_without_a_valid_status(config: GuardConfig, content: bytes 
         write_atomic(config.status_dir, STATUS_FILE_NAME, content)
 
     assert check_status(config, clock=lambda: NOW) == 1
+
+
+# --- telemetry（§16）--------------------------------------------------------------------------
+
+
+def test_serve_flushes_denial_counts_before_exiting(config: GuardConfig) -> None:
+    policy = make_policy()
+    write_atomic(config.policies_dir, policy_file_name(policy.run_id), encode_policy(policy))
+    flows: list[object] = []
+
+    class _Denying(FakeMaster):
+        async def run(self) -> None:
+            [addon] = self.addons.added
+            assert isinstance(addon, GuardAddon)
+            flow = make_flow("/api/admin")
+            flows.append(flow)
+            await addon.requestheaders(flow)
+
+    code = asyncio.run(
+        serve(
+            config,
+            create_master=lambda core: _Denying(core, config),
+            make_response=make_response,
+            routes=lambda: ROUTES,
+            log=GuardLog(guard_logger(f"flush-{uuid4().hex}", io.StringIO())),
+            signals=(),
+            status_interval=60,
+        )
+    )
+
+    assert code == EXIT_OK
+    raw = (config.telemetry_dir / summary_file_name(policy.run_id)).read_bytes()
+    summary = decode_summary(raw, run_id=policy.run_id)
+    assert summary.denied_total == 1
+    assert summary.boot_id == _status(config).boot_id
+
+
+def test_an_unwritable_telemetry_directory_is_not_enforcing(config: GuardConfig) -> None:
+    os.chmod(config.telemetry_dir, 0o500)
+    try:
+        code, [master], _ = _serve(config)
+    finally:
+        os.chmod(config.telemetry_dir, 0o700)
+
+    assert code == EXIT_OK
+    assert master.status_while_running is not None
+    assert master.status_while_running.enforcing is False

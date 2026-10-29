@@ -143,6 +143,16 @@ class AuthProfileRepository:
             token=row.encrypted_secret,
         )
 
+    def preflight(self, profile_id: UUID, *, version: int) -> Preflight | None:
+        """這一版的 preflight 定義（版本不可變，不必上鎖）；不存在回 None。"""
+        model = self._session.scalar(
+            select(AuthProfileVersionModel).where(
+                AuthProfileVersionModel.profile_id == profile_id,
+                AuthProfileVersionModel.version == version,
+            )
+        )
+        return None if model is None else _version(model).definition.preflight
+
     def get(self, profile_id: UUID) -> AuthProfile | None:
         row = self._session.execute(
             _with_project().where(AuthProfileModel.id == profile_id)

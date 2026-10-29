@@ -4,6 +4,8 @@
   （secscan.guard.files），寫不出去就是 guard 不可用（GuardUnavailableError）。
 - status 目錄（guard_status volume）：guard 寫、runner 唯讀。新鮮、版本相符、listen 等於 runner
   設定的 proxy、enforcing 為 true，才算可用。
+- telemetry 目錄（guard_telemetry volume，§16.3）：guard 寫、runner 唯讀。runner 讀 summary 得知
+  run 是否用盡預算與實際的轉送數；讀不出來或格式不符時拋 GuardUnavailableError。
 """
 
 import os
@@ -22,6 +24,13 @@ from secscan.guard.domain.status import (
     StatusIssue,
     decode_status,
     status_issue,
+)
+from secscan.guard.domain.telemetry import (
+    MAX_SUMMARY_BYTES,
+    RunSummary,
+    TelemetryError,
+    decode_summary,
+    summary_file_name,
 )
 from secscan.guard.files import TEMP_PREFIX, AtomicWriteError, remove_file, write_atomic
 
@@ -50,17 +59,19 @@ class GuardChannel:
         policies_dir: Path,
         status_dir: Path,
         *,
+        telemetry_dir: Path,
         listen: str,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._policies = policies_dir
         self._status = status_dir
+        self._telemetry = telemetry_dir
         self._listen = listen
         self._clock = clock
 
     def health(self) -> GuardHealth:
         try:
-            raw = _read_small(self._status / STATUS_FILE_NAME)
+            raw = _read_small(self._status / STATUS_FILE_NAME, MAX_STATUS_BYTES)
         except FileNotFoundError:
             return GuardHealth(boot_id=None, issue=StatusIssue.MISSING)
         except OSError:
@@ -71,6 +82,21 @@ class GuardChannel:
             return GuardHealth(boot_id=None, issue=StatusIssue.INVALID)
         issue = status_issue(status, now=self._clock(), listen=self._listen)
         return GuardHealth(boot_id=status.boot_id, issue=issue)
+
+    def summary(self, run_id: UUID) -> RunSummary | None:
+        """guard 為這個 run 寫的 summary；guard 還沒轉送或拒絕過任何請求時不存在（None）。"""
+        try:
+            raw = _read_small(self._telemetry / summary_file_name(run_id), MAX_SUMMARY_BYTES)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise GuardUnavailableError(
+                f"讀不到 run 的 telemetry（{type(exc).__name__}）"
+            ) from None
+        try:
+            return decode_summary(raw, run_id=run_id)
+        except TelemetryError as exc:
+            raise GuardUnavailableError(f"run 的 telemetry 格式不符（{exc}）") from None
 
     def writable(self) -> bool:
         """policy 目錄能建立與刪除檔案（權限錯了要在認領之前發現）。"""
@@ -106,11 +132,12 @@ class GuardChannel:
         return removed
 
 
-def _read_small(path: Path) -> bytes:
+def _read_small(path: Path, limit: int) -> bytes:
+    """讀一個不跟隨 symlink 的一般檔案，最多 limit + 1 bytes（超過的由解析拒絕）。"""
     descriptor = os.open(path, _READ)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError("status 不是一般檔案")
-        return os.read(descriptor, MAX_STATUS_BYTES + 1)
+            raise OSError("不是一般檔案")
+        return os.read(descriptor, limit + 1)
     finally:
         os.close(descriptor)

@@ -99,6 +99,8 @@ class RunEgress:
                 excluded_paths=grant.excluded_paths,
                 methods=grant.methods,
             ),
+            budget=egress.budget,
+            auth_header=egress.auth_header,
         )
         return cls(channel, policy, ProxyCredentials(lease.run_id, token), endpoint)
 
@@ -108,6 +110,11 @@ class RunEgress:
     @property
     def policy(self) -> Policy:
         return self._policy
+
+    @property
+    def activated(self) -> bool:
+        """policy 可能已經生效（寫入過，即使寫入時出錯）。"""
+        return self._written
 
     @property
     def proxy_url(self) -> str:

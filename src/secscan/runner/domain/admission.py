@@ -29,7 +29,9 @@ OUT_DIR = "/scan/out"
 SECRET_DIR = "/scan/secret"  # noqa: S105
 SECRET_FILE = "target-auth"  # noqa: S105
 PROXY_FILE = "proxy-url"
-SECRET_FILES = frozenset({SECRET_FILE, PROXY_FILE})
+# 送出 secret 的那一行 header（preflight 用；docs/DECISIONS.md §16.5）。
+AUTH_HEADER_FILE = "auth-header"
+SECRET_FILES = frozenset({SECRET_FILE, PROXY_FILE, AUTH_HEADER_FILE})
 # 容器的 log 由 Docker 保存：限制大小，工具大量輸出也不會塞滿磁碟。
 LOG_CONFIG: JsonObject = {"Type": "json-file", "Config": {"max-size": "1m", "max-file": "1"}}
 NOFILE_LIMIT = 1024

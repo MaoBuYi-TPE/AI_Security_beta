@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import Engine
@@ -75,7 +75,12 @@ class SpyRuntime(FakeContainerRuntime):
 
 class SpyChannel(GuardChannel):
     def __init__(self, double: GuardDouble, log: list[str]) -> None:
-        super().__init__(double.policies, double.status_dir, listen=ENDPOINT.listen)
+        super().__init__(
+            double.policies,
+            double.status_dir,
+            telemetry_dir=double.telemetry,
+            listen=ENDPOINT.listen,
+        )
         self.log = log
         self.fail_states: set[PolicyState] = set()
         self.fail_renewal = False
@@ -580,3 +585,172 @@ def test_docker_lost_after_the_guard_was_blocked_keeps_it_blocked(
     policy = guard.policy(UUID(name.removesuffix(".json")))
     assert policy is not None
     assert policy.state is PolicyState.BLOCKED
+
+
+# --- 共享預算與用量（docs/DECISIONS.md §16.4）-----------------------------------------------
+
+
+def _usage(seed: Seeder, run_id: UUID) -> tuple[Any, ...]:
+    [row] = seed.query(
+        "SELECT requests_allotted, requests_sent, requests_denied, traffic_seconds "
+        "FROM scanner_runs WHERE id = :id",
+        id=run_id,
+    )
+    return tuple(row)
+
+
+def test_an_exhausted_budget_blocks_then_stops_the_container(
+    make_runner: Callable[..., ContainerRunner],
+    channel: SpyChannel,
+    guard: GuardDouble,
+    log: list[str],
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    scan = queue_seed.scan(world.operator_a, scannable)
+    allotted = scan.budget.max_requests
+
+    def exhaust() -> None:
+        policy = channel.written[0]
+        guard.write_summary(policy.run_id, policy.scan_id, forwarded=allotted, exhausted=True)
+
+    clock.at(2, exhaust)
+    report = _report(make_runner(script=FakeScript(hold_seconds=300)))
+
+    assert report.run_status is R.TIMED_OUT
+    assert _error(queue_seed, report.run_id) == RunErrorCode.BUDGET_EXHAUSTED
+    stopping = _without_renewals(log)
+    assert stopping[stopping.index("stop") - 1] == "policy:blocked"
+    sent, traffic = _usage(queue_seed, report.run_id)[1], _usage(queue_seed, report.run_id)[3]
+    assert sent == allotted
+    assert 5 <= traffic < 30  # 下一次心跳（5 秒）就停止，不等到 300 秒
+
+
+def test_usage_is_written_back_from_the_guard_summary(
+    make_runner: Callable[..., ContainerRunner],
+    channel: SpyChannel,
+    guard: GuardDouble,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    scan = queue_seed.scan(world.operator_a, scannable)
+
+    def record() -> None:
+        policy = channel.written[0]
+        guard.write_summary(policy.run_id, policy.scan_id, forwarded=3, denied={"PATH_EXCLUDED": 2})
+
+    clock.at(4, record)
+    report = _report(make_runner())
+
+    assert report.run_status is R.COLLECTED
+    allotted, sent, denied, traffic = _usage(queue_seed, report.run_id)
+    assert (allotted, sent, denied) == (scan.budget.max_requests, 3, 2)
+    assert 12 <= traffic <= 20  # 腳本執行 12 秒
+
+
+def test_a_run_without_a_summary_sent_nothing(
+    make_runner: Callable[..., ContainerRunner],
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """guard 每轉送一個請求都先寫 summary：同一個 guard（boot_id 相同）沒有 summary 就是 0。"""
+    queue_seed.scan(world.operator_a, scannable)
+
+    report = _report(make_runner())
+
+    assert _usage(queue_seed, report.run_id)[1:3] == (0, 0)
+
+
+@pytest.mark.parametrize("change", ["restart", "corrupt"])
+def test_unknown_usage_is_left_for_the_conservative_count(
+    make_runner: Callable[..., ContainerRunner],
+    channel: SpyChannel,
+    guard: GuardDouble,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    change: str,
+) -> None:
+    """guard 重啟過（telemetry 可能不完整）或 summary 讀不出來：轉送數留空，之後的 run 以分到的
+    數量扣除（不以 0 冒充）。"""
+    queue_seed.scan(world.operator_a, scannable)
+
+    def corrupt() -> None:
+        policy = channel.written[0]
+        (guard.telemetry / f"{policy.run_id}.summary.json").write_bytes(b"{")
+
+    clock.at(6, guard.restart if change == "restart" else corrupt)
+    report = _report(make_runner())
+
+    assert _usage(queue_seed, report.run_id)[1:3] == (None, None)
+
+
+def test_runs_that_never_started_used_nothing(
+    make_runner: Callable[..., ContainerRunner],
+    guard: GuardDouble,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    guard.stop()
+
+    report = _report(make_runner())
+
+    assert report.run_status is R.FAILED
+    assert _usage(queue_seed, report.run_id)[1:] == (0, 0, 0)
+
+
+def test_usage_of_a_container_that_may_still_run_is_unknown(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: SpyRuntime,
+    channel: SpyChannel,
+    guard: GuardDouble,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """刪不掉容器：它之後可能還在送（審查發現），當下的 summary 不是最終值，留空。"""
+    queue_seed.scan(world.operator_a, scannable)
+
+    def record_then_lose_docker() -> None:
+        policy = channel.written[0]
+        guard.write_summary(policy.run_id, policy.scan_id, forwarded=1)
+        runtime.failing.update({"state", "remove"})
+
+    clock.at(2, record_then_lose_docker)
+
+    with pytest.raises(RuntimeUnavailableError):
+        make_runner().run_once(FAKE)
+
+    run_id = channel.written[0].run_id
+    assert _usage(queue_seed, run_id)[1:3] == (None, None)
+
+
+def test_a_summary_from_another_guard_boot_is_not_trusted(
+    make_runner: Callable[..., ContainerRunner],
+    channel: SpyChannel,
+    guard: GuardDouble,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """guard 在 run 中重啟、telemetry 沒有保留：新的 guard 從 0 開始計（審查發現），留空。"""
+    queue_seed.scan(world.operator_a, scannable)
+
+    def other_boot() -> None:
+        policy = channel.written[0]
+        guard.write_summary(policy.run_id, policy.scan_id, forwarded=1, boot_id=uuid4())
+
+    clock.at(4, other_boot)
+    report = _report(make_runner())
+
+    assert _usage(queue_seed, report.run_id)[1:3] == (None, None)

@@ -44,6 +44,7 @@ class RunnerSettings(BaseSettings):
     guard_proxy: str = "10.89.8.254:8080"
     guard_policies_dir: Path = Path("/guard/policies")
     guard_status_dir: Path = Path("/guard/status")
+    guard_telemetry_dir: Path = Path("/guard/telemetry")
 
     @field_validator("guard_proxy")
     @classmethod
@@ -63,7 +64,10 @@ class RunnerSettings(BaseSettings):
 
     def guard_channel(self) -> GuardChannel:
         return GuardChannel(
-            self.guard_policies_dir, self.guard_status_dir, listen=self.guard_endpoint().listen
+            self.guard_policies_dir,
+            self.guard_status_dir,
+            telemetry_dir=self.guard_telemetry_dir,
+            listen=self.guard_endpoint().listen,
         )
 
     def fake_script(self) -> FakeScript:

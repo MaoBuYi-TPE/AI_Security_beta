@@ -2,7 +2,8 @@
 
 單元測試以 Protocol 的假物件模擬 flow；這裡以 mitmproxy 12.2.3 自己的 Request、HTTPFlow、Client、
 Server 與 tflow 驅動同一個 addon，確認 addon 用到的屬性與行為（headers.fields、data.method、
-設定 host 之後的 Host、Response.make、server.error、flow.kill）和假物件一致。
+設定 host 之後的 Host、Response.make、server.error、flow.kill）和假物件一致；telemetry 的那一行
+（metadata、status_code）也以真的物件產生（§16）。
 輸出一行 JSON：{檢查的名稱: true/false}。
 """
 
@@ -27,6 +28,7 @@ from mitmproxy.test import tflow  # type: ignore[import-not-found]
 
 from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard.addon import APPROVAL_KEY, GuardAddon
+from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.credentials import new_token, token_digest
 from secscan.guard.domain.policy import (
     Policy,
@@ -34,9 +36,16 @@ from secscan.guard.domain.policy import (
     encode_policy,
     policy_file_name,
 )
+from secscan.guard.domain.telemetry import (
+    ForwardedRequest,
+    UpstreamResponse,
+    decode_line,
+    telemetry_file_name,
+)
 from secscan.guard.events import GuardLog, guard_logger
 from secscan.guard.files import write_atomic
 from secscan.guard.store import PolicyStore
+from secscan.guard.telemetry import TelemetryRecorder
 from secscan.targets.domain import LabNetwork, parse_ipv4, parse_origin
 
 TARGET_IP = "10.89.10.200"
@@ -47,7 +56,7 @@ async def _resolve(_: str) -> tuple[str, ...]:
     return (TARGET_IP,)
 
 
-def _addon(directory: Path) -> GuardAddon:
+def _addon(directory: Path, telemetry: Path) -> GuardAddon:
     return GuardAddon(
         store=PolicyStore(directory),
         resolve=_resolve,
@@ -55,6 +64,7 @@ def _addon(directory: Path) -> GuardAddon:
         scan_network=IPv4Network("10.89.9.0/24"),
         guard_ips=frozenset({IPv4Address("10.89.9.254"), IPv4Address("10.89.10.254")}),
         make_response=http.Response.make,
+        recorder=TelemetryRecorder(telemetry, boot_id=uuid.uuid4()),
         log=GuardLog(guard_logger("contract", open("/dev/null", "w"))),
     )
 
@@ -69,6 +79,7 @@ def _flow(run_id: uuid.UUID, token: str, *, url: str, method: str = "GET") -> An
             "Host": host,
             "Proxy-Authorization": f"Basic {credentials}",
             "Proxy-Connection": "x",
+            "authorization": "Bearer x",
         },
     )
     request.authority = ""  # regular mode 的 HTTP/1：hook 之前就改成 origin-form（§15 實測 5）
@@ -95,9 +106,12 @@ def main() -> None:
             excluded_paths=("/api/admin",),
             methods=(HttpMethod.GET,),
         ),
+        budget=RunBudget(requests_per_second=2, burst=1, max_requests=100),
+        auth_header="authorization",
     )
     write_atomic(directory, policy_file_name(run_id), encode_policy(policy))
-    addon = _addon(directory)
+    telemetry = Path(tempfile.mkdtemp())
+    addon = _addon(directory, telemetry)
     checks: dict[str, bool] = {}
 
     allowed = _flow(run_id, token, url="http://lab-target:8080/api/items/7")
@@ -144,6 +158,17 @@ def main() -> None:
     addon.response(excluded)
     checks["guard_denials_keep_the_reason"] = (
         excluded.response.headers.get("X-Secscan-Guard") == "PATH_EXCLUDED"
+    )
+    raw = (telemetry / telemetry_file_name(run_id)).read_bytes()
+    records = [decode_line(line) for line in raw.splitlines(keepends=True)]
+    checks["telemetry_records_the_forwarded_request"] = (
+        len(records) == 2
+        and isinstance(records[0], ForwardedRequest)
+        and (records[0].method, records[0].path, records[0].authenticated)
+        == ("GET", "/api/items/7", True)
+    )
+    checks["telemetry_records_the_upstream_status"] = (
+        isinstance(records[-1], UpstreamResponse) and records[-1].status == 200
     )
 
     tcp = tflow.ttcpflow()

@@ -11,6 +11,7 @@ from secscan.grants.models import ScopeGrantModel
 from secscan.projects.models import ProjectModel
 from secscan.scanners.models import RunnerInstanceModel
 from secscan.scans.models import (
+    RunCoverageModel,
     ScanEventModel,
     ScanModel,
     ScannerRunModel,
@@ -33,6 +34,7 @@ MODELS = (
     ScannerRunModel,
     ScanEventModel,
     ScanOperationModel,
+    RunCoverageModel,
     RunnerInstanceModel,
 )
 target_metadata = Base.metadata

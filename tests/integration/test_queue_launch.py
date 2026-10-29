@@ -13,16 +13,27 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import Engine, Row
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.auth_profiles.domain.credentials import SecretValue
 from secscan.auth_profiles.domain.model import AuthProfile, ChangeInput
 from secscan.auth_profiles.service import AuthProfileService
 from secscan.grants.service import ScopeGrantService
+from secscan.guard.domain.budget import RunBudget
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
-from secscan.scans.queue import EgressScope, Launch, Progress, QueueOperations, ScanQueue
+from secscan.scans.domain.request import BudgetRequest
+from secscan.scans.queue import (
+    EgressScope,
+    Launch,
+    LeaseLostError,
+    Progress,
+    QueueOperations,
+    RunUsage,
+    ScanQueue,
+)
 from tests.integration.api_support import DEFAULT_SECRET, LAB, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 from tests.integration.locks import Race, wait_until_waiting_for_a_lock
@@ -32,6 +43,7 @@ pytestmark = pytest.mark.integration
 
 OWNER = "runner-launch-1"
 FAKE = frozenset({ScanEngine.FAKE})
+PREFLIGHT = frozenset({ScanEngine.PREFLIGHT})
 IMAGE = "busybox:1.38.0@sha256:" + "ab" * 32
 RACER = "secscan-launch-racer"
 R = RunStatus
@@ -57,9 +69,17 @@ def scannable(queue_seed: Seeder, world: World) -> Scannable:
     return queue_seed.scannable(world)
 
 
-def _claimed(queue: ScanQueue) -> Lease:
-    lease = queue.claim(OWNER, FAKE)
+def _claimed(queue: ScanQueue, engines: frozenset[ScanEngine] = FAKE) -> Lease:
+    lease = queue.claim(OWNER, engines)
     assert lease is not None
+    return lease
+
+
+def _preflight(queue: ScanQueue, seed: Seeder, world: World, scannable: Scannable) -> Lease:
+    """綁定 auth profile 的 scan：第一個 run 是 preflight（docs/DECISIONS.md §16.5）。"""
+    seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
+    lease = _claimed(queue, PREFLIGHT)
+    assert lease.engine is ScanEngine.PREFLIGHT
     return lease
 
 
@@ -82,13 +102,12 @@ def _expire(seed: Seeder, run_id: UUID) -> None:
 def test_launch_records_the_container_and_returns_the_sealed_secret(
     queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
-    scan = queue_seed.scan(world.operator_a, scannable)
-    lease = _claimed(queue)
+    lease = _preflight(queue, queue_seed, world, scannable)
 
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
 
     assert launch.progress == Progress(R.RUNNING, S.RUNNING)
-    assert launch.max_duration_seconds == scan.budget.max_duration_seconds
+    assert launch.preflight == scannable.profile.current.definition.preflight
     assert launch.secret is not None
     assert launch.secret.profile_id == scannable.profile.id
     assert shared_cipher().reveal(launch.secret.token, context=launch.secret.context) == (
@@ -107,8 +126,8 @@ def test_launch_carries_the_grant_scope_for_the_guard(
     queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
     """gate 剛以 FOR SHARE 確認過的 grant：guard 的 policy 以它產生（docs/DECISIONS.md §15.7）。"""
-    queue_seed.scan(world.operator_a, scannable)
-    lease = _claimed(queue)
+    lease = _preflight(queue, queue_seed, world, scannable)
+    [scan] = queue_seed.query("SELECT requests_per_second, max_requests FROM scans")
 
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
 
@@ -116,7 +135,23 @@ def test_launch_carries_the_grant_scope_for_the_guard(
         origin=scannable.target.origin,
         scope=scannable.grant.scope,
         valid_until=scannable.grant.window.valid_until,
+        budget=RunBudget(
+            requests_per_second=scan.requests_per_second, burst=1, max_requests=scan.max_requests
+        ),
+        auth_header="authorization",  # 預設的 profile 是 bearer
     )
+
+
+def test_anonymous_scans_tell_the_guard_there_is_no_auth_header(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable, auth_profile_id=None)
+    lease = _claimed(queue)
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.egress is not None
+    assert launch.egress.auth_header is None
 
 
 def test_an_anonymous_scan_has_no_secret(
@@ -179,14 +214,14 @@ def _patch(world: World, profile: AuthProfile) -> Callable[[Session], AuthProfil
 def test_a_superseded_version_gets_no_secret(
     queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
-    queue_seed.scan(world.operator_a, scannable)
-    lease = _claimed(queue)
+    lease = _preflight(queue, queue_seed, world, scannable)
     with Session(queue_engine, expire_on_commit=False) as session, session.begin():
         _patch(world, scannable.profile)(session)
 
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
 
-    assert launch.progress == Progress(R.FAILED, S.FAILED)
+    # 之後的 fake run 還在排隊（它自己的 prepare 也會因同樣的原因失敗）。
+    assert launch.progress == Progress(R.FAILED, S.RUNNING)
     assert launch.secret is None
     assert launch.egress is None
     assert _run(queue_seed, lease.run_id).error_code == RunErrorCode.AUTH_PROFILE_SUPERSEDED
@@ -201,8 +236,7 @@ def test_a_patch_waits_until_the_secret_is_read(
     queue: ScanQueue,
 ) -> None:
     """prepare_launch 以 FOR SHARE 讀密文：PATCH 的清除等它 commit，讀到的一定是還沒清除的密文。"""
-    queue_seed.scan(world.operator_a, scannable)
-    lease = _claimed(queue)
+    lease = _preflight(queue, queue_seed, world, scannable)
     race = Race(queue_database, RACER, _patch(world, scannable.profile))
     with Session(queue_engine, expire_on_commit=False) as holder, holder.begin():
         launch = QueueOperations(holder, lab=LAB).prepare_launch(lease, clock=_now, image_ref=IMAGE)
@@ -260,3 +294,170 @@ def test_the_worker_reconciles_only_parsing(
     assert queue.reconcile_expired_parsing(FAKE) == 1
     assert _run(queue_seed, parsing.run_id).status == "collected"
     assert _run(queue_seed, running.run_id).status == "running"
+
+
+# --- 共享預算（docs/DECISIONS.md §16.4）------------------------------------------------------
+
+
+def _usage(seed: Seeder, run_id: UUID) -> Row[Any]:
+    [row] = seed.query(
+        "SELECT requests_allotted, requests_sent, requests_denied, traffic_seconds "
+        "FROM scanner_runs WHERE id = :id",
+        id=run_id,
+    )
+    return row
+
+
+def test_a_container_run_is_allotted_the_remaining_budget(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    scan = queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.max_duration_seconds == scan.budget.max_duration_seconds
+    assert launch.egress is not None
+    assert launch.egress.budget.max_requests == scan.budget.max_requests
+    assert _usage(queue_seed, lease.run_id).requests_allotted == scan.budget.max_requests
+
+
+def test_in_process_runs_send_nothing_and_are_allotted_nothing(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+
+    queue.prepare(lease)
+
+    assert _usage(queue_seed, lease.run_id).requests_allotted is None
+
+
+def test_usage_is_recorded_before_the_run_ends(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+
+    queue.record_usage(lease, RunUsage(requests_sent=7, requests_denied=2, traffic_seconds=31))
+    queue.advance(lease, R.TIMED_OUT, error_code=RunErrorCode.BUDGET_EXHAUSTED)
+
+    row = _usage(queue_seed, lease.run_id)
+    assert (row.requests_sent, row.requests_denied, row.traffic_seconds) == (7, 2, 31)
+
+
+def test_unknown_usage_is_left_empty(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+
+    queue.record_usage(lease, RunUsage(requests_sent=None, requests_denied=None, traffic_seconds=4))
+
+    row = _usage(queue_seed, lease.run_id)
+    assert (row.requests_sent, row.requests_denied, row.traffic_seconds) == (None, None, 4)
+
+
+def test_usage_needs_the_lease(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+    _expire(queue_seed, lease.run_id)
+
+    with pytest.raises(LeaseLostError):
+        queue.record_usage(lease, RunUsage(requests_sent=1, requests_denied=0, traffic_seconds=1))
+
+
+def test_the_database_refuses_usage_beyond_the_allotment(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    scan = queue_seed.scan(world.operator_a, scannable)
+    lease = _claimed(queue)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+    too_many = scan.budget.max_requests + 1
+
+    with pytest.raises(IntegrityError, match="sent_within_allotment"):
+        queue.record_usage(
+            lease, RunUsage(requests_sent=too_many, requests_denied=0, traffic_seconds=1)
+        )
+
+
+def _after_preflight(
+    queue: ScanQueue,
+    seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    *,
+    sent: int | None,
+    seconds: int = 30,
+    **budget: int,
+) -> Lease:
+    """preflight 用掉 sent 個請求、seconds 秒之後結束；回傳 fake 的 run（第二個）。"""
+    seed.scan(
+        world.operator_a,
+        scannable,
+        auth_profile_id=scannable.profile.id,
+        budget=BudgetRequest(**budget),
+    )
+    preflight = _claimed(queue, PREFLIGHT)
+    queue.prepare_launch(preflight, image_ref=IMAGE)
+    queue.record_usage(
+        preflight, RunUsage(requests_sent=sent, requests_denied=0, traffic_seconds=seconds)
+    )
+    queue.advance(preflight, R.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
+    return _claimed(queue)
+
+
+def test_later_runs_get_what_earlier_runs_left(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    """scan 共用的預算（SEC-13）：preflight 轉送的請求與流量的時間從之後的 run 扣除。"""
+    lease = _after_preflight(
+        queue, queue_seed, world, scannable, sent=2, max_requests=10, max_duration_seconds=100
+    )
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.egress is not None
+    assert launch.egress.budget.max_requests == 8
+    assert launch.max_duration_seconds == 70
+    assert _usage(queue_seed, lease.run_id).requests_allotted == 8
+
+
+def test_unknown_usage_is_deducted_in_full(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    """轉送數不明（guard 重啟、telemetry 遺失）：以 preflight 分到的整份扣除（保守）。"""
+    lease = _after_preflight(
+        queue, queue_seed, world, scannable, sent=None, max_requests=10, max_duration_seconds=100
+    )
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.progress == Progress(R.FAILED, S.FAILED)
+    assert _run(queue_seed, lease.run_id).error_code == RunErrorCode.BUDGET_EXHAUSTED
+    assert launch.egress is None
+
+
+def test_no_time_left_starts_nothing(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    lease = _after_preflight(
+        queue,
+        queue_seed,
+        world,
+        scannable,
+        sent=1,
+        seconds=100,
+        max_requests=10,
+        max_duration_seconds=100,
+    )
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.progress.run_status is R.FAILED
+    assert _run(queue_seed, lease.run_id).error_code == RunErrorCode.BUDGET_EXHAUSTED

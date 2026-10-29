@@ -126,7 +126,11 @@ T11 已涵蓋（`tests/unit/guard/`，guard 的程式 branch coverage 100%）：
 - **store、status、路由與啟動**：symlink、FIFO、目錄、超過大小、讀不到；只在檔案改變時重讀、損毀也快取、快取有上限；status 的新鮮度、版本、listen 與 enforcing；`/proc/net/route` 的預設路由、多一個網路、經 gateway；options 逐一核對（eager、upstream_cert、rawtcp、非空的 ignore_hosts、聽 0.0.0.0、streaming…）；路由或 options 不安全時不加入 addon、以非 0 結束；guard 載入的模組正好等於映像 COPY 的清單（`python -I -W error`）。
 - **runner 的 guard 通道**：policy 以 0400 原子寫入、寫不出去就是 guard 不可用；封鎖與續約可以重複、封鎖之後不再續約、還沒寫入就封鎖不產生檔案；`not_after` 受 grant 的期限限制；proxy-url 帶著新的 token；sweep 只刪 policy 與暫存檔。
 
-policy budget 留給 T12。
+T12 已涵蓋（guard 的程式 line 與 branch coverage 100%；`DECISIONS.md` §16）：
+- **預算與速率（SEC-13 的應用層）**：policy schema 2 的嚴格解析（速率、burst、剩下的請求數、認證 header 的名稱）；GCRA 的間隔、burst、等待的上限（超過不保留位置）、閒置不累積、依 scan 分開、過期的 key 清除；名額先保留、轉送才確定，拒絕、DNS 失敗、`request` hook 的重查、trailer、`error` hook 與取消（`CancelledError`）都釋放；用盡時不解析 DNS；等待之後重查 run（等待中被封鎖就拒絕）。
+- **telemetry**：summary 與每一行的嚴格解析；轉送時先寫 summary 再附加一行，寫不出來就拒絕這個請求、名額回到轉送之前；拒絕只計 token 驗證過的 run，定期寫入；guard 重啟時由 summary 接續計數與序號，summary 損毀或屬於別的 scan 時 fail closed；過期的檔案與閒置的計數清除；path 不含 query，telemetry 中沒有 header 的值；telemetry 目錄不可寫時 status 不是 enforcing、結束時再寫一次。
+- **preflight（§12.5）**：JSON Pointer 的嚴格比對（型別、陣列索引的前導 0 與 `-`、跳脫、指不到不等於 null）；原始 HTTP 回應的解析（chunked、header 的折行、缺少結尾、超過 64 KiB；長串空白加非法字元在 50 毫秒內拒絕，審查發現的 ReDoS）；`passed`、`failed`（含登入頁的 HTML）、`inconclusive`（含匿名的對照沒有有效回應）、`blocked`、`not_executed` 的判斷；plan 只接受 `http://<origin><path>`（沒有 query、帳密、換行）；runner 以 sha256 核准 script，改一個字就被拒絕；`header_line` 拒絕換行與 NUL。
+- **coverage 與用量**：請求對應到最具體的 operation（佔位符、結尾的斜線、method）；沒有回應的不算、認證被拒絕（401、403）的不算 authenticated；preflight 的請求不算；`budget_usage` 遇到不明的數字就是 null；`coverage_measured` 要所有 run 都結束、每個容器 run 都已對應；`authenticated_operations` 要 preflight 是 `passed`；guard 保留中的名額有上限。
 
 ### 4.2 Contract / Parser
 
@@ -223,7 +227,15 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method` 與 path 中的 `%`（`DECISIONS.md` §15.10 的取捨，T14 量測）。
 - **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約；grant 撤銷時停止執行中的 scan 在 T13。
 - **SEC-19（T11 的部分）**：取消時先封鎖 guard、再停止容器（live 以時間線證明）；孤兒容器的回收在 T13。
-- **SEC-15**：T11 的 guard 只放行 scan 的 target origin，任何帶著認證的請求都送不到其他 origin；跨 origin 的認證 header 規則（多個 origin）在 T12，工具實際送出的認證在 M3。
+- **SEC-15**：T11 的 guard 只放行 scan 的 target origin，任何帶著認證的請求都送不到其他 origin。T12 以 live 證明（§4.4）：帶著 `Authorization` 的請求只到達 target，另一個 origin 的接收端沒有任何連線；preflight 的帶認證請求只送到 target。使用者決定維持只放行 target origin，跨 origin 的認證 header 規則（多個 origin）延後；工具實際送出的認證在 M3。
+- **SEC-13（T12）**：guard 強制 scan 共用的請求數與速率，preflight 也計入；以 live 的接收端與 guard 的 telemetry 證明（§4.4）。實作以 scan 為單位（P0 同一個 target 同時只有一個 scan，和「target 合計」等價；多個 runner 時要改 key，`DECISIONS.md` §16.8）。延遲 body 只能累積 11 個已核准的請求。仍未涵蓋：多個真的引擎依序共用預算（M3、M4；目前以 preflight 加上不送流量的 fake 證明分配與扣除的規則）、依量測調整 lab profile 的預算（M3）。
+
+T12 已涵蓋（真的 DB 佇列）：
+- 預算：容器版的 run 分到剩下的請求數並記下；之後的 run 扣除之前的 run 實際轉送的數量與流量的秒數，轉送數不明時整份扣除；剩 0 不建立容器（`BUDGET_EXHAUSTED`）；用量超過分到的數量被 DB 的 CHECK 拒絕；寫回用量要持有 lease。
+- runner：guard 的 summary 說用盡 → 封鎖 → 停止 → `timed_out`（`BUDGET_EXHAUSTED`），不等到牆鐘上限；結束前寫回 guard 的計數；沒有 summary 而且同一個 guard 是 0；guard 重啟、summary 損毀或屬於另一個 boot、容器沒確認刪除時留空；沒有啟動容器、plan 被拒絕時是 0。
+- preflight：有 auth profile 的 scan 第一個 run 是 preflight；`prepare_launch` 帶回綁定版本的定義；容器拿到 0400 的 `auth-header`（`Authorization: Bearer …`），結束後刪除；profile 被取代時 preflight 與之後的 run 都在 prepare 失敗。
+- worker：依 runner 收集的輸出判斷五種結果；沒有讀取器（in-process）是 `not_executed`；只有 preflight 的 run 能寫結果；coverage 的對應、preflight 不算、沒有轉送、轉送數不明、telemetry 缺少或比轉送數多；寫入 coverage 之後中斷能在重試時完成；lease 失效的 run 跳過、不讓 worker 結束。
+- API：`budget_usage`、`auth.preflight`（in-process 跑完是 `not_executed`）、coverage 的新欄位與 limitations。
 
 ### 4.4 Live E2E
 
@@ -243,6 +255,11 @@ T11 已涵蓋（`tests/live/test_guard_live.py`；live 自己的 lab 網路 10.8
 - 在 guard 的映像中，以 mitmproxy 12.2.3 的真物件驅動 addon，確認單元測試的假物件和真物件一致（16 項，含刪除小寫的 `x-secscan-guard`）。
 - 尚未涵蓋：同一條 keep-alive 連線上交錯的放行與拒絕、pipelining 與 header 值中夾帶的請求（接收端與探針每個請求一條新連線）；目前只有單元測試，記為證據缺口（`DECISIONS.md` §15.10）。
 - fake scan：執行中有這個 run 的 policy、容器內有 0400 的 proxy-url，結束之後都刪除。
+
+T12 已涵蓋（`tests/live/test_budget_live.py`、`test_runner_live.py`；live 的 lab 網路上自己的接收端）：
+- SEC-13：上限 3、送 5 個允許的請求：前 3 個到達 target，之後是 `BUDGET_EXHAUSTED`、接收端沒有收到；summary 記下轉送 3、用盡、拒絕 2；三個轉送的請求相隔至少 0.5 秒（2 req/s）；jsonl 有 3 個請求與 3 個回應，沒有 Authorization 的值。
+- SEC-15：帶著 `Authorization` 的請求只到達 target 的 origin；另一個 origin 的接收端沒有任何連線。
+- preflight 的端到端：綁定 auth profile 的 scan 經 API、runner、busybox 容器、guard 送出帶認證與匿名的 `GET /me`，target 收到兩個請求（只有第一個帶 `Authorization`、Host 是 canonical、沒有 `Proxy-*`、來源是 guard），結果 `passed`，`budget_usage` 是 2，coverage 有量測依據；canary secret 不在接收端的紀錄中。實作時以這個測試發現 busybox nc 半關閉連線的問題（`DECISIONS.md` §16 的依據）。
 
 T10 已涵蓋（`make test-live-runner`，`tests/live/`；獨立的 compose 專案、自己的 DB，跑完一律拆除；fake 引擎，不連 lab）：api、runner、worker 沒有 docker.sock、不是 privileged；socket-proxy 唯讀掛 socket、只接 docker_net；runner 容器內呼叫不該開放的 API 都是 403／405、沒有產生容器；api、worker 連不到 socket-proxy；`GET /scanners` 顯示 fake 可用；fake scan 的容器非 root、唯讀、無 capability、IPC 與 cgroup namespace 是 private、只有三個 volume subpath（只看得到自己的 in/、out/ 與 secret）、secret 0400、解析不到 proxy／db／api／runner、沒有預設路由，完成後容器與 secret 都刪除；取消後 30 秒內刪除容器；secrets volume 是 tmpfs；canary secret 不在任何容器的 log 與設定中。
 

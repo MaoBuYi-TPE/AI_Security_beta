@@ -146,3 +146,49 @@ def _value_problem(value: object) -> str | None:
 
 def _has_invisible(text: str) -> bool:
     return any(unicodedata.category(character) in _INVISIBLE_CATEGORIES for character in text)
+
+
+class _NotJson:
+    """回應不是 JSON（和 JSON 的 null 區分）。"""
+
+    def __repr__(self) -> str:
+        return "NOT_JSON"
+
+
+NOT_JSON = _NotJson()
+_MISSING = object()
+
+
+def matches(preflight: Preflight, status: int, body: object) -> bool:
+    """§12.5 的比對：狀態碼相同，expected_json 的每一項都嚴格相等（型別也要相同）。
+
+    body 是解析好的 JSON 值；回應不是 JSON 時傳入 NOT_JSON。
+    """
+    if status != preflight.expected_status or body is NOT_JSON:
+        return False
+    return all(
+        _strictly_equal(_resolve(body, parse_pointer(pointer)), expected)
+        for pointer, expected in preflight.expected_json.items()
+    )
+
+
+def _resolve(document: object, tokens: tuple[str, ...]) -> object:
+    """RFC 6901 的解析；指不到時回傳 _MISSING。陣列索引不可有前導 0，`-` 指向不存在的元素。"""
+    current = document
+    for token in tokens:
+        if isinstance(current, dict):
+            if token not in current:
+                return _MISSING
+            current = current[token]
+        elif isinstance(current, list):
+            if re.fullmatch(r"0|[1-9][0-9]*", token) is None or int(token) >= len(current):
+                return _MISSING
+            current = current[int(token)]
+        else:
+            return _MISSING
+    return current
+
+
+def _strictly_equal(actual: object, expected: ExpectedValue) -> bool:
+    """型別也要相同：bool 與 int 不互通，浮點數不等於期望的整數。"""
+    return type(actual) is type(expected) and actual == expected

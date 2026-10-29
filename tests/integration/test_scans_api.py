@@ -39,7 +39,8 @@ def _body(scannable: Scannable, **overrides: object) -> dict[str, object]:
         "target_id": str(scannable.target.id),
         "scope_grant_id": str(scannable.grant.id),
         "api_spec_id": str(scannable.spec.id),
-        "auth_profile_id": str(scannable.profile.id),
+        # 預設是匿名的 scan；綁定 auth profile 時最前面多一個 preflight 的 run（§16.5）。
+        "auth_profile_id": None,
         "profile": "api_active_lab",
         "engines": ["fake"],
     }
@@ -80,7 +81,9 @@ def scannable(seed: Seeder, world: World) -> Scannable:
 def test_creating_a_scan_returns_202_with_the_full_scan(
     api_client: TestClient, world: World, scannable: Scannable
 ) -> None:
-    response = _create(api_client, world.operator_a, scannable)
+    response = _create(
+        api_client, world.operator_a, scannable, auth_profile_id=str(scannable.profile.id)
+    )
 
     assert response.status_code == 202
     body = response.json()
@@ -98,6 +101,7 @@ def test_creating_a_scan_returns_202_with_the_full_scan(
         "profile_id": str(scannable.profile.id),
         "version": 1,
         "role_label": "standard_user",
+        "preflight": None,  # preflight 的 run 還在排隊（§16.5）
     }
     assert scan["auth_role"] == "standard_user"
     assert scan["budget"] == {
@@ -105,10 +109,12 @@ def test_creating_a_scan_returns_202_with_the_full_scan(
         "max_requests": 5_000,
         "max_duration_seconds": 1_500,
     }
-    [run] = scan["engines"]
-    assert {key: run[key] for key in ("engine", "sequence", "status", "error_code")} == {
-        "engine": "fake",
-        "sequence": 1,
+    preflight, run = scan["engines"]
+    assert [(item["engine"], item["sequence"]) for item in (preflight, run)] == [
+        ("preflight", 1),  # 綁定 auth profile（§16.5）
+        ("fake", 2),
+    ]
+    assert {key: run[key] for key in ("status", "error_code")} == {
         "status": "queued",
         "error_code": None,
     }
@@ -116,8 +122,15 @@ def test_creating_a_scan_returns_202_with_the_full_scan(
     assert scan["coverage"] == {
         "eligible_operations": 1,
         "ineligible_operations": 0,
+        "observed_operations": None,
+        "authenticated_operations": None,
         "coverage_measured": False,
-        "limitations": ["TRAFFIC_TELEMETRY_UNAVAILABLE"],
+        "limitations": ["TRAFFIC_TELEMETRY_UNAVAILABLE", "AUTHENTICATION_NOT_VERIFIED"],
+    }
+    assert scan["budget_usage"] == {
+        "requests_sent": 0,
+        "requests_denied": 0,
+        "traffic_duration_seconds": 0,
     }
     assert (scan["fixture"], scan["results_complete"]) == (True, False)
     assert (scan["cancel_requested_at"], scan["finished_at"]) == (None, None)
@@ -156,6 +169,8 @@ def test_a_web_scan_has_no_operation_counts(
     assert scan["coverage"] == {
         "eligible_operations": None,
         "ineligible_operations": None,
+        "observed_operations": None,
+        "authenticated_operations": None,
         "coverage_measured": False,
         "limitations": ["NO_API_SPEC", "TRAFFIC_TELEMETRY_UNAVAILABLE"],
     }
@@ -548,3 +563,29 @@ def test_no_secret_or_key_appears_in_scan_responses(
         canary=f"%{key}%",
     )
     assert stored[0].n == 0
+
+
+def test_an_authenticated_scan_reports_its_preflight(
+    queue_client: TestClient, queue_engine: Engine, queue_seed: Seeder
+) -> None:
+    """in-process 的 runner 不送流量：preflight 是 not_executed，認證沒有被證明（§16.5）。"""
+    world = queue_seed.world()
+    scannable = queue_seed.scannable(world)
+    scan_id = _create(
+        queue_client, world.operator_a, scannable, auth_profile_id=str(scannable.profile.id)
+    ).json()["data"]["id"]
+
+    FakeRunner(_queue(queue_engine), owner="api-test", script=FakeScript()).drain()
+
+    scan = queue_client.get(f"{SCANS}/{scan_id}", headers=world.viewer_a.headers).json()["data"]
+    assert scan["status"] == "completed"
+    assert [(run["engine"], run["status"]) for run in scan["engines"]] == [
+        ("preflight", "succeeded"),
+        ("fake", "succeeded"),
+    ]
+    assert scan["auth"]["preflight"] == "not_executed"
+    assert scan["coverage"]["limitations"] == [
+        "TRAFFIC_TELEMETRY_UNAVAILABLE",
+        "AUTHENTICATION_NOT_VERIFIED",
+    ]
+    assert scan["budget_usage"]["requests_sent"] == 0

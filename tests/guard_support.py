@@ -1,6 +1,7 @@
 """runner 測試用的 guard 通道：真的 policy 與 status 目錄（tmp），status 由測試寫入。
 
-guard 本身不執行；測試以 status 檔模擬 guard 可用、過期、重啟或不再檢查，並讀回 runner 寫的 policy。
+guard 本身不執行；測試以 status 檔模擬 guard 可用、過期、重啟或不再檢查，以 summary 檔模擬 guard
+記下的用量，並讀回 runner 寫的 policy。
 """
 
 import time
@@ -8,8 +9,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from secscan.guard.domain.policy import Policy, decode_policy, policy_file_name
+from secscan.guard.domain.policy import POLICY_SCHEMA, Policy, decode_policy, policy_file_name
 from secscan.guard.domain.status import STATUS_FILE_NAME, GuardStatus, encode_status
+from secscan.guard.domain.telemetry import RunSummary, encode_summary, summary_file_name
 from secscan.guard.files import remove_file, write_atomic
 from secscan.runner.egress import GuardEndpoint
 from secscan.runner.guard import GuardChannel
@@ -22,19 +24,43 @@ ENDPOINT = GuardEndpoint.parse(GUARD_LISTEN)
 class GuardDouble:
     policies: Path
     status_dir: Path
+    telemetry: Path
     boot_id: UUID
 
     @classmethod
     def create(cls, root: Path) -> "GuardDouble":
         policies, status_dir = root / "guard-policies", root / "guard-status"
-        policies.mkdir()
-        status_dir.mkdir()
-        double = cls(policies, status_dir, uuid4())
+        telemetry = root / "guard-telemetry"
+        for directory in (policies, status_dir, telemetry):
+            directory.mkdir()
+        double = cls(policies, status_dir, telemetry, uuid4())
         double.healthy()
         return double
 
     def channel(self) -> GuardChannel:
-        return GuardChannel(self.policies, self.status_dir, listen=GUARD_LISTEN)
+        return GuardChannel(
+            self.policies, self.status_dir, telemetry_dir=self.telemetry, listen=GUARD_LISTEN
+        )
+
+    def write_summary(
+        self,
+        run_id: UUID,
+        scan_id: UUID,
+        *,
+        forwarded: int,
+        denied: dict[str, int] | None = None,
+        exhausted: bool = False,
+        boot_id: UUID | None = None,
+    ) -> None:
+        summary = RunSummary(
+            run_id=run_id,
+            scan_id=scan_id,
+            boot_id=boot_id or self.boot_id,
+            forwarded=forwarded,
+            denied=denied or {},
+            exhausted=exhausted,
+        )
+        write_atomic(self.telemetry, summary_file_name(run_id), encode_summary(summary))
 
     def status(self, **overrides: object) -> GuardStatus:
         now = int(time.time())
@@ -43,7 +69,7 @@ class GuardDouble:
             started_at=now,
             updated_at=now,
             listen=GUARD_LISTEN,
-            policy_schema=1,
+            policy_schema=POLICY_SCHEMA,
             enforcing=True,
         )
         return replace(status, **overrides)  # type: ignore[arg-type]

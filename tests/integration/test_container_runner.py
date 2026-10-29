@@ -16,7 +16,12 @@ from cryptography.fernet import Fernet
 from sqlalchemy import Engine, Row
 from sqlalchemy.orm import Session, sessionmaker
 
-from secscan.runner.domain.admission import PROXY_FILE, SECRET_FILE, ContainerSpec
+from secscan.runner.domain.admission import (
+    AUTH_HEADER_FILE,
+    PROXY_FILE,
+    SECRET_FILE,
+    ContainerSpec,
+)
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy
 from secscan.runner.domain.runtime import RuntimeUnavailableError
 from secscan.runner.service import ContainerRunner
@@ -41,6 +46,7 @@ pytestmark = pytest.mark.integration
 
 OWNER = "runner-container-1"
 FAKE = frozenset({ScanEngine.FAKE})
+PREFLIGHT = frozenset({ScanEngine.PREFLIGHT})
 POLICY = ContainerPolicy(
     scan_network="secscan_scan_net",
     runs_volume="secscan_runs",
@@ -145,10 +151,15 @@ def _mount_targets(spec: ContainerSpec) -> list[object]:
     return [mount["Target"] for mount in mounts if isinstance(mount, dict)]
 
 
-def _report(runner: ContainerRunner) -> RunReport:
-    report = runner.run_once(FAKE)
+def _report(runner: ContainerRunner, engines: frozenset[ScanEngine] = FAKE) -> RunReport:
+    report = runner.run_once(engines)
     assert report is not None
     return report
+
+
+def _authenticated(seed: Seeder, world: World, scannable: Scannable) -> None:
+    """綁定 auth profile：第一個 run 是 preflight，target 的 secret 注入它的容器（§16.5）。"""
+    seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
 
 
 # --- 成功 ----------------------------------------------------------------------------------
@@ -238,17 +249,22 @@ def test_the_secret_exists_only_while_the_container_does(
     scannable: Scannable,
     tmp_path: Path,
 ) -> None:
-    queue_seed.scan(world.operator_a, scannable)
-    seen: list[tuple[str, int]] = []
+    _authenticated(queue_seed, world, scannable)
+    seen: list[tuple[str, str, int]] = []
 
     def look() -> None:
-        [secret] = (tmp_path / "secrets").glob(f"*/{SECRET_FILE}")
-        seen.append((secret.read_text(encoding="utf-8"), stat.S_IMODE(secret.stat().st_mode)))
+        for name in (SECRET_FILE, AUTH_HEADER_FILE):
+            [secret] = (tmp_path / "secrets").glob(f"*/{name}")
+            mode = stat.S_IMODE(secret.stat().st_mode)
+            seen.append((name, secret.read_text(encoding="utf-8"), mode))
 
     clock.at(1, look)
-    report = _report(make_runner())
+    report = _report(make_runner(), PREFLIGHT)
 
-    assert seen == [(DEFAULT_SECRET, 0o400)]
+    assert seen == [
+        (SECRET_FILE, DEFAULT_SECRET, 0o400),
+        (AUTH_HEADER_FILE, f"Authorization: Bearer {DEFAULT_SECRET}", 0o400),
+    ]
     assert list((tmp_path / "secrets").iterdir()) == []
     [spec] = runtime.created
     assert DEFAULT_SECRET not in str(spec.body)
@@ -292,12 +308,13 @@ def test_an_unreadable_secret_fails_before_any_container(
     tmp_path: Path,
     cipher: str,
 ) -> None:
-    queue_seed.scan(world.operator_a, scannable)
+    _authenticated(queue_seed, world, scannable)
     other = SecretCipher.from_setting(Fernet.generate_key().decode())
 
-    report = _report(make_runner(cipher=other if cipher == "other-keys" else None))
+    report = _report(make_runner(cipher=other if cipher == "other-keys" else None), PREFLIGHT)
 
-    assert (report.run_status, report.scan_status) == (R.FAILED, S.FAILED)
+    # 之後的 fake run 還在排隊（它也會因為解不開 secret 而失敗）。
+    assert (report.run_status, report.scan_status) == (R.FAILED, S.RUNNING)
     assert _run(queue_seed, report.run_id).error_code == RunErrorCode.SECRET_UNAVAILABLE
     assert runtime.created == []
     assert list((tmp_path / "secrets").iterdir()) == []
@@ -498,6 +515,12 @@ def test_a_rejected_plan_never_reaches_docker(
     assert _run(queue_seed, report.run_id).error_code == RunErrorCode.PLAN_REJECTED
     assert runtime.created == []
     assert list((tmp_path / "secrets").iterdir()) == []
+    # 沒有流量：之後的 run 不必保守扣掉這個 run 分到的預算（docs/DECISIONS.md §16.4）。
+    [usage] = queue_seed.query(
+        "SELECT requests_sent, traffic_seconds FROM scanner_runs WHERE id = :id",
+        id=report.run_id,
+    )
+    assert tuple(usage) == (0, 0)
 
 
 @pytest.mark.parametrize("operation", ["create", "start"])

@@ -30,6 +30,7 @@ APP_TABLES = {
     "scan_events",
     "scan_operations",
     "runner_instances",
+    "run_coverage",
 }
 TRIGGER_FUNCTIONS = (
     "audit_events_reject_mutation",

@@ -21,6 +21,7 @@ from secscan.grants.domain.scope import (
     HttpMethod,
     Scope,
 )
+from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.policy import (
     MAX_POLICY_BYTES,
     POLICY_SCHEMA,
@@ -67,6 +68,8 @@ def _policy(**overrides: Any) -> Policy:
         "not_after": 1_767_600_000,
         "renew_until": 1_767_598_830,
         "scope": _scope(),
+        "budget": RunBudget(requests_per_second=2, burst=1, max_requests=4_000),
+        "auth_header": "authorization",
     }
     values.update(overrides)
     return Policy(**values)
@@ -99,6 +102,10 @@ def test_encodes_the_documented_flat_structure() -> None:
         "allow_all_paths": False,
         "paths": ["/api/items/{id}"],
         "excluded_paths": ["/api/admin"],
+        "requests_per_second": 2,
+        "burst": 1,
+        "max_requests": 4_000,
+        "auth_header": "authorization",
     }
 
 
@@ -238,7 +245,8 @@ def test_policy_must_have_exactly_one_origin() -> None:
     [
         _document(extra=1),
         {key: value for key, value in _document().items() if key != "paths"},
-        _document(schema=2),
+        _document(schema=1),  # T11 的格式：沒有預算，guard 不能接受
+        _document(schema=3),
         _document(schema=True),
         _document(schema="1"),
         _document(not_after=True),
@@ -271,6 +279,19 @@ def test_policy_must_have_exactly_one_origin() -> None:
         _document(paths=[1]),
         _document(excluded_paths=["/api/items/{id}"]),  # 同時列在允許與排除
         _document(origin="http://10.89.7.30:8080"),  # host 是 IP，卻不在 allowed_ips
+        _document(requests_per_second=3),
+        _document(requests_per_second=True),
+        _document(burst=0),
+        _document(max_requests=-1),
+        _document(max_requests=4_000.0),
+        _document(auth_header="Authorization"),  # 名稱一律小寫
+        _document(auth_header="x api key"),
+        _document(auth_header="x_api_key"),  # 比對時 _ 會換成 -：不收
+        _document(auth_header="-x"),
+        _document(auth_header="x" * 65),
+        _document(auth_header=""),
+        _document(auth_header=1),
+        {key: value for key, value in _document().items() if key != "auth_header"},
     ],
 )
 def test_rejects_anything_the_runner_would_not_write(document: dict[str, Any]) -> None:
@@ -316,3 +337,14 @@ def test_errors_do_not_echo_the_document() -> None:
         decode_policy(_raw(_document(token_sha256=secretish)), run_id=RUN_ID)
 
     assert "SECRET-TOKEN-VALUE" not in str(caught.value)
+
+
+def test_anonymous_scans_have_no_auth_header() -> None:
+    policy = _policy(auth_header=None)
+
+    assert decode_policy(encode_policy(policy), run_id=RUN_ID) == policy
+    assert json.loads(encode_policy(policy))["auth_header"] is None
+
+
+def test_the_schema_is_version_2() -> None:
+    assert POLICY_SCHEMA == 2

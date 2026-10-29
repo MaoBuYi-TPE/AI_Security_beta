@@ -18,6 +18,7 @@ from secscan.guard.config import GUARD_PORT
 from secscan.runner.config import RunnerSettings
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy
 from secscan.targets.domain import LabNetwork
+from secscan.worker.config import WorkerSettings
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE: dict[str, Any] = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
@@ -205,7 +206,8 @@ def test_the_proxy_rejects_host_binds_and_unknown_clients() -> None:
 def test_the_makefile_pulls_exactly_the_approved_images() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     [line] = [line for line in makefile.splitlines() if line.startswith("SCANNER_IMAGES :=")]
-    approved = sorted(image for policy in ENGINE_POLICIES.values() for image in policy.images)
+    # fake 與 preflight 共用同一個 busybox：每個映像只 pull 一次。
+    approved = sorted({image for policy in ENGINE_POLICIES.values() for image in policy.images})
 
     assert sorted(line.split(":=", 1)[1].split()) == approved
 
@@ -304,27 +306,48 @@ def test_the_runner_points_at_the_guard() -> None:
     assert defaults.guard_proxy == runner["RUNNER_GUARD_PROXY"]
     assert str(defaults.guard_policies_dir) in _volumes(SERVICES["runner"])[2]
     assert str(defaults.guard_status_dir) in _volumes(SERVICES["runner"])[3]
+    assert str(defaults.guard_telemetry_dir) in _volumes(SERVICES["runner"])[4]
 
 
 def test_policies_flow_from_the_runner_to_the_guard_and_status_back() -> None:
-    """policy：runner 讀寫、guard 唯讀；status：guard 讀寫、runner 唯讀；其他服務都不掛。"""
+    """policy：runner 讀寫、guard 唯讀；status：guard 讀寫、runner 唯讀；telemetry：guard 讀寫、
+    runner 與 worker 唯讀；其他服務（含掃描容器）都不掛。"""
     mounts = {
         name: [volume for volume in _volumes(service) if volume.startswith("guard_")]
         for name, service in SERVICES.items()
     }
 
-    assert {name for name, found in mounts.items() if found} == {"runner", "guard"}
-    assert mounts["runner"] == ["guard_policies:/guard/policies", "guard_status:/guard/status:ro"]
-    assert mounts["guard"] == ["guard_policies:/guard/policies:ro", "guard_status:/guard/status"]
+    assert {name for name, found in mounts.items() if found} == {"runner", "guard", "worker"}
+    assert mounts["runner"] == [
+        "guard_policies:/guard/policies",
+        "guard_status:/guard/status:ro",
+        "guard_telemetry:/guard/telemetry:ro",
+    ]
+    assert mounts["guard"] == [
+        "guard_policies:/guard/policies:ro",
+        "guard_status:/guard/status",
+        "guard_telemetry:/guard/telemetry",
+    ]
+    assert mounts["worker"] == ["guard_telemetry:/guard/telemetry:ro"]
 
 
-@pytest.mark.parametrize("volume", ["guard_policies", "guard_status"])
+def test_the_guard_writes_telemetry_where_the_runner_reads_it() -> None:
+    guard = {key: _default(value) for key, value in SERVICES["guard"]["environment"].items()}
+
+    assert guard.get("GUARD_TELEMETRY_DIR", "/guard/telemetry") == "/guard/telemetry"
+    assert str(RunnerSettings().guard_telemetry_dir) == "/guard/telemetry"
+
+
+@pytest.mark.parametrize("volume", ["guard_policies", "guard_status", "guard_telemetry"])
 def test_guard_volumes_live_only_in_memory(volume: str) -> None:
     options = COMPOSE["volumes"][volume]["driver_opts"]
 
     assert (options["type"], options["device"]) == ("tmpfs", "tmpfs")
-    parsed = dict(item.split("=", 1) for item in options["o"].split(","))
+    items = options["o"].split(",")
+    parsed = dict(item.split("=", 1) for item in items if "=" in item)
     assert (parsed["uid"], parsed["gid"], parsed["mode"]) == ("10001", "10001", "0700")
+    if volume == "guard_telemetry":  # 只有資料，不需要執行、setuid 或裝置檔（審查建議）
+        assert {"noexec", "nosuid", "nodev"} <= set(items)
 
 
 def test_the_guard_keeps_its_scratch_space_in_memory_and_is_health_checked() -> None:
@@ -394,3 +417,13 @@ def test_guard_logs_are_rotated() -> None:
 
     assert logging["driver"] == "json-file"
     assert logging["options"] == {"max-size": "10m", "max-file": "3"}
+
+
+def test_the_worker_reads_collected_runs_read_only() -> None:
+    """preflight 的回應由 worker 判斷（DECISIONS §16.5）：runs 唯讀，不碰 secret 與 guard。"""
+    worker = SERVICES["worker"]
+
+    assert _volumes(worker) == ["runs:/runs:ro", "guard_telemetry:/guard/telemetry:ro"]
+    assert str(WorkerSettings().runs_dir) == "/runs"
+    assert str(WorkerSettings().telemetry_dir) == "/guard/telemetry"
+    assert worker["networks"] == ["control_net"]

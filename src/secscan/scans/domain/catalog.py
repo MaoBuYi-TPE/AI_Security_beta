@@ -18,13 +18,27 @@ class Engine(StrEnum):
     SCHEMATHESIS = "schemathesis"
     # 不發任何流量的測試引擎：結果一律標為 fixture（docs/DECISIONS.md §13.7）。
     FAKE = "fake"
+    # 認證的 preflight（docs/DECISIONS.md §16.5）：綁定 auth profile 時由平台自動排在最前面，
+    # 不能在請求中指定、不出現在 GET /scanners。
+    PREFLIGHT = "preflight"
 
 
-# 同一個 target 依序執行（CLAUDE.md §4），順序固定，與請求中的順序無關。
-ENGINE_ORDER: tuple[Engine, ...] = (Engine.ZAP, Engine.NUCLEI, Engine.SCHEMATHESIS, Engine.FAKE)
+# 同一個 target 依序執行（CLAUDE.md §4），順序固定，與請求中的順序無關。preflight 一定最先。
+ENGINE_ORDER: tuple[Engine, ...] = (
+    Engine.PREFLIGHT,
+    Engine.ZAP,
+    Engine.NUCLEI,
+    Engine.SCHEMATHESIS,
+    Engine.FAKE,
+)
+# 請求可以指定的引擎（preflight 是內部的）。
+SELECTABLE_ENGINES: tuple[Engine, ...] = tuple(
+    engine for engine in ENGINE_ORDER if engine is not Engine.PREFLIGHT
+)
 AVAILABLE_ENGINES: frozenset[Engine] = frozenset({Engine.FAKE})
 _UNAVAILABLE_REASONS: Mapping[Engine, str] = MappingProxyType(
     {
+        Engine.PREFLIGHT: "preflight 不能指定：綁定 auth profile 時由平台自動加入",
         Engine.ZAP: "zap 的 Adapter 在 M3（T14）整合之後才能使用",
         Engine.NUCLEI: "nuclei 的 Adapter 在 M4（T18）整合之後才能使用",
         Engine.SCHEMATHESIS: "schemathesis 是 P1，M6 整合之後才能使用",
@@ -78,9 +92,12 @@ class PlannedRun:
 
 
 def plan_runs(
-    engines: Sequence[Engine], *, available: Collection[Engine] = AVAILABLE_ENGINES
+    engines: Sequence[Engine],
+    *,
+    authenticated: bool = False,
+    available: Collection[Engine] = AVAILABLE_ENGINES,
 ) -> tuple[PlannedRun, ...]:
-    """每個引擎一個 run，依固定的順序編號（從 1 開始）。
+    """每個引擎一個 run，依固定的順序編號（從 1 開始）；authenticated 時最前面加上 preflight。
 
     先檢查請求本身（至少一個、不重複、fake 單獨使用），再檢查引擎是否已整合。
     """
@@ -94,6 +111,8 @@ def plan_runs(
     for engine in ordered:
         if engine not in available:
             raise UnsupportedEngineError(engine)
+    if authenticated:
+        ordered = [Engine.PREFLIGHT, *ordered]
     return tuple(
         PlannedRun(engine=engine, sequence=index) for index, engine in enumerate(ordered, 1)
     )

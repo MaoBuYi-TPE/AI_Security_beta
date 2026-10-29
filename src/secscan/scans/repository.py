@@ -32,7 +32,14 @@ from secscan.scans.domain.model import (
     ScannerRun,
     VersionRef,
 )
-from secscan.scans.models import ScanEventModel, ScanModel, ScannerRunModel, ScanOperationModel
+from secscan.scans.domain.preflight import PreflightResult
+from secscan.scans.models import (
+    RunCoverageModel,
+    ScanEventModel,
+    ScanModel,
+    ScannerRunModel,
+    ScanOperationModel,
+)
 from secscan.specs.models import ApiSpecModel
 from secscan.targets.domain import parse_origin
 
@@ -250,10 +257,46 @@ class ScanRepository:
             .where(ScanOperationModel.scan_id.in_(scan_ids))
             .group_by(ScanOperationModel.scan_id)
         )
+        observed = self._observed(scan_ids)
         return {
-            scan_id: Coverage(eligible_operations=yes, ineligible_operations=no)
+            scan_id: Coverage(
+                eligible_operations=yes,
+                ineligible_operations=no,
+                observed_operations=observed.get(scan_id, (0, 0))[0],
+                authenticated_operations=observed.get(scan_id, (0, 0))[1],
+            )
             for scan_id, yes, no in rows
         }
+
+    def _observed(self, scan_ids: Sequence[UUID]) -> dict[UUID, tuple[int, int]]:
+        """跨 run 去重：轉送的請求涵蓋的 operation 數，以及其中帶著認證 header 的數量。"""
+        per_operation = (
+            select(
+                RunCoverageModel.scan_id,
+                RunCoverageModel.ordinal,
+                func.bool_or(RunCoverageModel.authenticated).label("authenticated"),
+            )
+            .join(
+                ScanOperationModel,
+                (ScanOperationModel.scan_id == RunCoverageModel.scan_id)
+                & (ScanOperationModel.ordinal == RunCoverageModel.ordinal),
+            )
+            # 只算範圍內的 operation：observed 不會超過分母（審查建議）。
+            .where(
+                RunCoverageModel.scan_id.in_(scan_ids),
+                ScanOperationModel.ineligible_reason.is_(None),
+            )
+            .group_by(RunCoverageModel.scan_id, RunCoverageModel.ordinal)
+            .subquery()
+        )
+        rows = self._session.execute(
+            select(
+                per_operation.c.scan_id,
+                func.count(),
+                func.count().filter(per_operation.c.authenticated),
+            ).group_by(per_operation.c.scan_id)
+        )
+        return {scan_id: (observed, authenticated) for scan_id, observed, authenticated in rows}
 
 
 def _with_versions() -> Select[ScanModel, int, int]:
@@ -334,6 +377,14 @@ def _run(model: ScannerRunModel) -> ScannerRun:
         started_at=model.started_at,
         finished_at=model.finished_at,
         created_at=model.created_at,
+        container=model.container_name is not None,
+        requests_sent=model.requests_sent,
+        requests_denied=model.requests_denied,
+        traffic_seconds=model.traffic_seconds,
+        preflight_result=(
+            PreflightResult(model.preflight_result) if model.preflight_result is not None else None
+        ),
+        coverage_recorded=model.coverage_recorded,
     )
 
 

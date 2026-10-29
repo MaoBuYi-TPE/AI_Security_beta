@@ -14,8 +14,11 @@ from typing import Any
 
 import pytest
 
+from tests.live.guard_support import start_receiver, stop_receiver
 from tests.live.support import (
     BUSYBOX,
+    GUARD_LAB_IP,
+    LAB_IP,
     SCAN_NET,
     SECRETS_VOLUME,
     Api,
@@ -120,12 +123,14 @@ def test_the_scanners_endpoint_sees_the_runner(admin: Api) -> None:
     assert data["worker"]["alive"] is True
 
 
-def _running_container(scan_id: str) -> str:
+def _running_container(scan_id: str, engine: str = "fake") -> str:
+    """綁定 auth profile 的 scan 先跑 preflight（§16.5）：預設等 fake 的容器。"""
+
     def find() -> str | None:
-        names = scan_containers(scan_id)
+        names = scan_containers(scan_id, engine)
         return names[0] if names else None
 
-    return wait_for(find, timeout=30)
+    return wait_for(find, timeout=60)
 
 
 def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) -> None:
@@ -169,6 +174,7 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         "/scan/in:",
         "run.json",
         "/scan/secret:",
+        "auth-header",
         "proxy-url",
         "target-auth",
     ]
@@ -179,7 +185,8 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         name,
         "sh",
         "-c",
-        "stat -c '%a %u' /scan/secret/target-auth /scan/secret/proxy-url; "
+        "stat -c '%a %u' /scan/secret/target-auth /scan/secret/auth-header "
+        "/scan/secret/proxy-url; "
         "test -e /var/run/docker.sock && echo socket || echo no-socket; "
         "for host in socket-proxy db api runner; do "
         "nslookup $host >/dev/null 2>&1 && echo resolved || echo unresolved; done; "
@@ -188,6 +195,8 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         check=False,
     ).split()
     assert checks == [
+        "400",
+        "10001",
         "400",
         "10001",
         "400",
@@ -221,6 +230,36 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
         "/s",
     )
     assert leftover.strip() == ""
+
+
+def test_an_authenticated_scan_runs_the_preflight_through_the_guard(target: Scannable) -> None:
+    """preflight 的執行路徑（§16.5）：帶認證與匿名各一次，經 guard 送到 target；收包證據以接收端的
+    紀錄為準。用量是 guard 的計數；preflight 的請求不算 coverage。"""
+    receiver = start_receiver("preflight", ip=LAB_IP, aliases=(target.host,), port=5000)
+    try:
+        scan_id = target.scan()
+        wait_for(lambda: target.status(scan_id) == "completed", timeout=120)
+        scan = target.operator.data("GET", f"/scans/{scan_id}")
+        records = receiver.records()
+        receiver_logs = docker("logs", receiver.container)
+    finally:
+        stop_receiver(receiver)
+
+    assert scan["auth"]["preflight"] == "passed"
+    assert [(record["method"], record["path"]) for record in records] == [("GET", "/me")] * 2
+    assert ["Authorization" in record["header_names"] for record in records] == [True, False]
+    assert all(record["host"] == [f"{target.host}:5000"] for record in records)
+    assert not any(record["proxy_authorization"] for record in records)
+    assert all(record["peer"] == GUARD_LAB_IP for record in records)
+    assert CANARY not in receiver_logs
+    assert (scan["budget_usage"]["requests_sent"], scan["budget_usage"]["requests_denied"]) == (
+        2,
+        0,
+    )
+    coverage = scan["coverage"]
+    assert coverage["coverage_measured"] is True
+    # preflight 的請求不算 coverage（審查發現）：有量測依據，涵蓋 0 個。
+    assert (coverage["observed_operations"], coverage["authenticated_operations"]) == (0, 0)
 
 
 def test_a_cancel_removes_the_container(target: Scannable) -> None:

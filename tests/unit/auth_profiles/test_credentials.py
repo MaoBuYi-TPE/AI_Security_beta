@@ -16,6 +16,7 @@ from secscan.auth_profiles.domain.credentials import (
     Credential,
     SecretValue,
     check_secret,
+    header_line,
 )
 from secscan.auth_profiles.domain.errors import InvalidAuthProfileError
 
@@ -394,3 +395,38 @@ def test_secret_values_are_hidden_from_repr_and_str() -> None:
     assert CANARY not in repr(secret)
     assert CANARY not in str(secret)
     assert secret.value == CANARY
+
+
+@pytest.mark.parametrize(
+    ("credential", "header"),
+    [(BEARER, "Authorization"), (API_KEY, "X-API-Key"), (COOKIE, "Cookie")],
+)
+def test_wire_header_names_the_header_that_carries_the_secret(
+    credential: Credential, header: str
+) -> None:
+    """guard 據此判斷請求是否帶著目標的憑證（telemetry 的 auth 欄位，docs/DECISIONS.md §16）。"""
+    assert credential.wire_header == header
+
+
+@pytest.mark.parametrize(
+    ("credential", "secret", "line"),
+    [
+        (BEARER, "abc.def", "Authorization: Bearer abc.def"),
+        (API_KEY, "k 1", "X-API-Key: k 1"),
+        (COOKIE, "a=1; b=2", "Cookie: a=1; b=2"),
+    ],
+)
+def test_header_line_is_the_header_preflight_sends(
+    credential: Credential, secret: str, line: str
+) -> None:
+    value = header_line(credential, SecretValue(secret))
+
+    assert value.value == line
+    assert secret not in repr(value)
+
+
+@pytest.mark.parametrize("secret", ["a\r\nX-Injected: 1", "a\nb", "a\x00b"])
+def test_header_line_refuses_line_breaks_even_if_stored_unchecked(secret: str) -> None:
+    """縱深防禦（審查建議）：解密出來的值不論怎麼存進去，都不能變成第二行 header。"""
+    with pytest.raises(InvalidAuthProfileError):
+        header_line(API_KEY, SecretValue(secret))

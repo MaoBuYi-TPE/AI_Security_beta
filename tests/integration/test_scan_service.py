@@ -101,7 +101,7 @@ def test_creates_a_queued_scan_with_its_run_operations_event_and_audit(
 ) -> None:
     before = _counts(db_session)
 
-    scan = create_scan(db_session, world)
+    scan = create_scan(db_session, world, world.authenticated())
 
     assert scan.status is ScanStatus.QUEUED
     assert (scan.project_id, scan.target_id) == (world.team.project_a, world.target.id)
@@ -116,7 +116,8 @@ def test_creates_a_queued_scan_with_its_run_operations_event_and_audit(
     assert scan.budget == world.grant.budget
     assert scan.coverage == Coverage(eligible_operations=ELIGIBLE, ineligible_operations=INELIGIBLE)
     assert [(run.engine, run.sequence, run.status) for run in scan.runs] == [
-        (Engine.FAKE, 1, RunStatus.QUEUED)
+        (Engine.PREFLIGHT, 1, RunStatus.QUEUED),  # 綁定 auth profile（§16.5）
+        (Engine.FAKE, 2, RunStatus.QUEUED),
     ]
     assert scan.fixture is True
     assert scan.results_complete is False
@@ -125,7 +126,7 @@ def test_creates_a_queued_scan_with_its_run_operations_event_and_audit(
     after = _counts(db_session)
     assert {table: after[table] - before[table] for table in after} == {
         "scans": 1,
-        "scanner_runs": 1,
+        "scanner_runs": 2,
         "scan_operations": ELIGIBLE + INELIGIBLE,
         "scan_events": 1,
         "audit": 1,
@@ -183,7 +184,7 @@ def test_binds_the_latest_profile_version(db_session: Session, world: ScanWorld)
         world.team.admin, world.profile.id, ChangeInput(secret=SecretValue("t2")), request_id=None
     )
 
-    scan = create_scan(db_session, world)
+    scan = create_scan(db_session, world, world.authenticated())
 
     assert scan.auth == AuthBinding(
         profile_id=world.profile.id, version=2, role_label="standard_user"
@@ -328,10 +329,12 @@ def test_the_same_key_with_other_content_is_a_conflict(
 ) -> None:
     """不同的內容回 409，不先判斷新內容的其他錯誤（例如不支援的引擎），也什麼都不寫。"""
     key = new_key()
-    create_scan(db_session, world, key=key)
+    create_scan(db_session, world, world.authenticated(), key=key)
     before = _counts(db_session)
 
-    error = app_error(lambda: create_scan(db_session, world, world.request(**change), key=key))
+    error = app_error(
+        lambda: create_scan(db_session, world, world.authenticated(**change), key=key)
+    )
 
     assert (error.status_code, error.code) == (409, ErrorCode.IDEMPOTENCY_CONFLICT)
     assert _counts(db_session) == before
@@ -600,7 +603,7 @@ def test_a_profile_without_a_secret_cannot_be_bound(db_session: Session, world: 
         {"id": world.profile.id},
     )
 
-    error = app_error(lambda: create_scan(db_session, world))
+    error = app_error(lambda: create_scan(db_session, world, world.authenticated()))
 
     assert (error.status_code, error.code) == (409, ErrorCode.INVALID_STATE_TRANSITION)
 
@@ -710,7 +713,7 @@ def test_the_audit_records_the_snapshot_without_secrets_or_keys(
     db_session: Session, world: ScanWorld
 ) -> None:
     key = new_key()
-    scan = create_scan(db_session, world, key=key)
+    scan = create_scan(db_session, world, world.authenticated(), key=key)
 
     [row] = db_session.execute(
         text(
@@ -736,7 +739,7 @@ def test_the_audit_records_the_snapshot_without_secrets_or_keys(
             "role_label": "standard_user",
         },
         "scan_profile": "api_active_lab",
-        "engines": ["fake"],
+        "engines": ["preflight", "fake"],
         "budget": {
             "requests_per_second": world.grant.budget.requests_per_second,
             "max_requests": world.grant.budget.max_requests,
@@ -789,7 +792,7 @@ def test_a_profile_vanishing_before_its_lock_looks_missing(
 ) -> None:
     monkeypatch.setattr(AuthProfileRepository, "lock", lambda *_args, **_kwargs: None)
 
-    error = app_error(lambda: create_scan(db_session, world))
+    error = app_error(lambda: create_scan(db_session, world, world.authenticated()))
 
     assert (error.status_code, error.code) == (404, ErrorCode.RESOURCE_NOT_FOUND)
 

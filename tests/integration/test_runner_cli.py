@@ -63,6 +63,7 @@ def environment(
     guard = GuardDouble.create(tmp_path)
     monkeypatch.setenv("RUNNER_GUARD_POLICIES_DIR", str(guard.policies))
     monkeypatch.setenv("RUNNER_GUARD_STATUS_DIR", str(guard.status_dir))
+    monkeypatch.setenv("RUNNER_GUARD_TELEMETRY_DIR", str(guard.telemetry))
     return tmp_path
 
 
@@ -157,7 +158,12 @@ def test_an_unavailable_guard_claims_nothing(
 ) -> None:
     """guard 停機（status 標成不再檢查）：runner 不認領，run 留在 queued（DECISIONS §15.7）。"""
     scan = queue_seed.scan(world.operator_a, scannable)
-    GuardDouble(environment / "guard-policies", environment / "guard-status", uuid4()).stop()
+    GuardDouble(
+        environment / "guard-policies",
+        environment / "guard-status",
+        environment / "guard-telemetry",
+        uuid4(),
+    ).stop()
 
     assert main(["runner", "--once"]) == EXIT_FAILURE
     assert "沒有可用的引擎" in capsys.readouterr().err
@@ -189,12 +195,17 @@ def test_without_encryption_keys_authenticated_scans_fail(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    scan = queue_seed.scan(world.operator_a, scannable)
+    scan = queue_seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
     monkeypatch.delenv("SECRET_ENCRYPTION_KEYS")
 
     assert main(["runner", "--once"]) == EXIT_OK
     assert "SECRET_UNAVAILABLE" in capsys.readouterr().err
-    assert _run_status(queue_seed, scan.id) == ("failed", "SECRET_UNAVAILABLE")
+    # 第一個 run 是 preflight（§16.5）：解不開 secret 就不建立容器。
+    [preflight] = queue_seed.query(
+        "SELECT status, error_code FROM scanner_runs WHERE scan_id = :id AND sequence = 1",
+        id=scan.id,
+    )
+    assert (preflight.status, preflight.error_code) == ("failed", "SECRET_UNAVAILABLE")
     assert runtime.created == []
 
 

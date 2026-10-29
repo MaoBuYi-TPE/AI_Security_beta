@@ -42,7 +42,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成 M0、M1（T02–T09）與 M2 的 T10、T11：
+目前完成 M0、M1（T02–T09）與 M2 的 T10、T11、T12：
 - **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
 - **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
 - **T05**：平台 API key（DB 只存 hash、一定會過期、可撤銷）、project 與 object-level 權限、`/api/v1` 的 projects、keys 與稽核查詢端點，以及建立初始管理 key 的本機 CLI `secscan-admin`（見下方「平台 API key」與 `docs/API_CONTRACT.md` §13）。
@@ -55,6 +55,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 - **T10**：容器版的 runner 與 worker（`secscan-admin runner`／`worker`）、經 wollomatic socket-proxy 存取 Docker（只放行掃描容器需要的 API）、ExecutionPlan 的驗證與強化的單次容器、target secret 以 0400 檔注入、`GET /api/v1/scanners`，以及 api、runner、worker 的容器化（`make up`）與測試程序連不到 Docker 的隔離（見下方「app stack 與 runner」與 `docs/API_CONTRACT.md` §18）。
 
 - **T11**：egress guard（官方 mitmproxy 映像加上我們的 addon）：每個 run 一組 proxy 帳密與 policy，逐請求檢查 origin、DNS／IP、path、method 與 redirect 之後的請求，拒絕時不建立上游連線；runner 在 guard 不可用時不認領、每條停止的路徑都先封鎖 guard；lab_net 與 scan_net 改由 Makefile 建立（見下方「egress guard」與 `docs/DECISIONS.md` §15）。
+- **T12**：scan 共用的預算：guard 強制請求數與速率（超過速率就等待，最多 5 秒）並記錄 telemetry，runner 分配剩下的預算、用盡時停止容器、寫回實際用量；綁定 auth profile 的 scan 先跑 preflight（busybox 經 guard 送出帶認證與匿名的請求，worker 依 `docs/DECISIONS.md` §12.5 判斷）；API 的 `budget_usage`、`auth.preflight` 與 coverage 的量測（見下方「共享預算與 preflight」與 §16）。
 
 還沒有正式的 Adapter（M3 起）：scan 只能用 `fake` 引擎，它的容器不連任何位址，結果在回應中標為 `fixture: true`，不是真的掃描。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
@@ -260,6 +261,12 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **掃描容器**：拿到 `/scan/secret/proxy-url`（0400，`http://<run_id>:<token>@10.89.8.254:8080`），只能經 guard 連到 grant 核准的 target origin；被擋下的請求回 403（`X-Secscan-Guard: <原因>`）或 407（帳密）。各工具使用這個 proxy 的設定在 M3。
 - **guard 不可用時**：`GET /api/v1/scanners` 顯示 `GUARD_UNAVAILABLE`，runner 不認領；執行中斷掉的 run 標成 `interrupted`。`docker logs secscan-guard-1` 是每個請求的決定（不含 header 的值、query 與 token）。
 - **保留的位址**：`LAB_CIDR` 的最後一個主機位址（預設 10.89.7.254）保留給 guard，target 與 grant 都不能用。
+- **telemetry**：guard 在 `secscan_guard_telemetry`（tmpfs）為每個 run 寫 summary 與每個轉送請求一行的 jsonl（不含 query 與 header 的值），runner 與 worker 唯讀；6 小時後刪除。
+
+#### 共享預算與 preflight（T12）
+
+- **預算**：scan 的 `max_requests`、`max_duration_seconds` 與速率由所有 run 共用（preflight 也算）。用盡時 guard 回 403（`BUDGET_EXHAUSTED`），runner 停止容器，run 是 `timed_out`；還沒開始就用完是 `failed`。`GET /api/v1/scans/{id}` 的 `budget_usage` 是 guard 實際的計數。
+- **preflight**：綁定 auth profile 的 scan，第一個 run 是 `preflight`（不能在請求中指定）。結果在 `auth.preflight`：`passed` 才把以認證取得的回應算進 `coverage.authenticated_operations`；`inconclusive` 代表匿名的請求也符合（或沒有對照），證明不了認證有效。in-process 的 `secscan-admin fake-runner` 不送流量，結果一律 `not_executed`。
 - **重建 T10 以前建立的網路**：舊的 `secscan_scan_net`、`secscan_lab_net` 沒有 `--ip-range`，`make scan-net`／`make lab-net` 會失敗並提示。先停掉使用它們的服務，再刪除重建：
 
   ```bash

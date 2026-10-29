@@ -158,6 +158,7 @@ services:
       - run_secrets:/run-secrets
       - guard_policies:/guard/policies
       - guard_status:/guard/status:ro
+      - guard_telemetry:/guard/telemetry:ro
     networks: [control_net, docker_net]
     depends_on:
       db:
@@ -173,6 +174,11 @@ services:
     command: ["secscan-admin", "worker"]
     environment:
       <<: *app-env
+    # runner 收集好的輸出（preflight 的回應；docs/DECISIONS.md §16.5）與 guard 的 telemetry
+    # （coverage；§16.6）：都唯讀。
+    volumes:
+      - runs:/runs:ro
+      - guard_telemetry:/guard/telemetry:ro
     networks: [control_net]
     depends_on:
       db:
@@ -207,6 +213,7 @@ services:
     volumes:
       - guard_policies:/guard/policies:ro
       - guard_status:/guard/status
+      - guard_telemetry:/guard/telemetry
     networks:
       scan_net:
         ipv4_address: ${SECSCAN_GUARD_IP:-10.89.8.254}
@@ -304,3 +311,10 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: size=1m,uid=10001,gid=10001,mode=0700
+  # guard 記下的轉送與拒絕（docs/DECISIONS.md §16.3）：guard 寫、runner 唯讀；6 小時後由 guard 刪除。
+  guard_telemetry:
+    name: ${SECSCAN_GUARD_TELEMETRY_VOLUME:-secscan_guard_telemetry}
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=64m,uid=10001,gid=10001,mode=0700,noexec,nosuid,nodev

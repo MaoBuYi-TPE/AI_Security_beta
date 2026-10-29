@@ -32,6 +32,8 @@ def test_a_container_is_refused_for_any_other_transition(current: RunStatus, to:
         auth_profile_id=None,
         auth_profile_version=None,
         created_by_key_id=uuid4(),
+        requests_per_second=2,
+        max_requests=100,
         max_duration_seconds=60,
         status=ScanStatus.RUNNING,
         cancel_requested=False,

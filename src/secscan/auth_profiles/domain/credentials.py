@@ -111,6 +111,25 @@ class Credential:
         elif self.header_name is not None:
             raise InvalidAuthProfileError("header_name 只能搭配 api_key_header")
 
+    @property
+    def wire_header(self) -> str:
+        """送出 secret 的 header 名稱（只有 api_key_header 有 header_name，__post_init__ 保證）。"""
+        if self.header_name is not None:
+            return self.header_name
+        return "Cookie" if self.type is AuthType.COOKIE else "Authorization"
+
+
+def header_line(credential: Credential, secret: SecretValue) -> SecretValue:
+    """送出 secret 的那一行 header（不含換行），例如 `Authorization: Bearer <token>`。
+
+    secret 已通過 check_secret：字元集排除 CR、LF 與 NUL，不會注入其他 header。
+    """
+    if any(character in secret.value for character in "\r\n\x00"):
+        # 縱深防禦（審查建議）：不論值怎麼存進去，都不能變成第二行 header。
+        raise InvalidAuthProfileError("secret 不可有換行或 NUL")
+    prefix = "Bearer " if credential.type is AuthType.BEARER else ""
+    return SecretValue(f"{credential.wire_header}: {prefix}{secret.value}")
+
 
 def check_secret(credential: Credential, secret: SecretValue) -> None:
     """secret 符合這種送出方式的格式；不符合時拋出 InvalidAuthProfileError（不含 secret）。"""

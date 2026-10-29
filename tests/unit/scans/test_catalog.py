@@ -4,6 +4,8 @@ import pytest
 
 from secscan.scans.domain.catalog import (
     AVAILABLE_ENGINES,
+    ENGINE_ORDER,
+    SELECTABLE_ENGINES,
     Engine,
     IncompatibleProfileError,
     InvalidScanRequestError,
@@ -117,3 +119,30 @@ def test_operation_counts_must_match_whether_the_profile_takes_a_spec() -> None:
         check_operations(API_LAB, eligible_operations=None)
     with pytest.raises(ValueError, match="規格"):
         check_operations(WEB_LAB, eligible_operations=3)
+
+
+# --- preflight（docs/DECISIONS.md §16.5）-----------------------------------------------------
+
+
+def test_authenticated_scans_start_with_a_preflight() -> None:
+    runs = plan_runs([Engine.FAKE], authenticated=True)
+
+    assert runs == (
+        PlannedRun(engine=Engine.PREFLIGHT, sequence=1),
+        PlannedRun(engine=Engine.FAKE, sequence=2),
+    )
+
+
+def test_anonymous_scans_have_no_preflight() -> None:
+    assert plan_runs([Engine.FAKE]) == (PlannedRun(engine=Engine.FAKE, sequence=1),)
+
+
+def test_preflight_cannot_be_requested() -> None:
+    with pytest.raises(UnsupportedEngineError, match="自動加入"):
+        plan_runs([Engine.PREFLIGHT])
+
+
+def test_selectable_engines_exclude_preflight() -> None:
+    assert Engine.PREFLIGHT not in SELECTABLE_ENGINES
+    assert ENGINE_ORDER[0] is Engine.PREFLIGHT
+    assert set(SELECTABLE_ENGINES) == set(Engine) - {Engine.PREFLIGHT}

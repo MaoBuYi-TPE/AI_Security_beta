@@ -38,8 +38,11 @@ from secscan.scanners.service import Fleet
 from secscan.scans.queue import RunReport, ScanQueue
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
 from secscan.targets.domain import LabNetwork
+from secscan.worker.artifacts import ArtifactReader
+from secscan.worker.config import WorkerSettings
 from secscan.worker.loop import WorkerLoop
 from secscan.worker.service import Worker
+from secscan.worker.telemetry import TelemetryReader
 
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -155,7 +158,7 @@ def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
         owner = _owner(InstanceRole.WORKER)
         with stop_signals() as stop:
             reports = WorkerLoop(
-                Worker(_queue(sessions, settings), owner=owner),
+                _worker(_queue(sessions, settings), owner),
                 _fleet(sessions, owner, InstanceRole.WORKER),
                 stop_requested=stop.is_set,
                 poll_seconds=WORKER_POLL_SECONDS,
@@ -168,6 +171,16 @@ def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
     if once and not reports:
         report("沒有等待解析的 run。")
     return EXIT_OK
+
+
+def _worker(queue: ScanQueue, owner: str) -> Worker:
+    worker_settings = WorkerSettings()
+    return Worker(
+        queue,
+        owner=owner,
+        artifacts=ArtifactReader(worker_settings.runs_dir),
+        telemetry=TelemetryReader(worker_settings.telemetry_dir),
+    )
 
 
 def describe(item: RunReport) -> str:

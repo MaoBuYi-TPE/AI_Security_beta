@@ -5,6 +5,7 @@
 - ContainerPolicy：所有掃描容器共用、不由 plan 決定的部分（網路、volume、user）。
 """
 
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -31,7 +32,17 @@ class ArgumentPattern:
         return re.fullmatch(self.regex, value) is not None
 
 
-type ArgumentRule = str | ArgumentPattern
+@dataclass(frozen=True, slots=True)
+class ArgumentDigest:
+    """值的 sha256 必須相同：核准一段固定的 script，而不必在這裡再寫一次全文。"""
+
+    sha256: str
+
+    def accepts(self, value: str) -> bool:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest() == self.sha256
+
+
+type ArgumentRule = str | ArgumentPattern | ArgumentDigest
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +56,7 @@ class CommandTemplate:
         if entrypoint != self.entrypoint or len(arguments) != len(self.arguments):
             return False
         return all(
-            rule.accepts(value) if isinstance(rule, ArgumentPattern) else rule == value
+            rule == value if isinstance(rule, str) else rule.accepts(value)
             for rule, value in zip(self.arguments, arguments, strict=True)
         )
 
@@ -76,15 +87,31 @@ class ContainerPolicy:
                 )
 
 
+_BUSYBOX = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
+# preflight 的 script（scanners.domain.preflight.PREFLIGHT_SCRIPT）的 sha256：script 改了，這裡要
+# 重新審查、更新（tests/unit/runner/test_engine_policy.py 核對兩者一致）。
+PREFLIGHT_SCRIPT_SHA256 = "5cfd3e5bc89770e36c1b8f523248a554b12dd8da0948a6ac79ee3711fd1ae2cc"
+
 ENGINE_POLICIES: Mapping[Engine, EnginePolicy] = MappingProxyType(
     {
-        Engine.FAKE: EnginePolicy(
-            images=frozenset(
-                {
-                    "busybox:1.38.0@sha256:"
-                    "fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
-                }
+        Engine.PREFLIGHT: EnginePolicy(
+            images=frozenset({_BUSYBOX}),
+            commands=(
+                CommandTemplate(("/bin/sh", "-c"), (ArgumentDigest(PREFLIGHT_SCRIPT_SHA256),)),
             ),
+            environment=MappingProxyType({}),
+            input_names=frozenset({"request"}),
+            max_input_bytes=1024,
+            accepts_target_auth=True,
+            max_limits=ResourceLimits(
+                memory_bytes=64 * 1024 * 1024,
+                nano_cpus=500_000_000,
+                pids=64,
+                wall_clock_seconds=60,
+            ),
+        ),
+        Engine.FAKE: EnginePolicy(
+            images=frozenset({_BUSYBOX}),
             commands=(
                 CommandTemplate(("/bin/sleep",), (ArgumentPattern(r"(?:0|[1-9][0-9]{0,2})"),)),
                 CommandTemplate(("/bin/false",), ()),
@@ -99,6 +126,6 @@ ENGINE_POLICIES: Mapping[Engine, EnginePolicy] = MappingProxyType(
                 pids=64,
                 wall_clock_seconds=600,
             ),
-        )
+        ),
     }
 )

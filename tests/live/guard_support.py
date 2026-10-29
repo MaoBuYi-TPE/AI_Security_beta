@@ -29,6 +29,7 @@ _WRITE_POLICY = """
 import json, sys, time, uuid
 from pathlib import Path
 from secscan.grants.domain.scope import HttpMethod, Scope
+from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.credentials import new_token, token_digest
 from secscan.guard.domain.policy import Policy, PolicyState, encode_policy, policy_file_name
 from secscan.guard.files import remove_file, write_atomic
@@ -58,6 +59,10 @@ policy = Policy(
         excluded_paths=tuple(spec["excluded"]),
         methods=tuple(HttpMethod(method) for method in spec["methods"]),
     ),
+    budget=RunBudget(
+        requests_per_second=spec["rate"], burst=1, max_requests=spec["max_requests"]
+    ),
+    auth_header=spec["auth_header"],
 )
 raw = b"{broken" if spec["corrupt"] else encode_policy(policy)
 write_atomic(directory, policy_file_name(run_id), raw)
@@ -87,6 +92,9 @@ def write_policy(
     renew_in: int = 600,
     corrupt: bool = False,
     reuse: LivePolicy | None = None,
+    rate: int = 2,
+    max_requests: int = 1000,
+    auth_header: str | None = "authorization",
 ) -> LivePolicy:
     """在 runner 容器內寫入 policy（runner 的程式、VM 的時鐘）；reuse 時沿用 run_id 與 token。"""
     spec = {
@@ -102,6 +110,9 @@ def write_policy(
         "not_after_in": not_after_in,
         "renew_in": renew_in,
         "corrupt": corrupt,
+        "rate": rate,
+        "max_requests": max_requests,
+        "auth_header": auth_header,
     }
     output = docker(
         "exec",

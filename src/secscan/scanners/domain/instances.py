@@ -9,7 +9,12 @@ from enum import StrEnum
 
 from secscan.core.json_types import JsonObject, JsonValue
 from secscan.scanners.domain.plan import ImageReference
-from secscan.scans.domain.catalog import AVAILABLE_ENGINES, ENGINE_ORDER, Engine, ScanProfile
+from secscan.scans.domain.catalog import (
+    AVAILABLE_ENGINES,
+    SELECTABLE_ENGINES,
+    Engine,
+    ScanProfile,
+)
 
 HEARTBEAT_EVERY = timedelta(seconds=5)
 # 30 秒內有心跳才算存活（和 lease 的長度相同）。
@@ -113,9 +118,12 @@ class EngineStatus:
 
 
 def engine_statuses(runner: Capabilities | None) -> tuple[EngineStatus, ...]:
-    """runner 是最近一個存活的 runner 回報的能力（沒有存活的 runner 時是 None）。"""
+    """runner 是最近一個存活的 runner 回報的能力（沒有存活的 runner 時是 None）。
+
+    只列出請求可以指定的引擎：preflight 是內部的（docs/DECISIONS.md §16.5）。
+    """
     reported = {item.engine: item for item in runner.engines} if runner is not None else {}
-    return tuple(_status(engine, reported.get(engine)) for engine in ENGINE_ORDER)
+    return tuple(_status(engine, reported.get(engine)) for engine in SELECTABLE_ENGINES)
 
 
 def _status(engine: Engine, capability: EngineCapability | None) -> EngineStatus:

@@ -3,6 +3,7 @@
 每一類未核准的內容都被拒絕；訊息只有原因，不含被拒絕的值。
 """
 
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -12,12 +13,15 @@ from hypothesis import strategies as st
 from secscan.runner.domain.admission import PlanRejectedError, PlanRejection, admit
 from secscan.runner.domain.policy import (
     ENGINE_POLICIES,
+    PREFLIGHT_SCRIPT_SHA256,
+    ArgumentDigest,
     ArgumentPattern,
     CommandTemplate,
     ContainerPolicy,
 )
 from secscan.scanners.domain.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
 from secscan.scanners.domain.plan import ExecutionPlan, ImageReference, InputFile, ResourceLimits
+from secscan.scanners.domain.preflight import PREFLIGHT_SCRIPT, plan_preflight_run
 from secscan.scans.domain.catalog import Engine
 from tests.unit.runner.plans import fake_plan
 
@@ -199,3 +203,53 @@ def test_container_policy_names_are_docker_names(name: str) -> None:
 
 def test_resource_limits_type_is_shared() -> None:
     assert isinstance(ENGINE_POLICIES[Engine.FAKE].max_limits, ResourceLimits)
+
+
+# --- preflight（docs/DECISIONS.md §16.5）-----------------------------------------------------
+
+
+def _preflight_plan(url: str = "http://lab-target:8080/me") -> ExecutionPlan:
+    return plan_preflight_run(
+        run_id=PLAN.run_id, scan_id=PLAN.scan_id, url=url, max_duration_seconds=900
+    )
+
+
+def test_the_approved_digest_is_the_preflight_script() -> None:
+    assert hashlib.sha256(PREFLIGHT_SCRIPT.encode()).hexdigest() == PREFLIGHT_SCRIPT_SHA256
+
+
+def test_preflight_plans_are_admitted() -> None:
+    admit(_preflight_plan())
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        (PREFLIGHT_SCRIPT + "\ncat /scan/secret/target-auth",),  # 多一行
+        (PREFLIGHT_SCRIPT.replace("sleep 5", "sleep 50"),),
+        ("true",),
+        (PREFLIGHT_SCRIPT, "extra"),
+    ],
+)
+def test_any_other_script_is_rejected(arguments: tuple[str, ...]) -> None:
+    plan = replace(_preflight_plan(), arguments=arguments)
+
+    assert _rejected(plan) is PlanRejection.COMMAND_NOT_ALLOWED
+
+
+def test_preflight_cannot_run_the_fake_commands_or_vice_versa() -> None:
+    assert _rejected(replace(PLAN, engine=Engine.PREFLIGHT)) in {
+        PlanRejection.COMMAND_NOT_ALLOWED,
+        PlanRejection.INPUT_NOT_ALLOWED,
+    }
+    assert _rejected(replace(_preflight_plan(), engine=Engine.FAKE)) in {
+        PlanRejection.COMMAND_NOT_ALLOWED,
+        PlanRejection.INPUT_NOT_ALLOWED,
+    }
+
+
+def test_digest_rules_compare_the_whole_value() -> None:
+    rule = ArgumentDigest(hashlib.sha256(b"echo").hexdigest())
+
+    assert rule.accepts("echo")
+    assert not rule.accepts("echo ")

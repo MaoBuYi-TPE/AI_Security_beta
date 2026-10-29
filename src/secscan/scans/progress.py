@@ -52,6 +52,8 @@ class LockedScan:
     auth_profile_id: UUID | None
     auth_profile_version: int | None
     created_by_key_id: UUID
+    requests_per_second: int
+    max_requests: int
     max_duration_seconds: int
     status: ScanStatus
     cancel_requested: bool
@@ -99,6 +101,8 @@ class ScanProgress:
                 ScanModel.auth_profile_id,
                 ScanModel.auth_profile_version,
                 ScanModel.created_by_key_id,
+                ScanModel.requests_per_second,
+                ScanModel.max_requests,
                 ScanModel.max_duration_seconds,
                 ScanModel.status,
                 ScanModel.cancel_requested_at,
@@ -117,6 +121,8 @@ class ScanProgress:
             auth_profile_id=row.auth_profile_id,
             auth_profile_version=row.auth_profile_version,
             created_by_key_id=row.created_by_key_id,
+            requests_per_second=row.requests_per_second,
+            max_requests=row.max_requests,
             max_duration_seconds=row.max_duration_seconds,
             status=ScanStatus(row.status),
             cancel_requested=row.cancel_requested_at is not None,

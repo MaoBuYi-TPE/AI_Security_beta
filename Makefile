@@ -44,7 +44,8 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 	RUNNER_FAKE_HOLD_SECONDS=15 SECSCAN_LAB_NET=$(LIVE_LAB_NET) LAB_CIDR=$(LIVE_LAB_SUBNET) \
 	SECSCAN_SCAN_SUBNET=$(LIVE_SCAN_SUBNET) SECSCAN_GUARD_IP=10.89.9.254 \
 	SECSCAN_GUARD_LAB_IP=10.89.10.254 SECSCAN_GUARD_POLICIES_VOLUME=secscan_live_guard_policies \
-	SECSCAN_GUARD_STATUS_VOLUME=secscan_live_guard_status
+	SECSCAN_GUARD_STATUS_VOLUME=secscan_live_guard_status \
+	SECSCAN_GUARD_TELEMETRY_VOLUME=secscan_live_guard_telemetry
 LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
@@ -191,7 +192,7 @@ down:
 # 否則 volume 還在使用中刪不掉），再刪 compose 的服務、volume 與網路。
 # 會中斷 stack 的測試（停掉 guard、kill runner）放在最後執行。
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
-	tests/live/test_guard_failover_live.py
+	tests/live/test_budget_live.py tests/live/test_guard_failover_live.py
 test-live-runner: env docker-check images build
 	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }
 	@$(MAKE) --no-print-directory scan-net SCAN_NET=$(LIVE_SCAN_NET) SCAN_SUBNET=$(LIVE_SCAN_SUBNET) \

@@ -15,10 +15,12 @@ from uuid import UUID
 
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import HttpMethod, InvalidScopeError, Scope
+from secscan.guard.domain.budget import BudgetError, RunBudget
 from secscan.guard.domain.strict import dump_canonical, load_object
 from secscan.targets.domain import InvalidOriginError, Origin, parse_ipv4, parse_origin
 
-POLICY_SCHEMA = 1
+# schema 2（T12）：加上這個 run 的預算與認證 header 的名稱。
+POLICY_SCHEMA = 2
 # 最大的 grant（256 個 512 字元的 path 等，§10.9）約 165 KB。
 MAX_POLICY_BYTES = 512 * 1024
 POLICY_SUFFIX = ".json"
@@ -26,6 +28,9 @@ POLICY_SUFFIX = ".json"
 MAX_EPOCH_SECONDS = 10**11 - 1
 
 _TOKEN_DIGEST = re.compile(r"[0-9a-f]{64}")
+# 認證 header 的名稱（小寫的 token）：guard 只用它標示請求有沒有帶認證，不讀它的值。
+# 與 auth profile 的 header 名稱相同的子集（英數字與 -），小寫：比對時 `_` 會換成 `-`。
+_AUTH_HEADER = re.compile(r"(?=.{1,64}$)[a-z0-9]+(?:-[a-z0-9]+)*")
 _FIELDS = frozenset(
     {
         "schema",
@@ -41,6 +46,10 @@ _FIELDS = frozenset(
         "allow_all_paths",
         "paths",
         "excluded_paths",
+        "requests_per_second",
+        "burst",
+        "max_requests",
+        "auth_header",
     }
 )
 _METHODS = frozenset(method.value for method in HttpMethod)
@@ -60,7 +69,11 @@ class PolicyError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Policy:
-    """一個 run 的出站範圍。scope 只有一個 origin：scan 的 target（T11 只放行它）。"""
+    """一個 run 的出站範圍與預算。scope 只有一個 origin：scan 的 target（只放行它）。
+
+    budget.max_requests 是這個 run 剩下的請求數（scan 的上限減去之前的 run 實際轉送的數量）；
+    auth_header 是認證 header 的名稱（小寫），沒有認證時是 None。
+    """
 
     run_id: UUID
     scan_id: UUID
@@ -69,6 +82,8 @@ class Policy:
     not_after: int
     renew_until: int
     scope: Scope
+    budget: RunBudget
+    auth_header: str | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.token_sha256, str) or not _TOKEN_DIGEST.fullmatch(self.token_sha256):
@@ -78,6 +93,10 @@ class Policy:
                 raise PolicyError(f"{field} 必須是 0 到 {MAX_EPOCH_SECONDS} 的整數（epoch 秒）")
         if len(self.scope.origins) != 1:
             raise PolicyError("policy 的範圍只能有一個 origin（scan 的 target）")
+        if self.auth_header is not None and (
+            not isinstance(self.auth_header, str) or not _AUTH_HEADER.fullmatch(self.auth_header)
+        ):
+            raise PolicyError("auth_header 必須是小寫的 header 名稱，最多 64 個字元")
 
     @property
     def origin(self) -> Origin:
@@ -127,6 +146,10 @@ def encode_policy(policy: Policy) -> bytes:
             "allow_all_paths": scope.allow_all_paths,
             "paths": list(scope.paths),
             "excluded_paths": list(scope.excluded_paths),
+            "requests_per_second": policy.budget.requests_per_second,
+            "burst": policy.budget.burst,
+            "max_requests": policy.budget.max_requests,
+            "auth_header": policy.auth_header,
         }
     )
 
@@ -160,9 +183,23 @@ def decode_policy(raw: bytes, *, run_id: UUID) -> Policy:
             not_after=document.integer("not_after"),
             renew_until=document.integer("renew_until"),
             scope=scope,
+            budget=RunBudget(
+                requests_per_second=document.integer("requests_per_second"),
+                burst=document.integer("burst"),
+                max_requests=document.integer("max_requests"),
+            ),
+            auth_header=_auth_header(document.raw("auth_header")),
         )
-    except (InvalidScopeError, InvalidOriginError) as exc:
-        raise PolicyError(f"範圍不合規則：{exc}") from None
+    except (InvalidScopeError, InvalidOriginError, BudgetError) as exc:
+        raise PolicyError(f"範圍或預算不合規則：{exc}") from None
+
+
+def _auth_header(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PolicyError("auth_header 必須是字串或 null")
+    return value
 
 
 def _method(value: str) -> HttpMethod:

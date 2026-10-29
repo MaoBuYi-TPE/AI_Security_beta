@@ -971,11 +971,60 @@
       - **T13**：grant 撤銷或 target 停用時停止執行中的 scan（SEC-01 的後半）；有容器的 run 的對帳與孤兒容器（runner 被 kill 之後留下的容器與 blocked 的 policy，reconciler 沿用 `runner/guard.py` 封鎖）；`/health/ready`。
       - **M3**：各工具的 proxy 設定（token 只能在 0400 的檔案中，不能放進 argv、env 或 label；工具的輸出可能含 proxy-url，遮罩要涵蓋 token）；HTTPS（CA、上游憑證驗證）；依 ZAP 的量測決定 path 中的 `%`；parser 依 `X-Secscan-Guard` 排除 guard 的回應。
       - **後續（M3 之前）**：補上 live 測試中同一條連線上多個請求的收包證據（security-reviewer 的 M2）。
-- [ ] T12 完成共享預算、telemetry 與認證 preflight 路徑。
+- [x] T12 完成共享預算、telemetry 與認證 preflight 路徑。
   - DoD：
     - 所有掃描流量共用同一個上限，preflight 也計入。
     - Token 只送往核准的 origin。
     - 從 telemetry 可以算出實際請求數。
+  - 交付（2026-10-29，done）：
+    - 範圍：
+      - guard：policy schema 2（速率、burst、這個 run 剩下的請求數、認證 header 的名稱）。放行之前保留名額（保留中最多 11 個）、依 scan 共用的速率等待（最多 5 秒）、等待之後重查 run；`request` hook 確定轉送才計入並寫 telemetry，拒絕、錯誤與取消都釋放。telemetry：每個 run 一個原子寫入的 summary 與一個 jsonl（請求與回應各一行，不含 query 與 header 的值）；寫不出就拒絕；guard 重啟時由 summary 接續；6 小時後清除。
+      - runner：剩下的預算（之前的 run 實際轉送的，不明時整份扣除；剩下的時間同理）；心跳時讀 summary，用盡 → 封鎖 → 停止 → `timed_out`（`BUDGET_EXHAUSTED`）；剩 0 不建立容器（`failed`）；run 結束之前寫回 guard 的計數（不可信時留空）。
+      - preflight：綁定 auth profile 時排在第一個 run（請求不能指定、`/scanners` 不列出）。busybox 的 `/bin/sh -c <固定的 script>`（runner 以 sha256 核准），proxy 帳密與認證 header 從 0400 的檔案讀進管線；帶認證與匿名各一次 HTTP/1.0 GET。worker 依 DECISIONS §12.5 判斷 `passed`、`failed`、`inconclusive`、`blocked`、`not_executed`。
+      - coverage：worker 唯讀掛載 telemetry，把有上游回應的請求對應到凍結的 operation（`run_coverage`）；preflight 的請求不算；authenticated 要以認證取得 401、403 以外的回應，而且 preflight 通過。
+      - API：`budget_usage`、`auth.preflight`、coverage 的 `observed_operations`、`authenticated_operations` 與 `AUTHENTICATION_NOT_VERIFIED`。
+      - 使用者的決定（2026-10-29）：T12 建好 preflight 的執行路徑；維持只放行 target origin；超過速率就等待。
+      - 設計決定與實測見 `DECISIONS.md` §16，API 見 `API_CONTRACT.md` §8、§17。
+    - 檔案：
+      - 程式：
+        - `src/secscan/guard/`：`domain/budget.py`、`domain/telemetry.py`、`telemetry.py`（記錄與計數）、`addon.py`、`bootstrap.py`、`config.py`、`domain/policy.py`（schema 2）、`domain/requests.py`、`domain/strict.py`
+        - `src/secscan/runner/`：`service.py`（預算、用量、preflight 的 plan）、`guard.py`（讀 summary）、`egress.py`、`config.py`、`domain/policy.py`（`ArgumentDigest`、preflight 的政策）、`domain/admission.py`（`auth-header`）
+        - `src/secscan/scans/`：`run_records.py`（用量、preflight、coverage）、`leases.py`、`queue.py`、`domain/catalog.py`（`PREFLIGHT`）、`domain/preflight.py`、`domain/coverage.py`、`domain/usage.py`、`domain/model.py`、`domain/lifecycle.py`（`BUDGET_EXHAUSTED`）、`models.py`、`repository.py`、`schemas.py`、`service.py`、`progress.py`
+        - `src/secscan/scanners/domain/preflight.py`、`scanners/domain/instances.py`；`src/secscan/worker/`（`service.py`、`artifacts.py`、`telemetry.py`、`config.py`）；`runner/fake.py`；`auth_profiles/domain/credentials.py`（`wire_header`、`header_line`）、`auth_profiles/domain/preflight.py`（`matches`）、`auth_profiles/repository.py`；`cli/services.py`
+        - migration `v0007_run_budget.py`、`v0008_preflight_coverage.py`；`migrations/metadata.py`
+      - 部署：`compose.yaml`（`guard_telemetry` volume；worker 唯讀掛載 runs 與 telemetry）、`deploy/guard/Dockerfile`（新的模組）、`Makefile`（live 的 volume 與測試）、`.env.example`
+      - 測試：
+        - unit：`tests/unit/guard/`（`test_budget.py`、`test_telemetry_format.py`、`test_telemetry_recorder.py`、`test_addon_budget.py`、`addon_support.py`；既有的 policy、config、runtime、edges）、`tests/unit/scanners/test_preflight.py`、`tests/unit/scans/`（`test_coverage.py`、`test_usage.py`、`test_scan_out.py`、`test_catalog.py`）、`tests/unit/worker/`、`tests/unit/auth_profiles/`（`test_preflight_match.py`、`test_credentials.py`）、`tests/unit/runner/`（admission、guard channel、probe）、`test_deployment.py`
+        - integration：`test_queue_launch.py`、`test_container_runner_guard.py`、`test_container_runner.py`、`test_worker.py`、`test_scans_api.py`、`test_scan_queue.py`、`test_scan_service.py`、`test_scan_races.py`、`test_scan_schema.py`、`test_runner_loop.py`、`test_runner_cli.py`、`test_migrations.py`、`test_schema_constraints.py`；測試資料的 scan 預設改成匿名
+        - live：`test_budget_live.py`（SEC-13、SEC-15）、`test_runner_live.py`（preflight 的端到端）、`receiver.py`（`/me`）；既有的 guard 與 failover 測試
+      - 文件：`DECISIONS.md` §16、`ARCHITECTURE.md`、`API_CONTRACT.md`、`SECURITY_AND_TESTING.md`、`README.md`、`CLAUDE.md` §1、§13
+    - DoD 對照：
+      - **共用同一個上限，preflight 也計入**：guard 依 policy 強制每個 run 的剩下請求數與 scan 的速率；runner 扣除之前的 run 實際轉送的。live：上限 3、送 5 個，target 只收到 3 個，之後是 `BUDGET_EXHAUSTED`，三個轉送的請求相隔至少 0.5 秒；preflight 的兩個請求計入 `budget_usage`。integration：之後的 run 只拿到剩下的、不明時整份扣除、剩 0 不開始、用盡時停止容器。
+      - **Token 只送往核准的 origin**：guard 只轉送到 target 的 origin。live：帶著 `Authorization` 的請求只到達 target，另一個 origin 的接收端沒有任何連線；preflight 的帶認證請求只送到 target，匿名的請求沒有 `Authorization`。
+      - **從 telemetry 可以算出實際請求數**：summary 的 `forwarded` 與 jsonl 的請求行；live 核對兩者與接收端的收包一致；API 的 `budget_usage` 以它為準，不明時是 null。
+    - 驗證（實際執行）：
+      - `make test`：4142 passed、1 skipped（live 的 40 個另外執行），coverage 99%；guard 的程式 line 與 branch 都是 100%。
+      - `make lint`（ruff、import-linter 5 個 contract）、`make typecheck`（mypy strict）通過。
+      - `ENABLE_LIVE_LAB_TESTS=1 make test-live-runner`：40 passed（獨立的 `secscan-live` 專案，跑完拆除，沒有殘留的容器、volume、網路）。
+      - 突變檢查：44 個（guard 的名額、速率、telemetry、保留中的上限；runner 的用盡與用量；剩下的預算；preflight 的判斷與 script 的白名單；coverage 與 API 的高估）全部被測試擋下（在獨立的 git worktree 執行，不動主目錄）。
+    - TDD：
+      - 大多數先寫失敗的測試：guard 的預算、速率、telemetry、addon 的整合，runner 的用盡與用量，preflight 的判斷與比對，coverage 與 API 的欄位，以及兩份審查的每一項修正（含 ReDoS 的時間測試先卡住）。
+      - **沒有做到**（以突變檢查補驗，都被擋下）：guard 啟動流程的兩個 telemetry 測試、`header_line`、worker 判斷 preflight 的 integration 測試、`TelemetryReader` 是在實作之後或同一步寫的；migration 0007、0008 先寫（以 drift 測試核對）；之後的 run 扣除之前用量的 integration 測試在 preflight 存在之後才補。
+    - live 發現的問題：busybox 的 nc 在 stdin 結束時半關閉連線，mitmproxy 當成 client 斷線、丟掉回應（preflight 是 `not_executed`）；改成送完請求後 stdin 再開著 5 秒。既有的 live 測試因為 telemetry 的掛載與 preflight 的容器、請求而更新。
+    - 審查：
+      - code-reviewer：WARNING（0 CRITICAL、0 HIGH、3 MEDIUM、7 LOW）。MEDIUM：coverage 的紀錄不是冪等的（worker 中斷後重試會一直崩潰）、preflight 的請求被算進 coverage、`queue.py` 太大。
+      - security-reviewer：REQUEST CHANGES（0 CRITICAL、1 HIGH、5 MEDIUM、10 LOW）。HIGH：preflight 回應的 header regex 有 ReDoS（靶機控制回應，worker 卡住）。MEDIUM：延遲 body 可以累積已核准的請求再一次送出（速率）、coverage 紀錄的冪等、匿名的對照沒有回應仍判 passed、coverage 只看送出不看回應、容器沒刪除或 guard 重啟時的用量。
+      - 已修正（都有先失敗的測試）：線性的 header 解析；保留中的名額上限；coverage 的冪等與 worker 跳過 lease 失效的 run；preflight 的請求不算 coverage；沒有對照判 `inconclusive`；coverage 要有回應、authenticated 要 401、403 以外；容器沒刪除或另一個 boot 的 summary 留空；`header_line` 擋換行；補攔 RecursionError；telemetry 的 tmpfs 加 noexec 等；observed 只取範圍內；`coverage_measured` 要所有 run 都結束；flush 與 prune 各自處理錯誤；`RunLedger.uncommit`；流量秒數不明時是 null；`queue.py` 拆出 `run_records.py` 與 `leases.py`（534 行）。
+      - 沒有修正、記入 `DECISIONS.md` §16：body 上限維持 16 MiB（同時限制回應，1 MiB 會擋掉大型 JS；OOM 時 fail closed）；速率與預算以 scan 為單位（P0 與 target 合計等價）；cookie 型 profile 的 `auth` 旗標只看名稱（M3 前決定）；telemetry 的 path 不遮罩；剛好用完預算時的 `timed_out`；0007 之前的資料。
+    - 限制：
+      - 只有 preflight 真的送出流量；多個真的引擎依序共用預算在 M3、M4 證明。
+      - 名額在 `request` hook 才確定：少數沒有觸發 `request`、`error` hook 的 flow 會佔著名額到 run 結束（只會少放行）。
+      - telemetry 在 tmpfs：VM 重啟之後還沒解析的 run 沒有 coverage（預算以分到的數量保守扣除）。
+      - preflight 只證明這組憑證在這個端點有效，不證明整段掃描都維持登入。
+      - T11 的證據缺口（同一條連線上多個請求的收包證據）仍在。
+    - 給後續任務：
+      - **T13**：有容器的 run 的對帳與孤兒容器（沿用 `RunRecords` 寫用量時，不明就留空）；grant 撤銷時停止執行中的 scan；`/health/ready`；`queue.py` 新增的 reconciler 注意 800 行的上限。
+      - **M3**：各工具的 proxy 與認證 header 設定（`auth-header` 檔已提供）；依 ZAP 的量測調整預算、body 上限與 path 中的 `%`；cookie 型 profile 的 `auth` 旗標；報告中的 telemetry path 要遮罩；`coverage_measured` 與多個引擎。
 - [ ] T13 實作心跳/lease、取消、timeout、孤兒容器清理與 reconciler。
   - DoD：
     - 重複認領時不會重複啟動容器。

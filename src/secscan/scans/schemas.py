@@ -3,6 +3,8 @@
 - 請求只限制型別與長度；引擎、profile 與預算的規則由 domain 在權限檢查之後判斷。
 - 回應是完整的 scan：快照引用的版本、每個引擎的 run、凍結的 operation 數（coverage 的分母）。
   fixture 表示結果不是真的掃描（有 fake 引擎）；results_complete 只有 completed 才是 true。
+- budget_usage、auth.preflight 與 coverage 的量測都來自 guard 的計數與 worker 的判斷
+  （docs/DECISIONS.md §16.4 至 §16.6），不採用工具自報的數字。
 """
 
 from datetime import datetime
@@ -16,11 +18,14 @@ from secscan.grants.schemas import BudgetIn, BudgetOut
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Scan, ScanEvent, ScannerRun
+from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.domain.request import BudgetRequest, ScanRequest
+from secscan.scans.domain.usage import budget_usage, coverage_measured, preflight_status
 
-# 還沒有量測實際流量（T12）：coverage_measured 一律 false，並說明原因（contract §8）。
+# coverage 沒有量測依據、或認證沒有被證明有效時的原因（contract §8）。
 TELEMETRY_UNAVAILABLE = "TRAFFIC_TELEMETRY_UNAVAILABLE"
 NO_API_SPEC = "NO_API_SPEC"
+AUTHENTICATION_NOT_VERIFIED = "AUTHENTICATION_NOT_VERIFIED"
 
 
 class ScanCreate(BaseModel):
@@ -67,6 +72,8 @@ class AuthBindingOut(BaseModel):
     profile_id: UUID
     version: int
     role_label: str
+    # preflight 的結果（passed、failed、inconclusive、blocked、not_executed）；還沒結束是 null。
+    preflight: PreflightResult | None
 
 
 class EngineRunOut(BaseModel):
@@ -92,14 +99,30 @@ class EngineRunOut(BaseModel):
 
 
 class CoverageOut(BaseModel):
-    """建立時凍結的 operation 數；沒有規格時是 null。不代表實際測到了這些 operation。"""
+    """建立時凍結的 operation 數（沒有規格時是 null），以及實際轉送的請求涵蓋的數量。
+
+    observed 與 authenticated 只在有量測依據時給值；authenticated 要 preflight 通過（否則是 0），
+    匿名的 scan 是 null。observed 不代表所有漏洞種類都測過了。
+    """
 
     model_config = ConfigDict(frozen=True)
 
     eligible_operations: int | None
     ineligible_operations: int | None
+    observed_operations: int | None
+    authenticated_operations: int | None
     coverage_measured: bool
     limitations: list[str]
+
+
+class BudgetUsageOut(BaseModel):
+    """guard 實際轉送與拒絕的請求數與流量的秒數，跨 run 加總（不明是 null）。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    requests_sent: int | None
+    requests_denied: int | None
+    traffic_duration_seconds: int | None
 
 
 class ScanOut(BaseModel):
@@ -118,6 +141,7 @@ class ScanOut(BaseModel):
     budget: BudgetOut
     engines: list[EngineRunOut]
     coverage: CoverageOut
+    budget_usage: BudgetUsageOut
     fixture: bool
     results_complete: bool
     cancel_requested_at: datetime | None
@@ -139,7 +163,10 @@ class ScanOut(BaseModel):
             api_spec=VersionRefOut(id=spec.id, version=spec.version) if spec is not None else None,
             auth=(
                 AuthBindingOut(
-                    profile_id=auth.profile_id, version=auth.version, role_label=auth.role_label
+                    profile_id=auth.profile_id,
+                    version=auth.version,
+                    role_label=auth.role_label,
+                    preflight=preflight_status(scan.runs),
                 )
                 if auth is not None
                 else None
@@ -152,6 +179,7 @@ class ScanOut(BaseModel):
             ),
             engines=[EngineRunOut.of(run) for run in scan.runs],
             coverage=_coverage(scan),
+            budget_usage=_budget_usage(scan),
             fixture=scan.fixture,
             results_complete=scan.results_complete,
             cancel_requested_at=scan.cancel_requested_at,
@@ -184,16 +212,33 @@ class ScanEventOut(BaseModel):
 
 
 def _coverage(scan: Scan) -> CoverageOut:
-    if scan.coverage is None:
-        return CoverageOut(
-            eligible_operations=None,
-            ineligible_operations=None,
-            coverage_measured=False,
-            limitations=[NO_API_SPEC, TELEMETRY_UNAVAILABLE],
-        )
+    coverage = scan.coverage
+    measured = coverage is not None and coverage_measured(scan.runs, has_spec=True)
+    limitations = [] if coverage is not None else [NO_API_SPEC]
+    if not measured:
+        limitations.append(TELEMETRY_UNAVAILABLE)
+    verified = preflight_status(scan.runs) is PreflightResult.PASSED
+    if scan.auth is not None and not verified:
+        limitations.append(AUTHENTICATION_NOT_VERIFIED)
+    observed = authenticated = None
+    if coverage is not None and measured:
+        observed = coverage.observed_operations
+        if scan.auth is not None:
+            authenticated = coverage.authenticated_operations if verified else 0
     return CoverageOut(
-        eligible_operations=scan.coverage.eligible_operations,
-        ineligible_operations=scan.coverage.ineligible_operations,
-        coverage_measured=False,
-        limitations=[TELEMETRY_UNAVAILABLE],
+        eligible_operations=coverage.eligible_operations if coverage is not None else None,
+        ineligible_operations=coverage.ineligible_operations if coverage is not None else None,
+        observed_operations=observed,
+        authenticated_operations=authenticated,
+        coverage_measured=measured,
+        limitations=limitations,
+    )
+
+
+def _budget_usage(scan: Scan) -> BudgetUsageOut:
+    usage = budget_usage(scan.runs)
+    return BudgetUsageOut(
+        requests_sent=usage.requests_sent,
+        requests_denied=usage.requests_denied,
+        traffic_duration_seconds=usage.traffic_seconds,
     )

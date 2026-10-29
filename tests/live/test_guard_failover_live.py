@@ -77,8 +77,10 @@ def target(admin: Api) -> Iterator[tuple[Scannable, Receiver, str]]:
 
 
 def _running(scan_id: str) -> str:
+    """fake 的容器：綁定 auth profile 的 scan 先跑 preflight（§16.5），它很快就結束。"""
+
     def find() -> str | None:
-        names = scan_containers(scan_id)
+        names = scan_containers(scan_id, "fake")
         return names[0] if names else None
 
     return wait_for(find, timeout=60)
@@ -93,7 +95,9 @@ def _borrow(name: str) -> Borrowed:
 
 
 def _engine(item: Scannable, scan_id: str) -> dict[str, object]:
-    [engine] = item.operator.data("GET", f"/scans/{scan_id}")["engines"]
+    """fake 的 run（第一個是 preflight，§16.5）。"""
+    engines = item.operator.data("GET", f"/scans/{scan_id}")["engines"]
+    [engine] = [engine for engine in engines if engine["engine"] == "fake"]
     return dict(engine)
 
 
@@ -191,7 +195,9 @@ def test_a_cancel_blocks_the_run_before_the_container_is_killed(
         (403, "RUN_BLOCKED"),
         (407, "PROXY_AUTH_REQUIRED"),
     }
-    assert len(receiver.records()) == 1 + len(allowed)
+    # preflight 的兩個 GET /me 也到達這個接收端（§16.5）：只數借用的 proxy-url 送出的請求。
+    borrowed_paths = [record for record in receiver.records() if record["path"] == "/users/v1"]
+    assert len(borrowed_paths) == 1 + len(allowed)
     blocked = [
         entry["ts"]
         for entry in guard_log()
