@@ -116,13 +116,13 @@ class CoverageOut(BaseModel):
 
 
 class BudgetUsageOut(BaseModel):
-    """guard 實際轉送與拒絕的請求數（不明是 null）與流量的秒數，跨 run 加總。"""
+    """guard 實際轉送與拒絕的請求數與流量的秒數，跨 run 加總（不明是 null）。"""
 
     model_config = ConfigDict(frozen=True)
 
     requests_sent: int | None
     requests_denied: int | None
-    traffic_duration_seconds: int
+    traffic_duration_seconds: int | None
 
 
 class ScanOut(BaseModel):

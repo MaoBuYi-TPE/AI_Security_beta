@@ -20,7 +20,7 @@ from ipaddress import IPv4Address, IPv4Network, ip_address
 from uuid import UUID
 
 from secscan.guard.domain.addresses import pick_upstream
-from secscan.guard.domain.budget import RateLimiter
+from secscan.guard.domain.budget import RateLimiter, max_pending
 from secscan.guard.domain.credentials import (
     PROXY_AUTHENTICATE,
     parse_proxy_authorization,
@@ -243,12 +243,18 @@ class GuardAddon:
         self._exchange("upstream_error", flow)
 
     def flush_telemetry(self) -> None:
-        """定期把拒絕的計數寫進 summary，並刪掉過期的檔案（由啟動程式的背景工作呼叫）。"""
+        """定期把拒絕的計數寫進 summary，並刪掉過期的檔案（由啟動程式的背景工作呼叫）。
+
+        兩者各自處理錯誤：volume 寫滿時 summary 寫不出來，正需要清理過期的檔案（審查發現）。
+        """
         try:
             self._recorder.flush()
-            self._recorder.prune()
         except TelemetryWriteError as exc:
             self._log.refused("telemetry_flush_failed", error=str(exc))
+        try:
+            self._recorder.prune()
+        except TelemetryWriteError as exc:
+            self._log.refused("telemetry_prune_failed", error=str(exc))
 
     # --- 判斷 ---------------------------------------------------------------------------------
 
@@ -260,6 +266,8 @@ class GuardAddon:
         reason = run_state_reason(policy, now=self._clock()) or request_reason(view, compiled)
         if reason is not None:
             raise _DeniedError(reason, policy=policy)
+        if self._recorder.pending(policy) >= max_pending(policy.budget):
+            raise _DeniedError(Reason.RATE_LIMITED, policy=policy)
         if not self._recorder.reserve(policy):
             raise _DeniedError(Reason.BUDGET_EXHAUSTED, policy=policy)
         flow.metadata[PENDING_KEY] = Pending(

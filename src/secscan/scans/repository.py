@@ -276,7 +276,16 @@ class ScanRepository:
                 RunCoverageModel.ordinal,
                 func.bool_or(RunCoverageModel.authenticated).label("authenticated"),
             )
-            .where(RunCoverageModel.scan_id.in_(scan_ids))
+            .join(
+                ScanOperationModel,
+                (ScanOperationModel.scan_id == RunCoverageModel.scan_id)
+                & (ScanOperationModel.ordinal == RunCoverageModel.ordinal),
+            )
+            # 只算範圍內的 operation：observed 不會超過分母（審查建議）。
+            .where(
+                RunCoverageModel.scan_id.in_(scan_ids),
+                ScanOperationModel.ineligible_reason.is_(None),
+            )
             .group_by(RunCoverageModel.scan_id, RunCoverageModel.ordinal)
             .subquery()
         )

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from secscan.guard.addon import PENDING_KEY, Pending
-from secscan.guard.domain.budget import RateLimiter
+from secscan.guard.domain.budget import RateLimiter, max_pending
 from secscan.guard.domain.policy import PolicyState
 from secscan.guard.domain.telemetry import (
     ForwardedRequest,
@@ -24,6 +24,7 @@ from secscan.guard.domain.telemetry import (
     summary_file_name,
     telemetry_file_name,
 )
+from secscan.guard.telemetry import TelemetryWriteError
 from tests.unit.guard.addon_support import (
     NOW,
     RUN_ID,
@@ -36,6 +37,8 @@ from tests.unit.guard.addon_support import (
     screen,
 )
 from tests.unit.guard.flows import FakeFlow, FakeHeaders, FakeResponse
+
+MAX_PENDING = 11  # 每秒 2 個、最多等 5 秒，再加 burst 1
 
 
 @pytest.fixture
@@ -314,3 +317,58 @@ def test_flush_failures_are_logged(harness: Harness) -> None:
         os.chmod(harness.telemetry, 0o700)
 
     assert any(line.get("event") == "telemetry_flush_failed" for line in harness.lines())
+
+
+def test_pruning_still_runs_when_flushing_fails(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """volume 寫滿時最需要清理：summary 寫不出來也要刪掉過期的檔案（審查發現）。"""
+    pruned: list[bool] = []
+
+    def fail() -> None:
+        raise TelemetryWriteError("1 個 summary 寫不出來")
+
+    monkeypatch.setattr(harness.recorder, "flush", fail)
+
+    def prune() -> int:
+        pruned.append(True)
+        return 0
+
+    monkeypatch.setattr(harness.recorder, "prune", prune)
+
+    harness.addon.flush_telemetry()
+
+    assert pruned == [True]
+    assert any(line.get("event") == "telemetry_flush_failed" for line in harness.lines())
+
+
+def test_prune_failures_are_logged(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail() -> int:
+        raise TelemetryWriteError("1 個過期的檔案刪不掉")
+
+    monkeypatch.setattr(harness.recorder, "prune", fail)
+
+    harness.addon.flush_telemetry()
+
+    assert any(line.get("event") == "telemetry_prune_failed" for line in harness.lines())
+
+
+def test_requests_held_back_by_their_body_cannot_pile_up(tmp_path: Path) -> None:
+    """名額在 header 階段保留、body 送完才轉送：延遲 body 可以累積已核准的請求再一次送出
+    （審查發現）。保留中的名額最多 速率乘以最長等待再加 burst 個，之後回 RATE_LIMITED。"""
+    harness = build_harness(tmp_path, limiter=RateLimiter(max_wait=1_000))
+    harness.write(make_policy(max_requests=100))
+    held = [screen(harness, make_flow()) for _ in range(MAX_PENDING)]
+    assert all(flow.response is None for flow in held)
+
+    extra = screen(harness, make_flow())
+
+    assert reason_of(extra) == "RATE_LIMITED"
+    harness.addon.request(held[0])  # body 送完、轉送：空出一個名額
+    assert screen(harness, make_flow()).response is None
+
+
+def test_the_pending_limit_follows_the_rate() -> None:
+    budget = make_policy().budget
+
+    assert max_pending(budget) == MAX_PENDING == 2 * 5 + 1

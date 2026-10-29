@@ -50,11 +50,12 @@ class GuardDouble:
         forwarded: int,
         denied: dict[str, int] | None = None,
         exhausted: bool = False,
+        boot_id: UUID | None = None,
     ) -> None:
         summary = RunSummary(
             run_id=run_id,
             scan_id=scan_id,
-            boot_id=self.boot_id,
+            boot_id=boot_id or self.boot_id,
             forwarded=forwarded,
             denied=denied or {},
             exhausted=exhausted,

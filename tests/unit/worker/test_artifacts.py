@@ -97,3 +97,10 @@ def test_only_plain_names_are_read(tmp_path: Path, name: str) -> None:
 
     with pytest.raises(ValueError, match="檔名"):
         ArtifactReader(tmp_path).read(RUN, name, max_bytes=10)
+
+
+def test_deeply_nested_manifests_are_none(tmp_path: Path) -> None:
+    _collect(tmp_path, {"a.http": b"a"}, manifest={"files": []})
+    (tmp_path / str(RUN) / "manifest.json").write_bytes(b"[" * 100_000 + b"]" * 100_000)
+
+    assert ArtifactReader(tmp_path).read(RUN, "a.http", max_bytes=10) is None

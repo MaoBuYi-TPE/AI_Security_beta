@@ -5,13 +5,19 @@
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
-from secscan.guard.domain.telemetry import ForwardedRequest, encode_line, telemetry_file_name
+from secscan.guard.domain.telemetry import (
+    ForwardedRequest,
+    UpstreamResponse,
+    encode_line,
+    telemetry_file_name,
+)
 from secscan.runner.workspace import Workspace
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
@@ -232,10 +238,12 @@ def test_only_preflight_runs_can_have_a_result(
 
 
 def _forwarded(telemetry: Path, run_id: UUID, *requests: tuple[str, bool]) -> None:
+    """guard 寫的 telemetry：每個請求一行，接著上游的 200 回應一行。"""
     lines = b"".join(
         encode_line(
             ForwardedRequest(sequence=index, at=1.0, method="GET", path=path, authenticated=auth)
         )
+        + encode_line(UpstreamResponse(sequence=index, at=1.1, status=200))
         for index, (path, auth) in enumerate(requests, 1)
     )
     (telemetry / telemetry_file_name(run_id)).write_bytes(lines)
@@ -260,11 +268,25 @@ def _worker(queue: ScanQueue, runs: Path, telemetry: Path) -> Worker:
     )
 
 
+def _collected_engine_run(
+    queue: ScanQueue, seed: Seeder, world: World, *, sent: int | None
+) -> Lease:
+    """匿名的 scan：fake 的容器 run 轉送了 sent 個請求之後收集好（M3 的引擎同樣的路徑）。"""
+    seed.scan(world.operator_a, seed.scannable(world))
+    lease = queue.claim("runner-1", FAKE)
+    assert lease is not None
+    queue.prepare_launch(lease, image_ref=IMAGE)
+    queue.record_usage(lease, RunUsage(requests_sent=sent, requests_denied=0, traffic_seconds=1))
+    queue.advance(lease, RunStatus.COLLECTING)
+    queue.advance(lease, RunStatus.COLLECTED)
+    return lease
+
+
 def test_forwarded_requests_are_mapped_to_operations(
     queue: ScanQueue, queue_seed: Seeder, world: World, runs: Path, tmp_path: Path
 ) -> None:
-    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=2)
-    _forwarded(tmp_path, lease.run_id, ("/me", True), ("/items/5", True))
+    lease = _collected_engine_run(queue, queue_seed, world, sent=2)
+    _forwarded(tmp_path, lease.run_id, ("/me", False), ("/items/5", True))
 
     _worker(queue, runs, tmp_path).drain()
 
@@ -272,10 +294,41 @@ def test_forwarded_requests_are_mapped_to_operations(
     assert _coverage(queue_seed, lease.run_id) == (True, [(ordinal, True)])
 
 
+def test_preflight_requests_are_not_coverage(
+    queue: ScanQueue, queue_seed: Seeder, world: World, runs: Path, tmp_path: Path
+) -> None:
+    """preflight 是平台的健檢探測，不是安全測試：它的請求不算進 observed（審查發現）。"""
+    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=2)
+    _forwarded(tmp_path, lease.run_id, ("/items/5", True), ("/items/5", False))
+
+    _worker(queue, runs, tmp_path).drain()
+
+    assert _coverage(queue_seed, lease.run_id) == (True, [])
+
+
+def test_a_worker_interrupted_after_recording_coverage_finishes_on_retry(
+    queue: ScanQueue, queue_seed: Seeder, world: World, runs: Path, tmp_path: Path
+) -> None:
+    """coverage 寫入之後、succeeded 之前中斷：退回 collected 再解析一次仍能完成（審查發現）。"""
+    lease = _collected_engine_run(queue, queue_seed, world, sent=0)
+    parsing = queue.claim_collected("worker-1", FAKE)
+    assert parsing is not None
+    queue.record_coverage(parsing, {})
+    queue_seed.execute(
+        "UPDATE scanner_runs SET lease_expires_at = now() - interval '1 second' WHERE id = :id",
+        id=lease.run_id,
+    )
+
+    [report] = _worker(queue, runs, tmp_path).drain()
+
+    assert report.run_status is RunStatus.SUCCEEDED
+    assert _coverage(queue_seed, lease.run_id) == (True, [])
+
+
 def test_a_run_without_traffic_is_measured_with_nothing_covered(
     queue: ScanQueue, queue_seed: Seeder, world: World, runs: Path, tmp_path: Path
 ) -> None:
-    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=0)
+    lease = _collected_engine_run(queue, queue_seed, world, sent=0)
 
     _worker(queue, runs, tmp_path).drain()
 
@@ -300,7 +353,7 @@ def test_incomplete_telemetry_leaves_the_run_unmeasured(
     sent: int | None,
     requests: list[tuple[str, bool]],
 ) -> None:
-    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=sent)
+    lease = _collected_engine_run(queue, queue_seed, world, sent=sent)
     if requests:
         _forwarded(tmp_path, lease.run_id, *requests)
 
@@ -320,3 +373,23 @@ def test_coverage_is_recorded_once(
     with pytest.raises(LeaseLostError):
         queue.record_coverage(parsing, {})
     assert _coverage(queue_seed, lease.run_id) == (True, [])
+
+
+def test_a_lost_lease_skips_the_run_instead_of_stopping_the_worker(
+    queue: ScanQueue, queue_seed: Seeder, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """解析中 lease 失效（例如解析太久）：記下來、留給對帳，繼續處理其他 run（審查發現）。"""
+    first = _collected(queue, queue_seed, world)
+    second = _collected(queue, queue_seed, world)
+    advance = queue.advance
+
+    def lose_the_first(lease: Lease, to: RunStatus, **options: Any) -> Any:
+        if lease.run_id == first.run_id and to is RunStatus.SUCCEEDED:
+            raise LeaseLostError("lease 已過期")
+        return advance(lease, to, **options)
+
+    monkeypatch.setattr(queue, "advance", lose_the_first)
+
+    reports = Worker(queue, owner="worker-1").drain()
+
+    assert [report.run_id for report in reports] == [second.run_id]

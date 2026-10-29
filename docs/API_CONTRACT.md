@@ -979,9 +979,9 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 - 快照：`scope_grant`、`api_spec`、`auth` 引用的版本都不可變；`target_origin` 是建立時凍結的 origin。規格中每個 operation 與建立時的判斷（在範圍內，或不在的原因）另外保存，作為 coverage 的分母。
 - `auth` 是 null 時 `auth_role` 是 `anonymous`。`web_active_lab` 的 `api_spec` 與 coverage 的數字是 null，`limitations` 多一個 `NO_API_SPEC`。
 - **用量與 coverage**（T12，`DECISIONS.md` §16.4 至 §16.6；以 egress guard 的計數為準，不採用工具自報的數字）：
-  - `budget_usage`：各容器 run 實際轉送與被 guard 拒絕的請求數、容器啟動到停止的秒數。開始過的 run 的轉送數不明（guard 重啟、telemetry 讀不出來）時 `requests_sent` 是 null，不以 0 冒充。
-  - `auth.preflight`：`passed`、`failed`、`inconclusive`（匿名的請求也符合期望，端點沒有受保護）、`blocked`（guard 拒絕）、`not_executed`（沒有可用的回應；in-process 的 runner 一律如此）；還沒結束是 null。
-  - `coverage_measured`：有規格、至少一個容器 run，而且每個容器 run 的 telemetry 都已對應到 operation。`observed_operations` 是實際有請求對應到的 operation 數（不代表所有漏洞種類都測過了）；`authenticated_operations` 要 preflight 是 `passed`（否則是 0），匿名的 scan 是 null。沒有量測依據時兩者都是 null。
+  - `budget_usage`：各容器 run 實際轉送與被 guard 拒絕的請求數、容器啟動到停止的秒數。開始過的 run 有任何一項不明（guard 重啟、telemetry 讀不出來、容器沒確認刪除）時，那一項是 null，不以 0 冒充。
+  - `auth.preflight`：`passed`、`failed`、`inconclusive`（匿名的請求也符合期望，或匿名的請求沒有有效的回應：證明不了端點有受保護）、`blocked`（guard 拒絕）、`not_executed`（沒有可用的回應；in-process 的 runner 一律如此）；還沒結束是 null。
+  - `coverage_measured`：有規格、所有 run 都結束、至少一個容器 run，而且每個容器 run 的 telemetry 都已對應到 operation。`observed_operations` 是實際取得上游回應的請求對應到的 operation 數（preflight 的請求不算；不代表所有漏洞種類都測過了）；`authenticated_operations` 是其中以認證取得 401、403 以外回應的數量，而且要 preflight 是 `passed`（否則是 0），匿名的 scan 是 null。沒有量測依據時兩者都是 null。
   - `limitations`：`NO_API_SPEC`、`TRAFFIC_TELEMETRY_UNAVAILABLE`（沒有量測依據）、`AUTHENTICATION_NOT_VERIFIED`（綁定了 profile，但 preflight 不是 `passed`）。
   - `eligible_operations` 是建立時在範圍內的 operation 數，不代表實際測到了。
 - `fixture`：有 fake 引擎就是 true，表示結果不是真的掃描。`results_complete` 只有 `completed` 才是 true。

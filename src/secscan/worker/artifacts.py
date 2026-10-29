@@ -68,7 +68,7 @@ def _listed(raw: bytes, name: str) -> tuple[int, str] | None:
     """manifest 中這個檔案的大小與 sha256；沒有列出時回 None。"""
     try:
         document = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         raise _UnusableError("manifest 不是 JSON") from None
     files = document.get("files") if isinstance(document, dict) else None
     if not isinstance(files, list):

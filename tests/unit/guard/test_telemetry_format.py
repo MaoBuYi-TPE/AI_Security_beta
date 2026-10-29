@@ -137,3 +137,9 @@ def test_malformed_lines_are_rejected(line: bytes) -> None:
 def test_records_validate_their_fields(build: Any) -> None:
     with pytest.raises(TelemetryError):
         build()
+
+
+def test_deeply_nested_documents_are_malformed_not_crashes() -> None:
+    """RecursionError 也轉成 TelemetryError（審查建議）：summary 的上限 64 KiB 放得下很深的巢狀。"""
+    with pytest.raises(TelemetryError):
+        decode_summary(b"[" * 30_000 + b"]" * 30_000, run_id=RUN)

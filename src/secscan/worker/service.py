@@ -6,9 +6,12 @@
   結束之前寫入結果。沒有 artifact 的讀取器（in-process）或沒有輸出時是 not_executed。
 - coverage（每個 run，§16.6）：guard 記下沒有轉送任何請求 → 已量測、涵蓋 0 個；有轉送而且讀得到
   完整的 telemetry → 對應到 operation；轉送數不明或 telemetry 不完整 → 不標記（沒有量測依據）。
+  preflight 是平台的健檢探測，它的請求不算 coverage（已量測、涵蓋 0 個）。已經記錄過就跳過：
+  寫入之後、轉成 succeeded 之前中斷，退回 collected 之後重試仍能完成。
 M3 起依引擎呼叫 parser（輸出一律當成不可信的資料）。
 """
 
+import logging
 from collections.abc import Callable
 
 from secscan.scanners.domain.preflight import (
@@ -22,11 +25,13 @@ from secscan.scans.domain.coverage import observed_operations
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.preflight import PreflightResult
-from secscan.scans.queue import RunReport, ScanQueue
+from secscan.scans.queue import LeaseLostError, RunReport, ScanQueue
 from secscan.worker.artifacts import ArtifactReader
 from secscan.worker.telemetry import TelemetryReader
 
 ENGINES = frozenset({Engine.FAKE, Engine.PREFLIGHT})
+
+logger = logging.getLogger(__name__)
 
 
 class Worker:
@@ -58,14 +63,23 @@ class Worker:
             lease = self._queue.claim_collected(self._owner, self._engines)
             if lease is None:
                 break
-            if lease.engine is Engine.PREFLIGHT:
-                self._queue.record_preflight(lease, self._preflight(lease))
-            self._coverage(lease)
-            report = RunReport.of(lease, self._queue.advance(lease, RunStatus.SUCCEEDED))
+            try:
+                report = self._normalize(lease)
+            except LeaseLostError:
+                # 解析太久或被對帳退回：這個 run 留給對帳，繼續處理其他的（審查發現：原本整個
+                # worker 結束，重啟後又認領同一個 run）。
+                logger.warning("run %s 的 lease 已失效：留給對帳", lease.run_id)
+                continue
             reports.append(report)
             if on_report is not None:
                 on_report(report)
         return reports
+
+    def _normalize(self, lease: Lease) -> RunReport:
+        if lease.engine is Engine.PREFLIGHT:
+            self._queue.record_preflight(lease, self._preflight(lease))
+        self._coverage(lease)
+        return RunReport.of(lease, self._queue.advance(lease, RunStatus.SUCCEEDED))
 
     def _preflight(self, lease: Lease) -> PreflightResult:
         definition = self._queue.bound_preflight(lease)
@@ -79,13 +93,15 @@ class Worker:
 
     def _coverage(self, lease: Lease) -> None:
         inputs = self._queue.coverage_inputs(lease)
-        if inputs.requests_sent == 0:
+        if inputs.recorded:
+            return
+        if lease.engine is Engine.PREFLIGHT or inputs.requests_sent == 0:
             self._queue.record_coverage(lease, {})
             return
         if inputs.requests_sent is None or self._telemetry is None:
             return
-        requests = self._telemetry.forwarded(lease.run_id)
+        exchanges = self._telemetry.exchanges(lease.run_id)
         # summary 先寫、行後寫：中途失敗時行數可能比轉送數少一個，但不會更多（§16.3）。
-        if requests is None or len(requests) > inputs.requests_sent:
+        if exchanges is None or len(exchanges) > inputs.requests_sent:
             return
-        self._queue.record_coverage(lease, observed_operations(inputs.operations, requests))
+        self._queue.record_coverage(lease, observed_operations(inputs.operations, exchanges))

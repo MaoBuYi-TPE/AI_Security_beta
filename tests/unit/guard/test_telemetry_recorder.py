@@ -283,6 +283,11 @@ def test_line_append_failures_leave_the_count_unchanged(
         recorder.forwarded(policy.run_id, method="GET", path="/api", authenticated=False, at=NOW)
 
     assert recorder.reserve(policy)
+    recorder.release(RUN)
+    recorder.flush()  # 記憶體回到轉送之前：沒有轉送、也沒有轉送的時間
+    summary = _summary(tmp_path)
+    counts = (summary.forwarded, summary.first_at, summary.last_at)  # type: ignore[attr-defined]
+    assert counts == (0, None, None)
 
 
 def test_files_are_owner_only(recorder: TelemetryRecorder, tmp_path: Path) -> None:

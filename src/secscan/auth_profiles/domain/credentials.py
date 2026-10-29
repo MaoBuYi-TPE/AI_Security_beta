@@ -124,6 +124,9 @@ def header_line(credential: Credential, secret: SecretValue) -> SecretValue:
 
     secret 已通過 check_secret：字元集排除 CR、LF 與 NUL，不會注入其他 header。
     """
+    if any(character in secret.value for character in "\r\n\x00"):
+        # 縱深防禦（審查建議）：不論值怎麼存進去，都不能變成第二行 header。
+        raise InvalidAuthProfileError("secret 不可有換行或 NUL")
     prefix = "Bearer " if credential.type is AuthType.BEARER else ""
     return SecretValue(f"{credential.wire_header}: {prefix}{secret.value}")
 

@@ -238,7 +238,7 @@ class ContainerRunner:
                 outcome = self._supervise(attempt, plan.limits.wall_clock_seconds)
         finally:
             removed = self._cleanup(attempt)
-        self._queue.record_usage(attempt.lease, self._usage(attempt, outcome))
+        self._queue.record_usage(attempt.lease, self._usage(attempt, outcome, removed=removed))
         if outcome.ending in _NEEDS_REMOVAL and not removed:
             raise RuntimeUnavailableError("無法確認容器已停止：run 留給對帳")
         return self._conclude(attempt.lease, outcome)
@@ -471,13 +471,15 @@ class ContainerRunner:
                 logger.error("無法刪除 run %s 的 guard policy（%s）：下次啟動時清除", run_id, exc)
         return True
 
-    def _usage(self, attempt: _Attempt, outcome: _Outcome) -> RunUsage:
+    def _usage(self, attempt: _Attempt, outcome: _Outcome, *, removed: bool) -> RunUsage:
         """run 用掉的預算（docs/DECISIONS.md §16.4），在最後一次轉換之前寫入。
 
         - 沒寫過 policy：沒有任何流量，0。
         - 有 summary：以 guard 記下的為準（超過分到的數量就是不可信，留空）。
         - 沒有 summary：guard 每轉送一個請求都先寫 summary，所以同一個 guard（boot_id 相同、沒有
           中斷）就是 0；guard 重啟或中斷過則留空，之後的 run 以分到的數量扣除。
+        - 容器沒確認刪除（之後可能還在送），或 summary 是另一個 guard 寫的（重啟之後從 0 開始計）：
+          留空（審查發現）。
         """
         seconds = (
             0 if attempt.started_at is None else math.ceil(self._monotonic() - attempt.started_at)
@@ -487,6 +489,8 @@ class ContainerRunner:
             return RunUsage(requests_sent=0, requests_denied=0, traffic_seconds=seconds)
         run_id = attempt.lease.run_id
         unknown = RunUsage(requests_sent=None, requests_denied=None, traffic_seconds=seconds)
+        if not removed:
+            return unknown
         try:
             summary = self._guard.summary(run_id)
         except GuardUnavailableError as exc:
@@ -498,8 +502,10 @@ class ContainerRunner:
                 and self._guard.health().boot_id == attempt.boot_id
             )
             return RunUsage(0, 0, seconds) if same_guard else unknown
-        if summary.scan_id != attempt.lease.scan_id or (
-            summary.forwarded > egress.policy.budget.max_requests
+        if (
+            summary.scan_id != attempt.lease.scan_id
+            or summary.boot_id != attempt.boot_id
+            or summary.forwarded > egress.policy.budget.max_requests
         ):
             logger.error("run %s 的 telemetry 和 policy 不符：用量留空", run_id)
             return unknown

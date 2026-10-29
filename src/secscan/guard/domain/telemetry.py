@@ -198,7 +198,7 @@ def _kind(raw: bytes) -> object:
         raise TelemetryError("telemetry 的一行太長")
     try:
         document = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         raise TelemetryError("telemetry 的一行不是 UTF-8 的 JSON") from None
     return document.get("e") if isinstance(document, dict) else None
 

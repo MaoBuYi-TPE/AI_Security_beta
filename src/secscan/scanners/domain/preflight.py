@@ -70,7 +70,10 @@ send anonymous
 """
 
 _STATUS_LINE = re.compile(rb"HTTP/1\.[01] ([1-5][0-9]{2})(?: [\x20-\x7e]*)?")
-_HEADER = re.compile(rb"([!#$%&'*+.^_`|~0-9A-Za-z-]+):[ \t]*([\x20-\x7e\t]*?)[ \t]*")
+# header 分成名稱與值各自比對（沒有重疊的量詞）：靶機控制回應，有歧義的 regex 會災難性回溯
+# （審查發現的 ReDoS）。
+_HEADER_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+_HEADER_VALUE = re.compile(rb"[\x20-\x7e\t]*")
 _CHUNK_SIZE = re.compile(rb"([0-9A-Fa-f]{1,8})(?:;[\x20-\x7e]*)?")
 
 
@@ -135,10 +138,13 @@ def parse_response(raw: bytes) -> HttpResponse | None:
         return None
     headers: list[tuple[str, str]] = []
     for line in lines:
-        header = _HEADER.fullmatch(line)
-        if header is None:
+        name, separator, value = line.partition(b":")
+        value = value.strip(b" \t")
+        if not separator or _HEADER_NAME.fullmatch(name) is None:
             return None
-        headers.append((header[1].decode("ascii").lower(), header[2].decode("ascii")))
+        if _HEADER_VALUE.fullmatch(value) is None:
+            return None
+        headers.append((name.decode("ascii").lower(), value.decode("ascii")))
     if any(name == "transfer-encoding" and "chunked" in value.lower() for name, value in headers):
         decoded = _dechunk(body)
         if decoded is None:
@@ -167,7 +173,9 @@ def _dechunk(body: bytes) -> bytes | None:
 def evaluate(
     preflight: Preflight, authenticated: bytes | None, anonymous: bytes | None
 ) -> PreflightResult:
-    """帶認證的回應決定結果；匿名的回應只用來證明端點有受保護（也符合 → inconclusive）。"""
+    """帶認證的回應決定結果；匿名的回應證明端點有受保護。匿名的也符合，或沒有匿名的有效回應
+    （沒有輸出、被 guard 拒絕），都證明不了認證有效 → inconclusive（審查發現）。
+    """
     response = parse_response(authenticated) if authenticated else None
     if response is None:
         return PreflightResult.NOT_EXECUTED
@@ -176,7 +184,7 @@ def evaluate(
     if not _passes(preflight, response):
         return PreflightResult.FAILED
     control = parse_response(anonymous) if anonymous else None
-    if control is not None and control.header(GUARD_HEADER) is None and _passes(preflight, control):
+    if control is None or control.header(GUARD_HEADER) is not None or _passes(preflight, control):
         return PreflightResult.INCONCLUSIVE
     return PreflightResult.PASSED
 

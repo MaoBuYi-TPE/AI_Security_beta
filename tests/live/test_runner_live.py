@@ -234,7 +234,7 @@ def test_a_fake_scan_runs_in_a_hardened_isolated_container(target: Scannable) ->
 
 def test_an_authenticated_scan_runs_the_preflight_through_the_guard(target: Scannable) -> None:
     """preflight 的執行路徑（§16.5）：帶認證與匿名各一次，經 guard 送到 target；收包證據以接收端的
-    紀錄為準。用量是 guard 的計數，coverage 由 telemetry 對應到規格的 GET /me。"""
+    紀錄為準。用量是 guard 的計數；preflight 的請求不算 coverage。"""
     receiver = start_receiver("preflight", ip=LAB_IP, aliases=(target.host,), port=5000)
     try:
         scan_id = target.scan()
@@ -258,7 +258,8 @@ def test_an_authenticated_scan_runs_the_preflight_through_the_guard(target: Scan
     )
     coverage = scan["coverage"]
     assert coverage["coverage_measured"] is True
-    assert (coverage["observed_operations"], coverage["authenticated_operations"]) == (1, 1)
+    # preflight 的請求不算 coverage（審查發現）：有量測依據，涵蓋 0 個。
+    assert (coverage["observed_operations"], coverage["authenticated_operations"]) == (0, 0)
 
 
 def test_a_cancel_removes_the_container(target: Scannable) -> None:

@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, exists, func, insert, or_, select, update
+from sqlalchemy import ColumnElement, Select, exists, func, or_, select, update
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from secscan.api_keys.repository import ApiKeyRepository
@@ -25,7 +25,6 @@ from secscan.grants.domain.scope import Scope
 from secscan.grants.repository import ScopeGrantRepository
 from secscan.guard.domain.budget import RunBudget
 from secscan.scans.domain.catalog import Engine
-from secscan.scans.domain.coverage import FrozenOperation
 from secscan.scans.domain.lifecycle import (
     GATE_ERROR_CODES,
     TERMINAL_SCAN_STATUSES,
@@ -36,7 +35,8 @@ from secscan.scans.domain.lifecycle import (
 )
 from secscan.scans.domain.model import CONTAINER_NAME_PREFIX, Lease
 from secscan.scans.domain.preflight import PreflightResult
-from secscan.scans.models import RunCoverageModel, ScanModel, ScannerRunModel, ScanOperationModel
+from secscan.scans.leases import LeaseLostError, holds
+from secscan.scans.models import ScanModel, ScannerRunModel
 from secscan.scans.progress import (
     LEASE_DURATION,
     ContainerAssignment,
@@ -45,6 +45,7 @@ from secscan.scans.progress import (
     ScanProgress,
     now,
 )
+from secscan.scans.run_records import CoverageInputs, RunRecords, RunUsage
 from secscan.targets.domain import LabNetwork, Origin, OutsideLabError
 from secscan.targets.repository import TargetRepository
 
@@ -67,10 +68,6 @@ HEARTBEAT_INTERVAL = timedelta(seconds=5)
 # 鎖到的 scan 已經不符合條件（別人剛改了它）時，以新的快照再找幾次。
 MAX_CLAIM_ATTEMPTS = 3
 MAX_RECONCILED_PER_CALL = 100
-
-
-class LeaseLostError(Exception):
-    """lease 已過期，或不屬於這個 owner：不能再改變這個 run（fencing）。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,27 +101,6 @@ class RunReport:
             run_status=progress.run_status,
             scan_status=progress.scan_status,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class RunUsage:
-    """run 用掉的預算（docs/DECISIONS.md §16.4）：guard 的 telemetry 記下的轉送與拒絕數，以及
-    容器啟動到停止的秒數。轉送數不明（telemetry 遺失）時是 None：之後的 run 以分到的數量扣除。
-    """
-
-    requests_sent: int | None
-    requests_denied: int | None
-    traffic_seconds: int
-
-
-@dataclass(frozen=True, slots=True)
-class CoverageInputs:
-    """worker 對應 coverage 需要的：guard 記下的轉送數（None 是不明或沒有容器）與範圍內的
-    operation（docs/DECISIONS.md §16.6）。
-    """
-
-    requests_sent: int | None
-    operations: tuple[FrozenOperation, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +143,7 @@ class QueueOperations:
         self._grants = ScopeGrantRepository(session)
         self._profiles = AuthProfileRepository(session)
         self._keys = ApiKeyRepository(session)
+        self._records = RunRecords(session)
         self._lab = lab
 
     def claim(self, owner: str, engines: Collection[Engine]) -> Lease | None:
@@ -185,7 +162,7 @@ class QueueOperations:
         """延長還沒過期的 lease；回報 scan 是否被要求取消。只改 run 的列，不等 scan 的鎖。"""
         scan_id = self._session.execute(
             update(ScannerRunModel)
-            .where(*_holds(lease))
+            .where(*holds(lease))
             .values(lease_expires_at=now() + LEASE_DURATION, heartbeat_at=now())
             .returning(ScannerRunModel.scan_id)
             .execution_options(synchronize_session=False)
@@ -196,87 +173,6 @@ class QueueOperations:
             select(ScanModel.cancel_requested_at).where(ScanModel.id == scan_id)
         )
         return Heartbeat(valid=True, cancel_requested=cancel_requested_at is not None)
-
-    def record_usage(self, lease: Lease, usage: RunUsage) -> None:
-        """在 run 結束之前（終止的 run 不能再改）記下用量；lease 失效時拋 LeaseLostError。"""
-        updated = self._session.execute(
-            update(ScannerRunModel)
-            .where(*_holds(lease))
-            .values(
-                requests_sent=usage.requests_sent,
-                requests_denied=usage.requests_denied,
-                traffic_seconds=usage.traffic_seconds,
-            )
-            .returning(ScannerRunModel.id)
-            .execution_options(synchronize_session=False)
-        ).scalar()
-        if updated is None:
-            raise LeaseLostError("lease 已過期或不屬於這個 runner")
-
-    def record_preflight(self, lease: Lease, result: PreflightResult) -> None:
-        """worker 判斷之後、run 結束之前寫入 preflight 的結果；lease 失效時拋 LeaseLostError。"""
-        updated = self._session.execute(
-            update(ScannerRunModel)
-            .where(*_holds(lease), ScannerRunModel.engine == Engine.PREFLIGHT.value)
-            .values(preflight_result=result.value)
-            .returning(ScannerRunModel.id)
-            .execution_options(synchronize_session=False)
-        ).scalar()
-        if updated is None:
-            raise LeaseLostError("lease 已過期、不屬於這個 worker，或不是 preflight 的 run")
-
-    def coverage_inputs(self, lease: Lease) -> CoverageInputs:
-        sent = self._session.scalar(
-            select(ScannerRunModel.requests_sent).where(ScannerRunModel.id == lease.run_id)
-        )
-        rows = self._session.execute(
-            select(ScanOperationModel.ordinal, ScanOperationModel.method, ScanOperationModel.path)
-            .where(
-                ScanOperationModel.scan_id == lease.scan_id,
-                ScanOperationModel.ineligible_reason.is_(None),
-            )
-            .order_by(ScanOperationModel.ordinal)
-        )
-        return CoverageInputs(
-            requests_sent=sent,
-            operations=tuple(FrozenOperation(row.ordinal, row.method, row.path) for row in rows),
-        )
-
-    def record_coverage(self, lease: Lease, observed: Mapping[int, bool]) -> None:
-        """在 run 結束之前寫入這個 run 涵蓋的 operation，並標記已量測；lease 失效時拋例外。"""
-        marked = self._session.execute(
-            update(ScannerRunModel)
-            .where(*_holds(lease), ScannerRunModel.coverage_recorded.is_(False))
-            .values(coverage_recorded=True)
-            .returning(ScannerRunModel.id)
-            .execution_options(synchronize_session=False)
-        ).scalar()
-        if marked is None:
-            raise LeaseLostError("lease 已過期、不屬於這個 worker，或已經記錄過 coverage")
-        if observed:
-            self._session.execute(
-                insert(RunCoverageModel),
-                [
-                    {
-                        "scanner_run_id": lease.run_id,
-                        "scan_id": lease.scan_id,
-                        "ordinal": ordinal,
-                        "authenticated": authenticated,
-                    }
-                    for ordinal, authenticated in sorted(observed.items())
-                ],
-            )
-
-    def bound_preflight(self, lease: Lease) -> Preflight | None:
-        """scan 綁定的 auth profile 版本的 preflight 定義；沒有綁定時是 None。"""
-        row = self._session.execute(
-            select(ScanModel.auth_profile_id, ScanModel.auth_profile_version).where(
-                ScanModel.id == lease.scan_id
-            )
-        ).first()
-        if row is None or row.auth_profile_id is None or row.auth_profile_version is None:
-            return None
-        return self._profiles.preflight(row.auth_profile_id, version=row.auth_profile_version)
 
     def prepare(self, lease: Lease, *, clock: Callable[[], datetime]) -> Progress:
         """runner 啟動前：要求過取消 → cancelling；gate、綁定的 profile 版本或建立者的 key
@@ -305,7 +201,12 @@ class QueueOperations:
         if error_code is None:
             error_code, secret = self._binding(scan, read_secret=image_ref is not None)
         error_code = error_code or self._creator(scan)
-        requests, seconds = self._remaining(scan, run)
+        requests, seconds = self._records.remaining(
+            scan.id,
+            run.id,
+            max_requests=scan.max_requests,
+            max_duration_seconds=scan.max_duration_seconds,
+        )
         if error_code is None and (requests == 0 or seconds == 0):
             error_code = RunErrorCode.BUDGET_EXHAUSTED
         if error_code is not None or grant is None:
@@ -318,67 +219,15 @@ class QueueOperations:
         )
         self._progress.move(scan, run, RunStatus.RUNNING, container=container)
         if container is not None:
-            # 只有容器版的 run 會送流量；in-process 的 fake 不佔預算。
-            self._session.execute(
-                update(ScannerRunModel)
-                .where(ScannerRunModel.id == run.id)
-                .values(requests_allotted=requests)
-                .execution_options(synchronize_session=False)
-            )
+            self._records.allot(run.id, requests)
         progress = Progress(run_status=RunStatus.RUNNING, scan_status=self._progress.settle(scan))
-        egress = EgressScope(
-            origin=scan.target_origin,
-            scope=grant.scope,
-            valid_until=grant.window.valid_until,
-            budget=RunBudget(
-                requests_per_second=scan.requests_per_second, burst=1, max_requests=requests
-            ),
-            auth_header=secret.credential.wire_header.lower() if secret is not None else None,
+        launch = self._launch(
+            scan, progress, secret, _egress(scan, grant, secret, requests), seconds=seconds
         )
-        launch = self._launch(scan, progress, secret, egress, seconds=seconds)
-        if run.engine is not Engine.PREFLIGHT or scan.auth_profile_id is None:
+        if run.engine is not Engine.PREFLIGHT:
             return launch
-        version = scan.auth_profile_version
-        preflight = (
-            None
-            if version is None
-            else self._profiles.preflight(scan.auth_profile_id, version=version)
-        )
+        preflight = self._records.preflight(scan.auth_profile_id, scan.auth_profile_version)
         return replace(launch, preflight=preflight)
-
-    def _remaining(self, scan: LockedScan, run: RunState) -> tuple[int, int]:
-        """scan 的上限減去同一個 scan 之前的 run 用掉的（docs/DECISIONS.md §16.4）。
-
-        轉送數不明的 run 以分到的數量計算（保守）；秒數不明的以開始到結束（或現在）的時間計算。
-        """
-        elapsed = func.ceil(
-            func.extract(
-                "epoch",
-                func.coalesce(ScannerRunModel.finished_at, func.clock_timestamp())
-                - ScannerRunModel.started_at,
-            )
-        )
-        used_requests, used_seconds = self._session.execute(
-            select(
-                func.coalesce(
-                    func.sum(
-                        func.coalesce(
-                            ScannerRunModel.requests_sent, ScannerRunModel.requests_allotted
-                        )
-                    ),
-                    0,
-                ),
-                func.coalesce(func.sum(func.coalesce(ScannerRunModel.traffic_seconds, elapsed)), 0),
-            ).where(
-                ScannerRunModel.scan_id == scan.id,
-                ScannerRunModel.id != run.id,
-                ScannerRunModel.container_name.is_not(None),
-            )
-        ).one()
-        return (
-            max(0, scan.max_requests - int(used_requests)),
-            max(0, scan.max_duration_seconds - int(used_seconds)),
-        )
 
     @staticmethod
     def _launch(
@@ -487,7 +336,7 @@ class QueueOperations:
     def _fenced(self, lease: Lease) -> tuple[LockedScan, RunState]:
         """先鎖 scan，再確認 lease 仍屬於這個 owner、而且還沒過期。"""
         scan = self._progress.lock_scan(lease.scan_id)
-        run = self._progress.run(lease.run_id, conditions=tuple(_holds(lease)))
+        run = self._progress.run(lease.run_id, conditions=tuple(holds(lease)))
         if scan is None or run is None or run.scan_id != scan.id:
             raise LeaseLostError("lease 已過期或不屬於這個 runner")
         return scan, run
@@ -582,23 +431,23 @@ class ScanQueue:
 
     def record_usage(self, lease: Lease, usage: RunUsage) -> None:
         with self._sessions.begin() as session:
-            self._operations(session).record_usage(lease, usage)
+            RunRecords(session).record_usage(lease, usage)
 
     def record_preflight(self, lease: Lease, result: PreflightResult) -> None:
         with self._sessions.begin() as session:
-            self._operations(session).record_preflight(lease, result)
+            RunRecords(session).record_preflight(lease, result)
 
     def coverage_inputs(self, lease: Lease) -> CoverageInputs:
         with self._sessions.begin() as session:
-            return self._operations(session).coverage_inputs(lease)
+            return RunRecords(session).coverage_inputs(lease)
 
     def record_coverage(self, lease: Lease, observed: Mapping[int, bool]) -> None:
         with self._sessions.begin() as session:
-            self._operations(session).record_coverage(lease, observed)
+            RunRecords(session).record_coverage(lease, observed)
 
     def bound_preflight(self, lease: Lease) -> Preflight | None:
         with self._sessions.begin() as session:
-            return self._operations(session).bound_preflight(lease)
+            return RunRecords(session).bound_preflight(lease)
 
     def prepare(self, lease: Lease) -> Progress:
         with self._sessions.begin() as session:
@@ -626,6 +475,20 @@ class ScanQueue:
 
     def _operations(self, session: Session) -> QueueOperations:
         return QueueOperations(session, lab=self._lab)
+
+
+def _egress(
+    scan: LockedScan, grant: ScopeGrant, secret: StoredSecret | None, requests: int
+) -> EgressScope:
+    return EgressScope(
+        origin=scan.target_origin,
+        scope=grant.scope,
+        valid_until=grant.window.valid_until,
+        budget=RunBudget(
+            requests_per_second=scan.requests_per_second, burst=1, max_requests=requests
+        ),
+        auth_header=secret.credential.wire_header.lower() if secret is not None else None,
+    )
 
 
 def _join_runs() -> Select[UUID, UUID]:
@@ -663,16 +526,6 @@ def _claimable(
         reasons.append(stopped.cancel_requested_at.is_not(None))
     conditions.append(~exists().where(stopped.id == ScannerRunModel.scan_id, or_(*reasons)))
     return conditions
-
-
-def _holds(lease: Lease) -> tuple[ColumnElement[bool], ...]:
-    """lease 仍屬於這個 owner、而且還沒過期（以 DB 的實際時間判斷）。"""
-    return (
-        ScannerRunModel.id == lease.run_id,
-        ScannerRunModel.scan_id == lease.scan_id,
-        ScannerRunModel.lease_owner == lease.owner,
-        ScannerRunModel.lease_expires_at > func.clock_timestamp(),
-    )
 
 
 def _values(

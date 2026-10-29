@@ -84,6 +84,10 @@ class TelemetryRecorder:
             return False
         return True
 
+    def pending(self, policy: Policy) -> int:
+        """保留中、還沒轉送的名額數（第一次看到這個 run 時同 reserve 由 summary 接續）。"""
+        return self._record(policy).ledger.pending
+
     def release(self, run_id: UUID) -> None:
         self._runs[run_id].ledger.release()
 
@@ -107,14 +111,14 @@ class TelemetryRecorder:
             record.ledger.release()
             raise TelemetryWriteError("轉送的請求無法記錄") from None
         record.ledger.commit()
-        first_at = record.first_at
+        first_at, last_at = record.first_at, record.last_at
         record.first_at = at if first_at is None else first_at
         record.last_at = at
         try:
             self._write_summary(run_id, record)
             self._append(run_id, line)
         except TelemetryWriteError:
-            self._uncommit(record, first_at)
+            self._uncommit(record, first_at, last_at)
             raise
         return sequence
 
@@ -210,10 +214,10 @@ class TelemetryRecorder:
             last_at=summary.last_at,
         )
 
-    def _uncommit(self, record: _RunRecord, first_at: float | None) -> None:
+    def _uncommit(self, record: _RunRecord, first_at: float | None, last_at: float | None) -> None:
         """summary 或那一行沒寫成：記憶體回到轉送之前（磁碟上的 summary 最多多算一個）。"""
-        record.ledger.forwarded -= 1
-        record.first_at = first_at
+        record.ledger.uncommit()
+        record.first_at, record.last_at = first_at, last_at
         record.dirty = True
 
     def _write_summary(self, run_id: UUID, record: _RunRecord) -> None:

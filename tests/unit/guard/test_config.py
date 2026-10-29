@@ -108,7 +108,7 @@ def test_addon_options_are_the_documented_safe_values() -> None:
     options = addon_options()
 
     assert options["connection_strategy"] == "lazy"
-    assert options["body_size_limit"] == "1m"  # 同時上傳的記憶體上限（DECISIONS §16.8）
+    assert options["body_size_limit"] == "16m"  # 也限制回應：不能太小（DECISIONS §16.8）
     assert options["stream_large_bodies"] is None
     assert options["validate_inbound_headers"] is True
     assert options["block_global"] is True

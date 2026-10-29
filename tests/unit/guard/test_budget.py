@@ -144,11 +144,24 @@ def test_the_ledger_resumes_from_a_previous_count() -> None:
     assert ledger.reserve(maximum=3)
 
 
+def test_an_unrecorded_forward_can_be_undone() -> None:
+    ledger = RunLedger()
+    ledger.reserve(maximum=1)
+    ledger.commit()
+
+    ledger.uncommit()
+
+    assert ledger.forwarded == 0
+    assert ledger.reserve(maximum=1)
+
+
 def test_ledger_misuse_is_an_error() -> None:
     with pytest.raises(BudgetError):
         RunLedger().commit()
     with pytest.raises(BudgetError):
         RunLedger().release()
+    with pytest.raises(BudgetError):
+        RunLedger().uncommit()
     with pytest.raises(BudgetError):
         RunLedger(forwarded=-1)
     with pytest.raises(BudgetError):

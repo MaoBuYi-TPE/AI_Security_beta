@@ -343,8 +343,11 @@ def test_guard_volumes_live_only_in_memory(volume: str) -> None:
     options = COMPOSE["volumes"][volume]["driver_opts"]
 
     assert (options["type"], options["device"]) == ("tmpfs", "tmpfs")
-    parsed = dict(item.split("=", 1) for item in options["o"].split(","))
+    items = options["o"].split(",")
+    parsed = dict(item.split("=", 1) for item in items if "=" in item)
     assert (parsed["uid"], parsed["gid"], parsed["mode"]) == ("10001", "10001", "0700")
+    if volume == "guard_telemetry":  # 只有資料，不需要執行、setuid 或裝置檔（審查建議）
+        assert {"noexec", "nosuid", "nodev"} <= set(items)
 
 
 def test_the_guard_keeps_its_scratch_space_in_memory_and_is_health_checked() -> None:

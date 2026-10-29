@@ -7,8 +7,11 @@
   MAX_RATE_WAIT_SECONDS；等不到就不保留位置，請求被拒絕（RATE_LIMITED）。
 - RunLedger：放行之前先保留一個名額（同時進行的請求不會一起超過上限），被拒絕就釋放；只計真的
   轉送的請求。
+- max_pending：名額在 header 階段保留、body 送完才轉送，延遲 body 可以累積已核准的請求再一次送出
+  （審查發現）。保留中的名額最多 速率乘以最長等待再加 burst 個：正常的工具排隊也不會超過。
 """
 
+import math
 from collections import OrderedDict
 from dataclasses import dataclass
 from uuid import UUID
@@ -38,6 +41,10 @@ class RunBudget:
             raise BudgetError("burst 必須是 1 到 requests_per_second")
         if not _is_int(self.max_requests) or not 0 <= self.max_requests <= MAX_REQUESTS:
             raise BudgetError(f"max_requests 必須是 0 到 {MAX_REQUESTS}")
+
+
+def max_pending(budget: RunBudget) -> int:
+    return budget.requests_per_second * math.ceil(MAX_RATE_WAIT_SECONDS) + budget.burst
 
 
 class RateLimiter:
@@ -101,6 +108,12 @@ class RunLedger:
 
     def release(self) -> None:
         self._take()
+
+    def uncommit(self) -> None:
+        """確定轉送之後才發現沒記錄下來（telemetry 寫不出）：回到轉送之前。"""
+        if self.forwarded <= 0:
+            raise BudgetError("沒有轉送過的請求")
+        self.forwarded -= 1
 
     @property
     def pending(self) -> int:

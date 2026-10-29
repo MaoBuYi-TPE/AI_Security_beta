@@ -9,6 +9,7 @@
 """
 
 import json
+import time
 from uuid import UUID
 
 import pytest
@@ -174,5 +175,37 @@ def test_no_usable_response_means_not_executed(authenticated: bytes | None) -> N
     assert evaluate(PREFLIGHT, authenticated, _anonymous()) is PreflightResult.NOT_EXECUTED
 
 
-def test_a_missing_anonymous_response_does_not_hide_a_pass() -> None:
-    assert evaluate(PREFLIGHT, _response(), None) is PreflightResult.PASSED
+@pytest.mark.parametrize(
+    "anonymous",
+    [
+        None,
+        b"",
+        b"HTTP/1.1 403 Forbidden\r\nX-Secscan-Guard: RATE_LIMITED\r\n\r\nblocked\n",
+    ],
+)
+def test_without_a_control_response_nothing_is_proven(anonymous: bytes | None) -> None:
+    """匿名的對照沒有有效的回應，證明不了端點有受保護（審查發現）：不判 passed。"""
+    assert evaluate(PREFLIGHT, _response(), anonymous) is PreflightResult.INCONCLUSIVE
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"X-A: x" + b" " * 16_000 + b"\xff",
+        b"X-A:" + b" " * 4_000 + b"\x01",
+        b"X-A: " + b"\t " * 8_000 + b"x\x7f",
+    ],
+)
+def test_hostile_headers_are_rejected_in_linear_time(line: bytes) -> None:
+    """靶機控制的回應（審查發現的 ReDoS）：長串空白加一個不合法的字元不能讓解析卡住。"""
+    started = time.perf_counter()
+
+    assert parse_response(b"HTTP/1.1 200 OK\r\n" + line + b"\r\n\r\n{}") is None
+    assert time.perf_counter() - started < 0.05
+
+
+def test_header_values_keep_inner_spaces_and_drop_outer_ones() -> None:
+    response = parse_response(b"HTTP/1.1 200 OK\r\nX-A: \t a  b \t\r\nX-B:\r\n\r\n{}")
+
+    assert response is not None
+    assert (response.header("x-a"), response.header("x-b")) == ("a  b", "")

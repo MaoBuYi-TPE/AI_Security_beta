@@ -14,7 +14,7 @@ import pytest
 
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
-from secscan.scans.domain.model import ScannerRun
+from secscan.scans.domain.model import Coverage, ScannerRun
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.domain.usage import (
     BudgetUsage,
@@ -65,6 +65,13 @@ def test_unknown_counts_make_the_total_unknown() -> None:
     assert budget_usage(runs) == BudgetUsage(
         requests_sent=None, requests_denied=None, traffic_seconds=9
     )
+
+
+def test_unknown_traffic_time_makes_the_total_unknown() -> None:
+    """和剩下的預算的口徑一致：不明的不以 0 冒充（審查發現）。"""
+    runs = (_run(1, traffic_seconds=None), _run(2, traffic_seconds=5))
+
+    assert budget_usage(runs).traffic_seconds is None
 
 
 def test_runs_that_never_started_used_nothing() -> None:
@@ -134,5 +141,31 @@ def test_an_unrecorded_container_run_means_not_measured() -> None:
     assert not coverage_measured(runs, has_spec=True)
 
 
+def test_coverage_is_not_measured_while_runs_are_pending() -> None:
+    """之後的引擎還沒跑完，涵蓋的數字還會變（審查建議）。"""
+    runs = (
+        _run(1, Engine.PREFLIGHT),
+        _run(2, status=RunStatus.QUEUED, started_at=None, finished_at=None, container=False),
+    )
+
+    assert not coverage_measured(runs, has_spec=True)
+
+
 def test_without_any_container_run_nothing_was_measured() -> None:
     assert not coverage_measured((_run(container=False, coverage_recorded=False),), has_spec=True)
+
+
+def test_only_preflight_runs_have_a_preflight_result() -> None:
+    with pytest.raises(ValueError, match="preflight"):
+        _run(preflight_result=PreflightResult.PASSED)
+
+
+@pytest.mark.parametrize(("observed", "authenticated"), [(2, 3), (11, 0)])
+def test_coverage_counts_stay_ordered(observed: int, authenticated: int) -> None:
+    with pytest.raises(ValueError, match="authenticated"):
+        Coverage(
+            eligible_operations=10,
+            ineligible_operations=0,
+            observed_operations=observed,
+            authenticated_operations=authenticated,
+        )

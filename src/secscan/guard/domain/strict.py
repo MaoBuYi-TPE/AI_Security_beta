@@ -91,7 +91,7 @@ def load_object(
             parse_float=float if floats else reject("浮點數"),
             parse_constant=reject(" NaN 或 Infinity"),
         )
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         raise error(f"{label} 不是 UTF-8 的 JSON") from None
     if not isinstance(document, dict):
         raise error(f"{label} 必須是 JSON 物件")

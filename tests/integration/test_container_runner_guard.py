@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import Engine
@@ -705,3 +705,52 @@ def test_runs_that_never_started_used_nothing(
 
     assert report.run_status is R.FAILED
     assert _usage(queue_seed, report.run_id)[1:] == (0, 0, 0)
+
+
+def test_usage_of_a_container_that_may_still_run_is_unknown(
+    make_runner: Callable[..., ContainerRunner],
+    runtime: SpyRuntime,
+    channel: SpyChannel,
+    guard: GuardDouble,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """刪不掉容器：它之後可能還在送（審查發現），當下的 summary 不是最終值，留空。"""
+    queue_seed.scan(world.operator_a, scannable)
+
+    def record_then_lose_docker() -> None:
+        policy = channel.written[0]
+        guard.write_summary(policy.run_id, policy.scan_id, forwarded=1)
+        runtime.failing.update({"state", "remove"})
+
+    clock.at(2, record_then_lose_docker)
+
+    with pytest.raises(RuntimeUnavailableError):
+        make_runner().run_once(FAKE)
+
+    run_id = channel.written[0].run_id
+    assert _usage(queue_seed, run_id)[1:3] == (None, None)
+
+
+def test_a_summary_from_another_guard_boot_is_not_trusted(
+    make_runner: Callable[..., ContainerRunner],
+    channel: SpyChannel,
+    guard: GuardDouble,
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """guard 在 run 中重啟、telemetry 沒有保留：新的 guard 從 0 開始計（審查發現），留空。"""
+    queue_seed.scan(world.operator_a, scannable)
+
+    def other_boot() -> None:
+        policy = channel.written[0]
+        guard.write_summary(policy.run_id, policy.scan_id, forwarded=1, boot_id=uuid4())
+
+    clock.at(4, other_boot)
+    report = _report(make_runner())
+
+    assert _usage(queue_seed, report.run_id)[1:3] == (None, None)

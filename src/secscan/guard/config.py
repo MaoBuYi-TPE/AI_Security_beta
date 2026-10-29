@@ -19,10 +19,9 @@ from secscan.core.network import lab_cidr_problem
 from secscan.targets.domain import LabNetwork, parse_ipv4
 
 GUARD_PORT = 8080
-# 每個請求的 body 最多 1 MiB（超過回 413）：mitmproxy 把 body 讀進記憶體，guard 的記憶體上限是
-# 256 MiB；同時上傳太多時 guard 被 OOM 終止（fail closed，DECISIONS §16.8）。lab 的 API 測試用不到
-# 更大的 body，M3 依工具的量測再調整。
-BODY_SIZE_LIMIT = "1m"
+# 請求與回應的 body 都受這個上限（mitmproxy 的 body_size_limit）：回應不能太小，ZAP 要爬大型的 JS。
+# 同時上傳太多時 guard 可能被 OOM 終止（fail closed）；DECISIONS §16.8。
+BODY_SIZE_LIMIT = "16m"
 DEFAULT_POLICIES_DIR = Path("/guard/policies")
 DEFAULT_STATUS_DIR = Path("/guard/status")
 DEFAULT_TELEMETRY_DIR = Path("/guard/telemetry")
