@@ -24,6 +24,7 @@ from secscan.guard.domain.budget import RunBudget
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
+from secscan.scans.domain.request import BudgetRequest
 from secscan.scans.queue import (
     EgressScope,
     Launch,
@@ -383,3 +384,80 @@ def test_the_database_refuses_usage_beyond_the_allotment(
         queue.record_usage(
             lease, RunUsage(requests_sent=too_many, requests_denied=0, traffic_seconds=1)
         )
+
+
+def _after_preflight(
+    queue: ScanQueue,
+    seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    *,
+    sent: int | None,
+    seconds: int = 30,
+    **budget: int,
+) -> Lease:
+    """preflight 用掉 sent 個請求、seconds 秒之後結束；回傳 fake 的 run（第二個）。"""
+    seed.scan(
+        world.operator_a,
+        scannable,
+        auth_profile_id=scannable.profile.id,
+        budget=BudgetRequest(**budget),
+    )
+    preflight = _claimed(queue, PREFLIGHT)
+    queue.prepare_launch(preflight, image_ref=IMAGE)
+    queue.record_usage(
+        preflight, RunUsage(requests_sent=sent, requests_denied=0, traffic_seconds=seconds)
+    )
+    queue.advance(preflight, R.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
+    return _claimed(queue)
+
+
+def test_later_runs_get_what_earlier_runs_left(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    """scan 共用的預算（SEC-13）：preflight 轉送的請求與流量的時間從之後的 run 扣除。"""
+    lease = _after_preflight(
+        queue, queue_seed, world, scannable, sent=2, max_requests=10, max_duration_seconds=100
+    )
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.egress is not None
+    assert launch.egress.budget.max_requests == 8
+    assert launch.max_duration_seconds == 70
+    assert _usage(queue_seed, lease.run_id).requests_allotted == 8
+
+
+def test_unknown_usage_is_deducted_in_full(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    """轉送數不明（guard 重啟、telemetry 遺失）：以 preflight 分到的整份扣除（保守）。"""
+    lease = _after_preflight(
+        queue, queue_seed, world, scannable, sent=None, max_requests=10, max_duration_seconds=100
+    )
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.progress == Progress(R.FAILED, S.FAILED)
+    assert _run(queue_seed, lease.run_id).error_code == RunErrorCode.BUDGET_EXHAUSTED
+    assert launch.egress is None
+
+
+def test_no_time_left_starts_nothing(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    lease = _after_preflight(
+        queue,
+        queue_seed,
+        world,
+        scannable,
+        sent=1,
+        seconds=100,
+        max_requests=10,
+        max_duration_seconds=100,
+    )
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.progress.run_status is R.FAILED
+    assert _run(queue_seed, lease.run_id).error_code == RunErrorCode.BUDGET_EXHAUSTED
