@@ -8,12 +8,12 @@
 （ARCHITECTURE.md §9）：過期的 lease 不能延長，也不會被別人認領，只由對帳處理。
 """
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, exists, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, exists, func, insert, or_, select, update
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from secscan.api_keys.repository import ApiKeyRepository
@@ -25,6 +25,7 @@ from secscan.grants.domain.scope import Scope
 from secscan.grants.repository import ScopeGrantRepository
 from secscan.guard.domain.budget import RunBudget
 from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.coverage import FrozenOperation
 from secscan.scans.domain.lifecycle import (
     GATE_ERROR_CODES,
     TERMINAL_SCAN_STATUSES,
@@ -35,7 +36,7 @@ from secscan.scans.domain.lifecycle import (
 )
 from secscan.scans.domain.model import CONTAINER_NAME_PREFIX, Lease
 from secscan.scans.domain.preflight import PreflightResult
-from secscan.scans.models import ScanModel, ScannerRunModel
+from secscan.scans.models import RunCoverageModel, ScanModel, ScannerRunModel, ScanOperationModel
 from secscan.scans.progress import (
     LEASE_DURATION,
     ContainerAssignment,
@@ -50,6 +51,7 @@ from secscan.targets.repository import TargetRepository
 __all__ = [
     "HEARTBEAT_INTERVAL",
     "LEASE_DURATION",
+    "CoverageInputs",
     "EgressScope",
     "Heartbeat",
     "Launch",
@@ -113,6 +115,16 @@ class RunUsage:
     requests_sent: int | None
     requests_denied: int | None
     traffic_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageInputs:
+    """worker 對應 coverage 需要的：guard 記下的轉送數（None 是不明或沒有容器）與範圍內的
+    operation（docs/DECISIONS.md §16.6）。
+    """
+
+    requests_sent: int | None
+    operations: tuple[FrozenOperation, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +224,48 @@ class QueueOperations:
         ).scalar()
         if updated is None:
             raise LeaseLostError("lease 已過期、不屬於這個 worker，或不是 preflight 的 run")
+
+    def coverage_inputs(self, lease: Lease) -> CoverageInputs:
+        sent = self._session.scalar(
+            select(ScannerRunModel.requests_sent).where(ScannerRunModel.id == lease.run_id)
+        )
+        rows = self._session.execute(
+            select(ScanOperationModel.ordinal, ScanOperationModel.method, ScanOperationModel.path)
+            .where(
+                ScanOperationModel.scan_id == lease.scan_id,
+                ScanOperationModel.ineligible_reason.is_(None),
+            )
+            .order_by(ScanOperationModel.ordinal)
+        )
+        return CoverageInputs(
+            requests_sent=sent,
+            operations=tuple(FrozenOperation(row.ordinal, row.method, row.path) for row in rows),
+        )
+
+    def record_coverage(self, lease: Lease, observed: Mapping[int, bool]) -> None:
+        """在 run 結束之前寫入這個 run 涵蓋的 operation，並標記已量測；lease 失效時拋例外。"""
+        marked = self._session.execute(
+            update(ScannerRunModel)
+            .where(*_holds(lease), ScannerRunModel.coverage_recorded.is_(False))
+            .values(coverage_recorded=True)
+            .returning(ScannerRunModel.id)
+            .execution_options(synchronize_session=False)
+        ).scalar()
+        if marked is None:
+            raise LeaseLostError("lease 已過期、不屬於這個 worker，或已經記錄過 coverage")
+        if observed:
+            self._session.execute(
+                insert(RunCoverageModel),
+                [
+                    {
+                        "scanner_run_id": lease.run_id,
+                        "scan_id": lease.scan_id,
+                        "ordinal": ordinal,
+                        "authenticated": authenticated,
+                    }
+                    for ordinal, authenticated in sorted(observed.items())
+                ],
+            )
 
     def bound_preflight(self, lease: Lease) -> Preflight | None:
         """scan 綁定的 auth profile 版本的 preflight 定義；沒有綁定時是 None。"""
@@ -533,6 +587,14 @@ class ScanQueue:
     def record_preflight(self, lease: Lease, result: PreflightResult) -> None:
         with self._sessions.begin() as session:
             self._operations(session).record_preflight(lease, result)
+
+    def coverage_inputs(self, lease: Lease) -> CoverageInputs:
+        with self._sessions.begin() as session:
+            return self._operations(session).coverage_inputs(lease)
+
+    def record_coverage(self, lease: Lease, observed: Mapping[int, bool]) -> None:
+        with self._sessions.begin() as session:
+            self._operations(session).record_coverage(lease, observed)
 
     def bound_preflight(self, lease: Lease) -> Preflight | None:
         with self._sessions.begin() as session:

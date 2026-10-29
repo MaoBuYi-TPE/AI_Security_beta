@@ -330,6 +330,7 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     requests_denied: Mapped[int | None]
     traffic_seconds: Mapped[int | None]
     preflight_result: Mapped[str | None] = mapped_column(String(PREFLIGHT_RESULT_MAX_LENGTH))
+    coverage_recorded: Mapped[bool] = mapped_column(server_default=text("false"))
 
 
 class ScanEventModel(Base):

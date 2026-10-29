@@ -174,9 +174,11 @@ services:
     command: ["secscan-admin", "worker"]
     environment:
       <<: *app-env
-    # runner 收集好的輸出（preflight 的回應；docs/DECISIONS.md §16.5）：唯讀。
+    # runner 收集好的輸出（preflight 的回應；docs/DECISIONS.md §16.5）與 guard 的 telemetry
+    # （coverage；§16.6）：都唯讀。
     volumes:
       - runs:/runs:ro
+      - guard_telemetry:/guard/telemetry:ro
     networks: [control_net]
     depends_on:
       db:

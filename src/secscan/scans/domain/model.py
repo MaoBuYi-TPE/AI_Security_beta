@@ -19,6 +19,7 @@ from secscan.scans.domain.lifecycle import (
     RunStatus,
     ScanStatus,
 )
+from secscan.scans.domain.preflight import PreflightResult
 from secscan.targets.domain import Origin
 
 # 未認證的 scan 的 auth role（contract §7）；auth profile 不能使用這個 role_label
@@ -68,22 +69,48 @@ class ScannerRun:
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+    # 共享預算與 telemetry（docs/DECISIONS.md §16.4 至 §16.6）：容器版的 run 才可能送出流量；
+    # 用量是 guard 記下的數字（None 是不明）；coverage_recorded 是 telemetry 已對應到 operation。
+    container: bool = False
+    requests_sent: int | None = None
+    requests_denied: int | None = None
+    traffic_seconds: int | None = None
+    preflight_result: PreflightResult | None = None
+    coverage_recorded: bool = False
 
     def __post_init__(self) -> None:
         if (self.status in ERROR_REQUIRED_RUN_STATUSES) != (self.error_code is not None):
             raise ValueError(f"run 的狀態 {self.status.value} 與錯誤碼不一致")
+        if self.preflight_result is not None and self.engine is not Engine.PREFLIGHT:
+            raise ValueError("只有 preflight 的 run 有 preflight 的結果")
 
 
 @dataclass(frozen=True, slots=True)
 class Coverage:
-    """建立時凍結的 operation 數（coverage 的分母）；還沒有量測實際的流量（T12）。"""
+    """建立時凍結的 operation 數（coverage 的分母），以及轉送的請求涵蓋的 operation 數
+    （observed；其中帶著認證 header 的是 authenticated，docs/DECISIONS.md §16.6）。
+    """
 
     eligible_operations: int
     ineligible_operations: int
+    observed_operations: int = 0
+    authenticated_operations: int = 0
 
     def __post_init__(self) -> None:
-        if self.eligible_operations < 0 or self.ineligible_operations < 0:
+        counts = (
+            self.eligible_operations,
+            self.ineligible_operations,
+            self.observed_operations,
+            self.authenticated_operations,
+        )
+        if any(count < 0 for count in counts):
             raise ValueError("coverage 的數量不可為負數")
+        if (
+            not self.authenticated_operations
+            <= self.observed_operations
+            <= (self.eligible_operations)
+        ):
+            raise ValueError("authenticated ≤ observed ≤ eligible")
 
 
 @dataclass(frozen=True, slots=True)

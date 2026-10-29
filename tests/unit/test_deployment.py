@@ -310,14 +310,14 @@ def test_the_runner_points_at_the_guard() -> None:
 
 
 def test_policies_flow_from_the_runner_to_the_guard_and_status_back() -> None:
-    """policy：runner 讀寫、guard 唯讀；status 與 telemetry：guard 讀寫、runner 唯讀；其他服務
-    （含 worker 與掃描容器）都不掛。"""
+    """policy：runner 讀寫、guard 唯讀；status：guard 讀寫、runner 唯讀；telemetry：guard 讀寫、
+    runner 與 worker 唯讀；其他服務（含掃描容器）都不掛。"""
     mounts = {
         name: [volume for volume in _volumes(service) if volume.startswith("guard_")]
         for name, service in SERVICES.items()
     }
 
-    assert {name for name, found in mounts.items() if found} == {"runner", "guard"}
+    assert {name for name, found in mounts.items() if found} == {"runner", "guard", "worker"}
     assert mounts["runner"] == [
         "guard_policies:/guard/policies",
         "guard_status:/guard/status:ro",
@@ -328,6 +328,7 @@ def test_policies_flow_from_the_runner_to_the_guard_and_status_back() -> None:
         "guard_status:/guard/status",
         "guard_telemetry:/guard/telemetry",
     ]
+    assert mounts["worker"] == ["guard_telemetry:/guard/telemetry:ro"]
 
 
 def test_the_guard_writes_telemetry_where_the_runner_reads_it() -> None:
@@ -419,6 +420,7 @@ def test_the_worker_reads_collected_runs_read_only() -> None:
     """preflight 的回應由 worker 判斷（DECISIONS §16.5）：runs 唯讀，不碰 secret 與 guard。"""
     worker = SERVICES["worker"]
 
-    assert _volumes(worker) == ["runs:/runs:ro"]
+    assert _volumes(worker) == ["runs:/runs:ro", "guard_telemetry:/guard/telemetry:ro"]
     assert str(WorkerSettings().runs_dir) == "/runs"
+    assert str(WorkerSettings().telemetry_dir) == "/guard/telemetry"
     assert worker["networks"] == ["control_net"]

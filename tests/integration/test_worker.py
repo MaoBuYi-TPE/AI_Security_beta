@@ -11,14 +11,16 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
+from secscan.guard.domain.telemetry import ForwardedRequest, encode_line, telemetry_file_name
 from secscan.runner.workspace import Workspace
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.preflight import PreflightResult
-from secscan.scans.queue import LeaseLostError, RunReport, ScanQueue
+from secscan.scans.queue import LeaseLostError, RunReport, RunUsage, ScanQueue
 from secscan.worker.artifacts import ArtifactReader
 from secscan.worker.service import Worker
+from secscan.worker.telemetry import TelemetryReader
 from tests.integration.api_support import LAB, Seeder, World
 
 pytestmark = pytest.mark.integration
@@ -128,7 +130,13 @@ def _http(status: int, body: bytes, headers: str = "") -> bytes:
 
 
 def _collected_preflight(
-    queue: ScanQueue, seed: Seeder, world: World, runs: Path, outputs: dict[str, bytes]
+    queue: ScanQueue,
+    seed: Seeder,
+    world: World,
+    runs: Path,
+    outputs: dict[str, bytes],
+    *,
+    sent: int | None = 2,
 ) -> Lease:
     """綁定 auth profile 的 scan：preflight 的 run 收集好 outputs（runner 的 workspace）。"""
     scannable = seed.scannable(world)
@@ -140,6 +148,7 @@ def _collected_preflight(
     workspace.prepare(lease.run_id, ())
     for name, content in outputs.items():
         (runs / str(lease.run_id) / "out" / name).write_bytes(content)
+    queue.record_usage(lease, RunUsage(requests_sent=sent, requests_denied=0, traffic_seconds=1))
     queue.advance(lease, RunStatus.COLLECTING)
     workspace.collect(lease.run_id)
     queue.advance(lease, RunStatus.COLLECTED)
@@ -217,3 +226,97 @@ def test_only_preflight_runs_can_have_a_result(
     with pytest.raises(LeaseLostError):
         queue.record_preflight(parsing, PreflightResult.PASSED)
     assert _result(queue_seed, lease.run_id) == ("normalizing", None)
+
+
+# --- coverage（docs/DECISIONS.md §16.6）------------------------------------------------------
+
+
+def _forwarded(telemetry: Path, run_id: UUID, *requests: tuple[str, bool]) -> None:
+    lines = b"".join(
+        encode_line(
+            ForwardedRequest(sequence=index, at=1.0, method="GET", path=path, authenticated=auth)
+        )
+        for index, (path, auth) in enumerate(requests, 1)
+    )
+    (telemetry / telemetry_file_name(run_id)).write_bytes(lines)
+
+
+def _coverage(seed: Seeder, run_id: UUID) -> tuple[bool, list[tuple[int, bool]]]:
+    [run] = seed.query("SELECT coverage_recorded FROM scanner_runs WHERE id = :id", id=run_id)
+    rows = seed.query(
+        "SELECT ordinal, authenticated FROM run_coverage WHERE scanner_run_id = :id "
+        "ORDER BY ordinal",
+        id=run_id,
+    )
+    return run.coverage_recorded, [(row.ordinal, row.authenticated) for row in rows]
+
+
+def _worker(queue: ScanQueue, runs: Path, telemetry: Path) -> Worker:
+    return Worker(
+        queue,
+        owner="worker-1",
+        artifacts=ArtifactReader(runs),
+        telemetry=TelemetryReader(telemetry),
+    )
+
+
+def test_forwarded_requests_are_mapped_to_operations(
+    queue: ScanQueue, queue_seed: Seeder, world: World, runs: Path, tmp_path: Path
+) -> None:
+    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=2)
+    _forwarded(tmp_path, lease.run_id, ("/me", True), ("/items/5", True))
+
+    _worker(queue, runs, tmp_path).drain()
+
+    [ordinal] = [row.ordinal for row in queue_seed.query("SELECT ordinal FROM scan_operations")]
+    assert _coverage(queue_seed, lease.run_id) == (True, [(ordinal, True)])
+
+
+def test_a_run_without_traffic_is_measured_with_nothing_covered(
+    queue: ScanQueue, queue_seed: Seeder, world: World, runs: Path, tmp_path: Path
+) -> None:
+    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=0)
+
+    _worker(queue, runs, tmp_path).drain()
+
+    assert _coverage(queue_seed, lease.run_id) == (True, [])
+
+
+@pytest.mark.parametrize(
+    ("sent", "requests"),
+    [
+        (None, [("/items/5", True)]),  # 轉送數不明（guard 重啟或 telemetry 遺失）
+        (2, []),  # 沒有 telemetry 檔
+        (1, [("/items/5", True), ("/items/6", True)]),  # 行數比轉送數多：不一致
+    ],
+    ids=["unknown", "missing", "inconsistent"],
+)
+def test_incomplete_telemetry_leaves_the_run_unmeasured(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    runs: Path,
+    tmp_path: Path,
+    sent: int | None,
+    requests: list[tuple[str, bool]],
+) -> None:
+    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=sent)
+    if requests:
+        _forwarded(tmp_path, lease.run_id, *requests)
+
+    _worker(queue, runs, tmp_path).drain()
+
+    assert _coverage(queue_seed, lease.run_id) == (False, [])
+
+
+def test_coverage_is_recorded_once(
+    queue: ScanQueue, queue_seed: Seeder, world: World, runs: Path
+) -> None:
+    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=0)
+    parsing = queue.claim_collected("worker-1", frozenset({ScanEngine.PREFLIGHT}))
+    assert parsing is not None
+    queue.record_coverage(parsing, {})
+
+    with pytest.raises(LeaseLostError):
+        queue.record_coverage(parsing, {})
+    assert _coverage(queue_seed, lease.run_id) == (True, [])

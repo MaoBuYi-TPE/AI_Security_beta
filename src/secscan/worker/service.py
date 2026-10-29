@@ -4,6 +4,8 @@
 - fake：沒有東西可以解析。
 - preflight：讀帶認證與匿名的回應，依 §12.5 判斷（scanners.domain.preflight.evaluate），在 run
   結束之前寫入結果。沒有 artifact 的讀取器（in-process）或沒有輸出時是 not_executed。
+- coverage（每個 run，§16.6）：guard 記下沒有轉送任何請求 → 已量測、涵蓋 0 個；有轉送而且讀得到
+  完整的 telemetry → 對應到 operation；轉送數不明或 telemetry 不完整 → 不標記（沒有量測依據）。
 M3 起依引擎呼叫 parser（輸出一律當成不可信的資料）。
 """
 
@@ -16,11 +18,13 @@ from secscan.scanners.domain.preflight import (
     evaluate,
 )
 from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.coverage import observed_operations
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.queue import RunReport, ScanQueue
 from secscan.worker.artifacts import ArtifactReader
+from secscan.worker.telemetry import TelemetryReader
 
 ENGINES = frozenset({Engine.FAKE, Engine.PREFLIGHT})
 
@@ -32,11 +36,13 @@ class Worker:
         *,
         owner: str,
         artifacts: ArtifactReader | None = None,
+        telemetry: TelemetryReader | None = None,
         engines: frozenset[Engine] = ENGINES,
     ) -> None:
         self._queue = queue
         self._owner = owner
         self._artifacts = artifacts
+        self._telemetry = telemetry
         self._engines = engines
 
     def drain(
@@ -54,6 +60,7 @@ class Worker:
                 break
             if lease.engine is Engine.PREFLIGHT:
                 self._queue.record_preflight(lease, self._preflight(lease))
+            self._coverage(lease)
             report = RunReport.of(lease, self._queue.advance(lease, RunStatus.SUCCEEDED))
             reports.append(report)
             if on_report is not None:
@@ -69,3 +76,16 @@ class Worker:
             for name in (AUTHENTICATED_OUTPUT, ANONYMOUS_OUTPUT)
         )
         return evaluate(definition, authenticated, anonymous)
+
+    def _coverage(self, lease: Lease) -> None:
+        inputs = self._queue.coverage_inputs(lease)
+        if inputs.requests_sent == 0:
+            self._queue.record_coverage(lease, {})
+            return
+        if inputs.requests_sent is None or self._telemetry is None:
+            return
+        requests = self._telemetry.forwarded(lease.run_id)
+        # summary 先寫、行後寫：中途失敗時行數可能比轉送數少一個，但不會更多（§16.3）。
+        if requests is None or len(requests) > inputs.requests_sent:
+            return
+        self._queue.record_coverage(lease, observed_operations(inputs.operations, requests))
