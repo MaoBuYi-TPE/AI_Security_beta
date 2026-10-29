@@ -1447,7 +1447,7 @@ API（跨 run 去重）：
 - 拒絕的計數最多落後 5 秒；不影響預算。
 - 速率以 scan 為 key、存在 guard 的記憶體：guard 重啟後第一個請求不必等待（最多多出一個 burst）。
 - ZAP 的 reactive 407（先送一次不帶帳密的請求）不計入 run（還不知道是哪個 run）。
-- **同時上傳的記憶體上限**（T11 的交接）：mitmproxy 把 body 讀進記憶體，被拒絕的請求 body 也會讀完（§15 實測 2）。曾把 `body_size_limit` 降到 1 MiB，但這個 option 同時限制回應的 body（兩份審查都指出），會擋掉 ZAP 爬取大型 JS，所以維持 16 MiB。同時上傳太多時 guard 可能被 OOM 終止（記憶體上限 256 MiB）：guard 重啟，runner 依 `boot_id` 把 run 標成 interrupted（fail closed）。保留中的名額上限（§16.2）限制了每個 run 同時等待轉送的請求，但沒有限制被拒絕前讀進來的 body；M3 依工具的量測再決定是否限制每個 run 的連線數。
+- **同時上傳的記憶體上限**（T11 的交接）：mitmproxy 把 body 讀進記憶體，被拒絕的請求 body 也會讀完（§15 實測 2）。曾把 `body_size_limit` 降到 1 MiB，但兩份審查都指出這個 option 可能同時限制回應的 body（**未驗證**：沒有對 mitmproxy 12.2.3 的原始碼或行為確認，也沒有 live 測試），1 MiB 若也限制回應，會擋掉 ZAP 爬取大型 JS，所以維持原本的 16 MiB（行為沒變）。M3 以大於 1 MiB 的回應驗證之後，才決定是否降低、或只限制請求。同時上傳太多時 guard 可能被 OOM 終止（記憶體上限 256 MiB）：guard 重啟，runner 依 `boot_id` 把 run 標成 interrupted（fail closed）。保留中的名額上限（§16.2）限制了每個 run 同時等待轉送的請求，但沒有限制被拒絕前讀進來的 body；M3 依工具的量測再決定是否限制每個 run 的連線數。
 - **速率與預算以 scan 為單位**：SECURITY_AND_TESTING 的 SEC-13 寫「target 合計」。P0 只有一個 runner、同一個 target 同時只有一個 scan（409 `TARGET_BUSY`），兩者等價；多個 runner 時要改以 target 為 key（security-reviewer 的 L3）。
 - telemetry 的 path 不遮罩：path 參數若是 ID 或 token，會明文留在 guard 的 tmpfs（只有 guard、runner、worker 讀得到，6 小時後刪除）。目前不經 API 輸出；之後放進報告時必須遮罩（security-reviewer 的 L2）。
 - migration 0007 之前的容器 run 沒有 `requests_allotted`，轉送數不明時會當成 0。M2 之前沒有任何 run 送過流量，開發用的 DB 也沒有正式資料，所以不另外處理（security-reviewer 的 L4）。

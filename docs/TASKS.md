@@ -1015,13 +1015,15 @@
       - code-reviewer：WARNING（0 CRITICAL、0 HIGH、3 MEDIUM、7 LOW）。MEDIUM：coverage 的紀錄不是冪等的（worker 中斷後重試會一直崩潰）、preflight 的請求被算進 coverage、`queue.py` 太大。
       - security-reviewer：REQUEST CHANGES（0 CRITICAL、1 HIGH、5 MEDIUM、10 LOW）。HIGH：preflight 回應的 header regex 有 ReDoS（靶機控制回應，worker 卡住）。MEDIUM：延遲 body 可以累積已核准的請求再一次送出（速率）、coverage 紀錄的冪等、匿名的對照沒有回應仍判 passed、coverage 只看送出不看回應、容器沒刪除或 guard 重啟時的用量。
       - 已修正（都有先失敗的測試）：線性的 header 解析；保留中的名額上限；coverage 的冪等與 worker 跳過 lease 失效的 run；preflight 的請求不算 coverage；沒有對照判 `inconclusive`；coverage 要有回應、authenticated 要 401、403 以外；容器沒刪除或另一個 boot 的 summary 留空；`header_line` 擋換行；補攔 RecursionError；telemetry 的 tmpfs 加 noexec 等；observed 只取範圍內；`coverage_measured` 要所有 run 都結束；flush 與 prune 各自處理錯誤；`RunLedger.uncommit`；流量秒數不明時是 null；`queue.py` 拆出 `run_records.py` 與 `leases.py`（534 行）。
-      - 沒有修正、記入 `DECISIONS.md` §16：body 上限維持 16 MiB（同時限制回應，1 MiB 會擋掉大型 JS；OOM 時 fail closed）；速率與預算以 scan 為單位（P0 與 target 合計等價）；cookie 型 profile 的 `auth` 旗標只看名稱（M3 前決定）；telemetry 的 path 不遮罩；剛好用完預算時的 `timed_out`；0007 之前的資料。
+      - 沒有修正、記入 `DECISIONS.md` §16：body 上限維持 16 MiB（審查者指出它可能也限制回應，1 MiB 會擋掉大型 JS，但**未驗證**；OOM 時 fail closed）；速率與預算以 scan 為單位（P0 與 target 合計等價）；cookie 型 profile 的 `auth` 旗標只看名稱（M3 前決定）；telemetry 的 path 不遮罩；剛好用完預算時的 `timed_out`；0007 之前的資料。
     - 限制：
       - 只有 preflight 真的送出流量；多個真的引擎依序共用預算在 M3、M4 證明。
       - 名額在 `request` hook 才確定：少數沒有觸發 `request`、`error` hook 的 flow 會佔著名額到 run 結束（只會少放行）。
       - telemetry 在 tmpfs：VM 重啟之後還沒解析的 run 沒有 coverage（預算以分到的數量保守扣除）。
       - preflight 只證明這組憑證在這個端點有效，不證明整段掃描都維持登入。
       - T11 的證據缺口（同一條連線上多個請求的收包證據）仍在。
+      - 保留中名額的上限（11 個）只用假的 flow 做 unit 測試，沒有對真的 mitmproxy 做「延遲送 body」的 live 測試。
+      - `body_size_limit` 是否也限制回應**未驗證**（兩份審查的推測，信心約 75–80%）；目前維持原本的 16 MiB，行為沒變。M3 要以大於 1 MiB 的回應驗證，再決定是否降低或只限制請求。
     - 給後續任務：
       - **T13**：有容器的 run 的對帳與孤兒容器（沿用 `RunRecords` 寫用量時，不明就留空）；grant 撤銷時停止執行中的 scan；`/health/ready`；`queue.py` 新增的 reconciler 注意 800 行的上限。
       - **M3**：各工具的 proxy 與認證 header 設定（`auth-header` 檔已提供）；依 ZAP 的量測調整預算、body 上限與 path 中的 `%`；cookie 型 profile 的 `auth` 旗標；報告中的 telemetry path 要遮罩；`coverage_measured` 與多個引擎。
