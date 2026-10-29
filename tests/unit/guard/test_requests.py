@@ -12,6 +12,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from secscan.grants.domain.scope import HttpMethod, Scope, path_problem
+from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.policy import (
     CompiledPolicy,
     Policy,
@@ -58,6 +59,8 @@ def _compiled(
             not_after=NOT_AFTER,
             renew_until=RENEW_UNTIL,
             scope=scope,
+            budget=RunBudget(requests_per_second=2, burst=1, max_requests=100),
+            auth_header=None,
         )
     )
 

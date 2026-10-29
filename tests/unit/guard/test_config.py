@@ -42,15 +42,19 @@ def test_reads_the_environment() -> None:
     assert config.guard_ips == frozenset({IPv4Address("10.89.8.254"), IPv4Address("10.89.7.254")})
     assert config.policies_dir == Path("/guard/policies")
     assert config.status_dir == Path("/guard/status")
+    assert config.telemetry_dir == Path("/guard/telemetry")
     assert config.confdir == Path("/tmp/mitmproxy")  # noqa: S108
 
 
 def test_directories_can_be_overridden() -> None:
-    config = _config(GUARD_POLICIES_DIR="/p", GUARD_STATUS_DIR="/s", GUARD_CONFDIR="/c")
+    config = _config(
+        GUARD_POLICIES_DIR="/p", GUARD_STATUS_DIR="/s", GUARD_TELEMETRY_DIR="/t", GUARD_CONFDIR="/c"
+    )
 
-    assert (config.policies_dir, config.status_dir, config.confdir) == (
+    assert (config.policies_dir, config.status_dir, config.telemetry_dir, config.confdir) == (
         Path("/p"),
         Path("/s"),
+        Path("/t"),
         Path("/c"),
     )
 
@@ -80,6 +84,8 @@ def test_required_variables(missing: str) -> None:
         {"GUARD_SCAN_IP": "0.0.0.0"},  # noqa: S104 - 測試資料：不能聽所有介面
         {"GUARD_POLICIES_DIR": "relative/path"},
         {"GUARD_STATUS_DIR": "/guard/policies", "GUARD_POLICIES_DIR": "/guard/policies"},
+        {"GUARD_TELEMETRY_DIR": "/guard/status"},
+        {"GUARD_TELEMETRY_DIR": "telemetry"},
     ],
 )
 def test_rejects_unsafe_settings(overrides: dict[str, str]) -> None:

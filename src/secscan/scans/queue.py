@@ -22,6 +22,7 @@ from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.grants.domain.lifecycle import GrantUnusableError, ScopeGrant, check_usable
 from secscan.grants.domain.scope import Scope
 from secscan.grants.repository import ScopeGrantRepository
+from secscan.guard.domain.budget import RunBudget
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import (
     GATE_ERROR_CODES,
@@ -102,14 +103,18 @@ class RunReport:
 
 @dataclass(frozen=True, slots=True)
 class EgressScope:
-    """running 的 run 能連到的範圍：guard 的 policy 由此產生（docs/DECISIONS.md §15.7）。
+    """running 的 run 能連到的範圍：guard 的 policy 由此產生（docs/DECISIONS.md §15.7、§16）。
 
     origin 是 scan 的 target（T11 只放行它）；scope 是 gate 剛以 FOR SHARE 確認過的 grant 範圍。
+    budget 是這個 run 的速率與請求數；auth_header 是送出目標 secret 的 header（小寫；沒有綁定
+    auth profile 或不讀 secret 時是 None），guard 據此記下每個請求是否帶著憑證。
     """
 
     origin: Origin
     scope: Scope
     valid_until: datetime
+    budget: RunBudget
+    auth_header: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,7 +207,15 @@ class QueueOperations:
         self._progress.move(scan, run, RunStatus.RUNNING, container=container)
         progress = Progress(run_status=RunStatus.RUNNING, scan_status=self._progress.settle(scan))
         egress = EgressScope(
-            origin=scan.target_origin, scope=grant.scope, valid_until=grant.window.valid_until
+            origin=scan.target_origin,
+            scope=grant.scope,
+            valid_until=grant.window.valid_until,
+            budget=RunBudget(
+                requests_per_second=scan.requests_per_second,
+                burst=1,
+                max_requests=scan.max_requests,
+            ),
+            auth_header=secret.credential.wire_header.lower() if secret is not None else None,
         )
         return self._launch(scan, progress, secret, egress)
 

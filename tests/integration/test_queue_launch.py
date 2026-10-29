@@ -19,6 +19,7 @@ from secscan.auth_profiles.domain.credentials import SecretValue
 from secscan.auth_profiles.domain.model import AuthProfile, ChangeInput
 from secscan.auth_profiles.service import AuthProfileService
 from secscan.grants.service import ScopeGrantService
+from secscan.guard.domain.budget import RunBudget
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
@@ -107,7 +108,7 @@ def test_launch_carries_the_grant_scope_for_the_guard(
     queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
     """gate 剛以 FOR SHARE 確認過的 grant：guard 的 policy 以它產生（docs/DECISIONS.md §15.7）。"""
-    queue_seed.scan(world.operator_a, scannable)
+    scan = queue_seed.scan(world.operator_a, scannable)
     lease = _claimed(queue)
 
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
@@ -116,7 +117,25 @@ def test_launch_carries_the_grant_scope_for_the_guard(
         origin=scannable.target.origin,
         scope=scannable.grant.scope,
         valid_until=scannable.grant.window.valid_until,
+        budget=RunBudget(
+            requests_per_second=scan.budget.requests_per_second,
+            burst=1,
+            max_requests=scan.budget.max_requests,
+        ),
+        auth_header="authorization",  # 預設的 profile 是 bearer
     )
+
+
+def test_anonymous_scans_tell_the_guard_there_is_no_auth_header(
+    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue_seed.scan(world.operator_a, scannable, auth_profile_id=None)
+    lease = _claimed(queue)
+
+    launch = queue.prepare_launch(lease, image_ref=IMAGE)
+
+    assert launch.egress is not None
+    assert launch.egress.auth_header is None
 
 
 def test_an_anonymous_scan_has_no_secret(

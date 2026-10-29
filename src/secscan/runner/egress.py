@@ -99,6 +99,8 @@ class RunEgress:
                 excluded_paths=grant.excluded_paths,
                 methods=grant.methods,
             ),
+            budget=egress.budget,
+            auth_header=egress.auth_header,
         )
         return cls(channel, policy, ProxyCredentials(lease.run_id, token), endpoint)
 

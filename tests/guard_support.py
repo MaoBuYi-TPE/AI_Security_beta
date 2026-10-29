@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from secscan.guard.domain.policy import Policy, decode_policy, policy_file_name
+from secscan.guard.domain.policy import POLICY_SCHEMA, Policy, decode_policy, policy_file_name
 from secscan.guard.domain.status import STATUS_FILE_NAME, GuardStatus, encode_status
 from secscan.guard.files import remove_file, write_atomic
 from secscan.runner.egress import GuardEndpoint
@@ -43,7 +43,7 @@ class GuardDouble:
             started_at=now,
             updated_at=now,
             listen=GUARD_LISTEN,
-            policy_schema=1,
+            policy_schema=POLICY_SCHEMA,
             enforcing=True,
         )
         return replace(status, **overrides)  # type: ignore[arg-type]

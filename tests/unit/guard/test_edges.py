@@ -26,6 +26,7 @@ from secscan.guard.events import GuardLog, guard_logger, safe_text
 from secscan.guard.files import AtomicWriteError, write_atomic
 from secscan.guard.heartbeat import StatusWriter
 from secscan.guard.store import PolicyStore, _read_regular
+from secscan.guard.telemetry import TelemetryRecorder
 from secscan.targets.domain import LabNetwork
 from tests.unit.guard.flows import (
     FakeClient,
@@ -57,6 +58,7 @@ def _addon(directory: Path, stream: io.StringIO) -> GuardAddon:
         scan_network=IPv4Network("10.89.8.0/24"),
         guard_ips=frozenset({IPv4Address("10.89.8.254")}),
         make_response=make_response,
+        recorder=TelemetryRecorder(directory, boot_id=uuid4()),
         log=GuardLog(guard_logger(f"edges-{uuid4().hex}", stream)),
     )
 

@@ -14,6 +14,7 @@ import pytest
 
 from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard import store as store_module
+from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.policy import (
     MAX_POLICY_BYTES,
     Policy,
@@ -46,6 +47,8 @@ def _policy(run_id: UUID = RUN_ID, *, renew_until: int = 1_767_598_830) -> Polic
             excluded_paths=(),
             methods=(HttpMethod.GET,),
         ),
+        budget=RunBudget(requests_per_second=2, burst=1, max_requests=100),
+        auth_header=None,
     )
 
 

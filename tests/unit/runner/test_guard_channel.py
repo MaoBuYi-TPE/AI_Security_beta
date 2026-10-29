@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from secscan.grants.domain.scope import HttpMethod, Scope
+from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.credentials import parse_proxy_authorization, token_digest
 from secscan.guard.domain.policy import Policy, PolicyState, policy_file_name
 from secscan.guard.domain.status import STATUS_FILE_NAME, StatusIssue
@@ -45,11 +46,18 @@ SCOPE = Scope(
 )
 
 
-def _egress(valid_until: datetime | None = None) -> EgressScope:
+BUDGET = RunBudget(requests_per_second=2, burst=1, max_requests=1_234)
+
+
+def _egress(
+    valid_until: datetime | None = None, auth_header: str | None = "x-api-key"
+) -> EgressScope:
     return EgressScope(
         origin=parse_origin("http://lab-target:8080"),
         scope=SCOPE,
         valid_until=valid_until or datetime.fromtimestamp(NOW, UTC) + timedelta(days=1),
+        budget=BUDGET,
+        auth_header=auth_header,
     )
 
 
@@ -163,6 +171,8 @@ def test_policy_is_built_from_the_grant_and_the_target(guard: GuardDouble) -> No
         SCOPE.methods,
     )
     assert policy.scope.excluded_paths == SCOPE.excluded_paths
+    assert policy.budget == BUDGET  # 這個 run 剩下的預算（佇列算好）
+    assert policy.auth_header == "x-api-key"
     assert policy.renew_until == int(NOW) + 30
     assert policy.not_after == int(NOW) + 600
 

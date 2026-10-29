@@ -6,155 +6,51 @@
 """
 
 import asyncio
-import base64
 import io
-import json
-from dataclasses import dataclass, field
-from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
-from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard.addon import APPROVAL_KEY, DENIAL_KEY, Approval, GuardAddon
-from secscan.guard.domain.credentials import token_digest
-from secscan.guard.domain.policy import Policy, PolicyState, encode_policy, policy_file_name
+from secscan.guard.domain.policy import Policy, PolicyState, policy_file_name
 from secscan.guard.events import GuardLog, guard_logger
 from secscan.guard.files import remove_file, write_atomic
 from secscan.guard.resolver import ResolveError
 from secscan.guard.store import PolicyStore
-from secscan.targets.domain import LabNetwork, parse_ipv4, parse_origin
+from secscan.guard.telemetry import TelemetryRecorder
+from tests.unit.guard.addon_support import (
+    GUARD_IPS,
+    LAB,
+    NOW,
+    RUN_ID,
+    SCAN_NET,
+    TOKEN,
+    Harness,
+    Resolver,
+    build_harness,
+)
+from tests.unit.guard.addon_support import denied as _denied
+from tests.unit.guard.addon_support import make_flow as _flow
+from tests.unit.guard.addon_support import make_policy as _policy
+from tests.unit.guard.addon_support import proxy_authorization as _authorization
+from tests.unit.guard.addon_support import reason_of as _reason
+from tests.unit.guard.addon_support import screen as _screen
 from tests.unit.guard.flows import (
     FakeClient,
     FakeFlow,
     FakeHeaders,
-    FakeRequest,
     FakeResponse,
     FakeServer,
     FakeServerConnection,
     make_response,
 )
 
-RUN_ID = UUID("6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b")
-TOKEN = "T" * 31 + "okenValue-_1"  # token_urlsafe(32)：43 個字元
-NOW = 1_767_598_800
-LAB = LabNetwork(IPv4Network("10.89.7.0/24"))
-SCAN_NET = IPv4Network("10.89.8.0/24")
-GUARD_IPS = frozenset({IPv4Address("10.89.7.254"), IPv4Address("10.89.8.254")})
-
-
-def _authorization(run_id: UUID = RUN_ID, token: str = TOKEN) -> str:
-    return "Basic " + base64.b64encode(f"{run_id}:{token}".encode()).decode()
-
-
-def _policy(
-    *,
-    origin: str = "http://lab-target:8080",
-    state: PolicyState = PolicyState.ACTIVE,
-    token: str = TOKEN,
-    not_after: int = NOW + 600,
-    renew_until: int = NOW + 30,
-    ips: tuple[str, ...] = ("10.89.7.20",),
-) -> Policy:
-    return Policy(
-        run_id=RUN_ID,
-        scan_id=uuid4(),
-        state=state,
-        token_sha256=token_digest(token),
-        not_after=not_after,
-        renew_until=renew_until,
-        scope=Scope(
-            origins=(parse_origin(origin),),
-            ips=tuple(parse_ipv4(ip) for ip in ips),
-            paths=("/api/items/{id}", "/api/items"),
-            allow_all_paths=False,
-            excluded_paths=("/api/admin",),
-            methods=(HttpMethod.GET, HttpMethod.POST),
-        ),
-    )
-
-
-@dataclass
-class Resolver:
-    answers: tuple[str, ...] | BaseException = ("10.89.7.20",)
-    calls: list[str] = field(default_factory=list)
-
-    async def __call__(self, host: str) -> tuple[str, ...]:
-        self.calls.append(host)
-        if isinstance(self.answers, BaseException):
-            raise self.answers
-        return self.answers
-
-
-@dataclass
-class Harness:
-    directory: Path
-    resolver: Resolver
-    addon: GuardAddon
-    stream: io.StringIO
-    clock: list[float]
-
-    def write(self, policy: Policy) -> None:
-        write_atomic(self.directory, policy_file_name(policy.run_id), encode_policy(policy))
-
-    def lines(self) -> list[dict[str, Any]]:
-        return [json.loads(line) for line in self.stream.getvalue().splitlines()]
-
 
 @pytest.fixture
 def harness(tmp_path: Path) -> Harness:
-    stream = io.StringIO()
-    resolver = Resolver()
-    clock = [float(NOW)]
-    addon = GuardAddon(
-        store=PolicyStore(tmp_path),
-        resolve=resolver,
-        lab=LAB,
-        scan_network=SCAN_NET,
-        guard_ips=GUARD_IPS,
-        make_response=make_response,
-        clock=lambda: clock[0],
-        log=GuardLog(guard_logger(f"test-{uuid4().hex}", stream)),
-    )
-    result = Harness(tmp_path, resolver, addon, stream, clock)
-    result.write(_policy())
-    return result
-
-
-def _flow(
-    target: str = "/api/items/7",
-    *,
-    method: str = "GET",
-    host: str = "lab-target",
-    port: int = 8080,
-    headers: list[tuple[str, str]] | None = None,
-    authorization: str | bool | None = None,
-    client: FakeClient | None = None,
-) -> FakeFlow:
-    fields = headers if headers is not None else [("Host", f"{host}:{port}")]
-    if authorization is not False:
-        value = authorization if isinstance(authorization, str) else _authorization()
-        fields = [*fields, ("Proxy-Authorization", value)]
-    return FakeFlow(
-        request=FakeRequest(method=method, target=target, host=host, port=port, headers=fields),
-        client_conn=client or FakeClient(),
-    )
-
-
-def _screen(harness: Harness, flow: FakeFlow) -> FakeFlow:
-    asyncio.run(harness.addon.requestheaders(flow))
-    return flow
-
-
-def _denied(flow: FakeFlow) -> FakeResponse:
-    assert isinstance(flow.response, FakeResponse)
-    return flow.response
-
-
-def _reason(flow: FakeFlow) -> str:
-    return _denied(flow).headers["X-Secscan-Guard"]
+    return build_harness(tmp_path)
 
 
 # --- 放行 -------------------------------------------------------------------------------------
@@ -564,6 +460,7 @@ def test_running_marks_the_addon_ready_and_notifies(tmp_path: Path) -> None:
         scan_network=SCAN_NET,
         guard_ips=GUARD_IPS,
         make_response=make_response,
+        recorder=TelemetryRecorder(tmp_path, boot_id=uuid4()),
         log=GuardLog(guard_logger(f"ready-{uuid4().hex}", io.StringIO())),
         on_ready=lambda: calls.append("ready"),
     )

@@ -21,18 +21,21 @@ COPY src/secscan/guard/bootstrap.py /opt/secscan-guard/secscan/guard/bootstrap.p
 COPY src/secscan/guard/config.py /opt/secscan-guard/secscan/guard/config.py
 COPY src/secscan/guard/domain/__init__.py /opt/secscan-guard/secscan/guard/domain/__init__.py
 COPY src/secscan/guard/domain/addresses.py /opt/secscan-guard/secscan/guard/domain/addresses.py
+COPY src/secscan/guard/domain/budget.py /opt/secscan-guard/secscan/guard/domain/budget.py
 COPY src/secscan/guard/domain/credentials.py /opt/secscan-guard/secscan/guard/domain/credentials.py
 COPY src/secscan/guard/domain/policy.py /opt/secscan-guard/secscan/guard/domain/policy.py
 COPY src/secscan/guard/domain/requests.py /opt/secscan-guard/secscan/guard/domain/requests.py
 COPY src/secscan/guard/domain/routes.py /opt/secscan-guard/secscan/guard/domain/routes.py
 COPY src/secscan/guard/domain/status.py /opt/secscan-guard/secscan/guard/domain/status.py
 COPY src/secscan/guard/domain/strict.py /opt/secscan-guard/secscan/guard/domain/strict.py
+COPY src/secscan/guard/domain/telemetry.py /opt/secscan-guard/secscan/guard/domain/telemetry.py
 COPY src/secscan/guard/events.py /opt/secscan-guard/secscan/guard/events.py
 COPY src/secscan/guard/files.py /opt/secscan-guard/secscan/guard/files.py
 COPY src/secscan/guard/flows.py /opt/secscan-guard/secscan/guard/flows.py
 COPY src/secscan/guard/heartbeat.py /opt/secscan-guard/secscan/guard/heartbeat.py
 COPY src/secscan/guard/resolver.py /opt/secscan-guard/secscan/guard/resolver.py
 COPY src/secscan/guard/store.py /opt/secscan-guard/secscan/guard/store.py
+COPY src/secscan/guard/telemetry.py /opt/secscan-guard/secscan/guard/telemetry.py
 COPY src/secscan/targets/__init__.py /opt/secscan-guard/secscan/targets/__init__.py
 COPY src/secscan/targets/domain.py /opt/secscan-guard/secscan/targets/domain.py
 

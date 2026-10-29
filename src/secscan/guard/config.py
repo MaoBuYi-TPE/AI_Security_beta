@@ -4,7 +4,7 @@
 - LAB_CIDR、GUARD_SCAN_CIDR：lab_net 與 scan_net 的網段（都要符合 LAB_CIDR 的規則、互不重疊）。
 - GUARD_LAB_IP、GUARD_SCAN_IP：guard 在兩個網段上的位址，必須是各自的最後一個主機位址
   （在 --ip-range 之外，動態配發不會給別的容器）。
-- GUARD_POLICIES_DIR、GUARD_STATUS_DIR、GUARD_CONFDIR：絕對路徑（有預設值）。
+- GUARD_POLICIES_DIR、GUARD_STATUS_DIR、GUARD_TELEMETRY_DIR、GUARD_CONFDIR：絕對路徑（有預設值）。
 
 options 分兩批：核心的在建立 Options 時給定，addon 的要等 DumpMaster 載入預設 addon 之後才能設定；
 設定之後逐一讀回核對（option_problems），不符就不啟動。
@@ -22,6 +22,7 @@ GUARD_PORT = 8080
 BODY_SIZE_LIMIT = "16m"
 DEFAULT_POLICIES_DIR = Path("/guard/policies")
 DEFAULT_STATUS_DIR = Path("/guard/status")
+DEFAULT_TELEMETRY_DIR = Path("/guard/telemetry")
 # mitmproxy 在 confdir 建立 CA 檔（P0 不用）：放在 tmpfs 的 /tmp。映像宣告的 VOLUME
 # （/home/mitmproxy/.mitmproxy）在 0700、屬於 mitmproxy 使用者的目錄下，uid 10001 進不去。
 DEFAULT_CONFDIR = Path("/tmp/mitmproxy")  # noqa: S108 - guard 容器自己的 tmpfs，只有 10001 可寫
@@ -40,6 +41,7 @@ class GuardConfig:
     lab_ip: IPv4Address
     policies_dir: Path = DEFAULT_POLICIES_DIR
     status_dir: Path = DEFAULT_STATUS_DIR
+    telemetry_dir: Path = DEFAULT_TELEMETRY_DIR
     confdir: Path = DEFAULT_CONFDIR
 
     def __post_init__(self) -> None:
@@ -53,11 +55,11 @@ class GuardConfig:
             raise GuardConfigError("GUARD_LAB_IP 必須是 LAB_CIDR 的最後一個主機位址")
         if self.scan_ip != self.scan_network.broadcast_address - 1:
             raise GuardConfigError("GUARD_SCAN_IP 必須是 GUARD_SCAN_CIDR 的最後一個主機位址")
-        directories = (self.policies_dir, self.status_dir, self.confdir)
+        directories = (self.policies_dir, self.status_dir, self.telemetry_dir, self.confdir)
         if not all(directory.is_absolute() for directory in directories):
             raise GuardConfigError("guard 的目錄必須是絕對路徑")
         if len(set(directories)) != len(directories):
-            raise GuardConfigError("policy、status 與 confdir 必須是不同的目錄")
+            raise GuardConfigError("policy、status、telemetry 與 confdir 必須是不同的目錄")
 
     @property
     def listen(self) -> str:
@@ -79,6 +81,7 @@ def config_from_env(env: Mapping[str, str]) -> GuardConfig:
         lab_ip=_address(env, "GUARD_LAB_IP"),
         policies_dir=Path(env.get("GUARD_POLICIES_DIR", str(DEFAULT_POLICIES_DIR))),
         status_dir=Path(env.get("GUARD_STATUS_DIR", str(DEFAULT_STATUS_DIR))),
+        telemetry_dir=Path(env.get("GUARD_TELEMETRY_DIR", str(DEFAULT_TELEMETRY_DIR))),
         confdir=Path(env.get("GUARD_CONFDIR", str(DEFAULT_CONFDIR))),
     )
 

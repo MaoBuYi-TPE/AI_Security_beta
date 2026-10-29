@@ -21,6 +21,10 @@ class StrictDocument:
     def integer(self, field: str) -> int:
         return self._typed(field, int, "整數")
 
+    def raw(self, field: str) -> object:
+        """不檢查型別的值（呼叫端自己檢查，例如可以是 null 的欄位）。"""
+        return self._document[field]
+
     def boolean(self, field: str) -> bool:
         return self._typed(field, bool, "布林值")
 
@@ -60,7 +64,9 @@ def load_object(
     max_bytes: int,
     label: str,
     error: type[ValueError],
+    floats: bool = False,
 ) -> StrictDocument:
+    """floats=True 時接受浮點數（例如時間）；NaN 與 Infinity 一律拒絕。"""
     if len(raw) > max_bytes:
         raise error(f"{label} 不可超過 {max_bytes} bytes")
 
@@ -82,7 +88,7 @@ def load_object(
         document = json.loads(
             raw.decode("utf-8"),
             object_pairs_hook=unique_keys,
-            parse_float=reject("浮點數"),
+            parse_float=float if floats else reject("浮點數"),
             parse_constant=reject(" NaN 或 Infinity"),
         )
     except (UnicodeDecodeError, json.JSONDecodeError):

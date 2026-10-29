@@ -394,3 +394,14 @@ def test_secret_values_are_hidden_from_repr_and_str() -> None:
     assert CANARY not in repr(secret)
     assert CANARY not in str(secret)
     assert secret.value == CANARY
+
+
+@pytest.mark.parametrize(
+    ("credential", "header"),
+    [(BEARER, "Authorization"), (API_KEY, "X-API-Key"), (COOKIE, "Cookie")],
+)
+def test_wire_header_names_the_header_that_carries_the_secret(
+    credential: Credential, header: str
+) -> None:
+    """guard 據此判斷請求是否帶著目標的憑證（telemetry 的 auth 欄位，docs/DECISIONS.md §16）。"""
+    assert credential.wire_header == header

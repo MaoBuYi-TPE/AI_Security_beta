@@ -111,6 +111,13 @@ class Credential:
         elif self.header_name is not None:
             raise InvalidAuthProfileError("header_name 只能搭配 api_key_header")
 
+    @property
+    def wire_header(self) -> str:
+        """送出 secret 的 header 名稱（只有 api_key_header 有 header_name，__post_init__ 保證）。"""
+        if self.header_name is not None:
+            return self.header_name
+        return "Cookie" if self.type is AuthType.COOKIE else "Authorization"
+
 
 def check_secret(credential: Credential, secret: SecretValue) -> None:
     """secret 符合這種送出方式的格式；不符合時拋出 InvalidAuthProfileError（不含 secret）。"""
