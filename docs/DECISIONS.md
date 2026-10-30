@@ -1453,6 +1453,102 @@ API（跨 run 去重）：
 - migration 0007 之前的容器 run 沒有 `requests_allotted`，轉送數不明時會當成 0。M2 之前沒有任何 run 送過流量，開發用的 DB 也沒有正式資料，所以不另外處理（security-reviewer 的 L4）。
 - 不在 T12：grant 的其他 origin 與跨 origin 的認證規則；依量測調整 lab profile 的預算（M3）；`/health/ready`（T13）。
 
+## 17. T13 補充決定：容器的對帳、孤兒容器、撤回授權與解析重試的上限（2026-10-30）
+
+T13 補上 runner 中斷之後的收尾：有容器的 run 由 runner 內的 reconciler 依 DB 的紀錄找到容器、先封鎖 guard 再刪除、確認之後才結算；執行中的 scan 在授權撤回時停止；解析的重試有次數上限。以下是規劃文件沒有寫到、實作前才定下的細節。
+
+使用者的決定（2026-10-29）：
+- **`/health/ready`**：維持只檢查 DB 可連線與 schema 版本，不納入 runner、worker、guard 的狀態（它們由 `GET /scanners` 呈現）。ready 表示這個 API 程序能服務：沒有 runner 時 API 仍能接受並排入 scan；runner 重啟時不應讓 API 被判定不可用。
+- **停止的條件**：執行中的 scan 在 grant 撤銷、過期、target 停用之外，**建立者的平台 key 被撤銷**時也停止（和 prepare 的檢查一致；key 到期不算，§13.5）。
+- **解析重試的上限**：T13 一起做。worker 遇到單一 run 的非預期例外時記下例外的類別、繼續處理其他 run。
+
+依據：
+- DoD（`TASKS.md` T13）：重複認領時不會重複啟動容器；中斷後不會永遠停在 running；取消時先封鎖 guard，再回收容器。
+- ARCHITECTURE §9：lease 過期不代表舊容器已經停止；runner 內的 reconciler 要核對 label、封鎖 guard、確認容器已終止；不能只因 lease 過期就啟動第二個掃描器。
+- CLAUDE.md §8：開始發流量之後中斷就標 interrupted，不自動重跑；只有 parser 可以對不可變的 artifact 重試。
+- socket-proxy 只比對 path（§14.1），不能限制 list 的 label 篩選，所以不放行 list：容器只能以 DB 中記下的名稱 inspect。
+
+### 17.1 核心不變式
+
+`renew_until` 在 DB 心跳**之前**讀取時間，只在心跳成功**之後**寫入 policy（§15.7），所以 `renew_until ≤ lease_expires_at`（runner 與 guard 共用 VM 的時鐘，T11 實測差距 0.05 秒以內）。對帳只處理 lease 已過期的 run：那時 guard 已經回 `POLICY_STALE`；凍結之後醒來的 owner 也不能再續約（過期的 lease 不能延長），它寫的 policy 同樣已過期。因此**封鎖是縱深防禦與證據，刪除容器不依賴封鎖成功**：封鎖失敗只記 log，仍然刪除容器。
+
+### 17.2 容器的對帳（`runner/reconciler.py`）
+
+- **誰、何時**：runner 程序內的 `ContainerReconciler`（只有 runner 能經 socket-proxy 操作容器）。啟動時一次，之後每 10 秒一次，在認領之前；單執行緒，監看一個長時間的 run 時不對帳（下一輪再處理）。
+- **以 DB 為準**：`scanner_runs` 新增 `container_removed_at`（容器確認不存在的時間）。待處理的 run：`container_name IS NOT NULL AND container_removed_at IS NULL`，而且**不是**「runner 階段（running、collecting、cancelling）且 lease 還有效」。包含 lease 過期的、已結束但容器沒刪掉的，以及 worker 階段（collected、normalizing）但容器沒刪掉的。依建立的順序，每輪最多 20 個（部分索引 `ix_scanner_runs_pending_containers`）。
+- **每個 run 的步驟**：
+  1. 封鎖 policy：讀回 `<run_id>.json`、改成 blocked 寫回（已是 blocked 或不存在就不寫）。讀不出來、檔案損毀或寫不出去只記 log，繼續。
+  2. 刪除這個 run 的 secret 目錄（失敗只記 log）。
+  3. 以名稱 inspect，核對 label（`secscan.managed=true`、`secscan.run_id` 是這個 run）。
+  4. 是我們的容器 → 強制刪除（SIGKILL，不等 5 秒的寬限：policy 已過期或已封鎖）；404 → 已不存在。
+  5. DB（先鎖 scan、再鎖 run，和認領、prepare、取消相同的順序）：重新確認仍待處理，記下 `container_removed_at`；仍在 runner 階段（lease 已過期）→ interrupted（`LEASE_EXPIRED`），用量留空（之後的 run 以分到的數量扣除，§16.4），scan 重新彙總。其他狀態只記下時間，不改狀態。
+  6. 結算成功之後才刪除 policy（T11 的「確認容器已刪除才刪 policy」）。
+- **label 不符**：名稱唯一、label 在建立之後不能改，`secscan-run-<id>` 沒有我們的 label 就證明我們的容器不存在（或已被刪除後有人用了同一個名稱）。不動那個容器，記 ERROR，照常結算：留著不處理會讓 run 永遠停在 running，也會佔住每輪的名額。
+- **Docker 出錯**：這個 run 留到下一輪，policy 保持 blocked，不宣稱已停止。409（刪除進行中）只延後那一個；其他錯誤（Docker 不可用）延後這一輪剩下的全部。同一段中斷只記一次 WARNING，恢復時記一次 INFO。**這是 DoD 2 唯一的例外**：Docker 長時間不可用時 run 停在 running，但 guard 已經拒絕它的流量（dead-man switch），每 10 秒重試。
+- **lease 過期的 run 一律 interrupted（`LEASE_EXPIRED`），要求過取消也一樣**：runner 遺失時無法證明 10 秒內停止了新的出站（API_CONTRACT §17.2 的語意）。
+- **沒有容器的 run**：`reconcile_expired_runner(engines)` 把 runner 階段、lease 過期，而且 `container_name IS NULL`（preparing 時中斷、in-process 的 fake）**或 `container_removed_at IS NOT NULL`**（容器已確認刪除、還沒做最後的轉換就中斷）的 run 標成 interrupted（`LEASE_EXPIRED`），不呼叫 Docker。只看 `container_removed_at IS NULL` 會讓後者永遠停在 running（規劃時的審查發現）。in-process 的 `reconcile_expired` 也使用同樣的條件。
+- **runner 自己記下刪除**：`record_usage(..., container_removed=…)` 在 `_cleanup` 確認刪除時寫入 `container_removed_at`（`coalesce`：不覆寫）；plan 被拒絕（從未建立容器）也寫入。正常結束的 run 不會進入待處理。
+- **不重複啟動（DoD 1）**：既有的 `FOR UPDATE … SKIP LOCKED` 認領、每次轉換都 fencing、過期的 lease 不能延長也不會被接手、容器名稱固定（重複 create 得到 409）。T13 再加上：
+  - **建立容器之前再心跳一次**（secret 與 policy 寫好之後、create 之前）：lease 已失效 → `LeaseLostError`，不建立容器。縮小「凍結的 owner 在對帳之後才建立容器」的時間窗。
+  - 下一個引擎要等前一個 run「不再送出流量」（`TRAFFIC_STOPPED_RUN_STATUSES`，§13.4）才可認領：lease 過期、容器還沒確認刪除的 run 仍是 running，同一個 scan 的下一個引擎不會開始。
+- **殘餘風險**：owner 在建立前的心跳之後凍結、對帳在這段期間刪了它的 secret 與 policy、owner 醒來建立容器之後又馬上死掉：那個容器沒有 secret 的 subpath（預期無法啟動）、沒有有效的 policy，DB 也已結算，留下一個停止的容器。機率極低（兩個故障要剛好落在毫秒級的時間窗），記為已知限制。
+
+### 17.3 `container_removed_at` 與 trigger（migration 0009）
+
+- 欄位 `scanner_runs.container_removed_at timestamptz NULL`；CHECK：`container_removed_at IS NULL OR (container_name IS NOT NULL AND container_removed_at >= started_at)`。
+- 只改 `scanner_runs_guard()`（巢狀的 IF：TRUNCATE、DELETE 時 NEW 是 NULL）：
+  - `container_removed_at` 只能寫入一次（不能改、不能清除）。
+  - 已終止的 run 只允許一種 UPDATE：`container_removed_at` 由 NULL 變成有值，其他欄位完全不變（`to_jsonb(NEW) - 'container_removed_at' = to_jsonb(OLD) - 'container_removed_at'`：之後新增的欄位也自動凍結）。
+  - `scanner_runs_container_guard` 不必改：它先執行（trigger 依名稱的字母順序），名稱與映像不變時直接放行。
+- 部分索引 `ix_scanner_runs_pending_containers (created_at) WHERE container_name IS NOT NULL AND container_removed_at IS NULL`。
+- 不回填：升級之前的容器 run 都會成為待處理，由對帳每輪 20 個逐一確認（404 就結算）。
+- 不用另一張表：待處理的查詢會變成對全部歷史的 anti-join，還需要另外的 trigger 與外鍵。
+
+### 17.4 啟動時依證據清理（取代 §14.6 刪除全部的 sweep）
+
+舊的做法在沒有其他存活的 runner 時刪除全部 secret 與 policy：孤兒容器的 policy 在容器確認刪除之前就被刪掉（違反 §15.7），runner 在 30 秒內重啟時又會整個跳過。改成：
+- 列出 policy 目錄的 `<run_id>.json` 與 secrets 目錄的 `<run_id>/`，向 DB 查這些 run：
+  - 待處理（容器還沒確認刪除），或 lease 還有效（另一個 runner 正在使用）→ 跳過，由對帳或 owner 處理。
+  - 已結算，或 DB 沒有這個 run → 封鎖 policy → inspect，是我們的容器就強制刪除 → 刪除 secret 與 policy。刪不掉容器就保留 blocked 的 policy，下次啟動再處理。
+- policy 目錄的暫存檔（`.tmp-*`）超過 60 秒才刪（可能是另一個 runner 正在寫的）。
+- 不再依賴 `others_alive()`。
+
+### 17.5 授權撤回時停止執行中的 scan（SEC-01 後半）
+
+- **心跳回報停止的原因**：`Heartbeat.stop_reason`。lease 有效、沒有要求取消時，以**不加鎖、重新 SELECT 的讀取**重新判斷 gate（`check_usable`、origin 與快照相同）與建立者的 key：
+  - 不加鎖：心跳不等撤銷或停用的 `FOR UPDATE`；READ COMMITTED 下，已 commit 的撤銷在下一次心跳（≤ 5 秒）就看得到。撤銷、停用、撤銷 key 的 API 都不改（它們不鎖 scan，也就不會和 prepare 形成相反的鎖順序）。
+  - 以 `populate_existing` 讀取，不用 session 中可能過時的物件。
+  - 綁定的 profile 被 PATCH 不算（§14.12：已啟動的 run 不受影響）。
+- 抽出 `scans/gate.py`（`RunGate`）：`locked` 給 prepare（照舊 `FOR SHARE`、時間在取得鎖之後才取），`current` 給心跳；兩者共用同一個判斷，prepare 的順序與錯誤碼不變。
+- **runner**：心跳的處理順序是 lease 失效 → 要求取消 → `stop_reason` → 續約 → 預算用盡。`stop_reason` → 先封鎖、再停止容器 → **failed**（該錯誤碼），不收集輸出。建立容器之前的兩次心跳看到 `stop_reason` → 不建立容器 → failed。collecting 階段的心跳不理會（容器已結束，不再送出流量）；worker 不理會。
+- **in-process 的 FakeRunner**：hold 期間看到 `stop_reason` → failed（該錯誤碼）。
+- 不經 cancelling：只有要求過取消的 scan 能轉到 cancelling（DB 也這樣要求）。running → failed。
+- grant 在執行中到期，現在以 `SCOPE_EXPIRED` 停止，不必等到 `TIME_LIMIT_EXCEEDED`（guard 原本就以 `not_after` 拒絕）。
+
+### 17.6 解析重試的上限
+
+- 不需要 migration：嘗試次數 = 這個 run 轉到 normalizing 的 `run.status` 事件數（`scanner_run_id` 與 payload 的 `status`；事件不可修改，計數不會被改小）。
+- lease 過期的 normalizing：已嘗試 3 次（`MAX_PARSE_ATTEMPTS`）→ failed（新的錯誤碼 `PARSE_ATTEMPTS_EXHAUSTED`），否則退回 collected。worker、in-process 的 FakeRunner 與 runner 的對帳共用這段。
+- worker：單一 run 的非預期例外只記 run_id 與例外的類別（輸出是不可信的資料，訊息可能含它的內容），繼續處理其他 run；那個 run 等 lease 過期之後由上面的規則處理。`LeaseLostError` 照舊；`SQLAlchemyError` 照舊讓程序結束（DB 不可用時繼續也沒有意義）。
+
+### 17.7 錯誤碼
+
+| 錯誤碼 | 情況 |
+|---|---|
+| `SCOPE_REVOKED`、`SCOPE_EXPIRED`、`SCOPE_NOT_APPROVED`、`TARGET_DISABLED`、`SCOPE_OUTSIDE_LAB`、`SCOPE_MISMATCH`、`CREATOR_KEY_REVOKED`（既有） | 也用於執行中：封鎖 guard → 停止容器 → failed |
+| `LEASE_EXPIRED`（既有） | 也用於有容器的 run：對帳確認容器已刪除之後 → interrupted |
+| `PARSE_ATTEMPTS_EXHAUSTED`（新） | 解析 3 次都沒有在 lease 內完成 → failed |
+
+DB 只檢查錯誤碼的格式，不必為錯誤碼改 migration。
+
+### 17.8 取捨與不在 T13 範圍
+
+- Docker 長時間不可用時 run 停在 running（§17.2）；guard 仍拒絕流量。
+- 時間預算：用量留空的 run 以開始到結束的時間計算，把對帳的延遲（最多約 30 秒的 lease 加上 10 秒的間隔）也算進去，之後的引擎可能提早 `BUDGET_EXHAUSTED`。方向是保守的。
+- trigger 放寬了已終止的 run：只允許單一欄位由 NULL 變成有值，其餘欄位以 `to_jsonb` 比較。
+- 單執行緒的迴圈在長時間的 run 期間不對帳；初版只有一個 runner。
+- 不在 T13：queued 的 scan 的時間上限（runner 長期不在時，使用者可以取消）；多個 runner 同時運作（目前的設計對兩個 runner 是安全的，但 proxy 憑證、速率與預算仍以單一 runner 為前提）；worker 解析時的心跳（M3 的真 parser 可能超過 30 秒）；runs volume 的保留期限（M5／T23）；T11 的證據缺口（同一條連線上多個請求的收包證據）；預算以 target 合計（多個 runner 時）。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。
