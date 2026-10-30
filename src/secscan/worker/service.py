@@ -1,6 +1,7 @@
 """worker（docs/DECISIONS.md §14.6、§16.5）：解析收集好的輸出。
 
-先把 lease 過期的 normalizing 退回 collected（解析不送流量，可以重試），再認領 collected 的 run。
+先把 lease 過期的 normalizing 退回 collected（解析不送流量，可以重試；最多 3 次，§17.6），再認領
+collected 的 run。單一 run 的非預期例外只記類別、繼續處理其他 run；DB 的錯誤讓程序結束。
 - fake：沒有東西可以解析。
 - preflight：讀帶認證與匿名的回應，依 §12.5 判斷（scanners.domain.preflight.evaluate），在 run
   結束之前寫入結果。沒有 artifact 的讀取器（in-process）或沒有輸出時是 not_executed。
@@ -13,6 +14,8 @@ M3 起依引擎呼叫 parser（輸出一律當成不可信的資料）。
 
 import logging
 from collections.abc import Callable
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from secscan.scanners.domain.preflight import (
     ANONYMOUS_OUTPUT,
@@ -69,6 +72,14 @@ class Worker:
                 # 解析太久或被對帳退回：這個 run 留給對帳，繼續處理其他的（審查發現：原本整個
                 # worker 結束，重啟後又認領同一個 run）。
                 logger.warning("run %s 的 lease 已失效：留給對帳", lease.run_id)
+                continue
+            except SQLAlchemyError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 單一 run 的錯誤不讓 worker 結束（§17.6）
+                # 輸出是不可信的資料，例外的訊息可能含它的內容：只記類別。lease 過期之後重試。
+                logger.error(
+                    "解析 run %s 失敗（%s）：lease 過期之後重試", lease.run_id, type(exc).__name__
+                )
                 continue
             reports.append(report)
             if on_report is not None:

@@ -25,6 +25,7 @@ from secscan.guard.domain.budget import RunBudget
 from secscan.scans.containers import ContainerRecords, PendingContainer
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import (
+    MAX_PARSE_ATTEMPTS,
     RUNNER_STAGE_RUN_STATUSES,
     TERMINAL_SCAN_STATUSES,
     TRAFFIC_STOPPED_RUN_STATUSES,
@@ -281,7 +282,7 @@ class QueueOperations:
         return self._reconcile(engines, and_(runner_stage, _without_live_container()))
 
     def reconcile_expired_parsing(self, engines: Collection[Engine]) -> int:
-        """worker 用：只把 lease 過期的 normalizing 退回 collected（解析不送流量，可以重試）。"""
+        """worker 用：lease 過期的 normalizing 退回 collected，嘗試太多次就 failed（§17.6）。"""
         return self._reconcile(engines, _parsing())
 
     def pending_containers(self, limit: int) -> tuple[PendingContainer, ...]:
@@ -315,11 +316,18 @@ class QueueOperations:
             if scan is None or run is None:
                 continue
             if run.status is RunStatus.NORMALIZING:
-                self._move(scan, run, RunStatus.COLLECTED)
+                self._retry_parsing(scan, run)
             else:
                 self._move(scan, run, RunStatus.INTERRUPTED, RunErrorCode.LEASE_EXPIRED)
             reconciled += 1
         return reconciled
+
+    def _retry_parsing(self, scan: LockedScan, run: RunState) -> None:
+        """解析不送流量，可以對不可變的 artifact 重試；但最多 MAX_PARSE_ATTEMPTS 次（§17.6）。"""
+        if self._records.parse_attempts(run.id, scan.id) >= MAX_PARSE_ATTEMPTS:
+            self._move(scan, run, RunStatus.FAILED, RunErrorCode.PARSE_ATTEMPTS_EXHAUSTED)
+        else:
+            self._move(scan, run, RunStatus.COLLECTED)
 
     def _claim(
         self,

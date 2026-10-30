@@ -112,6 +112,12 @@ class RunErrorCode(StrEnum):
     # 共享預算（docs/DECISIONS.md §16.4）：剩下的請求數或時間用完。開始之前 → failed；
     # 執行中由 guard 的 summary 得知 → timed_out。
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    # 解析 MAX_PARSE_ATTEMPTS 次都沒有在 lease 內完成（docs/DECISIONS.md §17.6）。
+    PARSE_ATTEMPTS_EXHAUSTED = "PARSE_ATTEMPTS_EXHAUSTED"
+
+
+# lease 過期的解析退回 collected 重試，最多嘗試幾次（第這麼多次過期時 failed）。
+MAX_PARSE_ATTEMPTS = 3
 
 
 # runner 啟動前重新判斷 gate（§10.6）不通過的原因。grant 不屬於這個 target、origin 不在範圍內，

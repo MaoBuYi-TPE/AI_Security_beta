@@ -16,10 +16,17 @@ from secscan.auth_profiles.domain.preflight import Preflight
 from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import FrozenOperation
-from secscan.scans.domain.model import Lease
+from secscan.scans.domain.lifecycle import RunStatus
+from secscan.scans.domain.model import EventType, Lease
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.leases import LeaseLostError, holds
-from secscan.scans.models import RunCoverageModel, ScanModel, ScannerRunModel, ScanOperationModel
+from secscan.scans.models import (
+    RunCoverageModel,
+    ScanEventModel,
+    ScanModel,
+    ScannerRunModel,
+    ScanOperationModel,
+)
 from secscan.scans.progress import now
 
 
@@ -104,6 +111,22 @@ class RunRecords:
                 ScannerRunModel.container_removed_at, now()
             )
         self._fenced_update(lease, values, problem="lease 已過期或不屬於這個 runner")
+
+    # --- 解析 ---------------------------------------------------------------------------------
+
+    def parse_attempts(self, run_id: UUID, scan_id: UUID) -> int:
+        """這個 run 轉到 normalizing 的次數（事件不可修改，計數不會被改小；§17.6）。"""
+        count = self._session.scalar(
+            select(func.count())
+            .select_from(ScanEventModel)
+            .where(
+                ScanEventModel.scan_id == scan_id,
+                ScanEventModel.scanner_run_id == run_id,
+                ScanEventModel.event_type == EventType.RUN_STATUS.value,
+                ScanEventModel.payload["status"].astext == RunStatus.NORMALIZING.value,
+            )
+        )
+        return int(count or 0)
 
     # --- preflight ----------------------------------------------------------------------------
 
