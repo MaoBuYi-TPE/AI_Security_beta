@@ -1612,7 +1612,7 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 ### 18.4 AF plan（`scanners/domain/zap/`，純函式）
 
 - 輸出 JSON（也是合法的 YAML 1.1；測試以 PyYAML 解析，和 ZAP 的 SnakeYAML 一樣），寫成 `in/plan.yaml`。
-- **context**：一個，`urls` 是 origin 加上起點。`includePaths` 由 grant 的 path 翻譯：literal 與 `{name}` 的路由（佔位符是 `[^/?#]+`）；英數字以外的字元一律以反斜線跳脫（Java 與 Python 的 regex 都當成字元本身，測試因此能以 Python 對照）；後面接 `(?:\?.*)?`；`allow_all_paths` 是整個 origin。`excludePaths` 不分大小寫，語意和 `covers(…, lenient=True)` 相同（排除路由本身與它底下的 path）。
+- **context**：一個，`urls` 是 origin 加上起點。`includePaths` 由 grant 的 path 翻譯：literal 與 `{name}` 的路由（佔位符是 `[^/?#]+`）；英數字以外的字元一律以反斜線跳脫（Java 與 Python 的 regex 都當成字元本身，測試因此能以 Python 對照）；後面接 `(?:\?.*)?`；`allow_all_paths` 是整個 origin。`excludePaths` 的語意和 `covers(…, lenient=True)` 相同（段數相同、不分大小寫、忽略結尾的斜線；不涵蓋底下的 path）。
 - 輸出的任何字串含 `${` 就拒絕：AF 會代換環境變數，可能把 secret 帶進 plan 或請求。
 - **web（`web_active_lab`）**：`spider` 從 `/` 開始，`threadCount 1`；`postForm` 只在 grant 允許 POST 時打開；`parseRobotsTxt`、`parseSitemapXml` 只在 `/robots.txt`、`/sitemap.xml` 在範圍內時打開；Git、DS_Store、SVN 一律關閉。
 - **api（`api_active_lab`）**：`openapi`（`apiFile: /scan/in/openapi.json`，`targetUrl` 是 origin 加 base path）。
