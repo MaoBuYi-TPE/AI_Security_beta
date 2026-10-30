@@ -95,9 +95,12 @@ def _assert_hidden(info: dict[str, Any], *secrets: str) -> None:
 
 
 def _measure(label: str, entries: list[dict[str, Any]]) -> None:
-    reasons = Counter(str(entry.get("reason")) for entry in entries if entry["decision"] == "deny")
+    denied = [entry for entry in entries if entry["decision"] == "deny"]
+    reasons = Counter(f"{entry.get('reason')}/{entry.get('method')}" for entry in denied)
     allowed = sum(1 for entry in entries if entry["decision"] == "allow")
+    ambiguous = sorted({str(e.get("path")) for e in denied if e.get("reason") == "PATH_AMBIGUOUS"})
     print(f"[量測] {label}：放行 {allowed}，拒絕 {dict(reasons)}")  # noqa: T201
+    print(f"[量測] {label}：PATH_AMBIGUOUS 的 path（前 5 個）{ambiguous[:5]}")  # noqa: T201
 
 
 def test_the_runner_probe_reports_the_pinned_zap(admin: Api) -> None:

@@ -1,8 +1,9 @@
 """ZAP 的 live 測試的共用工具（docs/DECISIONS.md §18.10；make test-live-zap）。
 
 - 小型網站（zap_site.py）與 canary（receiver.py）只接在 live 自己的 lab 網路上。
-- zap 在 T15 才開放：live 的 API 以 SCAN_PREVIEW_ENGINES=zap 啟動（Makefile）。zap 的 run 停在
-  collected（worker 還不解析），所以每個情境用新的 project 與 target，以 run 的狀態判斷。
+- zap 在 T15 才開放：live 的 API 以 SCAN_PREVIEW_ENGINES=zap 啟動（Makefile 的
+  SECSCAN_LIVE_PREVIEW_ENGINES）。zap 的 run 停在 collected（worker 還不解析），所以每個情境用新的
+  project 與 target，以 run 的狀態判斷。
 - runs volume 以唯讀的輔助容器讀取（manifest、報告、zap.log）；runner 不在宿主上。
 """
 
@@ -178,6 +179,9 @@ def run_file(run_id: str, path: str) -> bytes | None:
         "--read-only",
         "--cap-drop",
         "ALL",
+        # run 的目錄是 0700、屬於 10001：沒有 capability 的 root 讀不了。
+        "--user",
+        "10001:10001",
         "-v",
         f"{RUNS_VOLUME}:/runs:ro",
         "--entrypoint",
