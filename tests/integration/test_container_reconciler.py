@@ -377,6 +377,22 @@ def test_a_container_without_our_label_is_left_alone_but_the_run_is_settled(
 # --- 已結束的 run 留下的容器 -------------------------------------------------------------------
 
 
+def test_a_normal_run_records_the_removal_and_is_not_pending(
+    make_runner: Callable[..., ContainerRunner],
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+) -> None:
+    """runner 確認刪除容器時和用量一起記下：不會成為對帳的待處理（§17.2）。"""
+    queue_seed.scan(world.operator_a, queue_seed.scannable(world))
+
+    report = make_runner().run_once(FAKE)
+
+    assert report is not None
+    assert _run(queue_seed, report.run_id).container_removed_at is not None
+    assert queue.pending_containers(limit=20) == ()
+
+
 def test_a_container_left_by_a_finished_run_is_removed_without_changing_the_run(
     make_runner: Callable[..., ContainerRunner],
     reconciler: ContainerReconciler,

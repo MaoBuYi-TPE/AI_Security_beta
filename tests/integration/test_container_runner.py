@@ -516,11 +516,13 @@ def test_a_rejected_plan_never_reaches_docker(
     assert runtime.created == []
     assert list((tmp_path / "secrets").iterdir()) == []
     # 沒有流量：之後的 run 不必保守扣掉這個 run 分到的預算（docs/DECISIONS.md §16.4）。
+    # 從未建立容器：記下「容器不存在」，對帳不必再確認（§17.2）。
     [usage] = queue_seed.query(
-        "SELECT requests_sent, traffic_seconds FROM scanner_runs WHERE id = :id",
+        "SELECT requests_sent, traffic_seconds, container_removed_at IS NOT NULL AS removed "
+        "FROM scanner_runs WHERE id = :id",
         id=report.run_id,
     )
-    assert tuple(usage) == (0, 0)
+    assert tuple(usage) == (0, 0, True)
 
 
 @pytest.mark.parametrize("operation", ["create", "start"])
