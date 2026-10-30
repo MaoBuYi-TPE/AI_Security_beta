@@ -235,6 +235,12 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             "lease_expires_at",
             postgresql_where=text("lease_owner IS NOT NULL"),
         ),
+        # 容器的對帳（docs/DECISIONS.md §17.2）：找還沒確認刪除的容器。
+        Index(
+            "ix_scanner_runs_pending_containers",
+            "created_at",
+            postgresql_where=text("container_name IS NOT NULL AND container_removed_at IS NULL"),
+        ),
         CheckConstraint(f"engine IN ({_ENGINES})", name="engine_valid"),
         CheckConstraint(f"status IN ({_RUN_STATUSES})", name="status_valid"),
         CheckConstraint(f"sequence BETWEEN 1 AND {len(Engine)}", name="sequence_valid"),
@@ -292,6 +298,12 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             f"('{RunStatus.QUEUED.value}', '{RunStatus.PREPARING.value}')",
             name="container_after_start",
         ),
+        # 容器確認不存在的時間（docs/DECISIONS.md §17.3）：只能寫入一次（migration 的 trigger）。
+        CheckConstraint(
+            "container_removed_at IS NULL "
+            "OR (container_name IS NOT NULL AND container_removed_at >= started_at)",
+            name="container_removed_after_start",
+        ),
         # 共享預算（docs/DECISIONS.md §16.4）：分到的請求數與 guard 記下的用量。
         CheckConstraint(
             "(requests_allotted IS NULL OR requests_allotted >= 0) "
@@ -325,6 +337,7 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     error_code: Mapped[str | None] = mapped_column(String(ERROR_CODE_MAX_LENGTH))
     container_name: Mapped[str | None] = mapped_column(String(CONTAINER_NAME_MAX_LENGTH))
     image_ref: Mapped[str | None] = mapped_column(String(IMAGE_REF_MAX_LENGTH))
+    container_removed_at: Mapped[datetime | None]
     requests_allotted: Mapped[int | None]
     requests_sent: Mapped[int | None]
     requests_denied: Mapped[int | None]

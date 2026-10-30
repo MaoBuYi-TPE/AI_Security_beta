@@ -36,8 +36,9 @@ pytestmark = pytest.mark.integration
 # test_spec_schema.py，auth_profiles 與 auth_profile_versions 的在 test_auth_profile_schema.py）；
 # scans、scanner_runs、scan_events、scan_operations 共 31（test_scan_schema.py）；
 # T10 的 scanner_runs 容器 4 與 runner_instances 5（test_runner_schema.py）；
-# T12 的用量 2 與 preflight 的結果 1（test_budget_schema.py）。
-EXPECTED_CHECK_COUNT = 95
+# T12 的用量 2 與 preflight 的結果 1（test_budget_schema.py）；
+# T13 的容器確認刪除 1（test_container_cleanup_schema.py）。
+EXPECTED_CHECK_COUNT = 96
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "
@@ -323,6 +324,7 @@ def test_audit_events_are_append_only(db_session: Session, statement: str) -> No
         ("uq_scanner_runs_id_scan_id", "(id, scan_id)"),
         ("ix_scanner_runs_claimable", "(status, engine) WHERE"),
         ("ix_scanner_runs_lease_expires_at", "WHERE (lease_owner IS NOT NULL)"),
+        ("ix_scanner_runs_pending_containers", "(created_at) WHERE"),
         ("pk_scan_events", "(scan_id, sequence)"),
         ("pk_scan_operations", "(scan_id, ordinal)"),
         ("uq_scan_operations_scan_id_method_path", "(scan_id, method, path)"),
