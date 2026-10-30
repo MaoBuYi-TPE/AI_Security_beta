@@ -96,6 +96,16 @@ class ApiSpecRepository:
         )
         return Page(items=tuple(_from_row(row) for row in rows), total=total, request=page)
 
+    def stored_document(self, spec_id: UUID) -> tuple[bytes, str] | None:
+        """正規化文件與 base path（只有 runner 經由佇列讀取，交給工具；docs/DECISIONS.md §18.6）。
+
+        document_sha256 由 DB 的 CHECK 保證和內容一致，文件建立之後不能修改（trigger）。
+        """
+        row = self._session.execute(
+            select(ApiSpecModel.document, ApiSpecModel.base_path).where(ApiSpecModel.id == spec_id)
+        ).first()
+        return (row.document, row.base_path) if row is not None else None
+
     def all_operations(self, spec_id: UUID) -> tuple[SpecOperation, ...]:
         """整個 inventory（最多 MAX_OPERATIONS 個），依 inventory 的順序；建立 scan 時凍結用。"""
         models = self._session.scalars(

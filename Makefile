@@ -46,10 +46,11 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 	SECSCAN_GUARD_LAB_IP=10.89.10.254 SECSCAN_GUARD_POLICIES_VOLUME=secscan_live_guard_policies \
 	SECSCAN_GUARD_STATUS_VOLUME=secscan_live_guard_status \
 	SECSCAN_GUARD_TELEMETRY_VOLUME=secscan_live_guard_telemetry
-LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
+LIVE_COMPOSE = $(LIVE_ENV) $(LIVE_EXTRA_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
-	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner
+	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner \
+	test-live-zap
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -213,3 +214,10 @@ test-live-runner: env docker-check images build
 		$(LIVE_COMPOSE) down -v --remove-orphans; \
 		docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
 		exit $$status
+
+# ZAP 的 live 測試（docs/DECISIONS.md §18.10）：同一個獨立的 secscan-live 專案與流程，API 加上只給
+# live 的預覽開關（zap 在 T15 才開放）。runner 啟動時以真的 ZAP 映像執行 capability probe；掃描的是
+# live 自己 lab 網路上的小型網站（tests/live/zap_site.py），不啟動 Juice Shop、VAmPI。約 20 分鐘。
+test-live-zap: LIVE_TESTS := tests/live/test_zap_live.py
+test-live-zap: LIVE_EXTRA_ENV := SCAN_PREVIEW_ENGINES=zap
+test-live-zap: test-live-runner

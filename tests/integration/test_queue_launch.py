@@ -176,7 +176,12 @@ def test_a_cancelled_scan_gets_no_container(
 
     launch = queue.prepare_launch(lease, image_ref=IMAGE)
 
-    assert launch == Launch(Progress(R.CANCELLING, S.CANCELLING), launch.max_duration_seconds, None)
+    assert launch == Launch(
+        Progress(R.CANCELLING, S.CANCELLING),
+        launch.max_duration_seconds,
+        None,
+        scan_profile=scan.profile,
+    )
     assert launch.egress is None
     assert _run(queue_seed, lease.run_id).container_name is None
 

@@ -27,7 +27,7 @@ from secscan.runner.domain.runtime import (
     RuntimeUnavailableError,
 )
 from secscan.runner.guard import GuardChannel, GuardUnavailableError
-from secscan.runner.service import ENGINE_IMAGES
+from secscan.runner.plans import ENGINE_IMAGES
 from secscan.runner.workspace import Workspace, WorkspaceError
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.queue import ScanQueue

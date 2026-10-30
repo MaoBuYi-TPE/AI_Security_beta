@@ -5,6 +5,8 @@
 - 每 10 秒對帳一次（在認領之前；監看一個 run 時不對帳）。
 - 每圈先讀 guard 的 status（docs/DECISIONS.md §15.7）、再寫心跳（含最近一次 probe 的結果），只認領
   probe 通過、而且 guard 可用時的引擎；probe 每 60 秒重做一次。
+- 執行容器驗證的 probe（engine_probe.py，docs/DECISIONS.md §18.8）：每圈前進一步，不阻塞認領；
+  zap 只有驗證通過才可用。runner 停止時刪除執行中的 probe 容器。
 - lease 失效或監看途中 Docker 不可用時記下、重新 probe，繼續處理下一個（run 留給對帳）。
   DB 錯誤直接往外拋：程序結束，由 compose 重啟。
 """
@@ -15,6 +17,7 @@ from collections.abc import Callable, Mapping
 
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.runner.domain.runtime import ContainerRuntime, RuntimeUnavailableError
+from secscan.runner.engine_probe import EngineProber
 from secscan.runner.guard import GuardChannel
 from secscan.runner.probe import probe, require_guard
 from secscan.runner.reconciler import ContainerReconciler
@@ -46,6 +49,7 @@ class RunnerLoop:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         poll_seconds: float,
+        prober: EngineProber | None = None,
     ) -> None:
         self._fleet = fleet
         self._runtime = runtime
@@ -59,6 +63,10 @@ class RunnerLoop:
         self._monotonic = monotonic
         self._poll_seconds = poll_seconds
         self._runner: ContainerRunner | None = None
+        self._prober = prober or EngineProber(
+            runtime, workspace, policy, engines=engines, monotonic=monotonic
+        )
+        self._environment = Capabilities(engines=())
         self._capabilities = Capabilities(engines=())
         self._effective = self._capabilities
         self._guard_writable = False
@@ -82,21 +90,37 @@ class RunnerLoop:
         self, *, once: bool = False, on_report: Callable[[RunReport], None] | None = None
     ) -> list[RunReport]:
         """處理排隊中的 run，直到要求停止（once：最多處理一個，沒有工作就回來）。"""
-        if self._runner is None:
+        runner = self._runner
+        if runner is None:
             raise RuntimeError("先以 attach() 指定 runner")
         self._reconcile()
         self._reconciler.sweep_orphans()
         self._fleet.prune()
         self._probe()
         reports: list[RunReport] = []
+        try:
+            self._serve(runner, reports, once=once, on_report=on_report)
+        finally:
+            self._prober.close()
+        return reports
+
+    def _serve(
+        self,
+        runner: ContainerRunner,
+        reports: list[RunReport],
+        *,
+        once: bool,
+        on_report: Callable[[RunReport], None] | None,
+    ) -> None:
         while not self._stop_requested():
             if self._monotonic() - self._probed_at >= PROBE_EVERY_SECONDS:
                 self._probe()
             if self._monotonic() - self._reconciled_at >= RECONCILE_EVERY_SECONDS:
                 self._reconcile()
+            self._step_engine_probe()
             self._check_guard()
             self.beat()
-            report = self._run_one(self._runner)
+            report = self._run_one(runner)
             if report is not None:
                 reports.append(report)
                 if on_report is not None:
@@ -105,24 +129,29 @@ class RunnerLoop:
                 break
             if report is None:
                 self._sleep(self._poll_seconds)
-        return reports
 
     def _reconcile(self) -> None:
         self._reconciler.reconcile()
         self._reconciled_at = self._monotonic()
 
     def _probe(self) -> None:
-        self._capabilities = probe(
+        self._environment = probe(
             self._runtime,
             self._policy,
             self._engines,
             volumes_writable=self._workspace.writable(),
         )
+        self._capabilities = self._prober.apply(self._environment)
         self._guard_writable = self._guard.writable()
         self._probed_at = self._monotonic()
-        for item in self._capabilities.engines:
+        for item in self._environment.engines:
             if item.issue is not None:
                 logger.warning("引擎 %s 不可用：%s", item.engine.value, item.issue.value)
+
+    def _step_engine_probe(self) -> None:
+        """執行容器驗證的 probe 前進一步（不阻塞），再把結果併入能力。"""
+        self._prober.step(self._environment)
+        self._capabilities = self._prober.apply(self._environment)
 
     def _check_guard(self) -> None:
         """每一輪都讀 guard 的 status：停機與恢復不必等 60 秒的 probe。"""

@@ -123,6 +123,8 @@ services:
     environment:
       <<: *app-env
       SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      # 只給 live 測試的預覽開關（docs/DECISIONS.md §18.9；make test-live-zap 才設定，T15 移除）。
+      SCAN_PREVIEW_ENGINES: ${SCAN_PREVIEW_ENGINES:-}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     networks: [default, control_net]

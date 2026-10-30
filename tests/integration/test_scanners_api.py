@@ -74,6 +74,7 @@ def test_without_a_runner_nothing_is_available(client: TestClient, world: World)
         "image": None,
         "profiles": [],
         "unavailable_reason": "NOT_INTEGRATED",
+        "version": None,
     }
     assert engines["fake"]["unavailable_reason"] == "RUNNER_UNAVAILABLE"
     assert body["data"]["runner"] == {"alive": False, "last_heartbeat_at": None}
@@ -99,6 +100,7 @@ def test_a_live_runner_makes_fake_available(
         "image": IMAGE,
         "profiles": ["api_active_lab", "web_active_lab"],
         "unavailable_reason": None,
+        "version": None,
     }
     assert body["data"]["runner"]["alive"] is True
     assert body["data"]["worker"]["alive"] is True

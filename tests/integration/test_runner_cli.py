@@ -15,6 +15,7 @@ from secscan.cli import EXIT_FAILURE, EXIT_OK, main
 from secscan.cli.services import stop_signals
 from secscan.runner.docker_runtime import DockerRuntime
 from secscan.runner.loop import RunnerLoop
+from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.worker.loop import WorkerLoop
 from tests.guard_support import GuardDouble
 from tests.integration.api_support import Scannable, Seeder, World
@@ -40,6 +41,8 @@ def scannable(queue_seed: Seeder, world: World) -> Scannable:
 @pytest.fixture
 def runtime(monkeypatch: pytest.MonkeyPatch) -> FakeContainerRuntime:
     fake = FakeContainerRuntime()
+    # 這裡測的是 CLI 組好的 fake 流程：沒有 zap 的映像，就不會建立 zap 的 probe 容器。
+    del fake.images[str(ZAP_IMAGE)]
     monkeypatch.setattr(DockerRuntime, "connect", lambda _url: fake)
     return fake
 
