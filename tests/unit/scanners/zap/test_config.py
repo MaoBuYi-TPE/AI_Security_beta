@@ -88,3 +88,7 @@ def test_the_port_must_be_valid(port: int) -> None:
             credentials=ProxyCredentials(RUN_ID, TOKEN),
             requests_per_second=2,
         )
+
+
+def test_the_rate_follows_the_scan() -> None:
+    assert "network.ratelimit.rules.rule(0).reqsPerSec=1\n" in _render(requests_per_second=1)
