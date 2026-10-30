@@ -79,6 +79,16 @@ class ScopeGrantRepository:
         row = self._session.execute(_with_project().where(ScopeGrantModel.id == grant_id)).first()
         return _from_row(row) if row is not None else None
 
+    def current(self, grant_id: UUID) -> ScopeGrant | None:
+        """不加鎖、一定向 DB 重新讀取（runner 的心跳；docs/DECISIONS.md §17.5）。"""
+        statement = (
+            _with_project()
+            .where(ScopeGrantModel.id == grant_id)
+            .execution_options(populate_existing=True)
+        )
+        row = self._session.execute(statement).first()
+        return _from_row(row) if row is not None else None
+
     def lock(self, grant_id: UUID, *, shared: bool = False) -> ScopeGrant | None:
         """鎖住 grant（不鎖 target），並以 DB 的最新值覆蓋已載入的物件。
 

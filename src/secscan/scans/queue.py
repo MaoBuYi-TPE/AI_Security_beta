@@ -13,20 +13,19 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, exists, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, and_, exists, func, or_, select, update
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
-from secscan.api_keys.repository import ApiKeyRepository
 from secscan.auth_profiles.domain.model import StoredSecret
 from secscan.auth_profiles.domain.preflight import Preflight
 from secscan.auth_profiles.repository import AuthProfileRepository
-from secscan.grants.domain.lifecycle import GrantUnusableError, ScopeGrant, check_usable
+from secscan.grants.domain.lifecycle import ScopeGrant
 from secscan.grants.domain.scope import Scope
-from secscan.grants.repository import ScopeGrantRepository
 from secscan.guard.domain.budget import RunBudget
+from secscan.scans.containers import ContainerRecords, PendingContainer
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import (
-    GATE_ERROR_CODES,
+    RUNNER_STAGE_RUN_STATUSES,
     TERMINAL_SCAN_STATUSES,
     TRAFFIC_STOPPED_RUN_STATUSES,
     RunErrorCode,
@@ -35,6 +34,7 @@ from secscan.scans.domain.lifecycle import (
 )
 from secscan.scans.domain.model import CONTAINER_NAME_PREFIX, Lease
 from secscan.scans.domain.preflight import PreflightResult
+from secscan.scans.gate import RunGate
 from secscan.scans.leases import LeaseLostError, holds
 from secscan.scans.models import ScanModel, ScannerRunModel
 from secscan.scans.progress import (
@@ -46,8 +46,7 @@ from secscan.scans.progress import (
     now,
 )
 from secscan.scans.run_records import CoverageInputs, RunRecords, RunUsage
-from secscan.targets.domain import LabNetwork, Origin, OutsideLabError
-from secscan.targets.repository import TargetRepository
+from secscan.targets.domain import LabNetwork, Origin
 
 __all__ = [
     "HEARTBEAT_INTERVAL",
@@ -57,6 +56,7 @@ __all__ = [
     "Heartbeat",
     "Launch",
     "LeaseLostError",
+    "PendingContainer",
     "Progress",
     "QueueOperations",
     "RunReport",
@@ -72,8 +72,11 @@ MAX_RECONCILED_PER_CALL = 100
 
 @dataclass(frozen=True, slots=True)
 class Heartbeat:
+    """stop_reason：lease 有效、沒有要求取消，但 gate 或建立者的 key 已不再有效（§17.5）。"""
+
     valid: bool
     cancel_requested: bool
+    stop_reason: RunErrorCode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,11 +142,10 @@ class QueueOperations:
     def __init__(self, session: Session, *, lab: LabNetwork) -> None:
         self._session = session
         self._progress = ScanProgress(session)
-        self._targets = TargetRepository(session)
-        self._grants = ScopeGrantRepository(session)
+        self._gate = RunGate(session, lab=lab)
         self._profiles = AuthProfileRepository(session)
-        self._keys = ApiKeyRepository(session)
         self._records = RunRecords(session)
+        self._containers = ContainerRecords(session)
         self._lab = lab
 
     def claim(self, owner: str, engines: Collection[Engine]) -> Lease | None:
@@ -158,8 +160,12 @@ class QueueOperations:
             RunStatus.COLLECTED, RunStatus.NORMALIZING, owner, engines, run_id=run_id
         )
 
-    def heartbeat(self, lease: Lease) -> Heartbeat:
-        """延長還沒過期的 lease；回報 scan 是否被要求取消。只改 run 的列，不等 scan 的鎖。"""
+    def heartbeat(self, lease: Lease, *, clock: Callable[[], datetime]) -> Heartbeat:
+        """延長還沒過期的 lease；回報 scan 是否被要求取消，或執行中的 run 是否必須停止。
+
+        只改 run 的列、其餘都不加鎖讀取：不等 scan 的鎖，也不等撤銷或停用的 FOR UPDATE
+        （docs/DECISIONS.md §17.5）。
+        """
         scan_id = self._session.execute(
             update(ScannerRunModel)
             .where(*holds(lease))
@@ -169,10 +175,12 @@ class QueueOperations:
         ).scalar()
         if scan_id is None:
             return Heartbeat(valid=False, cancel_requested=False)
-        cancel_requested_at = self._session.scalar(
-            select(ScanModel.cancel_requested_at).where(ScanModel.id == scan_id)
+        scan = self._progress.current_scan(scan_id)
+        if scan.cancel_requested:
+            return Heartbeat(valid=True, cancel_requested=True)
+        return Heartbeat(
+            valid=True, cancel_requested=False, stop_reason=self._gate.current(scan, clock)
         )
-        return Heartbeat(valid=True, cancel_requested=cancel_requested_at is not None)
 
     def prepare(self, lease: Lease, *, clock: Callable[[], datetime]) -> Progress:
         """runner 啟動前：要求過取消 → cancelling；gate、綁定的 profile 版本或建立者的 key
@@ -196,11 +204,11 @@ class QueueOperations:
         scan, run = self._fenced(lease)
         if scan.cancel_requested:
             return self._launch(scan, self._move(scan, run, RunStatus.CANCELLING))
-        error_code, grant = self._gate(scan, clock)
+        error_code, grant = self._gate.locked(scan, clock)
         secret: StoredSecret | None = None
         if error_code is None:
             error_code, secret = self._binding(scan, read_secret=image_ref is not None)
-        error_code = error_code or self._creator(scan)
+        error_code = error_code or self._gate.locked_creator(scan)
         requests, seconds = self._records.remaining(
             scan.id,
             run.id,
@@ -259,20 +267,31 @@ class QueueOperations:
         return self._move(scan, run, to, error_code)
 
     def reconcile_expired(self, engines: Collection[Engine]) -> int:
-        """lease 過期的 run：runner 階段 → interrupted（LEASE_EXPIRED）；normalizing → collected。
+        """in-process 的 fake runner 用：runner 階段與解析中的對帳（下面兩個的合併）。"""
+        return self._reconcile(engines, or_(_parsing(), _without_live_container()))
 
-        runner 階段只處理沒有容器的 run（in-process 的 fake：不發流量，lease 過期就確定已停止）。
-        有容器的 run，lease 過期不代表容器已經停止（ARCHITECTURE.md §9），留給 T13 的容器對帳。
+    def reconcile_expired_runner(self, engines: Collection[Engine]) -> int:
+        """lease 過期、沒有容器或容器已確認刪除的 runner 階段 → interrupted（LEASE_EXPIRED）。
+
+        不必呼叫 Docker：沒有流量（in-process 的 fake、preparing 時中斷），或容器已確認不存在。
+        容器還沒確認刪除的 run，lease 過期不代表容器已經停止（ARCHITECTURE.md §9），由 runner 的
+        容器對帳處理（docs/DECISIONS.md §17.2）。
         """
-        stage = or_(
-            ScannerRunModel.status == RunStatus.NORMALIZING.value,
-            ScannerRunModel.container_name.is_(None),
-        )
-        return self._reconcile(engines, stage)
+        runner_stage = ScannerRunModel.status.in_(_values(RUNNER_STAGE_RUN_STATUSES))
+        return self._reconcile(engines, and_(runner_stage, _without_live_container()))
 
     def reconcile_expired_parsing(self, engines: Collection[Engine]) -> int:
         """worker 用：只把 lease 過期的 normalizing 退回 collected（解析不送流量，可以重試）。"""
-        return self._reconcile(engines, ScannerRunModel.status == RunStatus.NORMALIZING.value)
+        return self._reconcile(engines, _parsing())
+
+    def pending_containers(self, limit: int) -> tuple[PendingContainer, ...]:
+        return self._containers.pending(limit)
+
+    def settle_container(self, run_id: UUID) -> bool:
+        return self._containers.settle(run_id)
+
+    def unsettled_runs(self, run_ids: Collection[UUID]) -> frozenset[UUID]:
+        return self._containers.unsettled(run_ids)
 
     def _reconcile(self, engines: Collection[Engine], stage: ColumnElement[bool]) -> int:
         expired = (
@@ -351,25 +370,6 @@ class QueueOperations:
         self._progress.move(scan, run, to, error_code=error_code)
         return Progress(run_status=to, scan_status=self._progress.settle(scan))
 
-    def _gate(
-        self, scan: LockedScan, clock: Callable[[], datetime]
-    ) -> tuple[RunErrorCode | None, ScopeGrant | None]:
-        """以建立 scan 時相同的規則重新判斷（§10.6）；時間在取得鎖之後才取。
-
-        通過時一併回傳鎖住的 grant：guard 的 policy 以它的範圍與期限產生（§15.7）。
-        """
-        target = self._targets.lock(scan.target_id, shared=True)
-        grant = self._grants.lock(scan.scope_grant_id, shared=True)
-        if target is None or grant is None or target.origin != scan.target_origin:
-            return RunErrorCode.SCOPE_MISMATCH, None
-        try:
-            check_usable(grant, target=target, lab=self._lab, now=clock())
-        except GrantUnusableError as exc:
-            return GATE_ERROR_CODES[exc.reason], None
-        except OutsideLabError:
-            return RunErrorCode.SCOPE_OUTSIDE_LAB, None
-        return None, grant
-
     def _binding(
         self, scan: LockedScan, *, read_secret: bool
     ) -> tuple[RunErrorCode | None, StoredSecret | None]:
@@ -388,17 +388,6 @@ class QueueOperations:
         if self._profiles.version_has_secret(profile_id, version=version):
             return None, None
         return RunErrorCode.AUTH_PROFILE_SUPERSEDED, None
-
-    def _creator(self, scan: LockedScan) -> RunErrorCode | None:
-        """建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不開始（審查發現）。
-
-        以 FOR SHARE 鎖住 key：撤銷 key 要等這個 transaction 結束。到期不算：到期是例行的，
-        不代表 key 外洩。
-        """
-        key = self._keys.lock_shared(scan.created_by_key_id)
-        if key is None or key.revoked_at is not None:
-            return RunErrorCode.CREATOR_KEY_REVOKED
-        return None
 
 
 class ScanQueue:
@@ -427,11 +416,13 @@ class ScanQueue:
 
     def heartbeat(self, lease: Lease) -> Heartbeat:
         with self._sessions.begin() as session:
-            return self._operations(session).heartbeat(lease)
+            return self._operations(session).heartbeat(lease, clock=self._clock)
 
-    def record_usage(self, lease: Lease, usage: RunUsage) -> None:
+    def record_usage(
+        self, lease: Lease, usage: RunUsage, *, container_removed: bool = False
+    ) -> None:
         with self._sessions.begin() as session:
-            RunRecords(session).record_usage(lease, usage)
+            RunRecords(session).record_usage(lease, usage, container_removed=container_removed)
 
     def record_preflight(self, lease: Lease, result: PreflightResult) -> None:
         with self._sessions.begin() as session:
@@ -469,9 +460,25 @@ class ScanQueue:
         with self._sessions.begin() as session:
             return self._operations(session).reconcile_expired(engines)
 
+    def reconcile_expired_runner(self, engines: Collection[Engine]) -> int:
+        with self._sessions.begin() as session:
+            return self._operations(session).reconcile_expired_runner(engines)
+
     def reconcile_expired_parsing(self, engines: Collection[Engine]) -> int:
         with self._sessions.begin() as session:
             return self._operations(session).reconcile_expired_parsing(engines)
+
+    def pending_containers(self, limit: int) -> tuple[PendingContainer, ...]:
+        with self._sessions.begin() as session:
+            return self._operations(session).pending_containers(limit)
+
+    def settle_container(self, run_id: UUID) -> bool:
+        with self._sessions.begin() as session:
+            return self._operations(session).settle_container(run_id)
+
+    def unsettled_runs(self, run_ids: Collection[UUID]) -> frozenset[UUID]:
+        with self._sessions.begin() as session:
+            return self._operations(session).unsettled_runs(run_ids)
 
     def _operations(self, session: Session) -> QueueOperations:
         return QueueOperations(session, lab=self._lab)
@@ -488,6 +495,18 @@ def _egress(
             requests_per_second=scan.requests_per_second, burst=1, max_requests=requests
         ),
         auth_header=secret.credential.wire_header.lower() if secret is not None else None,
+    )
+
+
+def _parsing() -> ColumnElement[bool]:
+    return ScannerRunModel.status == RunStatus.NORMALIZING.value
+
+
+def _without_live_container() -> ColumnElement[bool]:
+    """沒有容器（in-process 的 fake、還沒開始），或容器已確認不存在（§17.2）。"""
+    return or_(
+        ScannerRunModel.container_name.is_(None),
+        ScannerRunModel.container_removed_at.is_not(None),
     )
 
 

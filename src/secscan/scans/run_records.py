@@ -20,6 +20,7 @@ from secscan.scans.domain.model import Lease
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.leases import LeaseLostError, holds
 from secscan.scans.models import RunCoverageModel, ScanModel, ScannerRunModel, ScanOperationModel
+from secscan.scans.progress import now
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,16 +90,20 @@ class RunRecords:
             .execution_options(synchronize_session=False)
         )
 
-    def record_usage(self, lease: Lease, usage: RunUsage) -> None:
-        self._fenced_update(
-            lease,
-            {
-                "requests_sent": usage.requests_sent,
-                "requests_denied": usage.requests_denied,
-                "traffic_seconds": usage.traffic_seconds,
-            },
-            problem="lease 已過期或不屬於這個 runner",
-        )
+    def record_usage(
+        self, lease: Lease, usage: RunUsage, *, container_removed: bool = False
+    ) -> None:
+        """container_removed：runner 已確認容器刪除，一併記下時間（已記下的不覆寫；§17.2）。"""
+        values: dict[str, object] = {
+            "requests_sent": usage.requests_sent,
+            "requests_denied": usage.requests_denied,
+            "traffic_seconds": usage.traffic_seconds,
+        }
+        if container_removed:
+            values["container_removed_at"] = func.coalesce(
+                ScannerRunModel.container_removed_at, now()
+            )
+        self._fenced_update(lease, values, problem="lease 已過期或不屬於這個 runner")
 
     # --- preflight ----------------------------------------------------------------------------
 

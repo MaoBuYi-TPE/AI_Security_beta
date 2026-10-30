@@ -10,6 +10,7 @@
 
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, DateTime, Row, Select, func, select, update
@@ -91,42 +92,12 @@ class ScanProgress:
         self._scans = ScanRepository(session)
 
     def lock_scan(self, scan_id: UUID) -> LockedScan | None:
-        row = self._session.execute(
-            select(
-                ScanModel.id,
-                ScanModel.project_id,
-                ScanModel.target_id,
-                ScanModel.target_origin,
-                ScanModel.scope_grant_id,
-                ScanModel.auth_profile_id,
-                ScanModel.auth_profile_version,
-                ScanModel.created_by_key_id,
-                ScanModel.requests_per_second,
-                ScanModel.max_requests,
-                ScanModel.max_duration_seconds,
-                ScanModel.status,
-                ScanModel.cancel_requested_at,
-            )
-            .where(ScanModel.id == scan_id)
-            .with_for_update()
-        ).first()
-        if row is None:
-            return None
-        return LockedScan(
-            id=row.id,
-            project_id=row.project_id,
-            target_id=row.target_id,
-            target_origin=parse_origin(row.target_origin),
-            scope_grant_id=row.scope_grant_id,
-            auth_profile_id=row.auth_profile_id,
-            auth_profile_version=row.auth_profile_version,
-            created_by_key_id=row.created_by_key_id,
-            requests_per_second=row.requests_per_second,
-            max_requests=row.max_requests,
-            max_duration_seconds=row.max_duration_seconds,
-            status=ScanStatus(row.status),
-            cancel_requested=row.cancel_requested_at is not None,
-        )
+        row = self._session.execute(_scan_columns(scan_id).with_for_update()).first()
+        return _locked_scan(row) if row is not None else None
+
+    def current_scan(self, scan_id: UUID) -> LockedScan:
+        """不加鎖讀 scan 目前的值（runner 的心跳只讀，不等 scan 的鎖；§17.5）。"""
+        return _locked_scan(self._session.execute(_scan_columns(scan_id)).one())
 
     def runs(self, scan_id: UUID) -> tuple[RunState, ...]:
         rows = self._session.execute(
@@ -235,6 +206,42 @@ class ScanProgress:
             scan.id, EventType.SCAN_STATUS, scan_status_payload(status=status, previous=scan.status)
         )
         return status
+
+
+def _scan_columns(scan_id: UUID) -> Select[*tuple[Any, ...]]:
+    return select(
+        ScanModel.id,
+        ScanModel.project_id,
+        ScanModel.target_id,
+        ScanModel.target_origin,
+        ScanModel.scope_grant_id,
+        ScanModel.auth_profile_id,
+        ScanModel.auth_profile_version,
+        ScanModel.created_by_key_id,
+        ScanModel.requests_per_second,
+        ScanModel.max_requests,
+        ScanModel.max_duration_seconds,
+        ScanModel.status,
+        ScanModel.cancel_requested_at,
+    ).where(ScanModel.id == scan_id)
+
+
+def _locked_scan(row: Row[*tuple[Any, ...]]) -> LockedScan:
+    return LockedScan(
+        id=row.id,
+        project_id=row.project_id,
+        target_id=row.target_id,
+        target_origin=parse_origin(row.target_origin),
+        scope_grant_id=row.scope_grant_id,
+        auth_profile_id=row.auth_profile_id,
+        auth_profile_version=row.auth_profile_version,
+        created_by_key_id=row.created_by_key_id,
+        requests_per_second=row.requests_per_second,
+        max_requests=row.max_requests,
+        max_duration_seconds=row.max_duration_seconds,
+        status=ScanStatus(row.status),
+        cancel_requested=row.cancel_requested_at is not None,
+    )
 
 
 def _run_columns() -> Select[UUID, UUID, str, int, str]:

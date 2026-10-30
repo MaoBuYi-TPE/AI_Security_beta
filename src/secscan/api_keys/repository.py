@@ -32,6 +32,11 @@ class ApiKeyRepository:
         model = self._session.get(ApiKeyModel, key_id)
         return _to_domain(model) if model is not None else None
 
+    def current(self, key_id: UUID) -> ApiKey | None:
+        """不加鎖、一定向 DB 重新讀取（runner 的心跳；docs/DECISIONS.md §17.5）。"""
+        model = self._session.get(ApiKeyModel, key_id, populate_existing=True)
+        return _to_domain(model) if model is not None else None
+
     def lock_shared(self, key_id: UUID) -> ApiKey | None:
         """以 FOR SHARE 鎖住 key 並讀最新的值：撤銷（FOR UPDATE）要等呼叫端的 transaction 結束。
 
