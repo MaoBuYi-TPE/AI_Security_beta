@@ -132,6 +132,32 @@ T12 已涵蓋（guard 的程式 line 與 branch coverage 100%；`DECISIONS.md` �
 - **preflight（§12.5）**：JSON Pointer 的嚴格比對（型別、陣列索引的前導 0 與 `-`、跳脫、指不到不等於 null）；原始 HTTP 回應的解析（chunked、header 的折行、缺少結尾、超過 64 KiB；長串空白加非法字元在 50 毫秒內拒絕，審查發現的 ReDoS）；`passed`、`failed`（含登入頁的 HTML）、`inconclusive`（含匿名的對照沒有有效回應）、`blocked`、`not_executed` 的判斷；plan 只接受 `http://<origin><path>`（沒有 query、帳密、換行）；runner 以 sha256 核准 script，改一個字就被拒絕；`header_line` 拒絕換行與 NUL。
 - **coverage 與用量**：請求對應到最具體的 operation（佔位符、結尾的斜線、method）；沒有回應的不算、認證被拒絕（401、403）的不算 authenticated；preflight 的請求不算；`budget_usage` 遇到不明的數字就是 null；`coverage_measured` 要所有 run 都結束、每個容器 run 都已對應；`authenticated_operations` 要 preflight 是 `passed`；guard 保留中的名額有上限。
 
+T14 已涵蓋（`DECISIONS.md` §18；新的 domain 模組 line 與 branch coverage 100%）：
+- **ZAP 的 AF plan**：web 與 api 的 job 順序；spider 從 / 開始、一個執行緒、`postForm` 只在 grant 允許 POST 時打開、robots 與 sitemap 只在範圍內時讀取、Git／DS_Store／SVN 關閉；api 以只含 eligible operation 的文件匯入、`targetUrl` 是 target 的 origin 加 base path；activeScan 的 `defaultThreshold` 是 off、只有白名單的規則（web 與 api 各一份；排除的 16 個類別代表逐一確認不在任何一份）；report 只能是 `traditional-json` 而且 `alwaysRun`；任何字串含 `${` 就拒絕（AF 的變數代換）；以 PyYAML（YAML 1.1）解析的結果和 JSON 相同。
+- **時間與預算**：maxDuration 取剩下的時間、請求數除以速率、grant 的期限中最小的，再減保留的 60 秒；不到下限就不執行；job 的上限至少 1 分鐘（0 是不限）。Hypothesis：任何預算下都不超過任何一個上限。
+- **grant → context 的 regex**：literal、佔位、`allow_all_paths`、排除不分大小寫與結尾的斜線但不涵蓋底下的 path、預設 port 的寫法；模擬 AF 把 url 加成 `url.*` 的 include 之後仍不擴大範圍（負向前瞻的排除）；Hypothesis 以 Python 的 re 和 guard 的 `covers()` 對照。
+- **zap.properties**：proxy 的帳密與速率逐行核對；token 不是 43 個 base64url 字元（含換行、`=`、反斜線）、速率或 port 超出範圍都拒絕；repr 不顯示 token。
+- **probe 的判斷**：退出 0、版本相同、必要的 add-on 是審查過的版本（同一個 add-on 取最大的檔案）才相容；退出 2 是不相容（未知的規則 ID），其他是失敗；報告或清單讀不到、格式不符、超過 64 KiB 都是失敗；不認得的行略過。
+- **只含 eligible operation 的規格**：只留下 eligible 的 operation（以含 base path 的 path 比對）、保留 path 層級的 parameters、刪掉 `x-` 與空的 path item；`servers` 不是 origin 加 base path 就拒絕；`operationRef` 指向被刪的 operation 時 fail closed；輸出是 compact JSON、不比輸入大；VAmPI 的規格只留下 GET。
+- **政策與 admission（SEC-12）**：每個 zap 的 plan 與 probe 的 plan 都通過；script 的 sha256 與政策一致，改一個字（含拿掉 `-silent`、`-nostdout`）就被拒絕；`ZAP_AUTH_HEADER_VALUE` 永遠不能在 plan；anonymous 只能有模式，header 模式一定有名稱與 host；模式和 `target_auth` 不一致被拒絕；輸入檔的名稱與大小（最大的規格放得下）；超過上限。create 的 body：zap 只有宣告的 tmpfs（改 path、拿掉 noexec 或 nosuid、加大、多一個、缺少都被拒絕），其他引擎加上 tmpfs 被拒絕；所有引擎的 healthcheck 必須是 NONE；送出前的檢查以自己的 tmpfs 字面值核對（改了引擎政策也擋下）。
+- **workspace**：manifest 記下退出碼與輸入檔的 hash；空的 secret 目錄只能建立一次；`zap.properties` 是已知的 secret 檔、會被刪除；`read_output` 不跟隨 symlink（檔案或被換掉的 out/）、只讀一般檔案、有大小上限。
+- **probe 的步進**：通過之前是 `ENGINE_PROBE_PENDING`、期間其他引擎照常可用；通過之後帶版本、同一個映像不再執行；失敗與不相容以退避重試、每次新的 id；逾時就停止並刪除；Docker 在啟動時出錯是失敗；刪不掉的容器留下 secret 目錄（下次啟動的清理依它找回）；映像不在時不執行；runner 停止時刪除執行中的容器。
+- **審查之後補上的**（T14 的 code-reviewer 與 security-reviewer）：
+  - **掃描的 script 以 dash 實際執行**（容器的路徑換成暫存目錄與替身）：
+    - anonymous 時 unset 所有 `ZAP_AUTH*`，有 secret 檔就 exit 64。
+    - header 模式下，值原樣 export（含 `$`、反引號與空白），有沒有結尾的換行都一樣；缺少檔案、前綴不符、值是空的、缺少 header 名稱或 SITE、不認得的模式都 exit 64。
+    - out/ 寫不了就 exit 65。
+  - **AF plan 的內容由 runner 的政策獨立檢查**：
+    - 以下都被拒絕：檔案中或解析之後（`\u0024` 跳脫）有 `${`、不在白名單的 job、報告的範本是 `-plus`、報告的目錄不對、兩個報告或沒有報告、`defaultThreshold` 不是 off、不是 JSON、超長的整數、過深的巢狀。
+    - probe 的 plan 以 sha256 核准。
+    - 規格不經過 AF 的代換，照樣接受 `${`。
+  - **probe 的樣板不接受任何環境變數或認證**。
+  - **會改 method 的規則**（20018、40045、40048）只在 grant 允許 POST 時執行。
+  - **範圍外的排除**：結尾有換行的 URL 也擋得下。
+  - **probe 執行中超過用量上限就停止**；報告中超長的整數是失敗、不是例外。
+  - **預覽開關只以 live 專用的變數插值**，`make up`、`make dev` 明確清空。
+- **API 的設定**：`SCAN_PREVIEW_ENGINES` 只接受空的或 zap；zap 的 web profile 需要 grant 允許 GET /（只檢查 zap）；`GET /scanners` 的版本、三個新的能力代碼、預覽開關下 zap 的狀態。
+
 ### 4.2 Contract / Parser
 
 每個鎖定版本保存遮罩後真實輸出 fixture：正常無告警、存在告警、非零退出但有有效 findings、格式截斷、未知欄位、缺必要欄位、空檔、重複事件、Unicode、超大單行/總量、timeout 後部分 artifact。版本不支援時明確 error，不默默漏掉資料。
@@ -224,11 +250,14 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。模板的 allowlist 在 M4（Nuclei）加入。
 - **SEC-18**：T10 只涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；artifact 的 storage key、下載與 worker 的解析在 M3、M5。
 - **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
-- **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method` 與 path 中的 `%`（`DECISIONS.md` §15.10 的取捨，T14 量測）。
+- **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method`（`DECISIONS.md` §15.10 的取捨；T14 的小型網站沒有這個欄位，T16 以真的靶機量測）。path 中的 `%`：T14 的 live 量測中，ZAP 對 path 參數的攻擊有 83% 以 `PATH_AMBIGUOUS` 被拒（`TOOLS.md` §7.5），維持 fail closed，覆蓋的缺口在 T16 量化。
 - **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約。T13 補上執行中的停止：grant 撤銷或到期、target 停用、建立者的 key 撤銷時，runner 在下一次心跳先封鎖 guard、再停止容器。
 - **SEC-19（T11 的部分）**：取消時先封鎖 guard、再停止容器（live 以時間線證明）。T13 補上 runner 遺失時的回收：對帳先封鎖、再強制刪除孤兒容器，確認之後才結算。
 - **SEC-15**：T11 的 guard 只放行 scan 的 target origin，任何帶著認證的請求都送不到其他 origin。T12 以 live 證明（§4.4）：帶著 `Authorization` 的請求只到達 target，另一個 origin 的接收端沒有任何連線；preflight 的帶認證請求只送到 target。使用者決定維持只放行 target origin，跨 origin 的認證 header 規則（多個 origin）延後；工具實際送出的認證在 M3。
 - **SEC-13（T12）**：guard 強制 scan 共用的請求數與速率，preflight 也計入；以 live 的接收端與 guard 的 telemetry 證明（§4.4）。實作以 scan 為單位（P0 同一個 target 同時只有一個 scan，和「target 合計」等價；多個 runner 時要改 key，`DECISIONS.md` §16.8）。延遲 body 只能累積 11 個已核准的請求。仍未涵蓋：多個真的引擎依序共用預算（M3、M4；目前以 preflight 加上不送流量的 fake 證明分配與扣除的規則）、依量測調整 lab profile 的預算（M3）。
+- **SEC-12（T14）**：zap 的政策（映像、兩個以 sha256 核准的 script、環境變數與 `target_auth` 的對應、輸入檔、上限）與 create body 的新規則（只有宣告的 tmpfs、healthcheck 關閉）。
+- **SEC-02、SEC-05、SEC-11（T14 的部分）**：交給 ZAP 的規格只有 eligible 的 operation、`servers` 與 `targetUrl` 都是核准的 target；規格中其他 URL（externalDocs、license、contact、draft-04 的 `id`、examples）與參照較深的規格以 live 的 canary 驗證（§4.4 的 T14）。
+- **SEC-14（T14 的部分）**：proxy 的 token 與目標的 secret 不在 zap 容器的 Env、Cmd、Labels、`out/zap.log` 與報告中（live）；`-configfile` 的值只在 tmpfs 的 log（`-nostdout`）。工具輸出與證據的精確遮罩在 T15。
 
 T12 已涵蓋（真的 DB 佇列）：
 - 預算：容器版的 run 分到剩下的請求數並記下；之後的 run 扣除之前的 run 實際轉送的數量與流量的秒數，轉送數不明時整份扣除；剩 0 不建立容器（`BUDGET_EXHAUSTED`）；用量超過分到的數量被 DB 的 CHECK 拒絕；寫回用量要持有 lease。
@@ -244,6 +273,16 @@ T13 已涵蓋（真的 DB 佇列、記憶體中的容器 runtime、tmp 中的 po
 - 啟動時依證據清理：已結算或 DB 沒有的 run 留下的 policy、secret 與容器被清掉；待處理、lease 有效的保留；Docker 不可用或 409 時保留 blocked 的 policy；暫存檔超過 60 秒才刪；迴圈啟動時先對帳再認領，之後每 10 秒一次。
 - 撤回授權（SEC-01）：心跳以不加鎖的讀取回報 grant 撤銷、到期、target 停用、origin 改變、`LAB_CIDR` 不符、建立者的 key 撤銷；撤銷還沒 commit 時心跳不等待（以 `Race` 的背景連線確認）；同一個 session 中讀到新的值。runner 執行中看到 → 封鎖 → stop → remove → `failed`（該錯誤碼），不收集輸出；建立容器之前看到 → 不建立；同時要求取消時走取消；in-process 的 FakeRunner 也停止。
 - 解析重試：第 3 次過期是 `failed`（`PARSE_ATTEMPTS_EXHAUSTED`），每個 run 各自計數；worker 遇到單一 run 的例外只記類別（不記訊息）、繼續處理其他 run，DB 的錯誤照舊結束。
+
+T14 已涵蓋（真的 DB 佇列、記憶體中的容器 runtime 模擬 ZAP 的容器：啟動那一刻記下 secret 檔、輸入檔與環境變數）：
+- **plan 與 secret**：anonymous 的 web run 只有模式的環境變數、只有 plan.yaml、spider 從 / 開始；secret 是 proxy-url 與 zap.properties（0400），zap.properties 的密碼與 proxy-url 的 token 相同、帳號是 run_id、速率是 scan 的速率；容器刪除之後 secret 全部刪除。api run 交給 ZAP 的規格只有 eligible 的 operation（grant 只允許 GET：DELETE 不在）、servers 與 targetUrl 是 target。帶認證的 run：preflight 先跑，zap 的環境變數只有模式、header 名稱與 host，auth-header 是 `Authorization: Bearer …`，值不在 create 的 body 與輸入檔中。
+- **退出碼**：0、1、2 收集輸出，manifest 記下退出碼與 plan.yaml 的 hash；64、65、3、143 是 `ENGINE_FAILED` 而且不收集；OOM 是 `RESOURCE_LIMIT_EXCEEDED`。
+- **預算**：剩下的時間（100 秒）或請求數（200 個）不夠 ZAP 執行時不建立容器、`BUDGET_EXHAUSTED`。
+- **取消**：執行中的 zap run 被取消時停止、刪除容器與 secret，run 是 `cancelled`。
+- **runner 的加固**：沒有 plan 的引擎（nuclei）不會拿到其他引擎的 plan、不記下容器與映像。
+- **佇列**：zap 的 api run 在 prepare 時拿到上傳時正規化的文件、base path 與凍結為 eligible 的 operation；web run 與其他引擎沒有規格。
+- **迴圈與 probe**：probe 期間 fake 照常認領、zap 是 `ENGINE_PROBE_PENDING`，runner 停止時刪除執行中的 probe 容器；zap 的 run 等 probe 通過之後才執行，能力記下版本。
+- **API**：沒有預覽開關時 zap 是 422 `ENGINE_UNSUPPORTED`；開啟時接受 zap 的 api scan；zap 的 web profile 而 grant 沒有 `GET /` 是 422 `PROFILE_INCOMPATIBLE`，fake 不受這個規則影響。
 
 ### 4.4 Live E2E
 
@@ -263,6 +302,28 @@ T11 已涵蓋（`tests/live/test_guard_live.py`；live 自己的 lab 網路 10.8
 - 在 guard 的映像中，以 mitmproxy 12.2.3 的真物件驅動 addon，確認單元測試的假物件和真物件一致（16 項，含刪除小寫的 `x-secscan-guard`）。
 - 尚未涵蓋：同一條 keep-alive 連線上交錯的放行與拒絕、pipelining 與 header 值中夾帶的請求（接收端與探針每個請求一條新連線）；目前只有單元測試，記為證據缺口（`DECISIONS.md` §15.10）。
 - fake scan：執行中有這個 run 的 policy、容器內有 0400 的 proxy-url，結束之後都刪除。
+
+T14 已涵蓋（`make test-live-zap`，`tests/live/test_zap_live.py`；live 自己 lab 網路上的小型網站 `zap_site.py` 與 canary；API 以只給 live 的預覽開關啟動；量測的數字在 `TOOLS.md` §7.5）：
+- capability probe：runner 啟動時以真的 ZAP 映像、掃描相同的強化設定執行；`GET /scanners` 顯示 2.17.0；probe 容器已刪除。
+- web、anonymous（SEC-02、SEC-05）：
+  - 網站只收到 GET 與 HEAD，沒有 `/admin`，沒有任何認證 header；canary 沒有連線，guard 只看到 target。
+  - 修正前 ZAP 送出的 52 個 POST（grant 不允許）都被 guard 擋下；會改 method 的規則依 grant 篩選之後是 0。
+  - 報告與 `zap.log` 收集到 out/，manifest 記下退出碼。
+  - 2 MiB 的回應取得成功。
+- api、bearer（SEC-02、SEC-05、SEC-11、SEC-14、SEC-15）：
+  - ZAP 只送出規格中 eligible 的 operation，DELETE 一次也沒有。
+  - 規格中指向 canary 的 URL（contact、license、externalDocs、servers、schema 的 `id`、example）連線數是 0。
+  - `Authorization` 只送到 target，值正確。
+  - token 與 proxy 的 token 不在 Env、Cmd、Labels 與 out/。
+  - path 參數的百分比編碼攻擊被 guard 以 `PATH_AMBIGUOUS` 拒絕（覆蓋的缺口，見 `TOOLS.md` §7.5）。
+- `api_key_header`、cookie：值正確、只送到 target；請求數較少的預算讓 ZAP 在 maxDuration 內自己結束。
+- 取消（SEC-19）：policy 先變成 blocked，容器才收到 kill；之後網站沒有再收到請求；ZAP 收到 SIGTERM 之後約 2 秒結束。
+- 參照炸彈（3^8）：在容器的上限內完成，沒有連到其他 host。
+- 尚未涵蓋：
+  - Juice Shop 與 VAmPI（T16）。
+  - 和 ZAP 自己的 session cookie 合併的情況（網站不發 `Set-Cookie`）。
+  - HTTPS。
+  - T11 的同一條連線上多個請求的證據缺口。
 
 T13 已涵蓋（`tests/live/test_revocation_live.py`、`test_guard_failover_live.py`；live 的 lab 網路上自己的接收端）：
 - SEC-01（執行中）：fake 容器執行中，以借用的 proxy-url 每 20 ms 送一次請求；管理員撤銷 grant 之後 10 秒內開始拒絕（`RUN_BLOCKED`，之後 policy 刪除是 407），放行與拒絕沒有交錯；之後接收端沒有再收到；容器在 30 秒內刪除；fake 的 run 是 `failed`（`SCOPE_REVOKED`）。

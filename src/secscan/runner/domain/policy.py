@@ -1,7 +1,11 @@
-"""runner 的政策（docs/DECISIONS.md §14.3、§14.4）。
+"""runner 的政策（docs/DECISIONS.md §14.3、§14.4、§18.2）。
 
-- EnginePolicy：每個引擎核准的映像、指令樣板、環境變數、輸入檔與上限。核准的映像在這裡另外寫一次，
-  不引用 scanners 的建構：驗證是獨立的白名單，不是「建構的結果自己核准自己」。
+- EnginePolicy：每個引擎核准的映像、指令樣板、環境變數、輸入檔與上限，以及可寫的 tmpfs、要收集
+  輸出的退出碼。核准的映像與 script 的 digest 在這裡另外寫一次，不引用 scanners 的建構：驗證是
+  獨立的白名單，不是「建構的結果自己核准自己」。
+- AuthEnvironment：認證的環境變數和 target_auth 的對應（掛在指令樣板上）；NoEnvironment：這個樣板
+  沒有任何環境變數、不帶認證（ZAP 的 probe）。
+- 輸入檔的內容規則（inputs.py）：AF plan 不只檢查名稱與大小，也檢查內容（審查 M1）。
 - ContainerPolicy：所有掃描容器共用、不由 plan 決定的部分（網路、volume、user）。
 """
 
@@ -11,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from secscan.runner.domain.inputs import AutomationPlan, ContentDigest
 from secscan.scanners.domain.plan import ResourceLimits
 from secscan.scans.domain.catalog import Engine
 
@@ -46,11 +51,43 @@ type ArgumentRule = str | ArgumentPattern | ArgumentDigest
 
 
 @dataclass(frozen=True, slots=True)
+class AuthEnvironment:
+    """target_auth 與環境變數的對應（docs/DECISIONS.md §18.2）：mode_variable 的值是 anonymous_mode
+    或 authenticated_mode，環境變數的名稱必須剛好是那個模式的集合。認證的值永遠不在 plan 中。
+    """
+
+    mode_variable: str
+    anonymous_mode: str
+    authenticated_mode: str
+    anonymous: frozenset[str]
+    authenticated: frozenset[str]
+
+    def accepts(self, environment: tuple[tuple[str, str], ...], *, target_auth: bool) -> bool:
+        values = dict(environment)
+        expected = self.authenticated_mode if target_auth else self.anonymous_mode
+        names = self.authenticated if target_auth else self.anonymous
+        return set(values) == names and values.get(self.mode_variable) == expected
+
+
+@dataclass(frozen=True, slots=True)
+class NoEnvironment:
+    """這個指令樣板沒有任何環境變數，也不帶認證（審查 I2：兩個 zap 的樣板都 fail closed）。"""
+
+    def accepts(self, environment: tuple[tuple[str, str], ...], *, target_auth: bool) -> bool:
+        return not environment and not target_auth
+
+
+type EnvironmentRule = AuthEnvironment | NoEnvironment
+type InputRule = AutomationPlan | ContentDigest
+
+
+@dataclass(frozen=True, slots=True)
 class CommandTemplate:
     """entrypoint 逐字相同；每個 arg 是 literal 或 regex，數量也必須相同。"""
 
     entrypoint: tuple[str, ...]
     arguments: tuple[ArgumentRule, ...]
+    auth_environment: EnvironmentRule | None = None
 
     def matches(self, entrypoint: tuple[str, ...], arguments: tuple[str, ...]) -> bool:
         if entrypoint != self.entrypoint or len(arguments) != len(self.arguments):
@@ -70,6 +107,12 @@ class EnginePolicy:
     max_input_bytes: int
     accepts_target_auth: bool
     max_limits: ResourceLimits
+    # 唯讀 rootfs 之外可寫的 tmpfs（path → 掛載選項）；記憶體上限要包含它。
+    scratch: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    # 這些退出碼收集輸出（語意由 parser 判斷）；其他是 ENGINE_FAILED（§18.1）。
+    collect_exit_codes: frozenset[int] = frozenset({0})
+    # 輸入檔的內容規則（名稱 → 規則）；沒有列出的只檢查名稱與大小。
+    input_rules: Mapping[str, InputRule] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,11 +132,87 @@ class ContainerPolicy:
 
 _BUSYBOX = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
 # preflight 的 script（scanners.domain.preflight.PREFLIGHT_SCRIPT）的 sha256：script 改了，這裡要
-# 重新審查、更新（tests/unit/runner/test_engine_policy.py 核對兩者一致）。
+# 重新審查、更新（tests/unit/runner/test_admission.py 核對兩者一致）。
 PREFLIGHT_SCRIPT_SHA256 = "5cfd3e5bc89770e36c1b8f523248a554b12dd8da0948a6ac79ee3711fd1ae2cc"
+
+# T03 鎖定的 ZAP（docs/TOOLS.md §1）與兩個 script（scanners.domain.zap.script）的 sha256：script
+# 改了，這裡要重新審查、更新（tests/unit/runner/test_zap_admission.py 核對兩者一致）。
+_ZAP = (
+    "zaproxy/zap-stable:20261016"
+    "@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6"
+)
+ZAP_SCAN_SCRIPT_SHA256 = "40cea7418d699ffa87e010cfb2b1a161fcef608c7d6d2e93ff699e2a6f59be36"
+ZAP_PROBE_SCRIPT_SHA256 = "a2749f65df1cf2932882cb8fbd95a45dd129dff28293b8a757c55adfd82fda1b"
+# probe 的 AF plan（scanners.domain.zap.probe）每次都相同：以 sha256 核准（審查 M1）。
+ZAP_PROBE_PLAN_SHA256 = "4b42f220f62ba673bfbd796304ad01aedbdf451c2c9e0b281bb17e81dc0b03e3"
+_ZAP_AUTH = AuthEnvironment(
+    mode_variable="SECSCAN_TARGET_AUTH",
+    anonymous_mode="none",
+    authenticated_mode="header",
+    anonymous=frozenset({"SECSCAN_TARGET_AUTH"}),
+    authenticated=frozenset({"SECSCAN_TARGET_AUTH", "ZAP_AUTH_HEADER", "ZAP_AUTH_HEADER_SITE"}),
+)
+# AF plan 的白名單（scanners.domain.zap.plan 產生的 job；報告的範本不能是 -plus：它含請求的
+# header，也就含注入的 secret）。
+_ZAP_PLAN = AutomationPlan(
+    job_types=frozenset(
+        {"passiveScan-config", "spider", "openapi", "passiveScan-wait", "activeScan", "report"}
+    ),
+    report_template="traditional-json",
+    report_dir="/scan/out",
+)
+# 最大的輸入是正規化之後的規格（specs.domain.openapi.MAX_DOCUMENT_BYTES）。
+_ZAP_MAX_INPUT_BYTES = 2 * 1024 * 1024
 
 ENGINE_POLICIES: Mapping[Engine, EnginePolicy] = MappingProxyType(
     {
+        Engine.ZAP: EnginePolicy(
+            images=frozenset({_ZAP}),
+            commands=(
+                CommandTemplate(
+                    ("/bin/sh", "-c"),
+                    (ArgumentDigest(ZAP_SCAN_SCRIPT_SHA256),),
+                    auth_environment=_ZAP_AUTH,
+                ),
+                CommandTemplate(
+                    ("/bin/sh", "-c"),
+                    (ArgumentDigest(ZAP_PROBE_SCRIPT_SHA256),),
+                    auth_environment=NoEnvironment(),
+                ),
+            ),
+            environment=MappingProxyType(
+                {
+                    "SECSCAN_TARGET_AUTH": ArgumentPattern(r"none|header"),
+                    # auth profile 的 header 名稱（auth_profiles.domain.credentials）。
+                    "ZAP_AUTH_HEADER": ArgumentPattern(
+                        r"(?=[A-Za-z0-9-]{1,64}$)[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*"
+                    ),
+                    # target 的 host：小寫的名稱或 IPv4（targets.domain.Origin）。
+                    "ZAP_AUTH_HEADER_SITE": ArgumentPattern(
+                        r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?"
+                    ),
+                }
+            ),
+            input_names=frozenset({"plan.yaml", "openapi.json", "probe.yaml"}),
+            # 規格不經過 AF 的代換，只檢查名稱與大小（內容在上傳與交給工具時已檢查，§18.6）。
+            input_rules=MappingProxyType(
+                {
+                    "plan.yaml": _ZAP_PLAN,
+                    "probe.yaml": ContentDigest(ZAP_PROBE_PLAN_SHA256),
+                }
+            ),
+            max_input_bytes=_ZAP_MAX_INPUT_BYTES,
+            accepts_target_auth=True,
+            max_limits=ResourceLimits(
+                memory_bytes=3 * 1024 * 1024 * 1024,
+                nano_cpus=2_000_000_000,
+                pids=1024,
+                wall_clock_seconds=1_500,
+            ),
+            # 容器內的 tmpfs（ZAP 的 home 與 JVM 的暫存），不是宿主的暫存目錄。
+            scratch=MappingProxyType({"/tmp": "rw,noexec,nosuid,nodev,size=768m,mode=1777"}),  # noqa: S108
+            collect_exit_codes=frozenset({0, 1, 2}),
+        ),
         Engine.PREFLIGHT: EnginePolicy(
             images=frozenset({_BUSYBOX}),
             commands=(

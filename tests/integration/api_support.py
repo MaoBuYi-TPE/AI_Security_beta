@@ -232,13 +232,32 @@ class Seeder:
         )
 
     def scan(
-        self, caller: Caller, scannable: Scannable, *, key: str | None = None, **overrides: object
+        self,
+        caller: Caller,
+        scannable: Scannable,
+        *,
+        key: str | None = None,
+        preview: frozenset[ScanEngine] = frozenset(),
+        **overrides: object,
     ) -> Scan:
-        """以 service 建立 scan（預設是 fake 引擎、api_active_lab）並 commit。"""
+        """以 service 建立 scan（預設是 fake 引擎、api_active_lab）並 commit。
+
+        preview：預覽開關開啟的引擎（docs/DECISIONS.md §18.9；zap 在 T15 才開放）。
+        """
+        return self.create_scan(caller, scannable.request(**overrides), key=key, preview=preview)
+
+    def create_scan(
+        self,
+        caller: Caller,
+        request: ScanRequest,
+        *,
+        key: str | None = None,
+        preview: frozenset[ScanEngine] = frozenset(),
+    ) -> Scan:
         with self._session() as session:
-            return ScanService(session, lab=LAB).create(
+            return ScanService(session, lab=LAB, preview_engines=preview).create(
                 caller.principal,
-                scannable.request(**overrides),
+                request,
                 idempotency_key=key if key is not None else uuid4().hex,
                 clock=lambda: datetime.now(UTC),
                 request_id=None,

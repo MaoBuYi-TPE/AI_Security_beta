@@ -10,26 +10,39 @@ from secscan.runner.probe import probe, require_guard
 from secscan.scanners.domain.fake import FAKE_IMAGE
 from secscan.scanners.domain.instances import CapabilityIssue, EngineCapability
 from secscan.scanners.domain.preflight import PREFLIGHT_IMAGE
+from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.scans.domain.catalog import Engine
 from tests.runner_fakes import FakeContainerRuntime
 from tests.unit.runner.plans import POLICY
 
 
 def _issue(runtime: FakeContainerRuntime) -> CapabilityIssue | None:
-    """fake 與 preflight 用同一個映像與環境：兩者的結果一定相同。"""
+    """所有引擎共用環境，映像也都在：結果一定相同。"""
     issues = {capability.issue for capability in probe(runtime, POLICY).engines}
     [issue] = issues
     return issue
 
 
-def test_a_ready_environment_makes_fake_and_preflight_available() -> None:
+def test_a_ready_environment_makes_every_engine_with_a_policy_available() -> None:
     capabilities = probe(FakeContainerRuntime(), POLICY)
 
     assert set(capabilities.engines) == {
         EngineCapability(engine=Engine.FAKE, image=str(FAKE_IMAGE), issue=None),
         EngineCapability(engine=Engine.PREFLIGHT, image=str(PREFLIGHT_IMAGE), issue=None),
+        EngineCapability(engine=Engine.ZAP, image=str(ZAP_IMAGE), issue=None),
     }
+    assert capabilities.available_engines == frozenset({Engine.FAKE, Engine.PREFLIGHT, Engine.ZAP})
+
+
+def test_a_missing_zap_image_affects_only_zap() -> None:
+    runtime = FakeContainerRuntime()
+    del runtime.images[str(ZAP_IMAGE)]
+
+    capabilities = probe(runtime, POLICY)
+
     assert capabilities.available_engines == frozenset({Engine.FAKE, Engine.PREFLIGHT})
+    [zap] = [item for item in capabilities.engines if item.engine is Engine.ZAP]
+    assert zap.issue is CapabilityIssue.IMAGE_MISSING
 
 
 @pytest.mark.parametrize("operation", ["version", "network", "volume_exists", "image_architecture"])

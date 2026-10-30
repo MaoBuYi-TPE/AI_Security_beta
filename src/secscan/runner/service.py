@@ -34,17 +34,17 @@ from secscan.runner.domain.admission import (
     SECRET_FILE,
     ContainerSpec,
     PlanRejectedError,
-    PlanRejection,
     build_container,
 )
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.runner.domain.runtime import ContainerRuntime, ContainerState, RuntimeUnavailableError
 from secscan.runner.egress import GuardEndpoint, RunEgress
 from secscan.runner.guard import GuardChannel, GuardUnavailableError
+from secscan.runner.plans import ENGINE_IMAGES, RunPlanner, secret_files
 from secscan.runner.workspace import ArtifactRejectedError, Workspace, WorkspaceError
-from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript, plan_fake_run
-from secscan.scanners.domain.plan import ExecutionPlan, ImageReference
-from secscan.scanners.domain.preflight import PREFLIGHT_IMAGE, plan_preflight_run
+from secscan.scanners.domain.fake import FakeScript
+from secscan.scanners.domain.plan import ExecutionPlan
+from secscan.scanners.domain.zap.plan import PlanWindowTooSmallError
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.model import Lease
@@ -52,7 +52,6 @@ from secscan.scans.queue import (
     HEARTBEAT_INTERVAL,
     LEASE_DURATION,
     EgressScope,
-    Launch,
     LeaseLostError,
     RunReport,
     RunUsage,
@@ -67,10 +66,6 @@ STOP_GRACE_SECONDS = 5
 POLL_SECONDS = 1.0
 # 連續幾次查不到容器的狀態才放棄（socket-proxy 或 Docker 的暫時錯誤不放棄整個 run）。
 MAX_STATE_FAILURES = 3
-# 有 plan 的引擎與它的映像。M3 起加入 ZAP 時，在這裡與 _plan 一起加。
-ENGINE_IMAGES: Mapping[Engine, ImageReference] = MappingProxyType(
-    {Engine.FAKE: FAKE_IMAGE, Engine.PREFLIGHT: PREFLIGHT_IMAGE}
-)
 
 
 class _Ending(StrEnum):
@@ -169,7 +164,7 @@ class ContainerRunner:
         self._workspace = workspace
         self._owner = owner
         self._policy = policy
-        self._script = script
+        self._planner = RunPlanner(script=script, clock=clock)
         self._cipher = cipher
         self._guard = guard
         self._endpoint = endpoint
@@ -202,36 +197,20 @@ class ContainerRunner:
         if launch.progress.run_status is not RunStatus.RUNNING or launch.egress is None:
             return RunReport.of(lease, launch.progress)
         try:
-            plan = self._plan(lease, launch)
+            plan = self._planner.plan(lease, launch, image_ref=str(image))
             spec = build_container(plan, policy=self._policy, engines=self._engine_policies)
         except PlanRejectedError as exc:
             logger.warning("ExecutionPlan 被拒絕：run %s，%s", lease.run_id, exc.reason.value)
-            # 沒有流量，也從未建立容器。
-            self._queue.record_usage(lease, RunUsage(0, 0, 0), container_removed=True)
-            return self._fail(lease, RunErrorCode.PLAN_REJECTED)
+            return self._never_started(lease, RunErrorCode.PLAN_REJECTED)
+        except PlanWindowTooSmallError:
+            logger.warning("剩下的時間、請求數或 grant 的期限不夠執行：run %s", lease.run_id)
+            return self._never_started(lease, RunErrorCode.BUDGET_EXHAUSTED)
         return self._execute(_Attempt(lease, spec.name), launch.secret, launch.egress, plan, spec)
 
-    def _plan(self, lease: Lease, launch: Launch) -> ExecutionPlan:
-        if lease.engine is not Engine.PREFLIGHT:
-            return plan_fake_run(
-                run_id=lease.run_id,
-                scan_id=lease.scan_id,
-                script=self._script,
-                target_auth=launch.secret is not None,
-                max_duration_seconds=launch.max_duration_seconds,
-            )
-        # preflight 一定有綁定的 profile 與 secret；缺少就是資料不一致，不啟動（fail closed）。
-        if launch.preflight is None or launch.secret is None or launch.egress is None:
-            raise PlanRejectedError(PlanRejection.ENGINE_NOT_ALLOWED)
-        try:
-            return plan_preflight_run(
-                run_id=lease.run_id,
-                scan_id=lease.scan_id,
-                url=f"{launch.egress.origin}{launch.preflight.path}",
-                max_duration_seconds=launch.max_duration_seconds,
-            )
-        except ValueError:
-            raise PlanRejectedError(PlanRejection.INPUT_NOT_ALLOWED) from None
+    def _never_started(self, lease: Lease, error_code: RunErrorCode) -> RunReport:
+        """沒有流量，也從未建立容器。"""
+        self._queue.record_usage(lease, RunUsage(0, 0, 0), container_removed=True)
+        return self._fail(lease, error_code)
 
     def _execute(
         self,
@@ -257,7 +236,7 @@ class ContainerRunner:
         )
         if unconfirmed and not removed:
             raise RuntimeUnavailableError("無法確認容器已停止：run 留給對帳")
-        return self._conclude(attempt.lease, outcome)
+        return self._conclude(attempt.lease, outcome, plan)
 
     # --- 啟動 ---------------------------------------------------------------------------------
 
@@ -340,7 +319,7 @@ class ContainerRunner:
     ) -> _Outcome | None:
         """secret 檔（proxy-url、target-auth）、輸入檔，最後是 guard 的 policy。"""
         try:
-            files = {PROXY_FILE: egress.proxy_url}
+            files = {PROXY_FILE: egress.proxy_url, **secret_files(plan, egress)}
             if secret is not None:
                 value = SecretValue(self._reveal(secret))
                 files[SECRET_FILE] = value.value
@@ -553,27 +532,28 @@ class ContainerRunner:
             return unknown
         return RunUsage(summary.forwarded, summary.denied_total, seconds)
 
-    def _conclude(self, lease: Lease, outcome: _Outcome) -> RunReport:
+    def _conclude(self, lease: Lease, outcome: _Outcome, plan: ExecutionPlan) -> RunReport:
         if outcome.ending in (_Ending.NOT_STARTED, _Ending.REVOKED):
             return self._fail(lease, outcome.error_code or RunErrorCode.RUNTIME_UNAVAILABLE)
         if outcome.ending is _Ending.EXITED:
-            return self._exited(lease, outcome.state)
+            return self._exited(lease, outcome.state, plan)
         status, error_code = _STOPPED_ENDINGS[outcome.ending]
         return self._advance(lease, status, error_code)
 
-    def _exited(self, lease: Lease, state: ContainerState | None) -> RunReport:
-        if state is None:
+    def _exited(self, lease: Lease, state: ContainerState | None, plan: ExecutionPlan) -> RunReport:
+        """退出碼在引擎的收集清單中（zap 的 AF 有警告是 2，§18.1）才收集；語意由 parser 判斷。"""
+        if state is None or state.exit_code is None:
             return self._fail(lease, RunErrorCode.RUNTIME_UNAVAILABLE)
         if state.oom_killed:
             return self._fail(lease, RunErrorCode.RESOURCE_LIMIT_EXCEEDED)
-        if state.exit_code != 0:
+        if state.exit_code not in self._engine_policies[plan.engine].collect_exit_codes:
             return self._fail(lease, RunErrorCode.ENGINE_FAILED)
         self._queue.advance(lease, RunStatus.COLLECTING)
         if not self._queue.heartbeat(lease).valid:
             raise LeaseLostError("lease 已過期：不收集，交給對帳處理")
         self._on_heartbeat()
         try:
-            self._workspace.collect(lease.run_id)
+            self._workspace.collect(lease.run_id, exit_code=state.exit_code, inputs=plan.inputs)
         except ArtifactRejectedError as exc:
             logger.warning("輸出被拒絕：run %s，%s", lease.run_id, exc.issue.value)
             return self._fail(lease, RunErrorCode.ARTIFACT_REJECTED)

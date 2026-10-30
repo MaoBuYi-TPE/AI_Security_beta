@@ -111,3 +111,70 @@ def test_statuses_follow_the_engine_order_with_profiles_and_images() -> None:
     fake = statuses[-1]
     assert (fake.integrated, fake.image, fake.profiles) == (True, IMAGE, tuple(ScanProfile))
     assert (statuses[0].image, statuses[0].profiles) == (None, ())
+
+
+# --- zap 的 probe 與預覽開關（docs/DECISIONS.md §18.8、§18.9）---------------------------------
+
+ZAP_IMAGE = "zaproxy/zap-stable:20261016@sha256:" + "cd" * 32
+
+
+def test_the_probed_version_round_trips() -> None:
+    capabilities = Capabilities(
+        engines=(EngineCapability(Engine.ZAP, ZAP_IMAGE, None, version="2.17.0"),)
+    )
+
+    document = capabilities_json(capabilities)
+
+    expected = {"image": ZAP_IMAGE, "issue": None, "version": "2.17.0"}
+    assert document == {"engines": {"zap": expected}}
+    assert read_capabilities(document) == capabilities
+
+
+@pytest.mark.parametrize("version", ["2.17", "2.17.0-beta", "<b>", 2170, "1.2.3\n"])
+def test_a_malformed_version_reports_nothing(version: object) -> None:
+    document: JsonObject = {
+        "engines": {"zap": {"image": ZAP_IMAGE, "issue": None, "version": version}}  # type: ignore[dict-item]
+    }
+
+    assert read_capabilities(document) == Capabilities(engines=())
+
+
+@pytest.mark.parametrize(
+    "issue",
+    [
+        CapabilityIssue.ENGINE_PROBE_PENDING,
+        CapabilityIssue.ENGINE_PROBE_FAILED,
+        CapabilityIssue.ENGINE_INCOMPATIBLE,
+    ],
+)
+def test_probe_issues_are_reported_codes(issue: CapabilityIssue) -> None:
+    capabilities = Capabilities(engines=(EngineCapability(Engine.ZAP, ZAP_IMAGE, issue),))
+
+    assert read_capabilities(capabilities_json(capabilities)) == capabilities
+
+
+def _zap(
+    capabilities: Capabilities, preview: frozenset[Engine] = frozenset()
+) -> tuple[object, ...]:
+    [zap] = [s for s in engine_statuses(capabilities, preview=preview) if s.engine is Engine.ZAP]
+    return (zap.integrated, zap.available, zap.unavailable_reason, zap.version)
+
+
+def test_zap_stays_not_integrated_but_shows_the_probed_version() -> None:
+    probed = Capabilities(
+        engines=(EngineCapability(Engine.ZAP, ZAP_IMAGE, None, version="2.17.0"),)
+    )
+
+    assert _zap(probed) == (False, False, "NOT_INTEGRATED", "2.17.0")
+
+
+def test_the_preview_switch_reports_the_runner_probe_for_zap() -> None:
+    preview = frozenset({Engine.ZAP})
+    ready = Capabilities(engines=(EngineCapability(Engine.ZAP, ZAP_IMAGE, None, version="2.17.0"),))
+    pending = Capabilities(
+        engines=(EngineCapability(Engine.ZAP, ZAP_IMAGE, CapabilityIssue.ENGINE_PROBE_PENDING),)
+    )
+
+    assert _zap(ready, preview) == (False, True, None, "2.17.0")
+    assert _zap(pending, preview) == (False, False, "ENGINE_PROBE_PENDING", None)
+    assert _zap(Capabilities(engines=()), preview) == (False, False, "RUNNER_UNAVAILABLE", None)

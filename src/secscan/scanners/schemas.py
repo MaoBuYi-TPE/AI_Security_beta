@@ -17,6 +17,8 @@ class EngineOut(BaseModel):
     image: str | None
     profiles: list[ScanProfile]
     unavailable_reason: str | None
+    # runner 的 capability probe 實際取得的版本（docs/DECISIONS.md §18.8）。
+    version: str | None
 
     @classmethod
     def of(cls, status: EngineStatus) -> "EngineOut":
@@ -27,6 +29,7 @@ class EngineOut(BaseModel):
             image=status.image,
             profiles=list(status.profiles),
             unavailable_reason=status.unavailable_reason,
+            version=status.version,
         )
 
 

@@ -30,7 +30,7 @@ SCAN_SUBNET ?= 10.89.8.0/24
 SCAN_IP_RANGE ?= 10.89.8.0/25
 # runner 不 pull 映像：核准的掃描器映像由這裡以 digest pull（和 runner/domain/policy.py 一致，
 # tests/unit/test_deployment.py 會核對）。
-SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e zaproxy/zap-stable:20261016@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6
 # live 測試用的獨立 stack：自己的 DB volume、網路與 volume 名稱；API 只綁 127.0.0.1:8765。
 LIVE_PROJECT := secscan-live
 LIVE_SCAN_NET := secscan_live_scan_net
@@ -46,10 +46,11 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 	SECSCAN_GUARD_LAB_IP=10.89.10.254 SECSCAN_GUARD_POLICIES_VOLUME=secscan_live_guard_policies \
 	SECSCAN_GUARD_STATUS_VOLUME=secscan_live_guard_status \
 	SECSCAN_GUARD_TELEMETRY_VOLUME=secscan_live_guard_telemetry
-LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
+LIVE_COMPOSE = $(LIVE_ENV) $(LIVE_EXTRA_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
-	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner
+	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner \
+	test-live-zap
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -59,7 +60,7 @@ bootstrap:
 # 啟動 API 開發程序：只綁 127.0.0.1，APP_ENV=dev 才開啟 API 文件。API 需要 .env 中的加密金鑰，
 # 所以先執行 make env（只補上缺少的值）。
 dev: env
-	APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
+	SCAN_PREVIEW_ENGINES= APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
 		--host 127.0.0.1 --port 8000 --reload --reload-dir src
 
 # unit/contract/integration 測試與 coverage 門檻（分支覆蓋），不做 live scan、不跑 live 測試。
@@ -180,7 +181,7 @@ lab-net:
 # 啟動 app stack（db、api、runner、worker、socket-proxy、guard）。API 只綁 127.0.0.1:$${API_PORT:-8000}。
 # 第一次使用先執行 make migrate（db 的 schema）與 create-admin-key。
 up: env docker-check scan-net lab-net images build
-	$(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
+	SECSCAN_LIVE_PREVIEW_ENGINES= $(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
 
 # 停止 app stack 與 db（資料保留在 volume）。
 down:
@@ -213,3 +214,10 @@ test-live-runner: env docker-check images build
 		$(LIVE_COMPOSE) down -v --remove-orphans; \
 		docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
 		exit $$status
+
+# ZAP 的 live 測試（docs/DECISIONS.md §18.10）：同一個獨立的 secscan-live 專案與流程，API 加上只給
+# live 的預覽開關（zap 在 T15 才開放）。runner 啟動時以真的 ZAP 映像執行 capability probe；掃描的是
+# live 自己 lab 網路上的小型網站（tests/live/zap_site.py），不啟動 Juice Shop、VAmPI。約 10 分鐘（測試本身約 8 分鐘）。
+test-live-zap: LIVE_TESTS := tests/live/test_zap_live.py
+test-live-zap: LIVE_EXTRA_ENV := SECSCAN_LIVE_PREVIEW_ENGINES=zap
+test-live-zap: test-live-runner

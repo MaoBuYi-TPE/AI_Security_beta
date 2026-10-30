@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.orm import Session
 
-from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.progress import ContainerAssignment, LockedScan, RunState, ScanProgress
 from secscan.targets.domain import parse_origin
@@ -37,6 +37,8 @@ def test_a_container_is_refused_for_any_other_transition(current: RunStatus, to:
         max_duration_seconds=60,
         status=ScanStatus.RUNNING,
         cancel_requested=False,
+        scan_profile=ScanProfile.API_ACTIVE_LAB,
+        api_spec_id=None,
     )
     run = RunState(id=run_id, scan_id=scan.id, engine=Engine.FAKE, sequence=1, status=current)
     container = ContainerAssignment(name=f"secscan-run-{run_id}", image_ref=IMAGE)

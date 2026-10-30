@@ -23,7 +23,7 @@ from secscan.grants.domain.lifecycle import ScopeGrant
 from secscan.grants.domain.scope import Scope
 from secscan.guard.domain.budget import RunBudget
 from secscan.scans.containers import ContainerRecords, PendingContainer
-from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import (
     MAX_PARSE_ATTEMPTS,
     RUNNER_STAGE_RUN_STATUSES,
@@ -46,7 +46,7 @@ from secscan.scans.progress import (
     ScanProgress,
     now,
 )
-from secscan.scans.run_records import CoverageInputs, RunRecords, RunUsage
+from secscan.scans.run_records import CoverageInputs, RunRecords, RunUsage, SpecInputs
 from secscan.targets.domain import LabNetwork, Origin
 
 __all__ = [
@@ -137,6 +137,9 @@ class Launch:
     egress: EgressScope | None = None
     # preflight 的 run 要送的請求（綁定版本的定義；docs/DECISIONS.md §16.5）。
     preflight: Preflight | None = None
+    # zap 的 plan 依 profile 產生（§18.4）；api profile 另外有規格的原料（§18.6）。
+    scan_profile: ScanProfile | None = None
+    spec: SpecInputs | None = None
 
 
 class QueueOperations:
@@ -233,10 +236,16 @@ class QueueOperations:
         launch = self._launch(
             scan, progress, secret, _egress(scan, grant, secret, requests), seconds=seconds
         )
-        if run.engine is not Engine.PREFLIGHT:
-            return launch
-        preflight = self._records.preflight(scan.auth_profile_id, scan.auth_profile_version)
-        return replace(launch, preflight=preflight)
+        return self._engine_inputs(scan, run, launch)
+
+    def _engine_inputs(self, scan: LockedScan, run: RunState, launch: Launch) -> Launch:
+        """preflight 要送的請求；zap 的 api profile 要交給工具的規格（§16.5、§18.6）。"""
+        if run.engine is Engine.PREFLIGHT:
+            preflight = self._records.preflight(scan.auth_profile_id, scan.auth_profile_version)
+            return replace(launch, preflight=preflight)
+        if run.engine is Engine.ZAP and scan.api_spec_id is not None:
+            return replace(launch, spec=self._records.spec_inputs(scan.id, scan.api_spec_id))
+        return launch
 
     @staticmethod
     def _launch(
@@ -252,6 +261,7 @@ class QueueOperations:
             max_duration_seconds=scan.max_duration_seconds if seconds is None else seconds,
             secret=secret,
             egress=egress,
+            scan_profile=scan.scan_profile,
         )
 
     def advance(

@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -106,6 +106,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make build／make images | M2（T10 已建立） | 建立 secscan 與 egress guard（T11）的映像／以 digest pull 核准的掃描器映像與 socket-proxy（runner 不 pull） |
 | make up／make down | M2（T10 已建立） | 啟動／停止 app stack（db、api、runner、worker、socket-proxy；T11 加上 guard），並建立 internal＋isolated 的 scan_net 與 lab_net；API 只綁 127.0.0.1:`API_PORT`（預設 8000） |
 | make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，一律拆除；T11 起在 live 自己的 lab 網路上啟動接收端與探針（SEC-02～SEC-10、取消與故障），T12 加上預算與 preflight，T13 加上 runner 中斷後的對帳與撤銷 grant；不啟動 Juice Shop、VAmPI |
+| make test-live-zap | M3（T14 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，API 加上只給 live 的預覽開關（`SECSCAN_LIVE_PREVIEW_ENGINES=zap` 插值成 API 的 `SCAN_PREVIEW_ENGINES`）；runner 以真的 ZAP 映像執行 capability probe，掃描 live lab 網路上的小型網站（`tests/live/zap_site.py`），以網站、canary 與 guard 的紀錄驗證範圍、認證與取消；不啟動 Juice Shop、VAmPI（約 10 分鐘（測試本身約 8 分鐘），`make images` 會 pull 約 1.2 GB 的 ZAP 映像） |
 | make test-contract | M1–M2 | 對固定 fixture 測 API/Parser 契約 |
 | make test-live-lab | M3 起 | 需要 `ENABLE_LIVE_LAB_TESTS=1`、LAB_ONLY、有效 grant，並通過隔離檢查才執行 |
 | make record-fixtures | M3 起 | 只在 lab 重新錄製工具輸出 fixture，並產生差異供人工審查 |

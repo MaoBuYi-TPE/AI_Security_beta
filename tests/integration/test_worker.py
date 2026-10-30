@@ -156,7 +156,7 @@ def _collected_preflight(
         (runs / str(lease.run_id) / "out" / name).write_bytes(content)
     queue.record_usage(lease, RunUsage(requests_sent=sent, requests_denied=0, traffic_seconds=1))
     queue.advance(lease, RunStatus.COLLECTING)
-    workspace.collect(lease.run_id)
+    workspace.collect(lease.run_id, exit_code=0, inputs=())
     queue.advance(lease, RunStatus.COLLECTED)
     return lease
 

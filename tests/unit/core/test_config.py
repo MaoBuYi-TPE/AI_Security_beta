@@ -276,3 +276,27 @@ def test_secret_encryption_keys_are_read_from_environment_and_masked(
     assert settings.secret_encryption_keys.get_secret_value() == "key-material-for-the-test"
     assert "key-material-for-the-test" not in repr(settings)
     assert "key-material-for-the-test" not in str(settings)
+
+
+# --- 預覽開關（docs/DECISIONS.md §18.9）----------------------------------------------------------
+
+
+def test_no_engine_is_previewed_by_default() -> None:
+    assert Settings(app_env="test", _env_file=None).scan_preview_engines == ()
+
+
+@pytest.mark.parametrize(("value", "expected"), [("", ()), ("zap", ("zap",)), (" zap ", ("zap",))])
+def test_only_zap_can_be_previewed(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: tuple[str, ...]
+) -> None:
+    monkeypatch.setenv("SCAN_PREVIEW_ENGINES", value)
+
+    assert Settings(app_env="test", _env_file=None).scan_preview_engines == expected
+
+
+@pytest.mark.parametrize("value", ["nuclei", "fake", "zap,nuclei", "zap,zap", "ZAP", "*"])
+def test_other_preview_values_are_refused(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("SCAN_PREVIEW_ENGINES", value)
+
+    with pytest.raises(ValidationError, match="SCAN_PREVIEW_ENGINES"):
+        Settings(app_env="test", _env_file=None)

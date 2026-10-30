@@ -6,7 +6,7 @@ lease 失效時拋 LeaseLostError。剩下的預算在 prepare 時由之前的 r
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, func, insert, select, update
@@ -28,6 +28,7 @@ from secscan.scans.models import (
     ScanOperationModel,
 )
 from secscan.scans.progress import now
+from secscan.specs.repository import ApiSpecRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,17 @@ class RunUsage:
     requests_sent: int | None
     requests_denied: int | None
     traffic_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class SpecInputs:
+    """交給工具的規格的原料（docs/DECISIONS.md §18.6）：上傳時正規化的文件、base path，以及 scan
+    建立時凍結為 eligible 的 (method, 含 base path 的 path)。過濾由 runner 在 transaction 之外進行。
+    """
+
+    document: bytes = field(repr=False)
+    base_path: str
+    eligible: frozenset[tuple[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +165,24 @@ class RunRecords:
         )
 
     # --- coverage -----------------------------------------------------------------------------
+
+    def spec_inputs(self, scan_id: UUID, spec_id: UUID) -> SpecInputs | None:
+        """文件與 operation 都不可變（trigger）：不另外加鎖。規格不見了（不應發生）是 None。"""
+        stored = ApiSpecRepository(self._session).stored_document(spec_id)
+        if stored is None:
+            return None
+        rows = self._session.execute(
+            select(ScanOperationModel.method, ScanOperationModel.path).where(
+                ScanOperationModel.scan_id == scan_id,
+                ScanOperationModel.ineligible_reason.is_(None),
+            )
+        )
+        document, base_path = stored
+        return SpecInputs(
+            document=document,
+            base_path=base_path,
+            eligible=frozenset((row.method, row.path) for row in rows),
+        )
 
     def coverage_inputs(self, lease: Lease) -> CoverageInputs:
         sent, recorded = self._session.execute(

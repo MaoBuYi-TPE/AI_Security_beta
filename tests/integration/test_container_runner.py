@@ -807,7 +807,7 @@ def test_engines_without_a_planner_are_rejected_before_recording_a_container(
     world: World,
     scannable: Scannable,
 ) -> None:
-    """目前只有 fake 有 plan：其他引擎的 run 不能拿到 fake 的映像與指令（審查發現）。"""
+    """沒有 plan 的引擎（nuclei 在 M4）不能拿到其他引擎的映像與指令（審查發現）。"""
     with Session(queue_engine, expire_on_commit=False) as session, session.begin():
         ScanRepository(session).create(
             NewScan(
@@ -819,7 +819,7 @@ def test_engines_without_a_planner_are_rejected_before_recording_a_container(
                 auth=None,
                 profile=ScanProfile.API_ACTIVE_LAB,
                 budget=scannable.grant.budget,
-                runs=plan_runs((ScanEngine.ZAP,), available=frozenset(ScanEngine)),
+                runs=plan_runs((ScanEngine.NUCLEI,), available=frozenset(ScanEngine)),
                 operations=(),
                 idempotency_key=uuid4().hex,
                 request_sha256=bytes(32),
@@ -827,7 +827,7 @@ def test_engines_without_a_planner_are_rejected_before_recording_a_container(
             )
         )
 
-    report = make_runner().run_once(frozenset({ScanEngine.ZAP}))
+    report = make_runner().run_once(frozenset({ScanEngine.NUCLEI}))
 
     assert report is not None
     assert (report.run_status, report.scan_status) == (R.FAILED, S.FAILED)
@@ -929,14 +929,14 @@ def test_the_lease_is_renewed_before_collecting(
 
     collect = workspace.collect
 
-    def measure(run_id: UUID) -> Any:
+    def measure(run_id: UUID, **options: Any) -> Any:
         [row] = queue_seed.query(
             "SELECT extract(epoch FROM lease_expires_at - clock_timestamp()) AS left "
             "FROM scanner_runs WHERE id = :id",
             id=run_id,
         )
         remaining.append(float(row.left))
-        return collect(run_id)
+        return collect(run_id, **options)
 
     monkeypatch.setattr(queue, "advance", nearly_expired)
     monkeypatch.setattr(workspace, "collect", measure)

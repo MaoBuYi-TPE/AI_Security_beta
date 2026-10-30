@@ -259,7 +259,7 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 
 `make up` 一併啟動 guard（`secscan-guard:dev`，`make build` 建立），它只接 `secscan_scan_net` 與 `secscan_lab_net`，固定在兩個網段的最後一個位址（10.89.8.254、10.89.7.254），只在 scan 那一側的 8080 聽。
 
-- **掃描容器**：拿到 `/scan/secret/proxy-url`（0400，`http://<run_id>:<token>@10.89.8.254:8080`），只能經 guard 連到 grant 核准的 target origin；被擋下的請求回 403（`X-Secscan-Guard: <原因>`）或 407（帳密）。各工具使用這個 proxy 的設定在 M3。
+- **掃描容器**：拿到 `/scan/secret/proxy-url`（0400，`http://<run_id>:<token>@10.89.8.254:8080`），只能經 guard 連到 grant 核准的 target origin；被擋下的請求回 403（`X-Secscan-Guard: <原因>`）或 407（帳密）。ZAP 以 0400 的 `zap.properties`（`-configfile`）使用同一組帳密（T14）；Nuclei 在 M4。
 - **guard 不可用時**：`GET /api/v1/scanners` 顯示 `GUARD_UNAVAILABLE`，runner 不認領；執行中斷掉的 run 標成 `interrupted`。`docker logs secscan-guard-1` 是每個請求的決定（不含 header 的值、query 與 token）。
 - **保留的位址**：`LAB_CIDR` 的最後一個主機位址（預設 10.89.7.254）保留給 guard，target 與 grant 都不能用。
 - **telemetry**：guard 在 `secscan_guard_telemetry`（tmpfs）為每個 run 寫 summary 與每個轉送請求一行的 jsonl（不含 query 與 header 的值），runner 與 worker 唯讀；6 小時後刪除。
@@ -284,6 +284,18 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **撤回授權**：撤銷 grant、停用 target 或撤銷建立 scan 的平台 key，執行中的 scan 在下一次心跳停止（通常 5 到 7 秒內），run 是 `failed`（`SCOPE_REVOKED`、`TARGET_DISABLED`、`CREATOR_KEY_REVOKED`）。
 - **`GET /health/ready`**：只檢查 DB 與 schema；runner、worker、guard 的狀態看 `GET /api/v1/scanners`。
 - 設計見 `docs/DECISIONS.md` §17；錯誤碼見 `docs/API_CONTRACT.md` §17.2。
+
+#### ZAP 的執行（T14）
+
+runner 已經能以強化的單次容器執行 ZAP，但 **zap 在 T15（parser）才對操作者開放**：在那之前 `POST /api/v1/scans` 指定 `zap` 回 422 `ENGINE_UNSUPPORTED`。
+
+- **映像**：`make images` 以 digest pull `zaproxy/zap-stable` 2.17.0（約 1.2 GB）。
+- **capability probe**：runner 啟動之後以和掃描相同的設定實際執行一次 ZAP（約 15 秒，不送任何請求），確認版本、必要的 add-on 與規則白名單；`GET /api/v1/scanners` 的 zap 顯示 `version`。probe 期間 fake 照常處理。
+- **plan**：由伺服器產生，ZAP 以 `-silent` 執行。`web_active_lab` 從 `/` 開始 spider（grant 必須允許 `GET /`），`api_active_lab` 只匯入 grant 範圍內的 operation；active scan 只跑審查過的規則（`docs/TOOLS.md` §7），grant 不允許 POST 時，會把請求改成 POST 的規則也不執行。
+- **認證**：以 `ZAP_AUTH_HEADER*` 環境變數交給 ZAP（bearer、`api_key_header`、cookie 都是一個 header），值不在 plan、Docker 的設定或 log 中；沒有 auth profile 的 scan 是 anonymous。
+- **輸出**：`runs/<run_id>/out/` 的 `zap-report.json` 與 `zap.log`；manifest 記下 ZAP 的退出碼與輸入的 hash。解析在 T15。
+- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 10 分鐘（測試本身約 8 分鐘）；只掃 live lab 網路上的小型網站）。
+- 設計見 `docs/DECISIONS.md` §18；量測與規則的審查見 `docs/TOOLS.md` §7。
 
 #### 隔離 lab 靶場（T03）
 

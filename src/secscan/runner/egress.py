@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from ipaddress import IPv4Address
 from typing import Self
 
+from secscan.auth_profiles.domain.credentials import SecretValue
 from secscan.grants.domain.scope import Scope
 from secscan.guard.config import GUARD_PORT
 from secscan.guard.domain.credentials import (
@@ -22,6 +23,7 @@ from secscan.guard.domain.credentials import (
 )
 from secscan.guard.domain.policy import Policy, PolicyState
 from secscan.runner.guard import GuardChannel
+from secscan.scanners.domain.zap.config import zap_properties
 from secscan.scans.domain.model import Lease
 from secscan.scans.queue import EgressScope
 from secscan.targets.domain import parse_ipv4
@@ -120,6 +122,15 @@ class RunEgress:
     def proxy_url(self) -> str:
         """寫進掃描容器的 proxy-url 檔（含 token；不可寫進 log、label 或事件）。"""
         return proxy_url(self._credentials, host=self._endpoint.address, port=self._endpoint.port)
+
+    def zap_properties(self) -> SecretValue:
+        """ZAP 的 -configfile：同一組 proxy 帳密與這個 run 的速率（含 token；§18.3）。"""
+        return zap_properties(
+            address=self._endpoint.address,
+            port=self._endpoint.port,
+            credentials=self._credentials,
+            requests_per_second=self._policy.budget.requests_per_second,
+        )
 
     def activate(self) -> None:
         # 先記下：寫入失敗時檔案仍可能已經生效（os.replace 之後的 fsync 失敗），之後的封鎖與刪除

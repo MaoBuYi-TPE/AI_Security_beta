@@ -8,7 +8,10 @@
   runner 掛著整個 runs 與 secrets volume，跟著工具建立的 symlink 就會讀到其他 run 的資料。
 - out/ 沒有磁碟配額：容器執行中，runner 以同樣的走訪（只 lstat、不開檔）檢查用量，超過就停止容器。
 - 走訪逐一處理條目（目錄也計數），超過上限就停：不先把整個目錄的名稱讀進記憶體。
-- 只計算大小與 sha256，不解析內容（解析在 worker）。
+- 只計算大小與 sha256，不解析內容（解析在 worker）。manifest 另外記下容器的退出碼與輸入檔的
+  hash（docs/DECISIONS.md §18.1：退出碼的語意由 parser 判斷）。
+- capability probe 的容器沒有 secret：create_secret_dir 建立空的目錄（掛載的 subpath 必須存在）；
+  read_output 以同樣的方式（dir fd 加 O_NOFOLLOW、只接受一般檔案、有大小上限）讀回 out/ 的檔案。
 - 檔案系統的錯誤一律轉成 WorkspaceError 或 ArtifactRejectedError，訊息不含路徑。
 """
 
@@ -86,6 +89,9 @@ class Manifest:
     run_id: UUID
     files: tuple[CollectedFile, ...]
     total_bytes: int
+    # 沒有預設值（審查 L6）：新的呼叫路徑忘了傳時不能悄悄記成 0。
+    exit_code: int
+    inputs: tuple[CollectedFile, ...]
 
 
 @dataclass
@@ -131,6 +137,17 @@ class Workspace:
             raise WorkspaceError("這個 run 的工作目錄已經存在") from None
         except OSError as exc:
             raise WorkspaceError(f"無法建立工作目錄（{_reason(exc)}）") from None
+
+    def create_secret_dir(self, run_id: UUID) -> None:
+        """沒有任何 secret 的 run（capability probe）：建立空的目錄；已經存在就拒絕。"""
+        secret_dir = self._secrets / str(run_id)
+        try:
+            secret_dir.mkdir(mode=_PRIVATE_DIR)
+            secret_dir.chmod(_PRIVATE_DIR)
+        except FileExistsError:
+            raise WorkspaceError("這個 run 的 secret 已經存在") from None
+        except OSError as exc:
+            raise WorkspaceError(f"無法建立 secret 目錄（{_reason(exc)}）") from None
 
     def write_secrets(self, run_id: UUID, files: Mapping[str, str]) -> None:
         """把 run 的 secret 檔（proxy-url、target-auth）寫成 0400 的檔案；目錄只建立一次，已經存在就
@@ -193,17 +210,45 @@ class Workspace:
         """容器執行中的用量檢查：條目數、深度與總大小（只 lstat，不開檔、不跟隨 symlink）。"""
         self._walk_output(run_id, _Walk(self._limits, hashing=False))
 
-    def collect(self, run_id: UUID) -> Manifest:
-        """走過 out/、計算 hash，寫入 manifest.json；不符合規則就拋 ArtifactRejectedError。"""
+    def collect(self, run_id: UUID, *, exit_code: int, inputs: Sequence[InputFile]) -> Manifest:
+        """走過 out/、計算 hash，寫入 manifest.json；不符合規則就拋 ArtifactRejectedError。
+
+        inputs 是 runner 寫進 in/ 的輸入檔（runner 自己的資料，從記憶體計算 hash）。
+        """
         walk = _Walk(self._limits, hashing=True)
         self._walk_output(run_id, walk)
         files = tuple(sorted(walk.files, key=lambda item: item.path))
-        manifest = Manifest(run_id=run_id, files=files, total_bytes=walk.total_bytes)
+        manifest = Manifest(
+            run_id=run_id,
+            files=files,
+            total_bytes=walk.total_bytes,
+            exit_code=exit_code,
+            inputs=tuple(_input_entry(item) for item in sorted(inputs, key=lambda i: i.name)),
+        )
         try:
             _write_new(self._runs / str(run_id) / MANIFEST_FILE, _manifest_json(manifest))
         except OSError as exc:
             raise WorkspaceError(f"無法寫入 manifest（{_reason(exc)}）") from None
         return manifest
+
+    def read_output(self, run_id: UUID, name: str, *, max_bytes: int) -> bytes | None:
+        """out/ 中的一般檔案（不跟隨 symlink）；不存在、不是一般檔案或超過上限都回 None。"""
+        if not name or name in {".", ".."} or "/" in name or "\x00" in name:
+            raise ValueError("檔名只能是 out/ 中的一般名稱")
+        try:
+            run_fd = os.open(self._runs / str(run_id), _DIRECTORY)
+        except OSError:
+            return None
+        try:
+            out_fd = os.open("out", _DIRECTORY, dir_fd=run_fd)
+        except OSError:
+            os.close(run_fd)
+            return None
+        try:
+            return _read_regular(name, out_fd, max_bytes)
+        finally:
+            os.close(out_fd)
+            os.close(run_fd)
 
     def _walk_output(self, run_id: UUID, walk: _Walk) -> None:
         try:
@@ -218,6 +263,28 @@ class Workspace:
                 os.close(out_fd)
         finally:
             os.close(run_fd)
+
+
+def _input_entry(item: InputFile) -> CollectedFile:
+    return CollectedFile(item.name, len(item.content), hashlib.sha256(item.content).hexdigest())
+
+
+def _read_regular(name: str, dir_fd: int, max_bytes: int) -> bytes | None:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        content = os.read(descriptor, max_bytes + 1)
+        while len(content) <= max_bytes and (chunk := os.read(descriptor, _CHUNK)):
+            content += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    return content if len(content) <= max_bytes else None
 
 
 def _unlink_if_present(name: str, dir_fd: int) -> None:
@@ -355,5 +422,10 @@ def _manifest_json(manifest: Manifest) -> bytes:
         ],
         "run_id": str(manifest.run_id),
         "total_bytes": manifest.total_bytes,
+        "exit_code": manifest.exit_code,
+        "inputs": [
+            {"path": item.path, "sha256": item.sha256, "size": item.size}
+            for item in manifest.inputs
+        ],
     }
     return json.dumps(document, ensure_ascii=False, sort_keys=True).encode("utf-8")

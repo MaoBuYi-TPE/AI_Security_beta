@@ -44,7 +44,7 @@ def test_every_fake_plan_is_admitted(outcome: FakeOutcome, hold: float, target_a
     admit(fake_plan(FakeScript(outcome=outcome, hold_seconds=hold), target_auth=target_auth))
 
 
-@pytest.mark.parametrize("engine", [Engine.ZAP, Engine.NUCLEI, Engine.SCHEMATHESIS])
+@pytest.mark.parametrize("engine", [Engine.NUCLEI, Engine.SCHEMATHESIS])
 def test_engines_without_a_policy_are_rejected(engine: Engine) -> None:
     assert _rejected(replace(PLAN, engine=engine)) is PlanRejection.ENGINE_NOT_ALLOWED
 

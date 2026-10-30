@@ -2,7 +2,9 @@
 
 假的容器照 busybox 的指令行為：`/bin/sleep N` 在 N 秒後以 0 結束，`/bin/false` 立刻以 1 結束，
 preflight 的 `/bin/sh -c` 在 3 秒後以 0 結束；
-stop 之後以 143 結束。時間由 FakeClock 控制：runner 呼叫 sleep 時時間前進，到點的 hook 依序執行。
+stop 之後以 143 結束。其他映像（ZAP）照 scripted 的設定：幾秒後以指定的退出碼結束，啟動時
+呼叫 on_start（例如寫 out/ 的檔案）。時間由 FakeClock 控制：runner 呼叫 sleep 時時間前進，
+到點的 hook 依序執行。
 state 和 DockerRuntime 一樣讀回 label 標示的 run；已建立但還沒啟動的容器算 running（Docker 的
 created）。
 """
@@ -19,6 +21,7 @@ from secscan.runner.domain.runtime import (
     RuntimeUnavailableError,
 )
 from secscan.scanners.domain.fake import FAKE_IMAGE
+from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 
 SIGTERM_EXIT = 143
 PREFLIGHT_SECONDS = 3
@@ -45,6 +48,15 @@ class FakeClock:
 
 
 @dataclass
+class ScriptedContainer:
+    """不是 busybox 的映像：seconds 秒後以 exit_code 結束；啟動時呼叫 on_start。"""
+
+    seconds: float = 3
+    exit_code: int = 0
+    on_start: Callable[[ContainerSpec], None] | None = None
+
+
+@dataclass
 class FakeContainer:
     spec: ContainerSpec
     started_at: float | None = None
@@ -57,7 +69,9 @@ class FakeContainerRuntime:
     engine: EngineVersion = field(
         default_factory=lambda: EngineVersion("1.54", "1.40", "linux", "arm64")
     )
-    images: dict[str, str] = field(default_factory=lambda: {str(FAKE_IMAGE): "arm64"})
+    images: dict[str, str] = field(
+        default_factory=lambda: {str(FAKE_IMAGE): "arm64", str(ZAP_IMAGE): "arm64"}
+    )
     networks: dict[str, NetworkState] = field(
         default_factory=lambda: {
             "secscan_scan_net": NetworkState(internal=True, isolated_gateway=True)
@@ -74,6 +88,8 @@ class FakeContainerRuntime:
     # 刪除時回 500 的容器（Docker 本身可用，只有這個容器刪不掉，例如 device busy）。
     broken: set[str] = field(default_factory=set)
     out_of_memory: bool = False
+    # 映像 → 容器的行為（ZAP）；沒有設定的 ZAP 容器 3 秒後以 0 結束。
+    scripted: dict[str, ScriptedContainer] = field(default_factory=dict)
 
     def _check(self, operation: str) -> None:
         if operation in self.failing:
@@ -106,7 +122,11 @@ class FakeContainerRuntime:
 
     def start(self, name: str) -> None:
         self._check("start")
-        self.containers[name].started_at = self.clock.now
+        container = self.containers[name]
+        container.started_at = self.clock.now
+        script = self.scripted.get(str(container.spec.body["Image"]))
+        if script is not None and script.on_start is not None:
+            script.on_start(container.spec)
 
     def state(self, name: str) -> ContainerState | None:
         self._check("state")
@@ -141,6 +161,12 @@ class FakeContainerRuntime:
 
     def _finished(self, container: FakeContainer) -> ContainerState | None:
         assert container.started_at is not None
+        image = str(container.spec.body["Image"])
+        if image != str(FAKE_IMAGE):
+            script = self.scripted.get(image, ScriptedContainer())
+            if self.clock.now - container.started_at < script.seconds:
+                return None
+            return self._exit(script.exit_code)
         entrypoint = container.spec.body["Entrypoint"]
         if entrypoint == ["/bin/false"]:
             return ContainerState(running=False, exit_code=1, oom_killed=False)
@@ -150,6 +176,9 @@ class FakeContainerRuntime:
         duration = PREFLIGHT_SECONDS if entrypoint == ["/bin/sh", "-c"] else int(str(arguments[0]))
         if self.clock.now - container.started_at < duration:
             return None
+        return self._exit(0)
+
+    def _exit(self, exit_code: int) -> ContainerState:
         if self.out_of_memory:
             return ContainerState(running=False, exit_code=OOM_EXIT, oom_killed=True)
-        return ContainerState(running=False, exit_code=0, oom_killed=False)
+        return ContainerState(running=False, exit_code=exit_code, oom_killed=False)

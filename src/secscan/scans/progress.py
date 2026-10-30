@@ -16,7 +16,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, DateTime, Row, Select, func, select, update
 from sqlalchemy.orm import Session
 
-from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import (
     LEASED_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -58,6 +58,8 @@ class LockedScan:
     max_duration_seconds: int
     status: ScanStatus
     cancel_requested: bool
+    scan_profile: ScanProfile
+    api_spec_id: UUID | None
 
     @property
     def is_terminal(self) -> bool:
@@ -223,6 +225,8 @@ def _scan_columns(scan_id: UUID) -> Select[*tuple[Any, ...]]:
         ScanModel.max_duration_seconds,
         ScanModel.status,
         ScanModel.cancel_requested_at,
+        ScanModel.scan_profile,
+        ScanModel.api_spec_id,
     ).where(ScanModel.id == scan_id)
 
 
@@ -241,6 +245,8 @@ def _locked_scan(row: Row[*tuple[Any, ...]]) -> LockedScan:
         max_duration_seconds=row.max_duration_seconds,
         status=ScanStatus(row.status),
         cancel_requested=row.cancel_requested_at is not None,
+        scan_profile=ScanProfile(row.scan_profile),
+        api_spec_id=row.api_spec_id,
     )
 
 

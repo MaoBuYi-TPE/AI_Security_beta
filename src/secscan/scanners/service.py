@@ -15,6 +15,7 @@ from secscan.scanners.domain.instances import (
     engine_statuses,
 )
 from secscan.scanners.repository import InstanceState, RunnerInstanceRepository
+from secscan.scans.domain.catalog import Engine
 
 
 class Fleet:
@@ -67,12 +68,14 @@ class ScannerCatalog:
     def __init__(self, session: Session) -> None:
         self._instances = RunnerInstanceRepository(session)
 
-    def describe(self) -> ScannerOverview:
+    def describe(self, *, preview: frozenset[Engine] = frozenset()) -> ScannerOverview:
         runner = self._instances.latest(InstanceRole.RUNNER, alive_within=ALIVE_WITHIN)
         worker = self._instances.latest(InstanceRole.WORKER, alive_within=ALIVE_WITHIN)
         live = runner.capabilities if runner is not None and runner.alive else None
         return ScannerOverview(
-            engines=engine_statuses(live), runner=_status(runner), worker=_status(worker)
+            engines=engine_statuses(live, preview=preview),
+            runner=_status(runner),
+            worker=_status(worker),
         )
 
 

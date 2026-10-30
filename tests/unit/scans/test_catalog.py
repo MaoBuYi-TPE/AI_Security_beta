@@ -1,11 +1,16 @@
 """引擎與 scan profile 的規則（docs/DECISIONS.md §13.1、§13.3）。"""
 
+from ipaddress import IPv4Address
+
 import pytest
 
+from secscan.grants.domain.matching import ScopeRules
+from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.scans.domain.catalog import (
     AVAILABLE_ENGINES,
     ENGINE_ORDER,
     SELECTABLE_ENGINES,
+    WEB_SEED_PATH,
     Engine,
     IncompatibleProfileError,
     InvalidScanRequestError,
@@ -14,9 +19,10 @@ from secscan.scans.domain.catalog import (
     UnsupportedEngineError,
     check_operations,
     check_profile,
+    check_seed_path,
     plan_runs,
 )
-from secscan.targets.domain import TargetKind
+from secscan.targets.domain import TargetKind, parse_origin
 
 ZAP, NUCLEI, SCHEMATHESIS, FAKE = Engine.ZAP, Engine.NUCLEI, Engine.SCHEMATHESIS, Engine.FAKE
 API_LAB, WEB_LAB = ScanProfile.API_ACTIVE_LAB, ScanProfile.WEB_ACTIVE_LAB
@@ -32,7 +38,7 @@ def test_fake_alone_is_planned_as_the_first_run() -> None:
 
 
 @pytest.mark.parametrize(
-    ("engine", "milestone"), [(ZAP, "M3"), (NUCLEI, "M4"), (SCHEMATHESIS, "M6")]
+    ("engine", "milestone"), [(ZAP, "T15"), (NUCLEI, "T18"), (SCHEMATHESIS, "M6")]
 )
 def test_engines_without_an_adapter_are_unsupported(engine: Engine, milestone: str) -> None:
     with pytest.raises(UnsupportedEngineError, match=milestone) as caught:
@@ -146,3 +152,38 @@ def test_selectable_engines_exclude_preflight() -> None:
     assert Engine.PREFLIGHT not in SELECTABLE_ENGINES
     assert ENGINE_ORDER[0] is Engine.PREFLIGHT
     assert set(SELECTABLE_ENGINES) == set(Engine) - {Engine.PREFLIGHT}
+
+
+# --- zap 的 spider 起點（docs/DECISIONS.md §18.7）---------------------------------------------
+
+
+def _rules(*paths: str, methods: tuple[HttpMethod, ...] = (HttpMethod.GET,)) -> ScopeRules:
+    return ScopeRules.of(
+        Scope(
+            origins=(parse_origin("http://lab-web:3000"),),
+            ips=(IPv4Address("10.89.7.20"),),
+            paths=paths,
+            allow_all_paths=not paths,
+            excluded_paths=(),
+            methods=methods,
+        )
+    )
+
+
+def test_zap_on_the_web_profile_needs_get_on_the_root() -> None:
+    check_seed_path((ZAP,), WEB_LAB, _rules("/", "/shop"))
+    check_seed_path((ZAP,), WEB_LAB, _rules())
+    with pytest.raises(IncompatibleProfileError, match="GET /"):
+        check_seed_path((ZAP,), WEB_LAB, _rules("/shop"))
+    with pytest.raises(IncompatibleProfileError, match="GET /"):
+        check_seed_path((ZAP,), WEB_LAB, _rules(methods=(HttpMethod.POST,)))
+
+
+def test_only_zap_on_the_web_profile_needs_the_root() -> None:
+    check_seed_path((FAKE,), WEB_LAB, _rules("/shop"))
+    check_seed_path((ZAP,), API_LAB, _rules("/api/items"))
+    check_seed_path((Engine.PREFLIGHT, ZAP), API_LAB, _rules("/me"))
+
+
+def test_the_seed_path_is_the_root() -> None:
+    assert WEB_SEED_PATH == "/"
