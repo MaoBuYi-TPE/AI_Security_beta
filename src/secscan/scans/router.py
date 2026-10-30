@@ -18,6 +18,7 @@ from secscan.core.db import DbSession
 from secscan.core.envelope import MAX_PAGE_LIMIT, Envelope, ok
 from secscan.core.errors import AppError, ErrorCode
 from secscan.core.request_id import request_id_of
+from secscan.scans.dependencies import PreviewEngines
 from secscan.scans.domain.lifecycle import ScanStatus
 from secscan.scans.domain.model import Scan
 from secscan.scans.domain.request import (
@@ -72,12 +73,13 @@ def create_scan(
     principal: CurrentPrincipal,
     session: DbSession,
     lab: CurrentLab,
+    preview: PreviewEngines,
     request: Request,
     response: Response,
 ) -> Envelope[ScanOut]:
     """建立 scan（operator、admin）：scan 與每個引擎的 run 在同一個 transaction 寫入（queued）。"""
     key = _idempotency_key(request)
-    scan = ScanService(session, lab=lab).create(
+    scan = ScanService(session, lab=lab, preview_engines=preview).create(
         principal,
         body.to_request(),
         idempotency_key=key,

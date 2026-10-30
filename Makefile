@@ -30,7 +30,7 @@ SCAN_SUBNET ?= 10.89.8.0/24
 SCAN_IP_RANGE ?= 10.89.8.0/25
 # runner 不 pull 映像：核准的掃描器映像由這裡以 digest pull（和 runner/domain/policy.py 一致，
 # tests/unit/test_deployment.py 會核對）。
-SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e zaproxy/zap-stable:20261016@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6
 # live 測試用的獨立 stack：自己的 DB volume、網路與 volume 名稱；API 只綁 127.0.0.1:8765。
 LIVE_PROJECT := secscan-live
 LIVE_SCAN_NET := secscan_live_scan_net

@@ -261,7 +261,7 @@ services:
       - -stoponwatchdog
       - -shutdowngracetime=5
       - -allowbindmountfrom=/nonexistent-secscan-no-host-binds
-      - '-allowGET=/v1\.[0-9]+/(version|containers/secscan-run-[0-9a-f-]{36}/json|images/(busybox:1\.38\.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e)/json|networks/${SECSCAN_SCAN_NET:-secscan_scan_net}|volumes/(${SECSCAN_RUNS_VOLUME:-secscan_runs}|${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}))'
+      - '-allowGET=/v1\.[0-9]+/(version|containers/secscan-run-[0-9a-f-]{36}/json|images/(busybox:1\.38\.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e|zaproxy/zap\-stable:20261016@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6)/json|networks/${SECSCAN_SCAN_NET:-secscan_scan_net}|volumes/(${SECSCAN_RUNS_VOLUME:-secscan_runs}|${SECSCAN_SECRETS_VOLUME:-secscan_run_secrets}))'
       - '-allowPOST=/v1\.[0-9]+/containers/(create|secscan-run-[0-9a-f-]{36}/(start|stop))'
       - '-allowDELETE=/v1\.[0-9]+/containers/secscan-run-[0-9a-f-]{36}'
     healthcheck:

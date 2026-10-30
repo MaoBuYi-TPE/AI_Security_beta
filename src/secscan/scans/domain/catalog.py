@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 
+from secscan.grants.domain.matching import ScopeRules
 from secscan.targets.domain import TargetKind
 
 
@@ -44,6 +45,10 @@ _UNAVAILABLE_REASONS: Mapping[Engine, str] = MappingProxyType(
         Engine.SCHEMATHESIS: "schemathesis 是 P1，M6 整合之後才能使用",
     }
 )
+
+
+# ZAP 的 web profile 從這裡開始 spider（docs/DECISIONS.md §18.7）。
+WEB_SEED_PATH = "/"
 
 
 class ScanProfile(StrEnum):
@@ -140,3 +145,16 @@ def check_operations(profile: ScanProfile, *, eligible_operations: int | None) -
         raise ValueError("有沒有規格和 profile 的規則不一致")
     if eligible_operations == 0:
         raise IncompatibleProfileError("規格中沒有任何 operation 在 scope grant 的範圍內")
+
+
+def check_seed_path(engines: Collection[Engine], profile: ScanProfile, rules: ScopeRules) -> None:
+    """zap 的 web profile 從 / 開始 spider：grant 必須允許 GET /（§18.7）。
+
+    只檢查 zap：fake 不送流量，不需要起點；api profile 由規格決定要送的請求。
+    """
+    if Engine.ZAP not in engines or profile is not ScanProfile.WEB_ACTIVE_LAB:
+        return
+    if rules.classify(method="GET", path=WEB_SEED_PATH) is not None:
+        raise IncompatibleProfileError(
+            f"zap 的 {profile.value} 需要 scope grant 允許 GET /（spider 的起點）"
+        )

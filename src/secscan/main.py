@@ -1,5 +1,6 @@
 """FastAPI 應用程式組裝。以 factory 建立，不在 import 時就產生 app。"""
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -24,11 +25,14 @@ from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
 from secscan.projects.router import router as projects_router
 from secscan.scanners.router import router as scanners_router
+from secscan.scans.domain.catalog import Engine
 from secscan.scans.router import router as scans_router
 from secscan.security.secret_cipher import SecretCipher
 from secscan.specs.router import router as specs_router
 from secscan.targets.domain import LabNetwork
 from secscan.targets.router import router as targets_router
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -60,6 +64,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.db = DatabaseResources(engine=engine, schema_revision=head_revision())
     # LAB_ONLY 時 target 與 grant 的 IP 必須在這個網段內（docs/DECISIONS.md §10.1）。
     app.state.lab = LabNetwork(resolved.lab_cidr)
+    # 只給 live 測試的預覽開關（docs/DECISIONS.md §18.9；T15 移除）。
+    app.state.preview_engines = frozenset(Engine(name) for name in resolved.scan_preview_engines)
+    if app.state.preview_engines:
+        logger.warning(
+            "預覽開關已開啟（%s）：只能用在拆除的 live 環境",
+            ",".join(sorted(engine.value for engine in app.state.preview_engines)),
+        )
     # 目標 secret 的加密（docs/DECISIONS.md §12.1）：沒有或不合法的金鑰，啟動就失敗。
     keys = resolved.secret_encryption_keys
     app.state.secret_cipher = SecretCipher.from_setting(

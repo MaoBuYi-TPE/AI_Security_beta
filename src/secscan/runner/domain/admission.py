@@ -1,4 +1,4 @@
-"""ExecutionPlan 的驗證與建立容器的 body（SEC-12、SEC-21；docs/DECISIONS.md §14.3、§14.4）。
+"""ExecutionPlan 的驗證與建立容器的 body（SEC-12、SEC-21；docs/DECISIONS.md §14.3、§14.4、§18.2）。
 
 1. admit()：plan 必須符合引擎的政策（核准的映像、指令樣板、環境變數、輸入檔、上限）。
 2. container_spec()：由 plan 與固定的容器政策組出 Docker create 的 body。
@@ -19,6 +19,7 @@ from secscan.core.identifiers import canonical_uuid
 from secscan.core.json_types import JsonObject, JsonValue
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.scanners.domain.plan import ExecutionPlan
+from secscan.scanners.domain.zap.script import CONFIG_FILE as ZAP_CONFIG_FILE
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.model import CONTAINER_NAME_PREFIX
 
@@ -30,15 +31,20 @@ OUT_DIR = "/scan/out"
 SECRET_DIR = "/scan/secret"  # noqa: S105
 SECRET_FILE = "target-auth"  # noqa: S105
 PROXY_FILE = "proxy-url"
-# 送出 secret 的那一行 header（preflight 用；docs/DECISIONS.md §16.5）。
+# 送出 secret 的那一行 header（preflight 與 ZAP 的 script 讀它；docs/DECISIONS.md §16.5、§18.2）。
 AUTH_HEADER_FILE = "auth-header"
-SECRET_FILES = frozenset({SECRET_FILE, PROXY_FILE, AUTH_HEADER_FILE})
+# ZAP 的 -configfile：proxy 的帳密與速率（docs/DECISIONS.md §18.3）。
+SECRET_FILES = frozenset({SECRET_FILE, PROXY_FILE, AUTH_HEADER_FILE, ZAP_CONFIG_FILE})
 # 容器的 log 由 Docker 保存：限制大小，工具大量輸出也不會塞滿磁碟。
 LOG_CONFIG: JsonObject = {"Type": "json-file", "Config": {"max-size": "1m", "max-file": "1"}}
 NOFILE_LIMIT = 1024
 LABEL_PREFIX = "secscan."
 
-_TOP_LEVEL_KEYS = frozenset({"Image", "Entrypoint", "Cmd", "Env", "User", "Labels", "HostConfig"})
+_TOP_LEVEL_KEYS = frozenset(
+    {"Image", "Entrypoint", "Cmd", "Env", "User", "Labels", "Healthcheck", "HostConfig"}
+)
+# 映像宣告的 HEALTHCHECK（ZAP 每 30 秒在容器內執行 curl）一律關閉（docs/DECISIONS.md §18.1）。
+_NO_HEALTHCHECK: JsonObject = {"Test": ["NONE"]}
 _HOST_CONFIG_KEYS = frozenset(
     {
         "NetworkMode",
@@ -79,6 +85,11 @@ _FIXED_HOST_CONFIG: Mapping[str, JsonValue] = MappingProxyType(
 )
 # 送出前的檢查用自己的一份（刻意重複，不引用上面組 body 用的常數）：組 body 的程式或常數被改錯，
 # 檢查不會跟著一起放行（審查發現）。改動時兩邊都要改，test_container_spec.py 會核對。
+# tmpfs 也一樣：組 body 用引擎政策的 scratch，檢查用這裡的字面值（test_zap_admission.py 核對）。
+_REQUIRED_TMPFS: Mapping[Engine, Mapping[str, str]] = MappingProxyType(
+    # 容器內的 tmpfs（每個容器各自一份），不是宿主的暫存目錄。
+    {Engine.ZAP: MappingProxyType({"/tmp": "rw,noexec,nosuid,nodev,size=768m,mode=1777"})}  # noqa: S108
+)
 _REQUIRED_HOST_CONFIG: Mapping[str, JsonValue] = MappingProxyType(
     {
         "ReadonlyRootfs": True,
@@ -129,9 +140,15 @@ def admit(plan: ExecutionPlan, policies: Mapping[Engine, EnginePolicy] = ENGINE_
         raise PlanRejectedError(PlanRejection.ENGINE_NOT_ALLOWED)
     if str(plan.image) not in policy.images:
         raise PlanRejectedError(PlanRejection.IMAGE_NOT_APPROVED)
-    if not any(template.matches(plan.entrypoint, plan.arguments) for template in policy.commands):
+    template = next(
+        (item for item in policy.commands if item.matches(plan.entrypoint, plan.arguments)), None
+    )
+    if template is None:
         raise PlanRejectedError(PlanRejection.COMMAND_NOT_ALLOWED)
-    if not _environment_allowed(plan.environment, policy):
+    if not _environment_allowed(plan.environment, policy) or not (
+        template.auth_environment is None
+        or template.auth_environment.accepts(plan.environment, target_auth=plan.target_auth)
+    ):
         raise PlanRejectedError(PlanRejection.ENVIRONMENT_NOT_ALLOWED)
     if not _inputs_allowed(plan, policy):
         raise PlanRejectedError(PlanRejection.INPUT_NOT_ALLOWED)
@@ -164,9 +181,16 @@ def _inputs_allowed(plan: ExecutionPlan, policy: EnginePolicy) -> bool:
     )
 
 
-def container_spec(plan: ExecutionPlan, policy: ContainerPolicy) -> ContainerSpec:
+def container_spec(
+    plan: ExecutionPlan,
+    policy: ContainerPolicy,
+    *,
+    engines: Mapping[Engine, EnginePolicy] = ENGINE_POLICIES,
+) -> ContainerSpec:
     """由 plan 與容器政策組出 create 的 body（呼叫端先以 admit 驗證過 plan）。"""
     limits = plan.limits
+    engine = engines.get(plan.engine)
+    scratch: JsonObject = dict(engine.scratch) if engine is not None else {}
     host_config: JsonObject = {
         "NetworkMode": policy.scan_network,
         "Mounts": _mounts(plan, policy),
@@ -175,6 +199,7 @@ def container_spec(plan: ExecutionPlan, policy: ContainerPolicy) -> ContainerSpe
         "NanoCpus": limits.nano_cpus,
         "PidsLimit": limits.pids,
         **_FIXED_HOST_CONFIG,
+        **({"Tmpfs": scratch} if scratch else {}),
     }
     body: JsonObject = {
         "Image": str(plan.image),
@@ -183,6 +208,7 @@ def container_spec(plan: ExecutionPlan, policy: ContainerPolicy) -> ContainerSpe
         "Env": [f"{name}={value}" for name, value in plan.environment],
         "User": policy.user,
         "Labels": dict(_labels(plan)),
+        "Healthcheck": dict(_NO_HEALTHCHECK),
         "HostConfig": host_config,
     }
     return ContainerSpec(name=container_name(plan.run_id), body=body)
@@ -195,7 +221,7 @@ def build_container(
     engines: Mapping[Engine, EnginePolicy] = ENGINE_POLICIES,
 ) -> ContainerSpec:
     admit(plan, engines)
-    spec = container_spec(plan, policy)
+    spec = container_spec(plan, policy, engines=engines)
     check_container_spec(spec, plan=plan, policy=policy)
     return spec
 
@@ -213,10 +239,13 @@ def _safe(spec: ContainerSpec, plan: ExecutionPlan, policy: ContainerPolicy) -> 
     host = body.get("HostConfig")
     if not isinstance(host, dict):
         return False
+    tmpfs = _REQUIRED_TMPFS.get(plan.engine)
     return (
         spec.name == container_name(plan.run_id)
         and set(body) == _TOP_LEVEL_KEYS
-        and set(host) == _HOST_CONFIG_KEYS
+        and body["Healthcheck"] == {"Test": ["NONE"]}
+        and set(host) == (_HOST_CONFIG_KEYS | {"Tmpfs"} if tmpfs else _HOST_CONFIG_KEYS)
+        and (tmpfs is None or host["Tmpfs"] == dict(tmpfs))
         and body["Image"] == str(plan.image)
         and body["Entrypoint"] == list(plan.entrypoint)
         and body["Cmd"] == list(plan.arguments)

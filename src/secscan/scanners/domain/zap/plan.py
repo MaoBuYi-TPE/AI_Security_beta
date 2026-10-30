@@ -33,7 +33,7 @@ from secscan.scanners.domain.zap.script import (
     SITE_VARIABLE,
     SPEC_FILE,
 )
-from secscan.scans.domain.catalog import Engine, ScanProfile
+from secscan.scans.domain.catalog import WEB_SEED_PATH, Engine, ScanProfile
 from secscan.targets.domain import Origin
 
 # JVM 啟動（離線實測約 15 秒）、報告與收集的保留時間；plan 至少要能跑這麼久。
@@ -44,7 +44,6 @@ ZAP_MEMORY_BYTES = 3 * 1024 * 1024 * 1024
 ZAP_NANO_CPUS = 2_000_000_000
 ZAP_PIDS = 1024
 CONTEXT = "target"
-SEED_PATH = "/"
 IN_DIR = "/scan/in"
 OUT_DIR = "/scan/out"
 _ROBOTS = "/robots.txt"
@@ -202,13 +201,13 @@ def _spider(
 ) -> JsonObject:
     if spec is not None:
         raise ZapPlanError("web_active_lab 不接受規格")
-    if not _allowed(rules, SEED_PATH):
+    if not _allowed(rules, WEB_SEED_PATH):
         raise ZapPlanError("web_active_lab 需要 grant 允許 GET /（spider 的起點）")
     return {
         "type": "spider",
         "parameters": {
             "context": CONTEXT,
-            "url": f"{origin}{SEED_PATH}",
+            "url": f"{origin}{WEB_SEED_PATH}",
             "maxDuration": max(1, minutes // 4),
             "maxDepth": 5,
             "threadCount": 1,
