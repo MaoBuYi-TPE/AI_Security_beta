@@ -13,7 +13,14 @@ from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.preflight import PreflightResult
-from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, Progress, RunReport, ScanQueue
+from secscan.scans.queue import (
+    HEARTBEAT_INTERVAL,
+    Heartbeat,
+    LeaseLostError,
+    Progress,
+    RunReport,
+    ScanQueue,
+)
 
 # preflight 的 run 也在這裡處理：in-process 不送任何流量，結果一律 not_executed（§16.5）。
 ENGINES = frozenset({Engine.FAKE, Engine.PREFLIGHT})
@@ -83,9 +90,13 @@ class FakeRunner:
             return _report(lease, progress)
         if lease.engine is Engine.PREFLIGHT:
             return self._collect(lease)
-        if self._hold(lease):
+        held = self._hold(lease)
+        if held.cancel_requested:
             self._queue.advance(lease, RunStatus.CANCELLING)
             return self._advance(lease, RunStatus.CANCELLED)
+        if held.stop_reason is not None:
+            # 授權撤回（docs/DECISIONS.md §17.5）。
+            return self._advance(lease, RunStatus.FAILED, held.stop_reason)
         if self._script.outcome is FakeOutcome.FAIL:
             return self._advance(lease, RunStatus.FAILED, RunErrorCode.ENGINE_FAILED)
         return self._collect(lease)
@@ -103,17 +114,19 @@ class FakeRunner:
             self._queue.record_preflight(lease, PreflightResult.NOT_EXECUTED)
         return self._advance(lease, RunStatus.SUCCEEDED)
 
-    def _hold(self, lease: Lease) -> bool:
-        """在 running 停留 hold_seconds，每 5 秒以內心跳一次；回傳是否被要求取消。"""
+    def _hold(self, lease: Lease) -> Heartbeat:
+        """在 running 停留 hold_seconds，每 5 秒以內心跳一次；被要求取消或授權撤回時提早回傳那次
+        心跳。
+        """
         deadline = self._monotonic() + self._script.hold_seconds
         while (remaining := deadline - self._monotonic()) > 0:
             self._sleep(min(HEARTBEAT_INTERVAL.total_seconds(), remaining))
             heartbeat = self._queue.heartbeat(lease)
             if not heartbeat.valid:
                 raise LeaseLostError("lease 已過期：停止執行，交給對帳處理")
-            if heartbeat.cancel_requested:
-                return True
-        return False
+            if heartbeat.cancel_requested or heartbeat.stop_reason is not None:
+                return heartbeat
+        return Heartbeat(valid=True, cancel_requested=False)
 
     def _advance(
         self, lease: Lease, to: RunStatus, error_code: RunErrorCode | None = None

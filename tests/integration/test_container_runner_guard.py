@@ -12,21 +12,17 @@ tmp 中的 policy 與 status 目錄。
 import stat
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import Engine
-from sqlalchemy.orm import sessionmaker
 
 from secscan.guard.domain.credentials import token_digest
-from secscan.guard.domain.policy import Policy, PolicyState
-from secscan.runner.domain.admission import PROXY_FILE, ContainerSpec
-from secscan.runner.domain.policy import ContainerPolicy
+from secscan.guard.domain.policy import PolicyState
+from secscan.runner.domain.admission import PROXY_FILE
 from secscan.runner.domain.runtime import RuntimeUnavailableError
-from secscan.runner.guard import GuardChannel, GuardUnavailableError
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.fake import FAKE_MAX_WALL_CLOCK_SECONDS, FakeScript
@@ -34,72 +30,25 @@ from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.request import BudgetRequest
-from secscan.scans.queue import LEASE_DURATION, LeaseLostError, Progress, RunReport, ScanQueue
+from secscan.scans.queue import LEASE_DURATION, LeaseLostError, RunReport, ScanQueue
 from tests.guard_support import ENDPOINT, GuardDouble
 from tests.integration.api_support import LAB, Scannable, Seeder, World
-from tests.runner_fakes import FakeClock, FakeContainerRuntime
+from tests.runner_fakes import FakeClock
+from tests.runner_spies import (
+    POLICY,
+    SpyChannel,
+    SpyRuntime,
+    logged_queue,
+    without_renewals,
+)
 from tests.secret_support import shared_cipher
 
 pytestmark = pytest.mark.integration
 
 OWNER = "runner-guard-1"
 FAKE = frozenset({ScanEngine.FAKE})
-POLICY = ContainerPolicy(
-    scan_network="secscan_scan_net",
-    runs_volume="secscan_runs",
-    secrets_volume="secscan_run_secrets",
-)
 R = RunStatus
 S = ScanStatus
-
-
-class SpyRuntime(FakeContainerRuntime):
-    log: list[str]
-
-    def create(self, spec: ContainerSpec) -> None:
-        self.log.append("create")
-        super().create(spec)
-
-    def start(self, name: str) -> None:
-        self.log.append("start")
-        super().start(name)
-
-    def stop(self, name: str, *, grace_seconds: int) -> None:
-        self.log.append("stop")
-        super().stop(name, grace_seconds=grace_seconds)
-
-    def remove(self, name: str) -> None:
-        self.log.append("remove")
-        super().remove(name)
-
-
-class SpyChannel(GuardChannel):
-    def __init__(self, double: GuardDouble, log: list[str]) -> None:
-        super().__init__(
-            double.policies,
-            double.status_dir,
-            telemetry_dir=double.telemetry,
-            listen=ENDPOINT.listen,
-        )
-        self.log = log
-        self.fail_states: set[PolicyState] = set()
-        self.fail_renewal = False
-        self.fail_remove = False
-        self.written: list[Policy] = []
-
-    def write(self, policy: Policy) -> None:
-        renewal = bool(self.written) and policy.state is PolicyState.ACTIVE
-        if policy.state in self.fail_states or (renewal and self.fail_renewal):
-            raise GuardUnavailableError("無法寫入 guard 的 policy（EACCES）")
-        super().write(policy)
-        self.written.append(policy)
-        self.log.append("renew" if renewal else f"policy:{policy.state.value}")
-
-    def remove(self, run_id: UUID) -> None:
-        if self.fail_remove:
-            raise GuardUnavailableError("無法刪除 guard 的 policy（EBUSY）")
-        super().remove(run_id)
-        self.log.append("policy:removed")
 
 
 @pytest.fixture
@@ -109,17 +58,7 @@ def log() -> list[str]:
 
 @pytest.fixture
 def queue(queue_engine: Engine, log: list[str]) -> ScanQueue:
-    queue = ScanQueue(
-        sessionmaker(queue_engine, expire_on_commit=False), lab=LAB, clock=lambda: datetime.now(UTC)
-    )
-    advance = queue.advance
-
-    def logged(lease: Lease, to: RunStatus, *, error_code: RunErrorCode | None = None) -> Progress:
-        log.append(f"run:{to.value}")
-        return advance(lease, to, error_code=error_code)
-
-    queue.advance = logged  # type: ignore[method-assign]
-    return queue
+    return logged_queue(queue_engine, log, lab=LAB)
 
 
 @pytest.fixture
@@ -198,10 +137,6 @@ def _error(seed: Seeder, run_id: UUID) -> str | None:
     return error
 
 
-def _without_renewals(log: list[str]) -> list[str]:
-    return [entry for entry in log if entry != "renew"]
-
-
 # --- 啟動 -------------------------------------------------------------------------------------
 
 
@@ -227,7 +162,7 @@ def test_the_policy_is_in_place_before_the_container_exists(
     clock.at(1, look)
     report = _report(make_runner())
 
-    assert _without_renewals(log)[:3] == ["policy:active", "create", "start"]
+    assert without_renewals(log)[:3] == ["policy:active", "create", "start"]
     first = channel.written[0]
     assert first.run_id == report.run_id
     assert first.scan_id == scan.id
@@ -280,7 +215,7 @@ def test_after_a_normal_run_the_policy_is_blocked_then_removed(
 
     _report(make_runner(script=FakeScript(hold_seconds=1)))
 
-    assert _without_renewals(log)[-5:] == [
+    assert without_renewals(log)[-5:] == [
         "policy:blocked",
         "remove",
         "policy:removed",
@@ -313,7 +248,7 @@ def test_a_cancel_blocks_the_guard_before_anything_else(
     report = _report(make_runner())
 
     assert report.run_status is R.CANCELLED
-    assert _without_renewals(log)[3:] == [
+    assert without_renewals(log)[3:] == [
         "policy:blocked",
         "run:cancelling",
         "stop",
@@ -342,7 +277,7 @@ def test_every_stop_blocks_first(
 
     report = _report(runner)
 
-    stopping = _without_renewals(log)
+    stopping = without_renewals(log)
     index = stopping.index("stop")
     assert stopping[index - 1] == "policy:blocked"
     assert stopping[index + 1 : index + 3] == ["remove", "policy:removed"]
@@ -372,7 +307,7 @@ def test_a_lost_lease_blocks_and_keeps_the_policy_blocked_while_the_container_st
     with pytest.raises(LeaseLostError):
         make_runner().run_once(FAKE)
 
-    stopping = _without_renewals(log)
+    stopping = without_renewals(log)
     assert stopping[stopping.index("stop") - 1] == "policy:blocked"
     [name] = guard.policy_files()
     policy = guard.policy(UUID(name.removesuffix(".json")))
@@ -504,7 +439,7 @@ def test_losing_the_guard_mid_run_interrupts_the_run(
 
     assert (report.run_status, report.scan_status) == (R.INTERRUPTED, S.INTERRUPTED)
     assert _error(queue_seed, report.run_id) == RunErrorCode.GUARD_UNAVAILABLE
-    stopping = _without_renewals(log)
+    stopping = without_renewals(log)
     assert stopping[stopping.index("stop") - 1] == "policy:blocked"
     assert runtime.containers == {}
     assert guard.policy_files() == []
@@ -621,7 +556,7 @@ def test_an_exhausted_budget_blocks_then_stops_the_container(
 
     assert report.run_status is R.TIMED_OUT
     assert _error(queue_seed, report.run_id) == RunErrorCode.BUDGET_EXHAUSTED
-    stopping = _without_renewals(log)
+    stopping = without_renewals(log)
     assert stopping[stopping.index("stop") - 1] == "policy:blocked"
     sent, traffic = _usage(queue_seed, report.run_id)[1], _usage(queue_seed, report.run_id)[3]
     assert sent == allotted
