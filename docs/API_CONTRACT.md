@@ -1041,7 +1041,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `RUNNER_STOPPED` | runner 被要求停止，已停止並刪除容器（`interrupted`，T10） |
 | `WORKSPACE_UNAVAILABLE` | runner 的工作目錄不可用（權限、磁碟滿），或寫不出收集的 manifest（T10） |
 | `GUARD_UNAVAILABLE` | egress guard 不可用（T11，`DECISIONS.md` §15.8）：建立容器之前（status 過期、不再檢查、寫不出 policy）→ `failed`；執行中 guard 中斷、重啟或續約失敗 → 封鎖、停止容器 → `interrupted` |
-| `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0，或不夠 ZAP 執行（maxDuration 不到 60 秒，T14）→ `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out` |
+| `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0，或不夠 ZAP 執行（剩下的時間、請求數 ÷ 速率、grant 到期前的秒數三者取最小，減去 60 秒之後不到 60 秒，T14；grant 快到期時也是這個代碼，延長 grant 而不是增加預算）→ `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out` |
 | `PARSE_ATTEMPTS_EXHAUSTED` | 解析 3 次都沒有在 lease 內完成（worker 中斷或卡住）→ `failed`（T13，`DECISIONS.md` §17.6） |
 
 ### 17.3 事件

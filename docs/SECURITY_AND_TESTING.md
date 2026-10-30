@@ -142,6 +142,20 @@ T14 已涵蓋（`DECISIONS.md` §18；新的 domain 模組 line 與 branch cover
 - **政策與 admission（SEC-12）**：每個 zap 的 plan 與 probe 的 plan 都通過；script 的 sha256 與政策一致，改一個字（含拿掉 `-silent`、`-nostdout`）就被拒絕；`ZAP_AUTH_HEADER_VALUE` 永遠不能在 plan；anonymous 只能有模式，header 模式一定有名稱與 host；模式和 `target_auth` 不一致被拒絕；輸入檔的名稱與大小（最大的規格放得下）；超過上限。create 的 body：zap 只有宣告的 tmpfs（改 path、拿掉 noexec 或 nosuid、加大、多一個、缺少都被拒絕），其他引擎加上 tmpfs 被拒絕；所有引擎的 healthcheck 必須是 NONE；送出前的檢查以自己的 tmpfs 字面值核對（改了引擎政策也擋下）。
 - **workspace**：manifest 記下退出碼與輸入檔的 hash；空的 secret 目錄只能建立一次；`zap.properties` 是已知的 secret 檔、會被刪除；`read_output` 不跟隨 symlink（檔案或被換掉的 out/）、只讀一般檔案、有大小上限。
 - **probe 的步進**：通過之前是 `ENGINE_PROBE_PENDING`、期間其他引擎照常可用；通過之後帶版本、同一個映像不再執行；失敗與不相容以退避重試、每次新的 id；逾時就停止並刪除；Docker 在啟動時出錯是失敗；刪不掉的容器留下 secret 目錄（下次啟動的清理依它找回）；映像不在時不執行；runner 停止時刪除執行中的容器。
+- **審查之後補上的**（T14 的 code-reviewer 與 security-reviewer）：
+  - **掃描的 script 以 dash 實際執行**（容器的路徑換成暫存目錄與替身）：
+    - anonymous 時 unset 所有 `ZAP_AUTH*`，有 secret 檔就 exit 64。
+    - header 模式下，值原樣 export（含 `$`、反引號與空白），有沒有結尾的換行都一樣；缺少檔案、前綴不符、值是空的、缺少 header 名稱或 SITE、不認得的模式都 exit 64。
+    - out/ 寫不了就 exit 65。
+  - **AF plan 的內容由 runner 的政策獨立檢查**：
+    - 以下都被拒絕：檔案中或解析之後（`\u0024` 跳脫）有 `${`、不在白名單的 job、報告的範本是 `-plus`、報告的目錄不對、兩個報告或沒有報告、`defaultThreshold` 不是 off、不是 JSON、超長的整數、過深的巢狀。
+    - probe 的 plan 以 sha256 核准。
+    - 規格不經過 AF 的代換，照樣接受 `${`。
+  - **probe 的樣板不接受任何環境變數或認證**。
+  - **會改 method 的規則**（20018、40045、40048）只在 grant 允許 POST 時執行。
+  - **範圍外的排除**：結尾有換行的 URL 也擋得下。
+  - **probe 執行中超過用量上限就停止**；報告中超長的整數是失敗、不是例外。
+  - **預覽開關只以 live 專用的變數插值**，`make up`、`make dev` 明確清空。
 - **API 的設定**：`SCAN_PREVIEW_ENGINES` 只接受空的或 zap；zap 的 web profile 需要 grant 允許 GET /（只檢查 zap）；`GET /scanners` 的版本、三個新的能力代碼、預覽開關下 zap 的狀態。
 
 ### 4.2 Contract / Parser
@@ -236,7 +250,7 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。模板的 allowlist 在 M4（Nuclei）加入。
 - **SEC-18**：T10 只涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；artifact 的 storage key、下載與 worker 的解析在 M3、M5。
 - **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
-- **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method` 與 path 中的 `%`（`DECISIONS.md` §15.10 的取捨，T14 量測）。
+- **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method`（`DECISIONS.md` §15.10 的取捨；T14 的小型網站沒有這個欄位，T16 以真的靶機量測）。path 中的 `%`：T14 的 live 量測中，ZAP 對 path 參數的攻擊有 83% 以 `PATH_AMBIGUOUS` 被拒（`TOOLS.md` §7.5），維持 fail closed，覆蓋的缺口在 T16 量化。
 - **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約。T13 補上執行中的停止：grant 撤銷或到期、target 停用、建立者的 key 撤銷時，runner 在下一次心跳先封鎖 guard、再停止容器。
 - **SEC-19（T11 的部分）**：取消時先封鎖 guard、再停止容器（live 以時間線證明）。T13 補上 runner 遺失時的回收：對帳先封鎖、再強制刪除孤兒容器，確認之後才結算。
 - **SEC-15**：T11 的 guard 只放行 scan 的 target origin，任何帶著認證的請求都送不到其他 origin。T12 以 live 證明（§4.4）：帶著 `Authorization` 的請求只到達 target，另一個 origin 的接收端沒有任何連線；preflight 的帶認證請求只送到 target。使用者決定維持只放行 target origin，跨 origin 的認證 header 規則（多個 origin）延後；工具實際送出的認證在 M3。
@@ -288,6 +302,28 @@ T11 已涵蓋（`tests/live/test_guard_live.py`；live 自己的 lab 網路 10.8
 - 在 guard 的映像中，以 mitmproxy 12.2.3 的真物件驅動 addon，確認單元測試的假物件和真物件一致（16 項，含刪除小寫的 `x-secscan-guard`）。
 - 尚未涵蓋：同一條 keep-alive 連線上交錯的放行與拒絕、pipelining 與 header 值中夾帶的請求（接收端與探針每個請求一條新連線）；目前只有單元測試，記為證據缺口（`DECISIONS.md` §15.10）。
 - fake scan：執行中有這個 run 的 policy、容器內有 0400 的 proxy-url，結束之後都刪除。
+
+T14 已涵蓋（`make test-live-zap`，`tests/live/test_zap_live.py`；live 自己 lab 網路上的小型網站 `zap_site.py` 與 canary；API 以只給 live 的預覽開關啟動；量測的數字在 `TOOLS.md` §7.5）：
+- capability probe：runner 啟動時以真的 ZAP 映像、掃描相同的強化設定執行；`GET /scanners` 顯示 2.17.0；probe 容器已刪除。
+- web、anonymous（SEC-02、SEC-05）：
+  - 網站只收到 GET 與 HEAD，沒有 `/admin`，沒有任何認證 header；canary 沒有連線，guard 只看到 target。
+  - 修正前 ZAP 送出的 52 個 POST（grant 不允許）都被 guard 擋下；會改 method 的規則依 grant 篩選之後是 0。
+  - 報告與 `zap.log` 收集到 out/，manifest 記下退出碼。
+  - 2 MiB 的回應取得成功。
+- api、bearer（SEC-02、SEC-05、SEC-11、SEC-14、SEC-15）：
+  - ZAP 只送出規格中 eligible 的 operation，DELETE 一次也沒有。
+  - 規格中指向 canary 的 URL（contact、license、externalDocs、servers、schema 的 `id`、example）連線數是 0。
+  - `Authorization` 只送到 target，值正確。
+  - token 與 proxy 的 token 不在 Env、Cmd、Labels 與 out/。
+  - path 參數的百分比編碼攻擊被 guard 以 `PATH_AMBIGUOUS` 拒絕（覆蓋的缺口，見 `TOOLS.md` §7.5）。
+- `api_key_header`、cookie：值正確、只送到 target；請求數較少的預算讓 ZAP 在 maxDuration 內自己結束。
+- 取消（SEC-19）：policy 先變成 blocked，容器才收到 kill；之後網站沒有再收到請求；ZAP 收到 SIGTERM 之後約 2 秒結束。
+- 參照炸彈（3^8）：在容器的上限內完成，沒有連到其他 host。
+- 尚未涵蓋：
+  - Juice Shop 與 VAmPI（T16）。
+  - 和 ZAP 自己的 session cookie 合併的情況（網站不發 `Set-Cookie`）。
+  - HTTPS。
+  - T11 的同一條連線上多個請求的證據缺口。
 
 T13 已涵蓋（`tests/live/test_revocation_live.py`、`test_guard_failover_live.py`；live 的 lab 網路上自己的接收端）：
 - SEC-01（執行中）：fake 容器執行中，以借用的 proxy-url 每 20 ms 送一次請求；管理員撤銷 grant 之後 10 秒內開始拒絕（`RUN_BLOCKED`，之後 policy 刪除是 407），放行與拒絕沒有交錯；之後接收端沒有再收到；容器在 30 秒內刪除；fake 的 run 是 `failed`（`SCOPE_REVOKED`）。

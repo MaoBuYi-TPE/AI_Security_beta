@@ -1585,7 +1585,7 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 | §14.6 第 5 步：非 0 的退出一律 `ENGINE_FAILED`、不收集 | 每個引擎宣告要收集的退出碼：fake、preflight 是 {0}，zap 是 {0, 1, 2}；manifest 記下 `exit_code`，退出碼的語意由 T15 的 parser 判斷 | AF 有警告就以 2 退出；T15 的 DoD「非零退出不一律當成 crash」 |
 | §14.4、SEC-21 的竄改表：`Tmpfs` 一律拒絕 | 只接受引擎政策宣告的固定值（zap 的 `/tmp`）；送出前的檢查以自己的一份字面值核對 | ZAP 需要可寫的 home 與 JVM 的暫存；放在 out/ 會收集到 session DB（含注入的認證）與 `config.xml`（含 proxy 的密碼） |
 | §14.4：create 的 body 只有 7 個頂層欄位 | 所有引擎都加 `Healthcheck: {"Test": ["NONE"]}`，逐字核對 | 不讓 Docker 在掃描容器內定期執行映像宣告的指令 |
-| ARCHITECTURE §6：`engine_version` 在 M3 | 版本由 probe 依映像 digest 取得、顯示在 `GET /scanners`；每個 run 的版本與輸入的 hash 由 T15 的 artifacts 資料表保存，T14 先寫進 manifest | T14 不加 migration（規劃時的審查建議） |
+| ARCHITECTURE §6：`engine_version` 在 M3 | 版本由 probe 依映像 digest 取得、顯示在 `GET /scanners`；每個 run 的版本與輸入的 hash 由 T15 的 artifacts 資料表保存；T14 的 manifest 先記下退出碼與輸入檔的 hash（映像的 digest 在 DB 的 `image_ref`，每個 run 的 ZAP 版本在 T15 記錄） | T14 不加 migration（規劃時的審查建議） |
 
 ### 18.2 ZAP 的執行方式
 
@@ -1612,7 +1612,7 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 ### 18.4 AF plan（`scanners/domain/zap/`，純函式）
 
 - 輸出 JSON（也是合法的 YAML 1.1；測試以 PyYAML 解析，和 ZAP 的 SnakeYAML 一樣），寫成 `in/plan.yaml`。
-- **context**：一個，`urls` 是 origin 加上起點。`includePaths` 由 grant 的 path 翻譯：literal 與 `{name}` 的路由（佔位符是 `[^/?#]+`）；英數字以外的字元一律以反斜線跳脫（Java 與 Python 的 regex 都當成字元本身，測試因此能以 Python 對照）；後面接 `(?:\?.*)?`；`allow_all_paths` 是整個 origin。`excludePaths` 的語意和 `covers(…, lenient=True)` 相同（段數相同、不分大小寫、忽略結尾的斜線；不涵蓋底下的 path）。
+- **context**：一個，`urls` 是 origin 加上起點。`includePaths` 由 grant 的 path 翻譯：literal 與 `{name}` 的路由（佔位符是 `[^/?#]+`）；英數字以外的字元一律以反斜線跳脫（Java 與 Python 的 regex 都當成字元本身，測試因此能以 Python 對照）；後面接 `(?:\?.*)?`；`allow_all_paths` 是整個 origin。`excludePaths` 的語意和 `covers(…, lenient=True)` 相同（段數相同、不分大小寫、忽略結尾的斜線；不涵蓋底下的 path）。AF 會把每個 context 的 `urls` 加成 `url + ".*"` 的 include（不跳脫，`TOOLS.md` §7.2），只靠 `includePaths` 擋不住範圍外的 path：`excludePaths` 另加一條「完整比對不到任何一條允許的 regex」的負向前瞻 `(?!(?:A|B)(?![\s\S])).*`（`scope.py`；和 guard 的 `covers()` 以性質測試對照；結尾不用 `$`：它在結尾的換行之前也成立）。
 - 輸出的任何字串含 `${` 就拒絕：AF 會代換環境變數，可能把 secret 帶進 plan 或請求。
 - **web（`web_active_lab`）**：`spider` 從 `/` 開始，`threadCount 1`；`postForm` 只在 grant 允許 POST 時打開；`parseRobotsTxt`、`parseSitemapXml` 只在 `/robots.txt`、`/sitemap.xml` 在範圍內時打開；Git、DS_Store、SVN 一律關閉。
 - **api（`api_active_lab`）**：`openapi`（`apiFile: /scan/in/openapi.json`，`targetUrl` 是 origin 加 base path）。
@@ -1635,6 +1635,7 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 
 - 建立 scan 時（只在 engines 含 zap 時）：`web_active_lab` 需要 grant 允許 `GET /`（spider 的起點固定是 `/`）；`api_active_lab` 照舊需要至少一個 eligible 的 operation。不符 → 422 `PROFILE_INCOMPATIBLE`。只檢查 zap：fake 不送流量，不需要起點。
 - runner 端的 plan builder 再檢查一次（`PLAN_REJECTED`）；plan 也依 grant 調整（`postForm`、robots 與 sitemap），白名單不收會改 method 的規則（api）。
+- **會改 method 的規則依 grant 篩選**（T14 的審查 L5；live 量到 grant 只允許 GET、HEAD 時仍有 52 個 POST 被 guard 擋下，§18.10）：ZAP 的原始碼中，20018（CVE-2012-1823 RCE）與 40048（React2Shell）一律送 POST，40045（Spring4Shell）先送 GET、再送 POST，10058（GET for POST）把 POST 改成 GET。grant 不允許那個 method 時，`policy_definition` 不放進那條規則（`METHOD_SWITCHING_RULES`）。依據是 zap-extensions main 分支的原始碼，不是鎖定的 ascanrules 84 的原始碼；live 以 method 分別計數驗證。guard 仍是邊界，其他規則送出 grant 以外的 method 時照樣被拒絕。
 - runner 的加固：`_plan` 依引擎完整分派、沒有預設的分支（原本 zap 的 lease 會拿到 fake 的 plan、記成 zap）；admission 核對 plan 的引擎等於 lease 的引擎、映像等於 prepare 記下的 `image_ref`。
 
 ### 18.8 capability probe（`runner/engine_probe.py`）
@@ -1642,17 +1643,27 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 - runner 對 zap 的映像 digest 執行一次 probe 容器：同一套 `build_container`（uid 10001、唯讀、tmpfs、`-dir`）；每次用新的 uuid4（workspace 的目錄不會重用）；建立空的 secret 目錄（runner 中斷時，T13 的啟動清理依它找回容器並刪除）；不寫 guard 的 policy（不需要網路）。
 - probe 的 script（另一個以 sha256 核准的樣板）：`ls /zap/plugin` 寫到 `out/plugins.txt`，再以一個 JVM 執行最小的 AF plan：兩個 `activeScan-policy`（web 與 api 的白名單）加上 `report`；context 是 `.invalid`，不送任何請求。
 - 檢查：退出碼 0（白名單的規則都存在，否則 AF 警告、退出 2）；報告的 `@version` 等於鎖定的版本；`plugins.txt` 中必要的 add-on 都在、而且是審查過的版本（同一個 add-on 有多個檔案時取最大的版本，和 ZAP 的載入規則相同）。輸出都是不可信的資料：有大小上限、逐行以 regex 解析。
-- 非阻塞：runner 的迴圈每圈前進一步（建立、查狀態、讀結果、刪除），probe 期間照常認領 fake 與 preflight；容器有牆鐘上限（180 秒）。成功以 digest 快取（同一個程序不再執行）；失敗以 10 分鐘的退避重試。runner 停止時刪除執行中的 probe 容器。
-- capability 只記版本與必要 add-on 的版本（JSONB ≤ 4096 bytes）；`GET /scanners` 加上 `version`。新的能力代碼：`ENGINE_PROBE_PENDING`（還沒驗證完）、`ENGINE_PROBE_FAILED`（容器失敗、逾時或輸出讀不到）、`ENGINE_INCOMPATIBLE`（版本、add-on 或規則不符）。API 與 runner 同時更新（§15.8）。
+- 非阻塞：runner 的迴圈每圈前進一步（建立、查狀態、讀結果、刪除），probe 期間照常認領 fake 與 preflight；容器有牆鐘上限（180 秒）。成功以 digest 快取（同一個程序不再執行）；失敗以 10 分鐘的退避重試。runner 停止時刪除執行中的 probe 容器。每次 probe（成功、失敗或沒有啟動）的 `in/`、`out/` 和掃描的 run 一樣留在 runs volume（保留期限在 M5／T23）；退避讓失敗時每 10 分鐘最多多一個目錄。
+- capability 只記版本（JSONB ≤ 4096 bytes）：必要 add-on 的版本由 probe 核對、不另外保存（每個 run 的版本與 add-on 在 T15 的 artifacts 資料表）；`GET /scanners` 加上 `version`。新的能力代碼：`ENGINE_PROBE_PENDING`（還沒驗證完）、`ENGINE_PROBE_FAILED`（容器失敗、逾時或輸出讀不到）、`ENGINE_INCOMPATIBLE`（版本、add-on 或規則不符）。API 與 runner 同時更新（§15.8）。
 
 ### 18.9 預覽開關（T15 移除）
 
 - API 的 `SCAN_PREVIEW_ENGINES`：預設是空的、只接受 `zap`、啟動時記一筆 WARNING。開啟時 `POST /scans` 接受 zap，`GET /scanners` 的 zap 以 runner 回報的 probe 結果判斷是否可用（`integrated` 仍是 false：`integrated=false` 而 `available=true` 只會出現在這個開關）。
-- 只有 live 的 compose（`make test-live-zap`）設定它。開關打開時建立的 zap scan 會停在 collected（worker 還不解析），所以只在拆除的 live 環境使用。
+- 只有 live 的 compose（`make test-live-zap`）設定它。開關打開時建立的 zap scan 會停在 collected（worker 還不解析），所以只在拆除的 live 環境使用。compose 以 live 專用的 `SECSCAN_LIVE_PREVIEW_ENGINES` 插值，`make up` 明確清空它、`make dev` 明確清空 `SCAN_PREVIEW_ENGINES`（環境變數優先於 `.env`）：`.env` 中留著 zap 也不會讓一般的 stack 接受 zap（T14 的審查 L4）。
 
 ### 18.10 量測的交接（live）
 
 - path 中的 `%` 與 body 的 `_method`（§15.10）、大於 1 MiB 的回應（§16.8）、cookie 與 ZAP 自己的 session cookie 怎麼合併（決定 §16.6 的 `auth` 旗標）、ZAP 收到 SIGTERM 之後的行為（§17.8）、參照炸彈、discriminator 與 links、說明用的 URL（§11.9）：都在 `make test-live-zap` 量測，結果記在 `TOOLS.md` §7。T14 不放寬 guard 的任何檢查。
+
+結果（2026-10-31，`TOOLS.md` §7.5）與對決定的影響：
+
+- **path 中的 `%`**：ZAP 對 path 參數的攻擊有 83% 以 `PATH_AMBIGUOUS` 被拒，§15.10 的取捨維持。放寬會讓 guard 必須判斷解碼之後的 path 是否仍在範圍內；覆蓋的缺口在 T16 以 VAmPI 量化，並在報告中揭露。
+- **body 的 `_method`**：還沒量到，小型網站的表單沒有這個欄位（T16）。
+- **大於 1 MiB 的回應**：2 MiB 的 JS 取得成功，`body_size_limit` 維持 16 MiB。
+- **cookie**：值正確、沒有和其他 cookie 合併。小型網站不發 `Set-Cookie`，和 ZAP session cookie 的合併還沒量到，所以 §16.6 的 `auth` 旗標維持只看名稱，T16 以 Juice Shop 再決定。
+- **SIGTERM**：ZAP 約 2 秒結束，在 5 秒的寬限之內；封鎖之後的請求都被拒絕，寬限維持。
+- **參照炸彈、discriminator、links、說明用的 URL**：在容器的上限內完成，canary 沒有連線，§11.9 的取捨維持。
+- **grant 不允許的 method**：ZAP 在 `postForm` 關閉時仍送出 52 個 POST，guard 全部拒絕。來源是三條會改 method 的規則，改成依 grant 篩選（§18.7）之後重跑，POST 是 0。規則白名單與 plan 的開關只是縮小工具的行為，不能取代 guard 逐請求的 method 檢查（§15；同 §18.2 對 `ZAP_AUTH_HEADER_SITE` 的定位）。
 
 ### 18.11 錯誤碼與能力代碼
 
@@ -1671,6 +1682,7 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 - `out/zap.log` 與報告的 evidence 可能含有靶機回應的內容（不可信的資料）；以已知的 secret 精確遮罩在 T15。
 - guard 回報預算用盡時不收集（T15／T16）；ZAP 分到 scan 剩下的全部預算（§16.4），M4 加入 Nuclei 時檢討。
 - `ZAP_AUTH_HEADER_SITE` 是子字串比對；預覽開關存在於 T14 與 T15 之間。
+- probe 容器與掃描容器可能同時在 scan_net 上（probe 期間照常認領）。scan_net 不能關閉容器之間的互通（掃描容器要連到 guard）；probe 沒有 secret，ZAP 的 `-cmd` 也不開埠。M4 之後同時有多個掃描容器時再檢討（T14 的審查 I3）。
 - 不在 T14：parser、觀察、退出碼的語意、排除 guard 的回應、遮罩（T15）；Juice Shop、VAmPI、預算的調整、token 失效（T16）；HTTPS、AJAX spider、queued scan 的時間上限、多個 runner；T11 的證據缺口（同一條連線上多個請求的收包證據）仍記為未實作。
 
 ## 來源
