@@ -63,7 +63,7 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/auth-profiles/{profile_id} | 同專案 | 200；不含 secret（T08 新增並實作） |
 | PATCH | /api/v1/auth-profiles/{profile_id} | operator/admin | 200；產生新版本，上一版的密文清除，舊 scan 快照不修改（T08 已實作） |
 | GET | /api/v1/auth-profiles/{profile_id}/versions | 同專案 | 200；版本的歷史，新版本在前（T08 新增並實作） |
-| GET | /api/v1/scan-profiles | 同專案 | 200；只列當前 Runner 已驗證支援的 profile（要有 runner 的 capability probe 才有意義，延到 M3） |
+| GET | /api/v1/scan-profiles | 同專案 | 200；只列當前 Runner 已驗證支援的 profile（和 zap 一起在 T15 開放，`DECISIONS.md` §18） |
 | GET | /api/v1/scanners | 已授權 key | 200；各引擎是否已整合、是否可用、映像 digest、可用的 scan profile 與 capability probe 的結果，以及 runner、worker 是否存活（T10 已實作，§18.4）；工具的版本在各引擎整合時加入 |
 | POST | /api/v1/scans | operator/admin | 202 + 完整的 scan；必須 Idempotency-Key，已終止的重送回 200（T09 已實作，§17.1；T09 只開放 fake 引擎） |
 | GET | /api/v1/scans | 同專案 | 200；target/status/time filter（T09 已實作） |
@@ -930,8 +930,8 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 
 | 欄位 | 規則 |
 |---|---|
-| `engines` | 1–4 個，不可重複。T09 只有 `fake` 可用，而且必須單獨使用；其他引擎回 422 `ENGINE_UNSUPPORTED`。執行順序固定為 zap → nuclei → schemathesis，與請求的順序無關。`preflight` 不能指定（422 `ENGINE_UNSUPPORTED`）：綁定 auth profile 時由平台自動排在第一個（T12，`DECISIONS.md` §16.5） |
-| `profile` | `api_active_lab`：必須有 `api_spec_id`，target 是 api 或 hybrid，至少一個 operation 在 grant 的範圍內。`web_active_lab`：不帶 `api_spec_id`，target 是 web 或 hybrid。不符合回 422 `PROFILE_INCOMPATIBLE` |
+| `engines` | 1–4 個，不可重複。目前只有 `fake` 可用，而且必須單獨使用；其他引擎回 422 `ENGINE_UNSUPPORTED`（zap 的 runner 端在 T14 完成，和 parser 一起在 T15 開放；只給 live 測試的預覽開關 `SCAN_PREVIEW_ENGINES=zap` 例外，`DECISIONS.md` §18.9）。執行順序固定為 zap → nuclei → schemathesis，與請求的順序無關。`preflight` 不能指定（422 `ENGINE_UNSUPPORTED`）：綁定 auth profile 時由平台自動排在第一個（T12，`DECISIONS.md` §16.5） |
+| `profile` | `api_active_lab`：必須有 `api_spec_id`，target 是 api 或 hybrid，至少一個 operation 在 grant 的範圍內。`web_active_lab`：不帶 `api_spec_id`，target 是 web 或 hybrid；引擎含 zap 時 grant 必須允許 `GET /`（spider 的起點，T14）。不符合回 422 `PROFILE_INCOMPATIBLE` |
 | `scope_grant_id` | 必須是這個 target 目前可用的 grant（§14.5 的 gate） |
 | `api_spec_id` | 必須屬於這個 target |
 | `auth_profile_id` | 必須屬於這個 target；綁定它目前的版本。preflight（GET 與 path）必須在 grant 的範圍內，否則 422（訊息附原因，例如 `PATH_EXCLUDED`，不附 path） |
@@ -1030,9 +1030,9 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `SCOPE_MISMATCH` | grant 或 target 的 origin 和快照不符（只有直接改了 DB 才會發生） |
 | `AUTH_PROFILE_SUPERSEDED` | 綁定的 profile 版本已被取代（密文已清除）；不會改用新版本 |
 | `CREATOR_KEY_REVOKED` | 建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不會開始，執行中的也停止（T13；key 到期不算） |
-| `ENGINE_FAILED` | 引擎失敗（fake 的失敗腳本；容器版是 exit code 不是 0） |
+| `ENGINE_FAILED` | 引擎失敗（fake 的失敗腳本；容器版是退出碼不在該引擎收集輸出的清單中：fake、preflight 只收 0，zap 收 0、1、2，退出碼的語意由 T15 的 parser 判斷，`DECISIONS.md` §18.1） |
 | `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止；已要求取消的 scan 也是 `interrupted`，不是 `cancelled`（沒有確認停止）。有容器的 run 由 runner 的對帳先封鎖 guard、確認容器已刪除之後才標成 `interrupted`（T13，`DECISIONS.md` §17.2）；用量不明，之後的引擎以 `BUDGET_EXHAUSTED` 失敗。容器刪不掉（Docker 不可用或那個容器出錯）時 run 保持 `running`，policy 保持 blocked |
-| `PLAN_REJECTED` | ExecutionPlan 或建立容器的設定不符合政策；沒有呼叫 Docker（T10） |
+| `PLAN_REJECTED` | ExecutionPlan 或建立容器的設定不符合政策；沒有呼叫 Docker（T10）。也用於：plan 的引擎或映像和 run 不一致、zap 的規格不能交給工具（servers 不是 target、參照指向被刪的 operation，T14） |
 | `RUNTIME_UNAVAILABLE` | 啟動容器之前 Docker 出錯（例如 socket-proxy 拒絕、映像不見了）、容器在執行中消失，或執行中連續查不到容器的狀態、已確認刪除容器（`interrupted`）（T10） |
 | `SECRET_UNAVAILABLE` | runner 解不開綁定版本的密文（金鑰不對或沒有設定）；沒有啟動容器（T10） |
 | `TIME_LIMIT_EXCEEDED` | 超過 scan 的時間上限，容器已停止（`timed_out`，T10） |
@@ -1041,7 +1041,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `RUNNER_STOPPED` | runner 被要求停止，已停止並刪除容器（`interrupted`，T10） |
 | `WORKSPACE_UNAVAILABLE` | runner 的工作目錄不可用（權限、磁碟滿），或寫不出收集的 manifest（T10） |
 | `GUARD_UNAVAILABLE` | egress guard 不可用（T11，`DECISIONS.md` §15.8）：建立容器之前（status 過期、不再檢查、寫不出 policy）→ `failed`；執行中 guard 中斷、重啟或續約失敗 → 封鎖、停止容器 → `interrupted` |
-| `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0 → `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out` |
+| `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0，或不夠 ZAP 執行（maxDuration 不到 60 秒，T14）→ `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out` |
 | `PARSE_ATTEMPTS_EXHAUSTED` | 解析 3 次都沒有在 lease 內完成（worker 中斷或卡住）→ `failed`（T13，`DECISIONS.md` §17.6） |
 
 ### 17.3 事件
@@ -1147,7 +1147,8 @@ uv run secscan-admin worker [--once]
 | 使用者與權限 | `10001:10001`、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges`、`init`、IPC 與 cgroup namespace 都是 private |
 | 網路 | 只接 scan_net（internal、gateway isolated）；T11 之前沒有任何可以連的對象 |
 | 掛載 | volume subpath：`/scan/in`（唯讀）、`/scan/out`（可寫）、`/scan/secret`（唯讀，有 secret 時；secrets volume 是 tmpfs）；沒有任何 host path |
-| 上限 | 記憶體（不能用 swap）、CPU、pids、`nofile`、log 大小、時間（scan 的 `max_duration_seconds`，fake 最多 600 秒） |
+| 上限 | 記憶體（不能用 swap）、CPU、pids、`nofile`、log 大小、時間（scan 的 `max_duration_seconds`，fake 最多 600 秒）。zap：3 GiB（含 tmpfs）、2 CPU、1024 pids，唯讀 rootfs 之外只有固定的 tmpfs `/tmp`（768 MiB、noexec；T14） |
+| healthcheck | 一律關閉映像宣告的 HEALTHCHECK（T14） |
 
 ### 18.4 GET /api/v1/scanners
 
@@ -1156,8 +1157,8 @@ uv run secscan-admin worker [--once]
 ```json
 {
   "engines": [
-    {"engine": "zap", "integrated": false, "available": false, "image": null, "profiles": [], "unavailable_reason": "NOT_INTEGRATED"},
-    {"engine": "fake", "integrated": true, "available": true, "image": "busybox:1.38.0@sha256:…", "profiles": ["api_active_lab", "web_active_lab"], "unavailable_reason": null}
+    {"engine": "zap", "integrated": false, "available": false, "image": null, "profiles": [], "unavailable_reason": "NOT_INTEGRATED", "version": "2.17.0"},
+    {"engine": "fake", "integrated": true, "available": true, "image": "busybox:1.38.0@sha256:…", "profiles": ["api_active_lab", "web_active_lab"], "unavailable_reason": null, "version": null}
   ],
   "runner": {"alive": true, "last_heartbeat_at": "2026-12-15T08:00:00Z"},
   "worker": {"alive": true, "last_heartbeat_at": "2026-12-15T08:00:01Z"}
@@ -1165,5 +1166,6 @@ uv run secscan-admin worker [--once]
 ```
 
 - 引擎依執行順序列出（zap、nuclei、schemathesis、fake）。可用與否依「最近一個 30 秒內有心跳的 runner」回報的 capability probe。
-- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`RUN_VOLUME_NOT_WRITABLE`（runner 寫不進掛載的目錄）、`IMAGE_MISSING`（映像不在本機或架構不符）、`GUARD_UNAVAILABLE`（egress guard 的 status 過期、不再檢查，或 policy 目錄不可寫；T11）。
-- `/api/v1/scan-profiles` 仍延到 M3（要依 ZAP 實際的設定調整 profile）。
+- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`RUN_VOLUME_NOT_WRITABLE`（runner 寫不進掛載的目錄）、`IMAGE_MISSING`（映像不在本機或架構不符）、`GUARD_UNAVAILABLE`（egress guard 的 status 過期、不再檢查，或 policy 目錄不可寫；T11）、`ENGINE_PROBE_PENDING`（執行容器驗證的 probe 還沒完成）、`ENGINE_PROBE_FAILED`（probe 的容器失敗、逾時或輸出讀不到）、`ENGINE_INCOMPATIBLE`（版本、add-on 或規則白名單和審查過的不同；T14，`DECISIONS.md` §18.8）。
+- `version`：runner 的 probe 實際執行映像取得的版本（zap；其他引擎是 null）。zap 在 T15 之前是 `integrated: false`、`NOT_INTEGRATED`，但仍顯示 probe 的版本；只有預覽開關開啟時，才依 probe 的結果回報 `available`（`integrated: false` 而 `available: true` 只會出現在這個開關）。
+- `/api/v1/scan-profiles` 和 zap 一起在 T15 開放（`DECISIONS.md` §18）。

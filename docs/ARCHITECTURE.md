@@ -294,10 +294,10 @@ ExecutionPlan 只能包含：
 | 項目 | ZAP | Nuclei | Schemathesis（P1） |
 |---|---|---|---|
 | 映像 | `zaproxy/zap-stable`（日期 tag + digest）[S04] | `projectdiscovery/nuclei`（digest） | `schemathesis/schemathesis`（digest）[S24] |
-| 主要入口 | `zap.sh -cmd -autorun /zap/wrk/plan.yaml`，plan 由伺服器產生 [S02][S04] | 固定參數陣列、唯讀模板目錄、凍結 ID 清單（`-id`）[S23] | `st run <spec> --url … --seed …`，搭配固定 config [S07] |
+| 主要入口 | 以 sha256 核准的 script 執行 `zap.sh -Xmx1536m -cmd -silent -nostdout -dir /tmp/zap -configfile … -autorun /scan/in/plan.yaml`，plan 由伺服器產生（T14，`DECISIONS.md` §18.2）[S02][S04] | 固定參數陣列、唯讀模板目錄、凍結 ID 清單（`-id`）[S23] | `st run <spec> --url … --seed …`，搭配固定 config [S07] |
 | 輸入 | scope context、Web seed 或 API 規格 | 核准的目標/端點、template ID 清單 | 已驗證的 OpenAPI、operation allowlist、seed |
-| 目標認證 | `ZAP_AUTH_HEADER*` 環境變數（啟動時讀取，每個容器各自獨立）[S21]；T03 已驗證 `_SITE` 以 host 子字串比對 | `-sf` secret 檔：`static: - type: bearertoken` + `domains` 完全比對 host:port（T03 驗證）[S23] | `schemathesis.toml` 以 `${ENV}` 帶入 `[auth.openapi.<scheme>] bearer`（T03 驗證）[S09] |
-| 出站 | upstream proxy 設定鍵 `network.connection.httpProxy.*`，以 `-configfile`（0400）注入、不洩漏密碼（T03 驗證） | `-p <檔案>` 指向 guard；經 proxy 不需本機 DNS（T03 驗證）[S23] | `proxy` 指向 guard（T03 驗證）[S07] |
+| 目標認證 | `ZAP_AUTH_HEADER*` 環境變數（啟動時讀取，每個容器各自獨立）[S21]：plan 只有模式與 header 名稱，值由 script 從 0400 的 auth-header 檔讀出、只 export 給 ZAP（T14）；`_SITE` 以 host 子字串比對，邊界是 guard | `-sf` secret 檔：`static: - type: bearertoken` + `domains` 完全比對 host:port（T03 驗證）[S23] | `schemathesis.toml` 以 `${ENV}` 帶入 `[auth.openapi.<scheme>] bearer`（T03 驗證）[S09] |
+| 出站 | upstream proxy 設定鍵 `network.connection.httpProxy.*` 與速率 `network.ratelimit.*`，以 `-configfile`（0400 的 zap.properties）注入；值會記在 ZAP 的 log，以 `-nostdout` 讓它只留在 tmpfs（T14 實測） | `-p <檔案>` 指向 guard；經 proxy 不需本機 DNS（T03 驗證）[S23] | `proxy` 指向 guard（T03 驗證）[S07] |
 | 整合輸出 | report job 產生的 JSON；必要的訊息/統計 | `-jsonl -o` + 執行 manifest | `--report json,ndjson`；必要時加 junit [S07] |
 | 必須關閉 | `-silent`（不主動對外請求、不檢查更新）[S20]；OAST | `-ni`（關閉 interactsh/OAST）、`-duc`、`-pt http` 以外的協定、code/headless/dos 模板、雲端上傳 [S23] | 未授權的 method（grant + guard 雙重限制）；自動建立帳號等行為（若該版本有） |
 | 來源鍵 | plugin/rule ID、alert instance | template ID、matcher、matched-at | check、operation、case/event ID |
@@ -313,7 +313,7 @@ ExecutionPlan 只能包含：
   - 依鎖定版本確認報告支援的格式，不捏造參數。
   - 用 JUnit 時，不能只靠 free text 猜 parameter 或位置；要關聯 NDJSON，或把缺乏定位資訊的結果標為低精度。[S07]
   - 要禁止某個 HTTP method，必須同時限制 generation 與出站，而不是只關掉對應的 check。[S08]
-- **capability probe**：每個 adapter 都要檢查實際的 executable、版本、設定檔、輸出能否寫入，以及 proxy 行為。工具不支援所需能力時，回傳能力錯誤，不偷偷降級。
+- **capability probe**：每個 adapter 都要檢查實際的 executable、版本、設定檔、輸出能否寫入，以及 proxy 行為。工具不支援所需能力時，回傳能力錯誤，不偷偷降級。ZAP（T14，`DECISIONS.md` §18.8）：runner 以和掃描相同的強化設定實際執行映像，確認版本、必要的 add-on 與規則白名單、輸出能寫出；proxy 的行為由每個 run 的 guard telemetry 證明。
 
 ## 6. 資料模型
 
