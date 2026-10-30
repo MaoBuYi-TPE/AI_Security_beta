@@ -22,6 +22,7 @@ from secscan.runner.domain.admission import (
     check_container_spec,
     container_name,
     container_spec,
+    managed_run_id,
 )
 from secscan.runner.domain.policy import ContainerPolicy
 from secscan.scanners.domain.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
@@ -340,3 +341,13 @@ def test_a_writable_secret_or_input_from_the_builder_is_refused(
 
     with pytest.raises(PlanRejectedError):
         build_container(AUTH_PLAN, policy=POLICY)
+
+
+def test_the_labels_identify_the_run() -> None:
+    """對帳以 label 核對容器（docs/DECISIONS.md §17.2）：container_spec 的 label 讀得回 run_id。"""
+    labels = container_spec(fake_plan(), POLICY).body["Labels"]
+
+    assert isinstance(labels, dict)
+    assert managed_run_id(labels) == RUN_ID
+    assert managed_run_id({**labels, "secscan.managed": "false"}) is None
+    assert managed_run_id({}) is None

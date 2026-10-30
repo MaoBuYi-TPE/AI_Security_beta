@@ -18,7 +18,12 @@ import pytest
 from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.credentials import parse_proxy_authorization, token_digest
-from secscan.guard.domain.policy import Policy, PolicyState, policy_file_name
+from secscan.guard.domain.policy import (
+    MAX_POLICY_BYTES,
+    Policy,
+    PolicyState,
+    policy_file_name,
+)
 from secscan.guard.domain.status import STATUS_FILE_NAME, StatusIssue
 from secscan.guard.domain.telemetry import summary_file_name
 from secscan.guard.files import write_atomic
@@ -283,20 +288,94 @@ def test_remove_failures_mean_the_guard_is_unavailable(guard: GuardDouble) -> No
         os.chmod(guard.policies, stat.S_IRWXU)
 
 
-# --- sweep ------------------------------------------------------------------------------------
+# --- 對帳與啟動時的清理（docs/DECISIONS.md §17.2、§17.4） ----------------------------------------
 
 
-def test_sweep_removes_policies_and_temp_files_only(guard: GuardDouble) -> None:
-    for run_id in (uuid4(), uuid4()):
-        _open(guard.channel(), lease=Lease(run_id, uuid4(), Engine.FAKE, "x")).activate()
+def _activated(guard: GuardDouble, run_id: UUID | None = None) -> UUID:
+    lease = Lease(run_id or uuid4(), uuid4(), Engine.FAKE, "x")
+    _open(guard.channel(), lease=lease).activate()
+    return lease.run_id
+
+
+def test_block_turns_a_leftover_policy_into_a_blocked_one(guard: GuardDouble) -> None:
+    run_id = _activated(guard)
+    before = guard.policy(run_id)
+    assert before is not None
+
+    assert guard.channel().block(run_id) is True
+
+    after = guard.policy(run_id)
+    assert after == before.blocked()
+    assert after.state is PolicyState.BLOCKED
+
+
+def test_block_leaves_a_blocked_policy_as_it_is(guard: GuardDouble) -> None:
+    run_id = _activated(guard)
+    guard.channel().block(run_id)
+    path = guard.policies / policy_file_name(run_id)
+    inode = path.stat().st_ino
+
+    assert guard.channel().block(run_id) is True
+    assert path.stat().st_ino == inode  # 沒有再寫一次
+
+
+def test_block_of_a_missing_policy_reports_it(guard: GuardDouble) -> None:
+    assert guard.channel().block(uuid4()) is False
+
+
+@pytest.mark.parametrize("damage", ["symlink", "directory", "oversized", "corrupt", "other_run"])
+def test_block_refuses_a_policy_it_cannot_trust(guard: GuardDouble, damage: str) -> None:
+    """讀不出來或格式不符：拋 GuardUnavailableError，不動那個檔案（guard 本來就會拒絕它）。"""
+    run_id = uuid4()
+    path = guard.policies / policy_file_name(run_id)
+    if damage == "symlink":
+        path.symlink_to(guard.policies / policy_file_name(_activated(guard)))
+    elif damage == "directory":
+        path.mkdir()
+    elif damage == "oversized":
+        path.write_bytes(b" " * (MAX_POLICY_BYTES + 2))
+    elif damage == "corrupt":
+        path.write_bytes(b"{not json")
+    else:
+        other = _activated(guard)
+        path.write_bytes((guard.policies / policy_file_name(other)).read_bytes())
+    before = path.lstat()
+
+    with pytest.raises(GuardUnavailableError):
+        guard.channel().block(run_id)
+
+    after = path.lstat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_policy_runs_lists_only_policy_files(guard: GuardDouble) -> None:
+    runs = {_activated(guard), _activated(guard)}
     (guard.policies / ".tmp-abc").write_bytes(b"x")
     (guard.policies / "README").write_bytes(b"keep")
-    (guard.policies / "subdir.json").mkdir()
+    (guard.policies / f"{str(uuid4()).upper()}.json").write_bytes(b"x")  # 不是標準格式
+    (guard.policies / f"{uuid4()}.json").mkdir()
 
-    removed = guard.channel().sweep()
+    assert guard.channel().policy_runs() == runs
 
-    assert removed == 3
-    assert guard.policy_files() == ["README", "subdir.json"]
+
+def test_only_stale_temporary_files_are_swept(guard: GuardDouble) -> None:
+    """暫存檔可能是另一個 runner 正在寫的：超過 60 秒才刪。"""
+    run_id = _activated(guard)
+    stale, fresh = guard.policies / ".tmp-stale", guard.policies / ".tmp-fresh"
+    stale.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    os.utime(stale, (NOW - 61, NOW - 61))
+    os.utime(fresh, (NOW - 59, NOW - 59))
+    channel = GuardChannel(
+        guard.policies,
+        guard.status_dir,
+        telemetry_dir=guard.telemetry,
+        listen=GUARD_LISTEN,
+        clock=lambda: NOW,
+    )
+
+    assert channel.sweep_temporary(older_than=60) == 1
+    assert guard.policy_files() == [".tmp-fresh", policy_file_name(run_id)]
 
 
 def test_a_policy_written_despite_an_error_can_still_be_blocked_and_removed(

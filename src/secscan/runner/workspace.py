@@ -165,6 +165,15 @@ class Workspace:
         except OSError as exc:
             raise WorkspaceError(f"無法刪除 secret（{_reason(exc)}）") from None
 
+    def secret_runs(self) -> frozenset[UUID]:
+        """secrets volume 中留下 secret 的 run（標準格式的 run_id 目錄；不跟隨 symlink）。"""
+        runs = set()
+        for entry in self._secrets.iterdir():
+            run_id = _run_id(entry.name)
+            if run_id is not None and entry.is_dir() and not entry.is_symlink():
+                runs.add(run_id)
+        return frozenset(runs)
+
     def sweep_secrets(self) -> int:
         """刪除上一個 runner 留下的 secret（呼叫端先確認沒有其他存活的 runner）。"""
         removed = 0
@@ -205,6 +214,14 @@ class Workspace:
                 os.close(out_fd)
         finally:
             os.close(run_fd)
+
+
+def _run_id(text: str) -> UUID | None:
+    try:
+        run_id = UUID(text)
+    except ValueError:
+        return None
+    return run_id if str(run_id) == text else None
 
 
 def _reason(exc: OSError) -> str:

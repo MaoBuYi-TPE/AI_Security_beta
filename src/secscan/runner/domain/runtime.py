@@ -6,6 +6,7 @@ runner 只透過這個介面操作容器；實作是 runner/docker_runtime.py（
 
 from dataclasses import dataclass
 from typing import Protocol
+from uuid import UUID
 
 from secscan.runner.domain.admission import ContainerSpec
 
@@ -37,11 +38,16 @@ class NetworkState:
 
 @dataclass(frozen=True, slots=True)
 class ContainerState:
-    """running 為 false 時，exit_code 是結束的代碼；oom_killed 表示因記憶體上限被終止。"""
+    """running 為 false 時，exit_code 是結束的代碼；oom_killed 表示因記憶體上限被終止。
+
+    run_label：label 標示的 run（不是 runner 建立的容器是 None；docs/DECISIONS.md §17.2）。
+    已建立但還沒啟動、暫停中的容器都算 running（可能之後才開始送出流量）。
+    """
 
     running: bool
     exit_code: int | None
     oom_killed: bool
+    run_label: UUID | None = None
 
 
 class ContainerRuntime(Protocol):

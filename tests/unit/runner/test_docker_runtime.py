@@ -4,6 +4,7 @@
 """
 
 from collections.abc import Callable
+from uuid import UUID
 
 import pytest
 import requests
@@ -132,6 +133,36 @@ def test_state(
     docker_api.reply("GET", f"{PREFIX}/containers/{NAME}/json", 200, {"State": state})
 
     assert runtime.state(NAME) == expected
+
+
+LABELED_RUN = "6f1c2d3e-4b5a-4c6d-8e7f-001122334455"
+
+
+@pytest.mark.parametrize(
+    ("config", "run_label"),
+    [
+        ({"Labels": {"secscan.managed": "true", "secscan.run_id": LABELED_RUN}}, LABELED_RUN),
+        ({"Labels": {"secscan.managed": "false", "secscan.run_id": LABELED_RUN}}, None),
+        ({"Labels": {"secscan.run_id": LABELED_RUN}}, None),
+        ({"Labels": {"secscan.managed": "true", "secscan.run_id": "not-a-uuid"}}, None),
+        ({"Labels": {"secscan.managed": "true", "secscan.run_id": LABELED_RUN.upper()}}, None),
+        ({"Labels": {"secscan.managed": "true", "secscan.run_id": 7}}, None),
+        ({"Labels": None}, None),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_state_reads_the_run_label(
+    runtime: DockerRuntime, docker_api: StubDocker, config: object, run_label: str | None
+) -> None:
+    """對帳以 label 核對容器是不是這個 run 的（docs/DECISIONS.md §17.2）；格式不符就是 None。"""
+    payload = {"State": {"Status": "running"}, "Config": config}
+    docker_api.reply("GET", f"{PREFIX}/containers/{NAME}/json", 200, payload)
+
+    state = runtime.state(NAME)
+
+    assert state is not None
+    assert state.run_label == (UUID(run_label) if run_label is not None else None)
 
 
 def test_state_of_a_missing_container(runtime: DockerRuntime) -> None:

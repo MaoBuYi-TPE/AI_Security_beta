@@ -166,17 +166,18 @@ def test_a_failure_on_the_second_file_leaves_nothing_behind(
     assert list(dirs[1].iterdir()) == []
 
 
-def test_sweeping_removes_secrets_left_by_a_previous_runner(
+def test_secret_runs_lists_the_runs_that_left_secrets(
     workspace: Workspace, dirs: tuple[Path, Path]
 ) -> None:
-    for _ in range(3):
-        workspace.write_secrets(uuid4(), {SECRET_FILE: "left over"})
+    """啟動時依證據清理（docs/DECISIONS.md §17.4）：只回報 run 的目錄，不跟隨 symlink。"""
+    runs = {uuid4() for _ in range(3)}
+    for run_id in runs:
+        workspace.write_secrets(run_id, {SECRET_FILE: "left over"})
     (dirs[1] / "stray").write_bytes(b"x")
-    (dirs[1] / "link").symlink_to(dirs[0])
+    (dirs[1] / str(uuid4())).symlink_to(dirs[0])
+    (dirs[1] / str(uuid4()).upper()).mkdir()
 
-    assert workspace.sweep_secrets() == 5
-    assert dirs[0].exists()
-    assert list(dirs[1].iterdir()) == []
+    assert workspace.secret_runs() == runs
 
 
 # --- 收集 ----------------------------------------------------------------------------------
