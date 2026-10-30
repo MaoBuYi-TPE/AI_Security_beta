@@ -188,6 +188,8 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 
 **T11 已實作**（`DECISIONS.md` §15.7）：取消是封鎖 → cancelling → stop；逾時、runner 停止、輸出超過上限、lease 失效、guard 中斷也都在停止容器之前先封鎖。容器確認刪除之後才刪 policy，刪不掉就保留 blocked。live 測試以掃描容器的 proxy-url 從探針送請求：取消之後 guard 在容器收到 kill 之前就開始回 `RUN_BLOCKED`。
 
+**T13 已實作**（`DECISIONS.md` §17.5）：執行中的 scan 在 grant 撤銷或到期、target 停用、建立者的 key 撤銷時停止。心跳以不加鎖的讀取重新判斷 gate（不等撤銷的 `FOR UPDATE`），看到就封鎖 → 停止容器 → `failed`（該錯誤碼）；建立容器之前看到就不建立。live 測試：撤銷 grant 之後 10 秒內開始拒絕，policy 在容器收到 kill 之前就已是 blocked，之後接收端收不到任何請求。
+
 已經送到靶場的操作無法撤銷；靶場資料的重置由受控的 fixture 程序另外處理。
 
 ### 3.5 Telemetry 的用途
@@ -394,6 +396,7 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
 - **T12（migration `0007`、`0008`）**：
   - scanner_runs 新增 `requests_allotted`、`requests_sent`、`requests_denied`、`traffic_seconds`（非負；有 sent 就有 allotted 且不超過它）、`preflight_result`（只有 preflight 的 run）、`coverage_recorded`；engine 加上 `preflight`，sequence 上限改成 5。
   - run_coverage：主鍵 `(scanner_run_id, ordinal)`；`(scanner_run_id, scan_id)` 引用 run、`(scan_id, ordinal)` 引用凍結的 operation；不可修改、刪除或 TRUNCATE。
+- **T13（migration `0009`）**：scanner_runs 新增 `container_removed_at`（容器確認不存在的時間；只有記下容器的 run 才有值，不早於開始的時間）與部分索引 `ix_scanner_runs_pending_containers`。trigger `scanner_runs_guard` 改寫：這一欄只能寫入一次；已終止的 run 只允許補寫它，其他欄位完全不變（`DECISIONS.md` §17.3）。
 - **其餘資料表由各功能任務以自己的 migration 加入**：findings、observations、artifacts、reports 在 M3 之後加入。
 
 ## 7. ScanPlan 與執行快照
@@ -500,6 +503,15 @@ T09 已實作（`DECISIONS.md` §13.4）：
 - runner 每一輪認領之前讀 guard 的 status；guard 不可用（過期、不再檢查、policy 目錄不可寫）就不認領，`GET /scanners` 顯示 `GUARD_UNAVAILABLE`。建立容器之前 guard 已不可用 → failed（`GUARD_UNAVAILABLE`），不建立容器。
 - 建立容器之前寫好 policy；每次 DB 心跳成功之後才續約 `renew_until`。執行中 guard 中斷、重啟（`boot_id` 改變）或續約寫不出去 → 封鎖、停止容器 → interrupted（`GUARD_UNAVAILABLE`）。
 - runner 被強制終止時，孤兒容器的 policy 不再續約：guard 最晚在 lease 到期時（30 秒）回 `POLICY_STALE`（live 測試以 SIGKILL 確認）。容器本身的回收與 run 的對帳仍在 T13。
+
+**T13 已實作**（`DECISIONS.md` §17.2、§17.4）：
+
+- runner 內的 reconciler：啟動時一次、之後每 10 秒一次（在認領之前），依 DB 記下的容器名稱找容器（socket-proxy 不放行 list）。lease 過期的 run：封鎖 guard 的 policy → 刪除 secret → 核對 label → 強制刪除容器 → 確認之後才在 DB 結算（runner 階段 → interrupted `LEASE_EXPIRED`，用量留空）→ 刪除 policy。已結束但容器沒刪掉的 run 只記下刪除的時間。Docker 出錯時不結算、policy 保持 blocked。
+- 沒有容器、或容器已確認刪除的 runner 階段 run（preparing 時中斷、記下刪除之後才中斷）：lease 過期就 interrupted，不必呼叫 Docker。
+- 建立容器之前再心跳一次：凍結的 owner 在對帳之後醒來不會建立容器；同一個 scan 的下一個引擎要等前一個 run 結算才開始（DoD 1）。
+- 啟動時依證據清理：只處理已結算或 DB 沒有的 run 留下的 policy、secret 與容器（取代 T10 刪除全部的 sweep）。
+- 解析重試最多 3 次（`PARSE_ATTEMPTS_EXHAUSTED`）；worker 不因單一 run 的例外結束。
+- live 測試：runner 被 SIGKILL 之後重啟，run 與 scan 都是 interrupted、容器被刪除、這個 run 只建立過一個容器、同一個 target 可以再掃描；lease 過期而容器仍在執行時，重啟的 runner 先把 policy 改成 blocked，容器才收到 kill，之後接收端收不到任何請求。
 
 **取消的驗收目標**：
 
