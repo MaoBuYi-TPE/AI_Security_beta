@@ -85,9 +85,11 @@ def _hosts(entries: list[dict[str, Any]]) -> set[tuple[object, object]]:
     return {(entry.get("host"), entry.get("port")) for entry in entries if "host" in entry}
 
 
-def _assert_hidden(container: str, *secrets: str) -> None:
-    """secret 不在容器的設定中（Env 只有非秘密的值，Cmd 是 script，Labels 只有 id）。"""
-    config = json.dumps(inspect(container)["Config"])
+def _assert_hidden(info: dict[str, Any], *secrets: str) -> None:
+    """secret 不在容器的設定中（執行中 inspect 的結果；Env 只有非秘密的值、Cmd 是 script、Labels
+    只有 id）。
+    """
+    config = json.dumps(info["Config"])
     for secret in secrets:
         assert secret not in config
 
@@ -126,7 +128,7 @@ def test_an_anonymous_web_scan_stays_inside_the_grant(
     assert not [env for env in config["Config"]["Env"] if env.startswith("ZAP_AUTH")]
     assert config["HostConfig"]["ReadonlyRootfs"] is True
     assert config["Config"]["User"] == "10001:10001"
-    _assert_hidden(container, token)
+    _assert_hidden(config, token)
     records = site.records()
     assert records, "ZAP 沒有送出任何請求（proxy 的設定沒有生效？）"
     paths = [urlsplit(record["path"]).path for record in records]
@@ -221,7 +223,12 @@ def _profile(item: Lab, kind: str, secret: str, header: str | None = None) -> st
         "role_label": "standard_user",
         "type": kind,
         "secret": secret,
-        "preflight": {"method": "GET", "path": "/me", "expected_status": 200},
+        "preflight": {
+            "method": "GET",
+            "path": "/me",
+            "expected_status": 200,
+            "expected_json": {"/status": "success"},
+        },
     }
     if header is not None:
         body["header_name"] = header
@@ -256,7 +263,7 @@ def test_a_bearer_api_scan_sends_only_eligible_operations_to_the_target(
     assert "SECSCAN_TARGET_AUTH=header" in env
     assert "ZAP_AUTH_HEADER=Authorization" in env
     assert f"ZAP_AUTH_HEADER_SITE={item.host}" in env
-    _assert_hidden(container, token, proxy_token)
+    _assert_hidden(config, token, proxy_token)
     records = site.records()
     zap_records = [record for record in records if urlsplit(record["path"]).path != "/me"]
     assert zap_records, "ZAP 沒有送出任何請求"

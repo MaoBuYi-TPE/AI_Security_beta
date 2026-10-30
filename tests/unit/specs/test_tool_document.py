@@ -176,3 +176,16 @@ def test_the_vampi_spec_keeps_only_the_get_operations() -> None:
     }
     assert kept == eligible
     assert len(output) < len(normalized.document)
+
+
+def test_paths_must_be_an_object() -> None:
+    document = json.loads(_document(ITEMS))
+    document["paths"] = []
+
+    with pytest.raises(ToolDocumentError, match="paths"):
+        tool_document(
+            json.dumps(document).encode(),
+            eligible={("GET", "/api/items")},
+            base_path="/api",
+            origin=ORIGIN,
+        )

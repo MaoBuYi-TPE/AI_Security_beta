@@ -14,7 +14,7 @@ import pytest
 from secscan.runner.domain.admission import ContainerSpec, managed_run_id
 from secscan.runner.engine_probe import PROBE_RETRY_SECONDS, EngineProber
 from secscan.runner.probe import probe
-from secscan.runner.workspace import Workspace
+from secscan.runner.workspace import Workspace, WorkspaceError
 from secscan.scanners.domain.instances import Capabilities, CapabilityIssue, EngineCapability
 from secscan.scanners.domain.zap.policy import REQUIRED_ADDONS, ZAP_IMAGE, ZAP_VERSION
 from secscan.scanners.domain.zap.probe import PROBE_WALL_CLOCK_SECONDS
@@ -283,3 +283,87 @@ def test_each_attempt_uses_a_new_identity(
         assert isinstance(labels, dict)
         ids.append(managed_run_id(labels))
     assert all(isinstance(value, UUID) and value != uuid4() for value in ids)
+
+
+def test_a_temporary_docker_error_while_watching_is_retried(
+    runtime: FakeContainerRuntime, dirs: tuple[Path, Path]
+) -> None:
+    runtime.scripted[str(ZAP_IMAGE)] = ScriptedContainer(seconds=10, on_start=_writer(dirs[0]))
+    prober = _prober(runtime, dirs)
+    base = probe(runtime, POLICY)
+    prober.step(base)
+    runtime.failing.add("state")
+
+    prober.step(base)
+
+    assert prober.running
+    runtime.failing.discard("state")
+    _settle(prober, runtime, base)
+    assert _zap(prober.apply(base)).issue is None
+
+
+def test_docker_errors_past_the_deadline_end_the_probe(
+    runtime: FakeContainerRuntime, dirs: tuple[Path, Path]
+) -> None:
+    runtime.scripted[str(ZAP_IMAGE)] = ScriptedContainer(seconds=10_000)
+    prober = _prober(runtime, dirs)
+    base = probe(runtime, POLICY)
+    prober.step(base)
+    runtime.failing.update({"state", "stop"})
+    runtime.clock.sleep(PROBE_WALL_CLOCK_SECONDS + 1)
+
+    prober.step(base)
+
+    assert not prober.running
+    assert runtime.removed == [runtime.created[0].name]
+    assert _zap(prober.apply(base)).issue is CapabilityIssue.ENGINE_PROBE_FAILED
+
+
+def test_a_secret_directory_that_cannot_be_removed_is_only_logged(
+    runtime: FakeContainerRuntime,
+    dirs: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime.scripted[str(ZAP_IMAGE)] = ScriptedContainer(on_start=_writer(dirs[0]))
+    workspace = Workspace(*dirs)
+
+    def refuse(run_id: UUID) -> None:
+        raise WorkspaceError("無法刪除 secret（EACCES）")
+
+    monkeypatch.setattr(workspace, "discard_secrets", refuse)
+    prober = EngineProber(runtime, workspace, POLICY, monotonic=runtime.clock.monotonic)
+    base = probe(runtime, POLICY)
+
+    _settle(prober, runtime, base)
+
+    assert _zap(prober.apply(base)).issue is None
+    assert "secret 目錄" in caplog.text
+
+
+def test_closing_without_a_running_probe_does_nothing(
+    runtime: FakeContainerRuntime, dirs: tuple[Path, Path]
+) -> None:
+    _prober(runtime, dirs).close()
+
+    assert runtime.removed == []
+
+
+def test_an_unusable_workspace_creates_no_container(
+    runtime: FakeContainerRuntime, dirs: tuple[Path, Path]
+) -> None:
+    probe_id = uuid4()
+    (dirs[0] / str(probe_id)).mkdir()
+    prober = EngineProber(
+        runtime,
+        Workspace(*dirs),
+        POLICY,
+        monotonic=runtime.clock.monotonic,
+        new_id=lambda: probe_id,
+    )
+    base = probe(runtime, POLICY)
+
+    prober.step(base)
+
+    assert runtime.created == []
+    assert _zap(prober.apply(base)).issue is CapabilityIssue.ENGINE_PROBE_FAILED
