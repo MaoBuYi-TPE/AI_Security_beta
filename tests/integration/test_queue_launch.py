@@ -2,7 +2,8 @@
 
 - prepare_launch：檢查通過時，在移到 running 的同一個 transaction 中記下容器與映像，並以 FOR SHARE
   讀出綁定版本的密文（T09 的交接：PATCH 清除密文要等這個 transaction 結束）。
-- 有容器的 run，lease 過期不代表容器已停止：runner 階段的對帳不碰它（T13）。
+- 有容器的 run，lease 過期不代表容器已停止：沒有容器的對帳不碰它（由容器的對帳處理，
+  docs/DECISIONS.md §17.2）。
 每個測試用自己的資料庫（queue_database）。
 """
 
@@ -264,7 +265,8 @@ def test_the_in_process_prepare_records_no_container(
 def test_reconcile_leaves_runs_with_a_container_alone(
     queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
-    """容器可能還在執行：只因 lease 過期就標成 interrupted，會讓第二個容器同時跑（T13 處理）。"""
+    """容器可能還在執行：只因 lease 過期就標成 interrupted，會讓第二個容器同時跑（由容器的對帳
+    確認刪除之後才結算，test_container_reconciler.py）。"""
     queue_seed.scan(world.operator_a, scannable)
     lease = _claimed(queue)
     queue.prepare_launch(lease, image_ref=IMAGE)

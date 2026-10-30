@@ -41,6 +41,11 @@ class TargetRepository:
         model = self._session.get(TargetModel, target_id)
         return _to_domain(model) if model is not None else None
 
+    def current(self, target_id: UUID) -> Target | None:
+        """不加鎖、一定向 DB 重新讀取（runner 的心跳；docs/DECISIONS.md §17.5）。"""
+        model = self._session.get(TargetModel, target_id, populate_existing=True)
+        return _to_domain(model) if model is not None else None
+
     def lock(self, target_id: UUID, *, shared: bool = False) -> Target | None:
         """鎖住 target，並以 DB 的最新值覆蓋已載入的物件。
 

@@ -30,7 +30,9 @@ def ready(
 ) -> Envelope[ReadyStatus]:
     """可接受請求的檢查：DB 能連線，且 schema 正好在程式預期的 migration 版本。
 
-    runner heartbeat 等其他依賴在 M2 加入。同步函式：FastAPI 會在 threadpool 執行 DB 查詢。
+    不納入 runner、worker、guard 的狀態（docs/DECISIONS.md §17）：ready 表示這個 API 程序能服務，
+    沒有 runner 時 API 仍能接受並排入 scan；它們的狀態由 GET /scanners 呈現。
+    同步函式：FastAPI 會在 threadpool 執行 DB 查詢。
     """
     status = probe_database(resources.engine, resources.schema_revision)
     if status is not DatabaseStatus.READY:

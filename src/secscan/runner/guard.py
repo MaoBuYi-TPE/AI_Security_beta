@@ -6,6 +6,8 @@
   設定的 proxy、enforcing 為 true，才算可用。
 - telemetry 目錄（guard_telemetry volume，§16.3）：guard 寫、runner 唯讀。runner 讀 summary 得知
   run 是否用盡預算與實際的轉送數；讀不出來或格式不符時拋 GuardUnavailableError。
+- 對帳與啟動時的清理（§17.2、§17.4）：讀回留下的 policy 改成 blocked、列出留下 policy 的 run、
+  刪除過期的暫存檔。
 """
 
 import os
@@ -16,7 +18,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from secscan.guard.domain.policy import POLICY_SUFFIX, Policy, encode_policy, policy_file_name
+from secscan.core.identifiers import canonical_uuid
+from secscan.guard.domain.policy import (
+    MAX_POLICY_BYTES,
+    POLICY_SUFFIX,
+    Policy,
+    PolicyError,
+    PolicyState,
+    decode_policy,
+    encode_policy,
+    policy_file_name,
+)
 from secscan.guard.domain.status import (
     MAX_STATUS_BYTES,
     STATUS_FILE_NAME,
@@ -120,16 +132,74 @@ class GuardChannel:
         except AtomicWriteError as exc:
             raise GuardUnavailableError(f"無法刪除 guard 的 policy（{exc}）") from None
 
-    def sweep(self) -> int:
-        """刪除上一個 runner 留下的 policy 與暫存檔（呼叫端先確認沒有其他存活的 runner）。"""
+    def block(self, run_id: UUID) -> bool:
+        """把留下的 policy 改成 blocked（對帳用；已是 blocked 就不再寫）。不存在回 False。
+
+        讀不出來、不是一般檔案、超過大小或格式不符：拋 GuardUnavailableError，不動那個檔案
+        （guard 讀到這種檔案本來就會拒絕；對帳仍會刪除容器，§17.1）。
+        """
+        try:
+            raw = _read_small(self._policies / policy_file_name(run_id), MAX_POLICY_BYTES)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise GuardUnavailableError(f"讀不到 guard 的 policy（{type(exc).__name__}）") from None
+        try:
+            policy = decode_policy(raw, run_id=run_id)
+        except PolicyError as exc:
+            raise GuardUnavailableError(f"guard 的 policy 格式不符（{exc}）") from None
+        if policy.state is not PolicyState.BLOCKED:
+            self.write(policy.blocked())
+        return True
+
+    def policy_runs(self) -> frozenset[UUID]:
+        """policy 目錄中留下 policy 的 run（檔名是標準格式的 `<run_id>.json`，不是目錄）。
+
+        列出之後才消失的條目（另一個 runner 正在寫入）跳過；目錄讀不出來時拋 GuardUnavailableError。
+        """
+        runs = set()
+        for entry in self._entries():
+            stem, suffix = entry.name[: -len(POLICY_SUFFIX)], entry.name[-len(POLICY_SUFFIX) :]
+            run_id = canonical_uuid(stem) if suffix == POLICY_SUFFIX else None
+            info = _lstat(entry) if run_id is not None else None
+            if run_id is not None and info is not None and not stat.S_ISDIR(info.st_mode):
+                runs.add(run_id)
+        return frozenset(runs)
+
+    def sweep_temporary(self, *, older_than: float) -> int:
+        """刪除超過 older_than 秒沒有更新的暫存檔（可能是另一個 runner 正在寫的，所以不全刪）。"""
         removed = 0
-        for entry in self._policies.iterdir():
-            info = entry.lstat()
-            leftover = entry.name.endswith(POLICY_SUFFIX) or entry.name.startswith(TEMP_PREFIX)
-            if leftover and not stat.S_ISDIR(info.st_mode):
+        cutoff = self._clock() - older_than
+        for entry in self._entries():
+            info = _lstat(entry) if entry.name.startswith(TEMP_PREFIX) else None
+            if info is None or stat.S_ISDIR(info.st_mode) or info.st_mtime >= cutoff:
+                continue
+            try:
                 entry.unlink()
-                removed += 1
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise GuardUnavailableError(
+                    f"無法刪除 policy 的暫存檔（{type(exc).__name__}）"
+                ) from None
+            removed += 1
         return removed
+
+    def _entries(self) -> list[Path]:
+        try:
+            return list(self._policies.iterdir())
+        except OSError as exc:
+            raise GuardUnavailableError(f"無法列出 policy 目錄（{type(exc).__name__}）") from None
+
+
+def _lstat(path: Path) -> os.stat_result | None:
+    """不存在（列出之後才消失）是 None；其他錯誤拋 GuardUnavailableError。"""
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise GuardUnavailableError(f"無法讀取 policy 目錄（{type(exc).__name__}）") from None
 
 
 def _read_small(path: Path, limit: int) -> bytes:

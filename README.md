@@ -42,7 +42,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 先閱讀 `docs/START_HERE.md`，再依 `docs/TASKS.md` 的順序開發。根目錄使用大寫檔名 **`CLAUDE.md`**。[S01]
 
-目前完成 M0、M1（T02–T09）與 M2 的 T10、T11、T12：
+目前完成 M0、M1（T02–T09）與 M2（T10–T13）：
 - **M0**：FastAPI 骨架與品質命令（T02）；隔離 lab（`compose.lab.yaml` + `make lab-up`）與三個掃描器經 proxy 的工具 spike（T03，結果見 `docs/TOOLS.md`）。
 - **T04**：PostgreSQL 資料層（`compose.yaml`、Alembic migration、repository），第一批資料表 projects、api_keys、audit_events，以及 `GET /health/ready`。
 - **T05**：平台 API key（DB 只存 hash、一定會過期、可撤銷）、project 與 object-level 權限、`/api/v1` 的 projects、keys 與稽核查詢端點，以及建立初始管理 key 的本機 CLI `secscan-admin`（見下方「平台 API key」與 `docs/API_CONTRACT.md` §13）。
@@ -56,6 +56,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 
 - **T11**：egress guard（官方 mitmproxy 映像加上我們的 addon）：每個 run 一組 proxy 帳密與 policy，逐請求檢查 origin、DNS／IP、path、method 與 redirect 之後的請求，拒絕時不建立上游連線；runner 在 guard 不可用時不認領、每條停止的路徑都先封鎖 guard；lab_net 與 scan_net 改由 Makefile 建立（見下方「egress guard」與 `docs/DECISIONS.md` §15）。
 - **T12**：scan 共用的預算：guard 強制請求數與速率（超過速率就等待，最多 5 秒）並記錄 telemetry，runner 分配剩下的預算、用盡時停止容器、寫回實際用量；綁定 auth profile 的 scan 先跑 preflight（busybox 經 guard 送出帶認證與匿名的請求，worker 依 `docs/DECISIONS.md` §12.5 判斷）；API 的 `budget_usage`、`auth.preflight` 與 coverage 的量測（見下方「共享預算與 preflight」與 §16）。
+- **T13**：runner 中斷之後的收尾：runner 內的 reconciler 依 DB 記下的容器名稱，先封鎖 guard、再刪除孤兒容器，確認之後才把 run 標成 `interrupted`（不永遠停在 running）；啟動時只清理已結算的 run 留下的 policy 與 secret；grant 撤銷或到期、target 停用、建立者的 key 撤銷時停止執行中的 scan；解析重試最多 3 次（見下方「中斷與撤回授權」與 `docs/DECISIONS.md` §17）。
 
 還沒有正式的 Adapter（M3 起）：scan 只能用 `fake` 引擎，它的容器不連任何位址，結果在回應中標為 `fixture: true`，不是真的掃描。其他文件中的指令與 API 仍是**待實作的契約**；`tests/fixtures/` 的真實輸出是給未來 Parser 開發用的樣本，不代表平台已能端到端掃描，也不能把 Mock 當成真實掃描成功的證明。
 
@@ -276,6 +277,13 @@ make down                          # 停止 app stack 與 db（資料保留在 v
   ```
 
 - 完整規則見 `docs/API_CONTRACT.md` §18，設計與實測見 `docs/DECISIONS.md` §15。
+
+#### 中斷與撤回授權（T13）
+
+- **runner 中斷**：runner 被 kill 時，guard 最晚在 lease 到期（30 秒）時拒絕孤兒容器的請求。runner 重啟之後（以及每 10 秒）對帳：先把 policy 改成 blocked、刪除容器，確認之後 run 與 scan 才是 `interrupted`（`LEASE_EXPIRED`），同一個 target 就能再建立 scan。這個 run 的用量不明，同一個 scan 之後的引擎以 `BUDGET_EXHAUSTED` 失敗（保守）。Docker 不可用時 run 保持 running，等 Docker 恢復。
+- **撤回授權**：撤銷 grant、停用 target 或撤銷建立 scan 的平台 key，執行中的 scan 在下一次心跳停止（通常 5 到 7 秒內），run 是 `failed`（`SCOPE_REVOKED`、`TARGET_DISABLED`、`CREATOR_KEY_REVOKED`）。
+- **`GET /health/ready`**：只檢查 DB 與 schema；runner、worker、guard 的狀態看 `GET /api/v1/scanners`。
+- 設計見 `docs/DECISIONS.md` §17；錯誤碼見 `docs/API_CONTRACT.md` §17.2。
 
 #### 隔離 lab 靶場（T03）
 

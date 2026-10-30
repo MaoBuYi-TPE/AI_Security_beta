@@ -3,12 +3,14 @@
 假的容器照 busybox 的指令行為：`/bin/sleep N` 在 N 秒後以 0 結束，`/bin/false` 立刻以 1 結束，
 preflight 的 `/bin/sh -c` 在 3 秒後以 0 結束；
 stop 之後以 143 結束。時間由 FakeClock 控制：runner 呼叫 sleep 時時間前進，到點的 hook 依序執行。
+state 和 DockerRuntime 一樣讀回 label 標示的 run；已建立但還沒啟動的容器算 running（Docker 的
+created）。
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from secscan.runner.domain.admission import ContainerSpec
+from secscan.runner.domain.admission import ContainerSpec, managed_run_id
 from secscan.runner.domain.runtime import (
     ContainerConflictError,
     ContainerState,
@@ -67,6 +69,10 @@ class FakeContainerRuntime:
     removed: list[str] = field(default_factory=list)
     stopped: list[str] = field(default_factory=list)
     failing: set[str] = field(default_factory=set)
+    # 刪除時回 409 的容器（Docker：刪除已在進行中）。
+    conflicting: set[str] = field(default_factory=set)
+    # 刪除時回 500 的容器（Docker 本身可用，只有這個容器刪不掉，例如 device busy）。
+    broken: set[str] = field(default_factory=set)
     out_of_memory: bool = False
 
     def _check(self, operation: str) -> None:
@@ -107,11 +113,13 @@ class FakeContainerRuntime:
         container = self.containers.get(name)
         if container is None:
             return None
-        if container.ended is None:
+        labels = container.spec.body["Labels"]
+        label = managed_run_id(labels) if isinstance(labels, dict) else None
+        if container.ended is None and container.started_at is not None:
             container.ended = self._finished(container)
         if container.ended is not None:
-            return container.ended
-        return ContainerState(running=True, exit_code=None, oom_killed=False)
+            return replace(container.ended, run_label=label)
+        return ContainerState(running=True, exit_code=None, oom_killed=False, run_label=label)
 
     def stop(self, name: str, *, grace_seconds: int) -> None:
         self._check("stop")
@@ -124,6 +132,10 @@ class FakeContainerRuntime:
 
     def remove(self, name: str) -> None:
         self._check("remove")
+        if name in self.conflicting:
+            raise ContainerConflictError("刪除容器：衝突（HTTP 409）")
+        if name in self.broken:
+            raise RuntimeUnavailableError("刪除容器失敗（HTTP 500）")
         if self.containers.pop(name, None) is not None:
             self.removed.append(name)
 

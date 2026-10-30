@@ -215,7 +215,7 @@ T06 已涵蓋 target 與 scope grant：
 - `LAB_CIDR`：設定驗證，以及建立 target、申請、核准、掃描 gate 四個時點的檢查。
 
 仍未完成的部分：
-- **SEC-01**：「建立或開始掃描被拒」已在 T09 實作並測試：建立 scan 時以 gate 拒絕，排隊中的 scan 在 runner 啟動前（prepare）重新判斷、不通過就 failed。「已執行者停止新出站」要到 M2/T13（guard 的 policy 改成 blocked），T09 的 fake 不送出任何流量。
+- **SEC-01**：「建立或開始掃描被拒」已在 T09 實作並測試：建立 scan 時以 gate 拒絕，排隊中的 scan 在 runner 啟動前（prepare）重新判斷、不通過就 failed。「已執行者停止新出站」在 T13 完成（見下方 T13 與 §4.4）。
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
 - **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；工具輸出的 parser（JSONL、XML、Markdown）在 M3 之後。
@@ -225,8 +225,8 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-18**：T10 只涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；artifact 的 storage key、下載與 worker 的解析在 M3、M5。
 - **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
 - **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method` 與 path 中的 `%`（`DECISIONS.md` §15.10 的取捨，T14 量測）。
-- **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約；grant 撤銷時停止執行中的 scan 在 T13。
-- **SEC-19（T11 的部分）**：取消時先封鎖 guard、再停止容器（live 以時間線證明）；孤兒容器的回收在 T13。
+- **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約。T13 補上執行中的停止：grant 撤銷或到期、target 停用、建立者的 key 撤銷時，runner 在下一次心跳先封鎖 guard、再停止容器。
+- **SEC-19（T11 的部分）**：取消時先封鎖 guard、再停止容器（live 以時間線證明）。T13 補上 runner 遺失時的回收：對帳先封鎖、再強制刪除孤兒容器，確認之後才結算。
 - **SEC-15**：T11 的 guard 只放行 scan 的 target origin，任何帶著認證的請求都送不到其他 origin。T12 以 live 證明（§4.4）：帶著 `Authorization` 的請求只到達 target，另一個 origin 的接收端沒有任何連線；preflight 的帶認證請求只送到 target。使用者決定維持只放行 target origin，跨 origin 的認證 header 規則（多個 origin）延後；工具實際送出的認證在 M3。
 - **SEC-13（T12）**：guard 強制 scan 共用的請求數與速率，preflight 也計入；以 live 的接收端與 guard 的 telemetry 證明（§4.4）。實作以 scan 為單位（P0 同一個 target 同時只有一個 scan，和「target 合計」等價；多個 runner 時要改 key，`DECISIONS.md` §16.8）。延遲 body 只能累積 11 個已核准的請求。仍未涵蓋：多個真的引擎依序共用預算（M3、M4；目前以 preflight 加上不送流量的 fake 證明分配與扣除的規則）、依量測調整 lab profile 的預算（M3）。
 
@@ -236,6 +236,14 @@ T12 已涵蓋（真的 DB 佇列）：
 - preflight：有 auth profile 的 scan 第一個 run 是 preflight；`prepare_launch` 帶回綁定版本的定義；容器拿到 0400 的 `auth-header`（`Authorization: Bearer …`），結束後刪除；profile 被取代時 preflight 與之後的 run 都在 prepare 失敗。
 - worker：依 runner 收集的輸出判斷五種結果；沒有讀取器（in-process）是 `not_executed`；只有 preflight 的 run 能寫結果；coverage 的對應、preflight 不算、沒有轉送、轉送數不明、telemetry 缺少或比轉送數多；寫入 coverage 之後中斷能在重試時完成；lease 失效的 run 跳過、不讓 worker 結束。
 - API：`budget_usage`、`auth.preflight`（in-process 跑完是 `not_executed`）、coverage 的新欄位與 limitations。
+
+T13 已涵蓋（真的 DB 佇列、記憶體中的容器 runtime、tmp 中的 policy 目錄；spy 把 policy 的寫入、容器的操作與 DB 的轉換記在同一個有序的 log）：
+- schema（migration 0009）：`container_removed_at` 只能寫入一次、只有記下容器的 run 能寫、不早於開始；已終止的 run 只允許補寫它，同時改其他欄位（用量、錯誤碼、結束時間、coverage）都被 trigger 拒絕；downgrade 還原原本的 trigger。
+- 對帳（SEC-19、DoD 2、DoD 3）：執行中的孤兒是封鎖 → 刪除容器 → 結算（`interrupted`、`LEASE_EXPIRED`，用量留空、scan 重新彙總）→ 刪除 policy；要求過取消也一樣是 `interrupted`；lease 有效的不碰；Docker 不可用時不結算、policy 保持 blocked、同一段中斷只記一次，恢復之後結算；409 只延後那一個；404 直接結算；label 不符的容器不刪、run 照常結算；已結束的 run 留下的容器只記下刪除的時間，worker 仍能解析；preparing 時中斷、或記下刪除之後才中斷的 run 不必呼叫 Docker 就結算。
+- 不重複啟動（DoD 1）：lease 過期而容器仍在執行時，另一個 runner 不認領同一個 scan 的下一個引擎，結算之後才會；兩個 reconciler 只結算一次；凍結的 owner 在結算之後不能再心跳、轉換或寫入用量；建立容器之前的心跳發現 lease 失效就不建立容器。
+- 啟動時依證據清理：已結算或 DB 沒有的 run 留下的 policy、secret 與容器被清掉；待處理、lease 有效的保留；Docker 不可用或 409 時保留 blocked 的 policy；暫存檔超過 60 秒才刪；迴圈啟動時先對帳再認領，之後每 10 秒一次。
+- 撤回授權（SEC-01）：心跳以不加鎖的讀取回報 grant 撤銷、到期、target 停用、origin 改變、`LAB_CIDR` 不符、建立者的 key 撤銷；撤銷還沒 commit 時心跳不等待（以 `Race` 的背景連線確認）；同一個 session 中讀到新的值。runner 執行中看到 → 封鎖 → stop → remove → `failed`（該錯誤碼），不收集輸出；建立容器之前看到 → 不建立；同時要求取消時走取消；in-process 的 FakeRunner 也停止。
+- 解析重試：第 3 次過期是 `failed`（`PARSE_ATTEMPTS_EXHAUSTED`），每個 run 各自計數；worker 遇到單一 run 的例外只記類別（不記訊息）、繼續處理其他 run，DB 的錯誤照舊結束。
 
 ### 4.4 Live E2E
 
@@ -255,6 +263,12 @@ T11 已涵蓋（`tests/live/test_guard_live.py`；live 自己的 lab 網路 10.8
 - 在 guard 的映像中，以 mitmproxy 12.2.3 的真物件驅動 addon，確認單元測試的假物件和真物件一致（16 項，含刪除小寫的 `x-secscan-guard`）。
 - 尚未涵蓋：同一條 keep-alive 連線上交錯的放行與拒絕、pipelining 與 header 值中夾帶的請求（接收端與探針每個請求一條新連線）；目前只有單元測試，記為證據缺口（`DECISIONS.md` §15.10）。
 - fake scan：執行中有這個 run 的 policy、容器內有 0400 的 proxy-url，結束之後都刪除。
+
+T13 已涵蓋（`tests/live/test_revocation_live.py`、`test_guard_failover_live.py`；live 的 lab 網路上自己的接收端）：
+- SEC-01（執行中）：fake 容器執行中，以借用的 proxy-url 每 20 ms 送一次請求；管理員撤銷 grant 之後 10 秒內開始拒絕（`RUN_BLOCKED`，之後 policy 刪除是 407），放行與拒絕沒有交錯；之後接收端沒有再收到；容器在 30 秒內刪除；fake 的 run 是 `failed`（`SCOPE_REVOKED`）。
+- 先後的證據（取消、撤銷、對帳）：唯讀掛載 policy volume 的觀察者每 1 ms 讀一次 policy，記下它變成 blocked 的時間；docker events 以即時串流記下容器的 kill／die（兩者都是 VM 的時鐘）。三條路徑都是 policy 先變成 blocked，容器才收到 kill。T13 才改用這個方法：T12 加上速率限制之後，探針的請求在 guard 中等待、醒來才判斷與記錄，guard 的 `RUN_BLOCKED` log 會落在 kill 之後約 0.1 秒（T13 的第一次 live 執行因此失敗了三個測試，產品的順序沒有錯：integration 的 spy 也確認先寫 blocked 再 stop）。`docker events --since` 的重播會被其他容器的事件擠掉，也改成在建立 scan 之前開始串流。
+- runner 中斷（SEC-19、DoD 1、DoD 2）：runner 被 SIGKILL，guard 在 lease 內開始回 `POLICY_STALE`；重啟之後 run 與 scan 是 `interrupted`（`LEASE_EXPIRED`）、容器被刪除、這個容器只有一個 `create`、重啟之後有 `destroy`、policy 檔已刪除、`budget_usage` 的請求數是 null、接收端的計數不再增加；同一個 target 再建立的 scan 完成。
+- lease 過期而容器仍在執行（DoD 3）：SIGKILL runner 之後以 db 容器內的 psql 把 lease 設成過期（容器自己的環境變數，密碼不經過測試），重啟 runner：policy 先變成 blocked、容器才收到 kill；之後接收端沒有再收到；run 是 `interrupted`，這個 run 只建立過一個容器。
 
 T12 已涵蓋（`tests/live/test_budget_live.py`、`test_runner_live.py`；live 的 lab 網路上自己的接收端）：
 - SEC-13：上限 3、送 5 個允許的請求：前 3 個到達 target，之後是 `BUDGET_EXHAUSTED`、接收端沒有收到；summary 記下轉送 3、用盡、拒絕 2；三個轉送的請求相隔至少 0.5 秒（2 req/s）；jsonl 有 3 個請求與 3 個回應，沒有 Authorization 的值。
@@ -276,9 +290,11 @@ T10 已涵蓋（`make test-live-runner`，`tests/live/`；獨立的 compose 專�
 
 結果要求：無重複同 run 活躍容器；未證明舊 run 停止前不啟動新 run；partial evidence 不被刪除；狀態不能永久顯示 running；不將錯誤轉為「0 漏洞」。
 
+T13 已涵蓋：見 §4.3 的 T13（integration）與 §4.4 的 T13（live）。各階段中斷 runner 的結果：queued 不受影響；preparing → `interrupted`（不必呼叫 Docker）；running、collecting、cancelling → 封鎖、刪除容器之後 `interrupted`；collected、normalizing 照常解析（容器沒刪掉的另外刪除）；解析中斷 3 次 → `failed`。Docker 長時間不可用時，run 停在 running（policy 保持 blocked、guard 拒絕它的流量），是「狀態不能永久顯示 running」唯一的例外（`DECISIONS.md` §17.2）。
+
 T11 已涵蓋（egress guard，`tests/live/test_guard_failover_live.py`）：guard 停機時 `/scanners` 顯示 `GUARD_UNAVAILABLE`、新的 scan 留在 queued、對 guard 的連線失敗（fail closed），恢復後完成；guard 重啟（`boot_id` 改變）讓執行中的 run interrupted（`GUARD_UNAVAILABLE`）；runner 被 SIGKILL 之後，孤兒容器的請求在 lease（30 秒）內開始被拒絕（`POLICY_STALE`）、接收端不再收到；設定錯誤、只接一個網路、模組損壞的 guard 以非 0 結束、從未監聽。
 
-T10 已涵蓋（容器版的 runner）：runner 收到 SIGTERM 時停止並刪除容器、run 標成 interrupted（live 實測 1.3 秒）；lease 失效時停止容器；Docker 中途不可用時刪除 secret、不把 run 標成結束的狀態；容器 OOM、消失、create／start 失敗。lease 過期而容器仍在執行、孤兒容器在 T13。
+T10 已涵蓋（容器版的 runner）：runner 收到 SIGTERM 時停止並刪除容器、run 標成 interrupted（live 實測 1.3 秒）；lease 失效時停止容器；Docker 中途不可用時刪除 secret、不把 run 標成結束的狀態；容器 OOM、消失、create／start 失敗。lease 過期而容器仍在執行、孤兒容器在 T13（見 §4.3 的 T13 與下方）。
 
 T09 已涵蓋（fake 引擎，沒有容器）：兩個 consumer 同時認領；lease 過期之後不被接手，由對帳標成 interrupted（runner 階段）或退回 collected（解析中）；runner 停太久、lease 失效時在第一次心跳就停止；DB 等鎖逾時回 503；手動取消（排隊中、prepare 前、執行中、解析中）。容器、guard、磁碟、OOM 與 Token 到期在 M2 之後。
 

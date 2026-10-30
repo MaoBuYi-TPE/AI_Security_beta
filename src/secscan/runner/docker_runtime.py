@@ -11,12 +11,13 @@
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
+from uuid import UUID
 
 import docker
 import requests
 from requests.adapters import BaseAdapter
 
-from secscan.runner.domain.admission import ContainerSpec
+from secscan.runner.domain.admission import ContainerSpec, managed_run_id
 from secscan.runner.domain.runtime import (
     DOCKER_API_VERSION,
     ContainerConflictError,
@@ -121,12 +122,16 @@ class DockerRuntime:
             return None
         with _parsing("查詢容器"):
             state: Mapping[str, Any] = info["State"]
+            run_label = _run_label(info["Config"])
             if state["Status"] not in _FINISHED:
-                return ContainerState(running=True, exit_code=None, oom_killed=False)
+                return ContainerState(
+                    running=True, exit_code=None, oom_killed=False, run_label=run_label
+                )
             return ContainerState(
                 running=False,
                 exit_code=int(state["ExitCode"]),
                 oom_killed=state.get("OOMKilled") is True,
+                run_label=run_label,
             )
 
     def stop(self, name: str, *, grace_seconds: int) -> None:
@@ -170,10 +175,19 @@ def _translate(action: str, *, absent_ok: bool = False) -> Iterator[None]:
         raise RuntimeUnavailableError(f"{action}失敗（HTTP 404）") from None
     except docker.errors.APIError as exc:
         if exc.status_code == _CONFLICT:
-            raise ContainerConflictError(f"{action}：同名的容器已經存在") from None
+            # create 是同名的容器已經存在；remove 是刪除已在進行中。
+            raise ContainerConflictError(f"{action}失敗（HTTP 409）") from None
         raise RuntimeUnavailableError(f"{action}失敗（HTTP {exc.status_code}）") from None
     except (docker.errors.DockerException, requests.exceptions.RequestException) as exc:
         raise RuntimeUnavailableError(f"{action}失敗（{type(exc).__name__}）") from None
+
+
+def _run_label(config: object) -> UUID | None:
+    """Config 一定存在（缺少就是回應的格式不符）；label 不符只代表不是我們的容器。"""
+    if not isinstance(config, Mapping):
+        raise TypeError("Config 不是物件")
+    labels = config.get("Labels")
+    return managed_run_id(labels) if isinstance(labels, Mapping) else None
 
 
 def _supported(url: str) -> bool:

@@ -15,6 +15,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
+from secscan.core.identifiers import canonical_uuid
 from secscan.core.json_types import JsonObject, JsonValue
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.scanners.domain.plan import ExecutionPlan
@@ -286,8 +287,19 @@ def _volume(source: str, subpath: str, target: str, *, read_only: bool) -> JsonO
     }
 
 
+def managed_run_id(labels: Mapping[str, object]) -> UUID | None:
+    """容器的 label 標示的 run（對帳核對容器是不是這個 run 的，docs/DECISIONS.md §17.2）。
+
+    不是 runner 建立的（沒有 managed、run_id 不是標準格式的 UUID）就是 None。
+    """
+    if labels.get(f"{LABEL_PREFIX}managed") != "true":
+        return None
+    value = labels.get(f"{LABEL_PREFIX}run_id")
+    return canonical_uuid(value) if isinstance(value, str) else None
+
+
 def _labels(plan: ExecutionPlan) -> Mapping[str, str]:
-    """T13 的對帳以 label 找到這個 run 的容器。"""
+    """容器的對帳以 label 核對這個 run 的容器（managed_run_id）。"""
     return {
         f"{LABEL_PREFIX}managed": "true",
         f"{LABEL_PREFIX}run_id": str(plan.run_id),

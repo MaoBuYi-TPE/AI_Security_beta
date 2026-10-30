@@ -39,7 +39,7 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | 方法 | 路徑 | 權限 | 回應與要點 |
 |---|---|---|---|
 | GET | /health/live | 可僅本機公開 | 200；僅程序存活，不含敏感依賴資訊 |
-| GET | /health/ready | 管理網 | 200/503；DB、runner heartbeat、必要配置可用。T04 已實作 DB 可連線且 schema 在目前的 migration 版本，不符時回 503 `DEPENDENCY_UNAVAILABLE`。runner 與 worker 的心跳在 T10 改由 `GET /api/v1/scanners` 呈現；是否也列入 ready（沒有 runner 時 API 仍能接受並排入 scan）在 T13 決定 |
+| GET | /health/ready | 管理網 | 200/503；DB 可連線且 schema 在目前的 migration 版本（T04 已實作），不符時回 503 `DEPENDENCY_UNAVAILABLE`。T13 決定不納入 runner、worker、guard（`DECISIONS.md` §17）：ready 表示這個 API 程序能服務，沒有 runner 時 API 仍能接受並排入 scan；它們的狀態由 `GET /api/v1/scanners` 呈現 |
 | POST | /api/v1/projects | platform_admin | 201 建立專案（T05 已實作） |
 | GET | /api/v1/projects | 已授權 key | 200，只列可存取專案（T05 已實作） |
 | GET | /api/v1/projects/{project_id} | 同專案 | 200；其他 project 與不存在的一樣回 404（T05 新增並實作） |
@@ -53,7 +53,7 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/targets/{target_id}/scope-grants | 同專案 | 200；target 的所有版本，新版本在前（T06 新增並實作） |
 | GET | /api/v1/scope-grants/{grant_id} | 同專案 | 200（T06 新增並實作） |
 | POST | /api/v1/scope-grants/{grant_id}/approve | platform_admin | 200；核對靶場/授權證據後核准（T06 已實作） |
-| POST | /api/v1/scope-grants/{grant_id}/revoke | platform_admin | 200；之後不能再用它建立 scan，排隊中的 scan 在 runner 啟動前失敗（T09）。停止執行中的流量由 T13 處理（T06 已實作撤銷本身） |
+| POST | /api/v1/scope-grants/{grant_id}/revoke | platform_admin | 200；之後不能再用它建立 scan，排隊中的 scan 在 runner 啟動前失敗（T09）；執行中的 scan 在下一次心跳停止（通常 5 到 7 秒）：先封鎖 guard、再停止容器，run 是 `failed`（`SCOPE_REVOKED`，T13）。T06 已實作撤銷本身 |
 | POST | /api/v1/targets/{target_id}/api-specs | operator/admin | 201；raw body 上傳 OpenAPI 3.0（JSON 或 YAML），P0 不接受遠端 URL；servers 改綁到 target 的 origin（T07 已實作；原規劃的 multipart 改掉，理由見 `DECISIONS.md` §11.1） |
 | GET | /api/v1/targets/{target_id}/api-specs | 同專案 | 200；target 的所有版本，新版本在前（T07 新增並實作） |
 | GET | /api/v1/api-specs/{spec_id} | 同專案 | 200；不含文件內容（T07 新增並實作） |
@@ -509,7 +509,7 @@ uv run secscan-admin create-admin-key --name "本機管理員" [--expires-in-day
 - 每個 project 最多 100 個 target：409 `QUOTA_EXCEEDED`（`DECISIONS.md` §10.9）。
 - 清單（`GET …/targets`）依建立時間由舊到新、分頁。
 
-修改（`PATCH /api/v1/targets/{target_id}`，200）：`{"enabled": false}` 或 `{"name": "…"}`。至少要有一個欄位，不接受 null 與其他欄位；origin 要改就建立新的 target。停用之後，已核准的 grant 就不能再用來建立 scan（§14.5）。operator 也能重新啟用，所以停用不是權威的停止手段；權威的停止是 admin 撤銷 grant。
+修改（`PATCH /api/v1/targets/{target_id}`，200）：`{"enabled": false}` 或 `{"name": "…"}`。至少要有一個欄位，不接受 null 與其他欄位；origin 要改就建立新的 target。停用之後，已核准的 grant 就不能再用來建立 scan（§14.5），執行中的 scan 也在下一次心跳停止（`TARGET_DISABLED`，T13）。operator 也能重新啟用，所以停用不是權威的停止手段；權威的停止是 admin 撤銷 grant。
 
 ### 14.2 ScopeGrant
 
@@ -1026,12 +1026,12 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 
 | error_code | 情況 |
 |---|---|
-| `SCOPE_REVOKED`、`SCOPE_EXPIRED`、`SCOPE_NOT_APPROVED`、`SCOPE_NOT_YET_VALID`、`TARGET_DISABLED`、`SCOPE_OUTSIDE_LAB` | runner 啟動前重新判斷 gate 不通過（撤銷、過期、停用…之後排隊中的 scan 不會送出流量） |
+| `SCOPE_REVOKED`、`SCOPE_EXPIRED`、`SCOPE_NOT_APPROVED`、`SCOPE_NOT_YET_VALID`、`TARGET_DISABLED`、`SCOPE_OUTSIDE_LAB` | runner 啟動前重新判斷 gate 不通過（撤銷、過期、停用…之後排隊中的 scan 不會送出流量）；T13 起執行中也每次心跳重新判斷：先封鎖 guard、再停止容器 → `failed`（`DECISIONS.md` §17.5） |
 | `SCOPE_MISMATCH` | grant 或 target 的 origin 和快照不符（只有直接改了 DB 才會發生） |
 | `AUTH_PROFILE_SUPERSEDED` | 綁定的 profile 版本已被取代（密文已清除）；不會改用新版本 |
-| `CREATOR_KEY_REVOKED` | 建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不會開始（key 到期不算） |
+| `CREATOR_KEY_REVOKED` | 建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不會開始，執行中的也停止（T13；key 到期不算） |
 | `ENGINE_FAILED` | 引擎失敗（fake 的失敗腳本；容器版是 exit code 不是 0） |
-| `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止；已要求取消的 scan 也是 `interrupted`，不是 `cancelled`（沒有確認停止） |
+| `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止；已要求取消的 scan 也是 `interrupted`，不是 `cancelled`（沒有確認停止）。有容器的 run 由 runner 的對帳先封鎖 guard、確認容器已刪除之後才標成 `interrupted`（T13，`DECISIONS.md` §17.2）；用量不明，之後的引擎以 `BUDGET_EXHAUSTED` 失敗。容器刪不掉（Docker 不可用或那個容器出錯）時 run 保持 `running`，policy 保持 blocked |
 | `PLAN_REJECTED` | ExecutionPlan 或建立容器的設定不符合政策；沒有呼叫 Docker（T10） |
 | `RUNTIME_UNAVAILABLE` | 啟動容器之前 Docker 出錯（例如 socket-proxy 拒絕、映像不見了）、容器在執行中消失，或執行中連續查不到容器的狀態、已確認刪除容器（`interrupted`）（T10） |
 | `SECRET_UNAVAILABLE` | runner 解不開綁定版本的密文（金鑰不對或沒有設定）；沒有啟動容器（T10） |
@@ -1042,6 +1042,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `WORKSPACE_UNAVAILABLE` | runner 的工作目錄不可用（權限、磁碟滿），或寫不出收集的 manifest（T10） |
 | `GUARD_UNAVAILABLE` | egress guard 不可用（T11，`DECISIONS.md` §15.8）：建立容器之前（status 過期、不再檢查、寫不出 policy）→ `failed`；執行中 guard 中斷、重啟或續約失敗 → 封鎖、停止容器 → `interrupted` |
 | `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0 → `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out` |
+| `PARSE_ATTEMPTS_EXHAUSTED` | 解析 3 次都沒有在 lease 內完成（worker 中斷或卡住）→ `failed`（T13，`DECISIONS.md` §17.6） |
 
 ### 17.3 事件
 
@@ -1077,6 +1078,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | 已終止 | 200，不改變任何東西 |
 
 - 排隊中的 run 直接取消；執行中的 run 由 runner 在心跳或 prepare 時看到取消，停止後確認。已收集、正在解析的引擎繼續解析完（解析不發流量），結果保留。
+- runner 在確認之前遺失（被 kill）：重啟的 runner 對帳時先封鎖 guard、確認容器已刪除，run 與 scan 是 `interrupted`（`LEASE_EXPIRED`），不是 `cancelled`（T13）。
 - 取消無法撤銷已送出的請求或回復靶場的資料（CLAUDE.md §8）。
 
 ### 17.5 FakeRunner
@@ -1086,7 +1088,7 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 ```
 
 - 先對帳 lease 過期的 fake run（標成 `interrupted`，`LEASE_EXPIRED`），再處理排隊中的 fake run，直到沒有工作（`--once` 只處理一個）。
-- 每個 run：認領 → 重新判斷 gate 與綁定的 profile 版本 → running（停留 `--hold-seconds` 秒，每 5 秒心跳並檢查取消）→ 依 `--outcome` 失敗（`ENGINE_FAILED`），或收集、解析之後成功。
+- 每個 run：認領 → 重新判斷 gate 與綁定的 profile 版本 → running（停留 `--hold-seconds` 秒，每 5 秒心跳並檢查取消與授權；授權撤回時 `failed`，同 §17.2，T13）→ 依 `--outcome` 失敗（`ENGINE_FAILED`），或收集、解析之後成功。
 - 不連任何位址，不需要 `SECRET_ENCRYPTION_KEYS`，不解密任何 secret。被強制終止時，scan 停在 `running`，lease（30 秒）過期之後下一次執行會把它標成 `interrupted`。
 
 ### 17.6 權限
@@ -1120,11 +1122,12 @@ uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-
 ```
 
 - 經 `RUNNER_DOCKER_URL`（預設 `tcp://socket-proxy:2375`）操作 Docker；compose 的 `runner` 服務以這個指令執行。
-- 啟動時刪除上一個 runner 留下的 secret 與 guard 的 policy、做 capability probe（§18.4）；只認領 probe 通過的引擎，probe 每 60 秒重做。每一輪認領之前讀 egress guard 的 status（T11）：不可用時不認領。
+- 啟動時先對帳上一個 runner 留下的 run（T13，`DECISIONS.md` §17.2）、再依證據清理留下的 secret 與 guard 的 policy（只清已結算或 DB 沒有的 run，§17.4）、做 capability probe（§18.4）；只認領 probe 通過的引擎，probe 每 60 秒重做、對帳每 10 秒一次。每一輪認領之前讀 egress guard 的 status（T11）：不可用時不認領。
 - 每個 run：認領 → 重新判斷 gate、綁定的 profile 版本與建立者的 key（同 T09）→ 記下容器名稱 `secscan-run-<run_id>` 與映像 → 驗證 ExecutionPlan → guard 可用、心跳 → 寫 `proxy-url` 與 target 的 secret（有 auth profile 時解密），都是 0400 的檔案 → 寫 guard 的 policy → 建立並啟動容器 → 啟動後立刻、之後每 5 秒心跳（成功之後續約 policy），每秒查一次狀態與 out/ 的用量 → 結束之後收集輸出 → `collected`。容器與 secret 不論結果、不論例外都刪除；容器確認刪除之後才刪 policy。
 - 查不到容器的狀態時重試，連續 3 次才放棄：已確認刪除容器時是 `interrupted`（`RUNTIME_UNAVAILABLE`），刪不掉就不轉換。out/ 超過上限時停止容器（`ARTIFACT_REJECTED`）。
 - 要求取消：封鎖 guard 的 policy → 轉到 `cancelling` → 停止容器（SIGTERM，5 秒後 SIGKILL）、刪除容器 → `cancelled`。超過時間上限：`timed_out`（`TIME_LIMIT_EXCEEDED`）。收到 SIGTERM：停止並刪除容器 → `interrupted`（`RUNNER_STOPPED`）。每一條停止容器的路徑都先封鎖 guard（T11）。
-- lease 失效、或無法確認容器已停止：停止處理、刪除 secret，run 停在 `running`，由 T13 的容器對帳處理。
+- lease 失效、或無法確認容器已停止：停止處理、刪除 secret，run 停在 `running`，由容器的對帳處理：lease 過期之後封鎖 guard、核對 label、強制刪除容器，確認之後才標成 `interrupted`（`LEASE_EXPIRED`）；Docker 不可用時保持 `running`，policy 保持 blocked（T13）。
+- 執行中的授權撤回（grant 撤銷或到期、target 停用、建立者的 key 撤銷）：封鎖 guard → 停止容器 → `failed`（該錯誤碼）；建立容器之前看到就不建立（T13）。建立容器之前會再心跳一次，lease 已失效就不建立。
 - `--once`：最多處理一個 run。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。fake 的腳本預設依 `RUNNER_FAKE_OUTCOME`、`RUNNER_FAKE_HOLD_SECONDS`。
 
 ### 18.2 worker
@@ -1133,7 +1136,7 @@ uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-
 uv run secscan-admin worker [--once]
 ```
 
-- 先把 lease 過期的 `normalizing` 退回 `collected`（解析可以重試），再把 fake 的 `collected` 標成 `succeeded`。T10 不讀任何輸出（parser 在 M3）。
+- 先把 lease 過期的 `normalizing` 退回 `collected`（解析可以重試，最多 3 次；第 3 次過期是 `failed`，`PARSE_ATTEMPTS_EXHAUSTED`，T13），再把 fake 的 `collected` 標成 `succeeded`。單一 run 的非預期例外只記類別，繼續處理其他 run。T10 不讀任何輸出（parser 在 M3）。
 
 ### 18.3 掃描容器
 

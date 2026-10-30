@@ -71,20 +71,6 @@ class RunnerInstanceRepository:
             capabilities=read_capabilities(row.capabilities),
         )
 
-    def others_alive(self, role: InstanceRole, *, excluding: str, alive_within: timedelta) -> bool:
-        return (
-            self._session.execute(
-                select(RunnerInstanceModel.id)
-                .where(
-                    RunnerInstanceModel.role == role.value,
-                    RunnerInstanceModel.owner != excluding,
-                    RunnerInstanceModel.heartbeat_at > func.clock_timestamp() - alive_within,
-                )
-                .limit(1)
-            ).first()
-            is not None
-        )
-
     def prune(self, *, older_than: timedelta) -> int:
         removed = self._session.execute(
             delete(RunnerInstanceModel)

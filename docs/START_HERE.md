@@ -105,7 +105,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | uv run secscan-admin worker [--once] | M2（T10 已建立） | 對帳過期的解析，再處理 collected 的 run（T10 只有 fake，不讀檔；`API_CONTRACT.md` §18.2） |
 | make build／make images | M2（T10 已建立） | 建立 secscan 與 egress guard（T11）的映像／以 digest pull 核准的掃描器映像與 socket-proxy（runner 不 pull） |
 | make up／make down | M2（T10 已建立） | 啟動／停止 app stack（db、api、runner、worker、socket-proxy；T11 加上 guard），並建立 internal＋isolated 的 scan_net 與 lab_net；API 只綁 127.0.0.1:`API_PORT`（預設 8000） |
-| make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，一律拆除；T11 起在 live 自己的 lab 網路上啟動接收端與探針（SEC-02～SEC-10、取消與故障），不啟動 Juice Shop、VAmPI |
+| make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，一律拆除；T11 起在 live 自己的 lab 網路上啟動接收端與探針（SEC-02～SEC-10、取消與故障），T12 加上預算與 preflight，T13 加上 runner 中斷後的對帳與撤銷 grant；不啟動 Juice Shop、VAmPI |
 | make test-contract | M1–M2 | 對固定 fixture 測 API/Parser 契約 |
 | make test-live-lab | M3 起 | 需要 `ENABLE_LIVE_LAB_TESTS=1`、LAB_ONLY、有效 grant，並通過隔離檢查才執行 |
 | make record-fixtures | M3 起 | 只在 lab 重新錄製工具輸出 fixture，並產生差異供人工審查 |

@@ -1027,15 +1027,72 @@
     - 給後續任務：
       - **T13**：有容器的 run 的對帳與孤兒容器（沿用 `RunRecords` 寫用量時，不明就留空）；grant 撤銷時停止執行中的 scan；`/health/ready`；`queue.py` 新增的 reconciler 注意 800 行的上限。
       - **M3**：各工具的 proxy 與認證 header 設定（`auth-header` 檔已提供）；依 ZAP 的量測調整預算、body 上限與 path 中的 `%`；cookie 型 profile 的 `auth` 旗標；報告中的 telemetry path 要遮罩；`coverage_measured` 與多個引擎。
-- [ ] T13 實作心跳/lease、取消、timeout、孤兒容器清理與 reconciler。
+- [x] T13 實作心跳/lease、取消、timeout、孤兒容器清理與 reconciler。
   - DoD：
     - 重複認領時不會重複啟動容器。
     - 中斷後不會永遠停在 running。
     - 取消時先封鎖 guard，再回收容器。
+  - 交付（2026-10-30，done）：
+    - 範圍：
+      - runner 內的 reconciler（`runner/reconciler.py`）：啟動時一次、之後每 10 秒一次，依 DB 記下的容器名稱（socket-proxy 不放行 list）處理 lease 過期、或已結束但容器沒刪掉的 run：封鎖 policy → 刪除 secret → 核對 label → 強制刪除容器 → 確認之後才結算（runner 階段 → `interrupted`／`LEASE_EXPIRED`，用量留空）→ 刪除 policy。Docker 不可用時這一輪停止；只有一個容器刪不掉時延後它、繼續處理其他的。沒有容器、或容器已確認刪除的 runner 階段 run 不必呼叫 Docker 就結算。
+      - 啟動時依證據清理：只處理已結算或 DB 沒有的 run 留下的 policy、secret 與容器（取代 T10 刪除全部的 sweep 與 `others_alive`）。
+      - 不重複啟動：建立容器之前再心跳一次；呼叫過 create 而沒有確認刪除的容器不轉成結束的狀態；下一個引擎要等前一個 run 結算。
+      - 撤回授權：心跳以不加鎖、重新讀取的方式判斷 grant（撤銷、到期）、target（停用、origin）、`LAB_CIDR` 與建立者的 key（`scans/gate.py`、`scans/domain/gate.py`），runner 看到就封鎖 → 停止容器 → `failed`（該錯誤碼）；in-process 的 FakeRunner 也停止。
+      - 解析重試最多 3 次（`PARSE_ATTEMPTS_EXHAUSTED`，以 normalizing 的事件數計算）；worker 遇到單一 run 的例外只記類別與位置，繼續處理其他 run。
+      - migration `0009`：`scanner_runs.container_removed_at`、部分索引與改寫的 `scanner_runs_guard()`（已終止的 run 只允許補寫這一欄）。
+      - `/health/ready` 維持只檢查 DB 與 schema。
+      - 使用者的決定（2026-10-29）：`/health/ready` 不納入 runner；建立者的 key 撤銷也停止執行中的 scan；解析重試的上限在 T13 一起做。
+      - 設計決定與取捨見 `DECISIONS.md` §17，API 見 `API_CONTRACT.md` §17、§18。
+    - 檔案：
+      - 程式：
+        - 新增：`src/secscan/runner/reconciler.py`、`src/secscan/scans/containers.py`、`src/secscan/scans/gate.py`、`src/secscan/scans/domain/gate.py`、`src/secscan/core/identifiers.py`、migration `v0009_container_cleanup.py`
+        - 修改：`runner/service.py`、`runner/loop.py`、`runner/guard.py`、`runner/workspace.py`、`runner/fake.py`、`runner/docker_runtime.py`、`runner/domain/runtime.py`、`runner/domain/admission.py`；`scans/queue.py`、`scans/run_records.py`、`scans/progress.py`、`scans/models.py`、`scans/domain/lifecycle.py`；`worker/service.py`；`cli/services.py`；`health/router.py`；`scanners/service.py`、`scanners/repository.py`（刪除 `others_alive`）；`targets/repository.py`、`grants/repository.py`、`api_keys/repository.py`（不加鎖的重新讀取）
+      - 部署：`Makefile`（live 測試的順序）
+      - 測試：
+        - unit：`tests/unit/scans/test_gate.py`、`tests/unit/core/test_identifiers.py`；`tests/unit/runner/`（guard channel 的封鎖、列舉與暫存檔；workspace 的 `secret_runs` 與 dir fd；docker runtime 的 label 與 `Config`；`managed_run_id`）
+        - integration：`test_container_cleanup_schema.py`、`test_container_records.py`（含 `Race` 的並行）、`test_heartbeat_gate.py`、`test_runner_revocation.py`、`test_container_reconciler.py`、`test_runner_loop_reconcile.py`、`test_parse_attempts.py`；共用的 `tests/runner_spies.py`、`tests/runner_fakes.py`（label、已建立未啟動、409 與 500）；既有的 `test_container_runner.py`、`test_container_runner_guard.py`、`test_runner_loop.py`、`test_scan_cancel.py`、`test_queue_launch.py`、`test_schema_constraints.py`
+        - live：`tests/live/test_revocation_live.py`、`run_support.py`、`policy_watch.py`；`test_guard_failover_live.py` 的 SIGKILL 測試擴充並新增「lease 過期而容器仍在執行」
+      - 文件：`DECISIONS.md` §17、`ARCHITECTURE.md` §3.4、§6.2、§9、`API_CONTRACT.md`（`/health/ready`、撤銷、停用、§17.2、§17.4、§17.5、§18）、`SECURITY_AND_TESTING.md` §3、§4.3、§4.4、§4.5、`START_HERE.md`、`README.md`、`CLAUDE.md` §1、§13
+    - DoD 對照：
+      - **重複認領時不會重複啟動容器**：integration：lease 過期而容器仍在執行時，另一個 runner 不認領同一個 scan 的下一個引擎，結算之後才會，`runtime.created` 中這個 run 只有一次；兩個 reconciler 並行只結算一次（`Race`）；凍結的 owner 在結算之後不能心跳、轉換或寫入用量；建立前的心跳發現 lease 失效就不建立容器；呼叫過 create 而刪不掉的容器不轉成 failed。live：docker events 的即時串流中這個容器只有一個 `create`。
+      - **中斷後不會永遠停在 running**：integration：執行中、cancelling、preparing、已記下刪除之後才中斷的 run 都結算成 `interrupted`；Docker 恢復之後結算；label 不符、一個容器壞掉時其他的照常結算；解析第 3 次過期是 `failed`。live：runner 被 SIGKILL、重啟之後 run 與 scan 是 `interrupted`、容器被刪除、同一個 target 可以再建立 scan 並完成。唯一的例外是 Docker 不可用或那個容器一直刪不掉（policy 保持 blocked、guard 拒絕它的流量，`DECISIONS.md` §17.2）。
+      - **取消時先封鎖 guard，再回收容器**：integration 以 spy 的有序 log 確認取消、撤回授權、對帳（含 cancelling 而 runner 遺失）都是 `policy:blocked` 在 stop／remove 之前。live：policy 的觀察者記下的 blocked 時間早於 docker events 的 kill（取消、撤銷 grant、lease 過期而容器仍在執行三條路徑）。
+    - 驗證（實際執行）：
+      - `make test`：4270 passed、1 skipped（非 UTF-8 檔名，同 T10）、42 deselected（live）；coverage 99.85%（line 與 branch）；`reconciler.py`、`containers.py`、`scans/gate.py`、`scans/domain/gate.py`、`runner/guard.py`、`workspace.py`、`worker/service.py`、`core/identifiers.py` 都是 100%。
+      - `make lint`（ruff、import-linter 5 個 contract）、`make typecheck`（mypy strict，369 個檔案）通過。
+      - `ENABLE_LIVE_LAB_TESTS=1 make test-live-runner`：42 passed（約 5 分 40 秒；審查的修正之後重跑一次，同樣 42 passed）（獨立的 `secscan-live` 專案，跑完拆除，沒有殘留的容器、volume、網路）。
+      - 突變檢查（在獨立的 git worktree 執行，不動主目錄的 `src/`、`tests/`；腳本不進 repo）：53 項（reconciler 的封鎖、順序、Docker 錯誤、label、409、單一容器的失敗、清理；迴圈的啟動與定期對帳；DB 的待處理條件、結算、trigger、`record_usage`；心跳的 gate、加鎖、identity map、取消的優先；runner 的 `REVOKED`、封鎖、建立前的心跳、plan 被拒；解析上限與 worker 的 log）全部被測試擋下。第一輪存活 2 項，都補上測試之後被擋下：心跳不重新讀取（identity map 是弱參照，原本的測試沒有持有舊物件，分不出差別）、Docker 不可用時仍逐一嘗試其他容器（結果相同、只是多打 Docker）。
+    - TDD：
+      - 大多數先寫失敗的測試並確認失敗：schema（欄位不存在）、容器的紀錄（15 failed）、gate 與心跳（模組不存在、8 failed）、撤回授權（7 failed）、label 與 guard 通道（`managed_run_id` 不存在）、reconciler（模組不存在）、迴圈（`RECONCILE_EVERY_SECONDS` 不存在）、解析上限（`MAX_PARSE_ATTEMPTS` 不存在），以及審查的修正（單一容器、create 之後、列舉錯誤、dir fd、`Config`、log 的位置都先失敗）。
+      - **沒有做到**（如實記錄）：
+        - `Race` 的並行測試（審查要求）與「Docker 不可用時這一輪在第一個之後就停」的測試是驗證既有行為，寫完就通過；「正常結束與 plan 被拒時記下刪除」的斷言在實作之後才補（為了讓突變檢查抓得到）。
+        - 並行測試原本預期 owner 的心跳會等結算的列鎖，實際上 lease 已過期，條件在舊的資料上就不成立、不必等鎖；測試改成確認它不等待就失去 lease。
+        - live 測試在實作之後才寫。
+    - live 發現的問題（都已修正，產品的順序沒有錯）：
+      - 第一次 live 執行有 4 個失敗。其中 3 個（取消、撤銷、lease 過期而容器仍在執行）是「先封鎖再 kill」的證據方法：guard 的 `RUN_BLOCKED` log 是請求在速率限制中等待、醒來才記錄的時間，會落在 kill 之後約 0.1 秒（T11 的取消測試在 T12 加上速率限制之後就有這個隱患）。改成唯讀掛載 policy volume 的觀察者每 1 ms 讀一次 policy，記下它變成 blocked 的時間。
+      - 第 4 個：`docker events --since` 只重播 daemon 記憶體中最近的事件，L1 期間每秒啟動的探針容器把 `create` 擠掉；改成在建立 scan 之前就開始串流。
+      - 撤銷的測試原本預期 scan 是 `failed`；preflight 在撤銷之前已經成功，依 §13.4 是 `partially_completed`（測試的預期錯了）。
+    - 審查（code-reviewer、security-reviewer，2026-10-30）：
+      - code-reviewer：APPROVE（0 CRITICAL、0 HIGH、2 MEDIUM、8 LOW）。MEDIUM：單一容器的持續錯誤讓整個對帳佇列停住（head-of-line blocking）；沒有真正並行的競爭測試。LOW：409 的訊息、UUID 的解析重複三份、同名的 `pending()`、worker 的 log 沒有位置、列舉時的 `FileNotFoundError`、`Config` 缺少時當成不是我們的容器、`NOT_STARTED` 之後刪不掉容器、文件還沒 commit。
+      - security-reviewer：APPROVE（0 CRITICAL、0 HIGH、1 MEDIUM、6 LOW）。MEDIUM：同上的 head-of-line blocking（違反 DoD 2）。LOW：呼叫過 create 但刪不掉的容器會讓下一個引擎提早開始；列舉的 OSError 讓 runner 啟動失敗；inspect 與 remove 之間的 TOCTOU；`discard_secrets` 跟隨 symlink；live helper 的 token 在 repr；撤回的時限寫得太樂觀。
+      - 已修正（都有先失敗的測試，`Race` 的測試除外）：Docker 本身可用時只延後那一個容器、每個 run 只記一次 ERROR；呼叫過 create 而刪不掉的容器留給對帳；列舉時消失的條目跳過、目錄讀不出來時記錯誤並跳過清理；secret 目錄以 dir fd 加 `O_NOFOLLOW` 刪除；`Config` 缺少視為格式不符；共用的 `canonical_uuid`；409 的訊息；`awaiting_removal`；worker 的 log 加上最內層的檔名與行號；token 不進 repr；撤回的時限改成「通常 5 到 7 秒，最晚 30 秒」；補上 4 個 `Race` 的並行測試。
+      - 沒有修正、記入 `DECISIONS.md` §17.8：inspect 到 remove 之間的 TOCTOU（proxy 只能以名稱刪除）；每輪 20 個的上限（超過 20 個容器同時一直刪不掉時，較新的要等）。
+    - 限制：
+      - Docker 不可用、或某個容器一直刪不掉時，run 停在 running（policy 保持 blocked，guard 拒絕它的流量）。
+      - 對帳結算的 run 用量不明：同一個 scan 之後的引擎以 `BUDGET_EXHAUSTED` 失敗（保守；scan 已是 interrupted）。
+      - 單執行緒的迴圈在監看長時間的 run 時不對帳；初版只有一個 runner。
+      - owner 在建立前的心跳之後凍結、又在建立容器之後馬上死掉的雙重故障：可能留下一個沒有 secret 與有效 policy 的停止容器（`DECISIONS.md` §17.2）。
+      - live 的「先封鎖再 kill」以 1 ms 輪詢 policy 的觀察者證明：封鎖到 kill 之間短於 1 ms 時觀察不到（三條路徑實測都觀察到）。
+      - T11 的證據缺口（同一條連線上多個請求的收包證據）仍在。
+    - 給後續任務：
+      - **M3**：真的引擎（ZAP）的 proxy 設定與停止的行為（SIGTERM 之後還會不會送請求）；worker 解析時的心跳（真的 parser 可能超過 30 秒，現在 3 次過期就 failed）；依 ZAP 的量測決定每輪的對帳數量與間隔；queued 的 scan 的時間上限。
+      - **之後**：多個 runner（proxy 憑證、速率與預算以 target 為 key）；runs volume 的保留期限（M5／T23）。
 
 放行規則：T10–T13 全部通過前，不對操作者開放真實的 active scan API。只支援完全封閉的 HTTP 靶場；不跳過 HTTPS guard 測試來擴大範圍。
 
 上學期成果展示的內容：授權流程、FakeRunner 任務、guard 擋下越界請求、取消，以及 M0 的工具 spike 結果。
+
+- 達成（M2，2026-10-30）：T10–T13 都符合 DoD。runner 經 socket-proxy 啟動強化的單次容器；egress guard 逐請求檢查並強制共享預算，以 live 的接收端證明越界的請求一個也沒有送達；取消、撤回授權、runner 中斷之後都先封鎖 guard 再回收容器，run 不會永遠停在 running。`make test` 與 `make test-live-runner` 全部通過；code-reviewer 與 security-reviewer 在 M2 結束時都是 APPROVE（0 CRITICAL、0 HIGH，MEDIUM 已修正）。只有 fake 引擎與 preflight 送出流量：真的掃描器在 M3 起才接上，放行規則仍要求只掃完全封閉的 HTTP 靶場。
 
 ## M3｜01/25 – 02/28：ZAP Adapter（寒假與農曆年）
 

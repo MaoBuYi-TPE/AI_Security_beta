@@ -16,7 +16,7 @@ from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease, Scan
 from secscan.scans.queue import QueueOperations
 from secscan.scans.service import ScanService
-from tests.integration.scan_support import ScanWorld, create_scan, scan_world
+from tests.integration.scan_support import DEFAULT_CLOCK, ScanWorld, create_scan, scan_world
 from tests.integration.scope_support import LAB, app_error, same_response
 
 pytestmark = pytest.mark.integration
@@ -123,7 +123,7 @@ def test_a_running_scan_waits_for_the_runner_to_confirm(
     assert cancelling.status is ScanStatus.CANCELLING
     assert cancelling.runs[0].status is RunStatus.RUNNING
     assert cancelling.finished_at is None
-    assert _operations(db_session).heartbeat(lease).cancel_requested is True
+    assert _operations(db_session).heartbeat(lease, clock=DEFAULT_CLOCK).cancel_requested is True
     _operations(db_session).advance(lease, RunStatus.CANCELLING)
     done = _operations(db_session).advance(lease, RunStatus.CANCELLED)
     assert done.scan_status is ScanStatus.CANCELLED

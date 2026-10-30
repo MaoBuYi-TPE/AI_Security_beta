@@ -230,11 +230,11 @@ def test_heartbeats_keep_the_lease_and_the_instance_alive(
         make_runner(script=FakeScript(hold_seconds=40), on_heartbeat=lambda: beats.append(1))
     )
 
-    # lease 是 30 秒：停留 40 秒仍然成功，代表期間有延長。建立容器之前心跳一次（guard 的 renew_until
-    # 以它為準，docs/DECISIONS.md §15.7），啟動後立刻一次，之後每 5 秒一次（第 0 到 40 秒共 9 次；
-    # 心跳在查狀態之前），收集之前再心跳一次。
+    # lease 是 30 秒：停留 40 秒仍然成功，代表期間有延長。寫 policy 之前心跳一次（guard 的
+    # renew_until 以它為準，docs/DECISIONS.md §15.7），建立容器之前再一次（§17.2），啟動後立刻
+    # 一次，之後每 5 秒一次（第 0 到 40 秒共 9 次；心跳在查狀態之前），收集之前再心跳一次。
     assert report.run_status is R.COLLECTED
-    assert len(beats) == 11
+    assert len(beats) == 12
 
 
 # --- secret --------------------------------------------------------------------------------
@@ -516,11 +516,13 @@ def test_a_rejected_plan_never_reaches_docker(
     assert runtime.created == []
     assert list((tmp_path / "secrets").iterdir()) == []
     # 沒有流量：之後的 run 不必保守扣掉這個 run 分到的預算（docs/DECISIONS.md §16.4）。
+    # 從未建立容器：記下「容器不存在」，對帳不必再確認（§17.2）。
     [usage] = queue_seed.query(
-        "SELECT requests_sent, traffic_seconds FROM scanner_runs WHERE id = :id",
+        "SELECT requests_sent, traffic_seconds, container_removed_at IS NOT NULL AS removed "
+        "FROM scanner_runs WHERE id = :id",
         id=report.run_id,
     )
-    assert tuple(usage) == (0, 0)
+    assert tuple(usage) == (0, 0, True)
 
 
 @pytest.mark.parametrize("operation", ["create", "start"])
@@ -636,9 +638,9 @@ def test_the_first_heartbeat_comes_right_after_the_start(
         make_runner(script=FakeScript(hold_seconds=1), on_heartbeat=lambda: beats.append(1))
     )
 
-    # 建立容器之前、啟動之後立刻、收集之前各一次。
+    # 寫 policy 之前、建立容器之前（§17.2）、啟動之後立刻、收集之前各一次。
     assert report.run_status is R.COLLECTED
-    assert len(beats) == 3
+    assert len(beats) == 4
 
 
 @pytest.mark.parametrize("volume", ["runs", "secrets"])
