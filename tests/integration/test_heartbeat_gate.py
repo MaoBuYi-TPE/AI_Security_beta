@@ -14,13 +14,16 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from secscan.api_keys.models import ApiKeyModel
 from secscan.api_keys.service import ApiKeyService
+from secscan.grants.models import ScopeGrantModel
 from secscan.grants.service import ScopeGrantService
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode
 from secscan.scans.domain.model import Lease
 from secscan.scans.queue import Heartbeat, QueueOperations, ScanQueue
 from secscan.targets.domain import LabNetwork, TargetUpdate
+from secscan.targets.models import TargetModel
 from secscan.targets.service import TargetService
 from tests.integration.api_support import LAB, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
@@ -206,13 +209,54 @@ def test_the_heartbeat_does_not_wait_for_a_pending_revocation(
 def test_the_heartbeat_reads_fresh_values_in_a_shared_session(
     queue_engine: Engine, lease: Lease, world: World, scannable: Scannable
 ) -> None:
-    """同一個 session 先載入過 grant（identity map），撤銷之後仍讀到新的值。"""
+    """呼叫端的 session 持有已載入的 grant、target 與 key（identity map 中的舊值）：撤銷之後
+    心跳仍讀到新的值。identity map 是弱參照，沒有持有時不會重用舊的物件，所以這裡刻意持有。
+    """
     with Session(queue_engine, expire_on_commit=False) as session:
         with session.begin():
+            held = (
+                session.get(ScopeGrantModel, scannable.grant.id),
+                session.get(TargetModel, scannable.target.id),
+                session.get(ApiKeyModel, world.operator_a.principal.key_id),
+            )
             operations = QueueOperations(session, lab=LAB)
             assert operations.heartbeat(lease, clock=_now).stop_reason is None
         _revoke(queue_engine, world, scannable)
+        _revoke_creator(queue_engine, world, scannable)
         with session.begin():
             later = operations.heartbeat(lease, clock=lambda: _now() + timedelta(seconds=1))
+            assert all(model is not None for model in held)
 
     assert later.stop_reason is RunErrorCode.SCOPE_REVOKED
+
+
+def test_the_heartbeat_reads_a_fresh_creator_key_in_a_shared_session(
+    queue_engine: Engine, lease: Lease, world: World, scannable: Scannable
+) -> None:
+    with Session(queue_engine, expire_on_commit=False) as session:
+        with session.begin():
+            held = session.get(ApiKeyModel, world.operator_a.principal.key_id)
+            operations = QueueOperations(session, lab=LAB)
+            assert operations.heartbeat(lease, clock=_now).stop_reason is None
+        _revoke_creator(queue_engine, world, scannable)
+        with session.begin():
+            later = operations.heartbeat(lease, clock=_now)
+            assert held is not None
+
+    assert later.stop_reason is RunErrorCode.CREATOR_KEY_REVOKED
+
+
+def test_the_heartbeat_reads_a_fresh_target_in_a_shared_session(
+    queue_engine: Engine, lease: Lease, world: World, scannable: Scannable
+) -> None:
+    with Session(queue_engine, expire_on_commit=False) as session:
+        with session.begin():
+            held = session.get(TargetModel, scannable.target.id)
+            operations = QueueOperations(session, lab=LAB)
+            assert operations.heartbeat(lease, clock=_now).stop_reason is None
+        _disable(queue_engine, world, scannable)
+        with session.begin():
+            later = operations.heartbeat(lease, clock=_now)
+            assert held is not None
+
+    assert later.stop_reason is RunErrorCode.TARGET_DISABLED
