@@ -166,7 +166,7 @@ def af_plan(
             {"type": "passiveScan-config", "parameters": {"scanOnlyInScope": True}},
             discovery,
             {"type": "passiveScan-wait", "parameters": {"maxDuration": max(1, minutes // 10)}},
-            _active_scan(profile, minutes),
+            _active_scan(profile, scope, minutes),
             {
                 "type": "report",
                 "alwaysRun": True,
@@ -235,7 +235,7 @@ def _openapi(origin: Origin, spec: ToolSpec | None) -> JsonObject:
     }
 
 
-def _active_scan(profile: ScanProfile, minutes: int) -> JsonObject:
+def _active_scan(profile: ScanProfile, scope: Scope, minutes: int) -> JsonObject:
     return {
         "type": "activeScan",
         "parameters": {
@@ -248,7 +248,7 @@ def _active_scan(profile: ScanProfile, minutes: int) -> JsonObject:
             "injectPluginIdInHeader": False,
             "scanHeadersAllRequests": False,
         },
-        "policyDefinition": policy_definition(profile),
+        "policyDefinition": policy_definition(profile, methods=scope.methods),
     }
 
 

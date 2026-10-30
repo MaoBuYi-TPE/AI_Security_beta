@@ -20,6 +20,8 @@ from secscan.targets.domain import Origin
 PLACEHOLDER = "[^/?#]+"
 QUERY = r"(?:\?.*)?"
 _IGNORE_CASE = "(?i)"
+# 字串的結尾：`$` 在結尾的換行之前也成立（Java 與 Python 相同），Python 3.12 又沒有 \z。
+_END = r"(?![\s\S])"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +43,7 @@ def context_paths(origin: Origin, scope: Scope) -> ContextPaths:
         f"{_IGNORE_CASE}{base}{_route(parse_route(path), lenient=True)}{QUERY}"
         for path in scope.excluded_paths
     )
-    outside = "(?!(?:" + "|".join(f"(?:{pattern})" for pattern in include) + ")$).*"
+    outside = "(?!(?:" + "|".join(f"(?:{pattern})" for pattern in include) + f"){_END}).*"
     return ContextPaths(urls=(f"{origin}/",), include=include, exclude=(*excluded, outside))
 
 

@@ -38,7 +38,7 @@ def test_fake_alone_is_planned_as_the_first_run() -> None:
 
 
 @pytest.mark.parametrize(
-    ("engine", "milestone"), [(ZAP, "M3"), (NUCLEI, "M4"), (SCHEMATHESIS, "M6")]
+    ("engine", "milestone"), [(ZAP, "T15"), (NUCLEI, "T18"), (SCHEMATHESIS, "M6")]
 )
 def test_engines_without_an_adapter_are_unsupported(engine: Engine, milestone: str) -> None:
     with pytest.raises(UnsupportedEngineError, match=milestone) as caught:

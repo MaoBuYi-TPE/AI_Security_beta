@@ -203,7 +203,7 @@ class ContainerRunner:
             logger.warning("ExecutionPlan 被拒絕：run %s，%s", lease.run_id, exc.reason.value)
             return self._never_started(lease, RunErrorCode.PLAN_REJECTED)
         except PlanWindowTooSmallError:
-            logger.warning("剩下的時間或請求數不夠執行：run %s", lease.run_id)
+            logger.warning("剩下的時間、請求數或 grant 的期限不夠執行：run %s", lease.run_id)
             return self._never_started(lease, RunErrorCode.BUDGET_EXHAUSTED)
         return self._execute(_Attempt(lease, spec.name), launch.secret, launch.egress, plan, spec)
 

@@ -40,7 +40,7 @@ AVAILABLE_ENGINES: frozenset[Engine] = frozenset({Engine.FAKE})
 _UNAVAILABLE_REASONS: Mapping[Engine, str] = MappingProxyType(
     {
         Engine.PREFLIGHT: "preflight 不能指定：綁定 auth profile 時由平台自動加入",
-        Engine.ZAP: "zap 的 Adapter 在 M3（T14）整合之後才能使用",
+        Engine.ZAP: "zap 在 M3 的 parser（T15）完成之後才能使用",
         Engine.NUCLEI: "nuclei 的 Adapter 在 M4（T18）整合之後才能使用",
         Engine.SCHEMATHESIS: "schemathesis 是 P1，M6 整合之後才能使用",
     }

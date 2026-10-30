@@ -124,7 +124,8 @@ services:
       <<: *app-env
       SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
       # 只給 live 測試的預覽開關（docs/DECISIONS.md §18.9；make test-live-zap 才設定，T15 移除）。
-      SCAN_PREVIEW_ENGINES: ${SCAN_PREVIEW_ENGINES:-}
+      # 以 live 專用的變數插值，make up 會明確清空它：.env 中留著 zap 也不會讓一般的 stack 接受 zap。
+      SCAN_PREVIEW_ENGINES: ${SECSCAN_LIVE_PREVIEW_ENGINES:-}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     networks: [default, control_net]

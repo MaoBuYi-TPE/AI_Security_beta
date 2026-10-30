@@ -176,8 +176,13 @@ def _environment_allowed(environment: tuple[tuple[str, str], ...], policy: Engin
 
 def _inputs_allowed(plan: ExecutionPlan, policy: EnginePolicy) -> bool:
     names = Counter(item.name for item in plan.inputs)
-    return all(count == 1 and name in policy.input_names for name, count in names.items()) and all(
-        len(item.content) <= policy.max_input_bytes for item in plan.inputs
+    if not all(count == 1 and name in policy.input_names for name, count in names.items()):
+        return False
+    rules = policy.input_rules
+    return all(
+        len(item.content) <= policy.max_input_bytes
+        and (item.name not in rules or rules[item.name].accepts(item.content))
+        for item in plan.inputs
     )
 
 

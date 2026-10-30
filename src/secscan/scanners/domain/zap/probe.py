@@ -14,6 +14,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from secscan.core.json_types import JsonObject
+from secscan.grants.domain.scope import HttpMethod
 from secscan.scanners.domain.plan import ExecutionPlan, InputFile, ResourceLimits
 from secscan.scanners.domain.zap.plan import OUT_DIR, ZAP_MEMORY_BYTES, ZAP_NANO_CPUS, ZAP_PIDS
 from secscan.scanners.domain.zap.policy import (
@@ -113,7 +114,7 @@ def _policy_job(profile: ScanProfile) -> JsonObject:
     return {
         "type": "activeScan-policy",
         "parameters": {"name": POLICY_NAMES[profile]},
-        "policyDefinition": policy_definition(profile),
+        "policyDefinition": policy_definition(profile, methods=frozenset(HttpMethod)),
     }
 
 
@@ -122,7 +123,8 @@ def _report_version(report: bytes | None) -> str | None:
         return None
     try:
         document = json.loads(report.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    # ValueError 包含 JSONDecodeError 與超過位數上限的整數（不可信的資料；審查 L1）。
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     version = document.get("@version") if isinstance(document, dict) else None
     if not isinstance(version, str) or _VERSION.fullmatch(version) is None:

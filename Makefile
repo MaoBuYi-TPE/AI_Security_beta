@@ -60,7 +60,7 @@ bootstrap:
 # 啟動 API 開發程序：只綁 127.0.0.1，APP_ENV=dev 才開啟 API 文件。API 需要 .env 中的加密金鑰，
 # 所以先執行 make env（只補上缺少的值）。
 dev: env
-	APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
+	SCAN_PREVIEW_ENGINES= APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
 		--host 127.0.0.1 --port 8000 --reload --reload-dir src
 
 # unit/contract/integration 測試與 coverage 門檻（分支覆蓋），不做 live scan、不跑 live 測試。
@@ -181,7 +181,7 @@ lab-net:
 # 啟動 app stack（db、api、runner、worker、socket-proxy、guard）。API 只綁 127.0.0.1:$${API_PORT:-8000}。
 # 第一次使用先執行 make migrate（db 的 schema）與 create-admin-key。
 up: env docker-check scan-net lab-net images build
-	$(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
+	SECSCAN_LIVE_PREVIEW_ENGINES= $(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
 
 # 停止 app stack 與 db（資料保留在 volume）。
 down:
@@ -217,7 +217,7 @@ test-live-runner: env docker-check images build
 
 # ZAP 的 live 測試（docs/DECISIONS.md §18.10）：同一個獨立的 secscan-live 專案與流程，API 加上只給
 # live 的預覽開關（zap 在 T15 才開放）。runner 啟動時以真的 ZAP 映像執行 capability probe；掃描的是
-# live 自己 lab 網路上的小型網站（tests/live/zap_site.py），不啟動 Juice Shop、VAmPI。約 20 分鐘。
+# live 自己 lab 網路上的小型網站（tests/live/zap_site.py），不啟動 Juice Shop、VAmPI。約 10 分鐘（測試本身約 8 分鐘）。
 test-live-zap: LIVE_TESTS := tests/live/test_zap_live.py
-test-live-zap: LIVE_EXTRA_ENV := SCAN_PREVIEW_ENGINES=zap
+test-live-zap: LIVE_EXTRA_ENV := SECSCAN_LIVE_PREVIEW_ENGINES=zap
 test-live-zap: test-live-runner

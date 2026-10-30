@@ -153,7 +153,9 @@ def test_a_reference_to_a_removed_operation_fails_closed() -> None:
         )
 
 
-@pytest.mark.parametrize("content", [b"not json", b"[]", b'{"paths": []}'])
+@pytest.mark.parametrize(
+    "content", [b"not json", b"[]", b'{"paths": []}', b"1" * 5_000, b"[" * 100_000, b"\xff"]
+)
 def test_a_document_that_is_not_the_normalized_shape_is_an_error(content: bytes) -> None:
     with pytest.raises(ToolDocumentError):
         tool_document(content, eligible={("GET", "/api/items")}, base_path="/api", origin=ORIGIN)

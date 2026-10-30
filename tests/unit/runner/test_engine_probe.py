@@ -14,7 +14,7 @@ import pytest
 from secscan.runner.domain.admission import ContainerSpec, managed_run_id
 from secscan.runner.engine_probe import PROBE_RETRY_SECONDS, EngineProber
 from secscan.runner.probe import probe
-from secscan.runner.workspace import Workspace, WorkspaceError
+from secscan.runner.workspace import CollectionLimits, Workspace, WorkspaceError
 from secscan.scanners.domain.instances import Capabilities, CapabilityIssue, EngineCapability
 from secscan.scanners.domain.zap.policy import REQUIRED_ADDONS, ZAP_IMAGE, ZAP_VERSION
 from secscan.scanners.domain.zap.probe import PROBE_WALL_CLOCK_SECONDS
@@ -93,7 +93,6 @@ def test_zap_is_pending_until_the_probe_passes(
 
     zap = _zap(prober.apply(base))
     assert (zap.issue, zap.version) == (None, ZAP_VERSION)
-    assert prober.addons == dict(REQUIRED_ADDONS)
 
 
 def test_the_probe_container_is_hardened_like_a_scan_and_then_removed(
@@ -197,6 +196,30 @@ def test_a_probe_that_never_ends_is_stopped_and_removed(
     base = probe(runtime, POLICY)
 
     _settle(prober, runtime, base)
+
+    assert not prober.running
+    [spec] = runtime.created
+    assert spec.name in runtime.stopped
+    assert runtime.removed == [spec.name]
+    assert _zap(prober.apply(base)).issue is CapabilityIssue.ENGINE_PROBE_FAILED
+
+
+def test_a_probe_that_writes_too_much_is_stopped_early(
+    runtime: FakeContainerRuntime, dirs: tuple[Path, Path]
+) -> None:
+    """審查 L2：probe 執行中也做和掃描相同的用量檢查，不等到牆鐘的上限。"""
+    runtime.scripted[str(ZAP_IMAGE)] = ScriptedContainer(
+        seconds=10_000, on_start=_writer(dirs[0], plugins=b"x" * 2_048)
+    )
+    limits = CollectionLimits(max_file_bytes=1_024, max_total_bytes=1_024)
+    prober = EngineProber(
+        runtime, Workspace(*dirs, limits=limits), POLICY, monotonic=runtime.clock.monotonic
+    )
+    base = probe(runtime, POLICY)
+
+    prober.step(base)
+    runtime.clock.sleep(1)
+    prober.step(base)
 
     assert not prober.running
     [spec] = runtime.created

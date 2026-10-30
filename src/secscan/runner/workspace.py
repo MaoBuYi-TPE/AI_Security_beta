@@ -89,8 +89,9 @@ class Manifest:
     run_id: UUID
     files: tuple[CollectedFile, ...]
     total_bytes: int
-    exit_code: int = 0
-    inputs: tuple[CollectedFile, ...] = ()
+    # 沒有預設值（審查 L6）：新的呼叫路徑忘了傳時不能悄悄記成 0。
+    exit_code: int
+    inputs: tuple[CollectedFile, ...]
 
 
 @dataclass
@@ -209,9 +210,7 @@ class Workspace:
         """容器執行中的用量檢查：條目數、深度與總大小（只 lstat，不開檔、不跟隨 symlink）。"""
         self._walk_output(run_id, _Walk(self._limits, hashing=False))
 
-    def collect(
-        self, run_id: UUID, *, exit_code: int = 0, inputs: Sequence[InputFile] = ()
-    ) -> Manifest:
+    def collect(self, run_id: UUID, *, exit_code: int, inputs: Sequence[InputFile]) -> Manifest:
         """走過 out/、計算 hash，寫入 manifest.json；不符合規則就拋 ArtifactRejectedError。
 
         inputs 是 runner 寫進 in/ 的輸入檔（runner 自己的資料，從記憶體計算 hash）。

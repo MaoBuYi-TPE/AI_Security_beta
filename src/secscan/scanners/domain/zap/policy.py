@@ -7,10 +7,11 @@ alpha 的規則、雜訊（User Agent Fuzzer）、時間型的注入（耗掉時
 web 與 api 各一份（ARCHITECTURE §5：兩種 profile 不等價）；api 以 ZAP 的 API-Minimal policy 為基準。
 """
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from types import MappingProxyType
 
 from secscan.core.json_types import JsonObject
+from secscan.grants.domain.scope import HttpMethod
 from secscan.scanners.domain.plan import ImageReference
 from secscan.scans.domain.catalog import ScanProfile
 
@@ -95,10 +96,25 @@ DEFAULT_STRENGTH = "low"
 RULE_THRESHOLD = "medium"
 
 
-def policy_definition(profile: ScanProfile) -> JsonObject:
-    """activeScan 與 activeScan-policy 共用的 policyDefinition：白名單以外一律關閉。"""
+# 會把請求改成另一個 method 的規則（ZAP 的原始碼；T14 的審查 L5）：grant 不允許那個 method 時
+# 不執行。20018 與 40048 一律送 POST；40045 先送 GET、再送 POST；10058 把 POST 改成 GET（web 一定
+# 允許 GET）。
+METHOD_SWITCHING_RULES: Mapping[int, HttpMethod] = MappingProxyType(
+    {10058: HttpMethod.GET, 20018: HttpMethod.POST, 40045: HttpMethod.POST, 40048: HttpMethod.POST}
+)
+
+
+def policy_definition(profile: ScanProfile, *, methods: Collection[HttpMethod]) -> JsonObject:
+    """activeScan 與 activeScan-policy 共用的 policyDefinition：白名單以外一律關閉；會改成 grant
+    不允許的 method 的規則也關閉（probe 傳入全部的 method，核對每一條規則都存在）。
+    """
+    rules = [
+        rule
+        for rule in ACTIVE_SCAN_RULES[profile]
+        if rule not in METHOD_SWITCHING_RULES or METHOD_SWITCHING_RULES[rule] in methods
+    ]
     return {
         "defaultStrength": DEFAULT_STRENGTH,
         "defaultThreshold": "off",
-        "rules": [{"id": rule, "threshold": RULE_THRESHOLD} for rule in ACTIVE_SCAN_RULES[profile]],
+        "rules": [{"id": rule, "threshold": RULE_THRESHOLD} for rule in rules],
     }

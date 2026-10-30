@@ -257,7 +257,7 @@ def _prepared(workspace: Workspace, dirs: tuple[Path, Path]) -> Path:
 def test_an_empty_output_is_collected(workspace: Workspace, dirs: tuple[Path, Path]) -> None:
     _prepared(workspace, dirs)
 
-    manifest = workspace.collect(RUN)
+    manifest = workspace.collect(RUN, exit_code=0, inputs=())
 
     assert manifest.files == ()
     assert manifest.total_bytes == 0
@@ -271,7 +271,7 @@ def test_files_are_hashed_and_listed_outside_the_output(
     (out / "nested").mkdir()
     (out / "nested" / "b.txt").write_bytes(b"hello")
 
-    manifest = workspace.collect(RUN)
+    manifest = workspace.collect(RUN, exit_code=0, inputs=())
 
     assert [(item.path, item.size, item.sha256) for item in manifest.files] == [
         ("nested/b.txt", 5, hashlib.sha256(b"hello").hexdigest()),
@@ -312,7 +312,7 @@ def test_the_manifest_records_the_exit_code_and_the_inputs(
 
 def _rejected(workspace: Workspace) -> ArtifactIssue:
     with pytest.raises(ArtifactRejectedError) as caught:
-        workspace.collect(RUN)
+        workspace.collect(RUN, exit_code=0, inputs=())
     return caught.value.issue
 
 
@@ -478,7 +478,7 @@ def test_limits_at_the_boundary_are_accepted(dirs: tuple[Path, Path]) -> None:
     (out / "a" / "x").write_bytes(b"1234")
     (out / "y").write_bytes(b"1234")
 
-    assert workspace.collect(RUN).total_bytes == 8
+    assert workspace.collect(RUN, exit_code=0, inputs=()).total_bytes == 8
 
 
 def test_the_rejection_names_no_path(workspace: Workspace, dirs: tuple[Path, Path]) -> None:
@@ -486,7 +486,7 @@ def test_the_rejection_names_no_path(workspace: Workspace, dirs: tuple[Path, Pat
     (out / "secret-looking-name").symlink_to("/etc/passwd")
 
     with pytest.raises(ArtifactRejectedError) as caught:
-        workspace.collect(RUN)
+        workspace.collect(RUN, exit_code=0, inputs=())
 
     assert "secret-looking-name" not in str(caught.value)
     assert "/etc" not in str(caught.value)
@@ -502,7 +502,7 @@ def test_an_existing_manifest_is_never_overwritten(
     manifest.chmod(0o600)
 
     with pytest.raises(WorkspaceError):
-        workspace.collect(RUN)
+        workspace.collect(RUN, exit_code=0, inputs=())
 
     assert manifest.read_bytes() == b"{}"
 
@@ -709,7 +709,7 @@ def test_an_unreadable_directory_while_running_is_rejected(
 
 def test_collecting_a_run_without_a_directory_is_a_workspace_error(workspace: Workspace) -> None:
     with pytest.raises(WorkspaceError):
-        workspace.collect(RUN)
+        workspace.collect(RUN, exit_code=0, inputs=())
 
 
 @pytest.mark.parametrize("failing", ["scandir", "read", "open_and_stat"])
@@ -815,3 +815,41 @@ def test_reading_an_output_from_a_swapped_out_directory_fails(
 def test_only_plain_names_can_be_read(workspace: Workspace, name: str) -> None:
     with pytest.raises(ValueError, match="檔名"):
         workspace.read_output(RUN, name, max_bytes=1024)
+
+
+def test_an_output_of_a_run_that_was_never_prepared_is_none(workspace: Workspace) -> None:
+    assert workspace.read_output(uuid4(), "plugins.txt", max_bytes=1024) is None
+
+
+def test_short_reads_are_joined_and_read_errors_are_none(
+    workspace: Workspace, dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _prepared(workspace, dirs)
+    (out / "plugins.txt").write_bytes(b"spider-release-0.20.0.zap\n")
+    real_read = os.read
+
+    def short(descriptor: int, size: int) -> bytes:
+        return real_read(descriptor, min(size, 3))
+
+    monkeypatch.setattr(os, "read", short)
+    assert workspace.read_output(RUN, "plugins.txt", max_bytes=1024) == (
+        b"spider-release-0.20.0.zap\n"
+    )
+    assert workspace.read_output(RUN, "plugins.txt", max_bytes=8) is None
+
+    def failing(descriptor: int, size: int) -> bytes:
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(os, "read", failing)
+    assert workspace.read_output(RUN, "plugins.txt", max_bytes=1024) is None
+
+
+def test_a_secret_directory_that_cannot_be_created_is_a_workspace_error(
+    workspace: Workspace, dirs: tuple[Path, Path]
+) -> None:
+    dirs[1].chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        with pytest.raises(WorkspaceError, match="無法建立 secret 目錄"):
+            workspace.create_secret_dir(RUN)
+    finally:
+        dirs[1].chmod(stat.S_IRWXU)

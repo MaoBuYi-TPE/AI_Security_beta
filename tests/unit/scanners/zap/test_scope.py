@@ -160,3 +160,15 @@ def test_matches_the_guard_rules(
 
     assert _included(paths, url) == (allowed_by_guard and not excluded_by_guard)
     assert not _included(paths, f"http://other:3000{request}{query}")
+
+
+def test_a_trailing_line_break_does_not_slip_past_the_outside_exclusion() -> None:
+    """審查 L3：Java 與 Python 的 `$` 都會在結尾的換行之前成立；改用「後面沒有任何字元」。
+
+    以 DOTALL 比對（`.*` 也吃換行）：允許的 URL 後面接換行，仍然被範圍外的排除擋下。
+    """
+    paths = context_paths(ORIGIN, _scope(("/api/items",)))
+    outside = paths.exclude[-1]
+
+    assert re.fullmatch(outside, "http://lab-web:3000/api/items", re.DOTALL) is None
+    assert re.fullmatch(outside, "http://lab-web:3000/api/items\n", re.DOTALL) is not None

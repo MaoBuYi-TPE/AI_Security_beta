@@ -1,16 +1,22 @@
 """每個引擎的 ExecutionPlan（docs/DECISIONS.md §18.7）：完整分派、建好之後再核對引擎與映像。"""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
 from uuid import uuid4
 
 import pytest
 
+from secscan.auth_profiles.domain.credentials import AuthType, Credential
+from secscan.auth_profiles.domain.model import StoredSecret
+from secscan.auth_profiles.domain.preflight import Preflight
 from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard.domain.budget import RunBudget
+from secscan.runner import plans
 from secscan.runner.domain.admission import PlanRejectedError, PlanRejection
 from secscan.runner.plans import ENGINE_IMAGES, RunPlanner
 from secscan.scanners.domain.fake import FakeScript
+from secscan.scanners.domain.plan import ExecutionPlan
 from secscan.scanners.domain.zap.plan import PlanWindowTooSmallError
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.scans.domain.catalog import Engine, ScanProfile
@@ -38,6 +44,10 @@ SPEC = SpecInputs(
     ),
     base_path="/api",
     eligible=frozenset({("GET", "/api/items")}),
+)
+PREFLIGHT = Preflight(method="GET", path="/me", expected_status=200, expected_json={"/ok": True})
+SECRET = StoredSecret(
+    profile_id=uuid4(), version=1, credential=Credential(AuthType.BEARER), token=b"x"
 )
 
 
@@ -143,6 +153,40 @@ def test_an_incompatible_profile_is_refused() -> None:
     launch = _launch(profile=ScanProfile.API_ACTIVE_LAB, spec=None)
 
     assert _rejected(_lease(Engine.ZAP), launch, str(ZAP_IMAGE)) is PlanRejection.INPUT_NOT_ALLOWED
+
+
+PREFLIGHT_LAUNCH = replace(_launch(), preflight=PREFLIGHT, secret=SECRET)
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        replace(PREFLIGHT_LAUNCH, preflight=None),
+        replace(PREFLIGHT_LAUNCH, secret=None),
+        replace(PREFLIGHT_LAUNCH, egress=None),
+    ],
+)
+def test_a_preflight_without_its_binding_is_refused(launch: Launch) -> None:
+    image = str(ENGINE_IMAGES[Engine.PREFLIGHT])
+
+    assert _planner().plan(_lease(Engine.PREFLIGHT), PREFLIGHT_LAUNCH, image_ref=image).engine is (
+        Engine.PREFLIGHT
+    )
+    assert _rejected(_lease(Engine.PREFLIGHT), launch, image) is PlanRejection.ENGINE_NOT_ALLOWED
+
+
+def test_a_preflight_url_the_builder_refuses_is_an_input_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(**_: object) -> ExecutionPlan:
+        raise ValueError("URL 不合法")
+
+    monkeypatch.setattr(plans, "plan_preflight_run", refuse)
+    image = str(ENGINE_IMAGES[Engine.PREFLIGHT])
+
+    assert _rejected(_lease(Engine.PREFLIGHT), PREFLIGHT_LAUNCH, image) is (
+        PlanRejection.INPUT_NOT_ALLOWED
+    )
 
 
 @pytest.mark.parametrize(

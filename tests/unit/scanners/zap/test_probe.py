@@ -114,6 +114,9 @@ def test_plan_warnings_mean_a_rule_or_an_option_is_missing() -> None:
         json.dumps({"@version": 2170}).encode(),
         json.dumps({"@version": "2.17.0\n"}).encode(),
         b" " * (MAX_PROBE_OUTPUT_BYTES + 1),
+        # 超過位數上限的整數是 ValueError，不是 JSONDecodeError（審查 L1）。
+        b"1" * 5_000,
+        b"[" * 10_000,
     ],
 )
 def test_an_unreadable_report_is_a_probe_failure(report: bytes | None) -> None:

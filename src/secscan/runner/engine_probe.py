@@ -23,7 +23,7 @@ from secscan.runner.domain.admission import PlanRejectedError, build_container
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.runner.domain.runtime import ContainerRuntime, RuntimeUnavailableError
 from secscan.runner.service import STOP_GRACE_SECONDS
-from secscan.runner.workspace import Workspace, WorkspaceError
+from secscan.runner.workspace import ArtifactRejectedError, Workspace, WorkspaceError
 from secscan.scanners.domain.instances import Capabilities, CapabilityIssue, EngineCapability
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.scanners.domain.zap.probe import (
@@ -80,10 +80,6 @@ class EngineProber:
     @property
     def running(self) -> bool:
         return self._running is not None
-
-    @property
-    def addons(self) -> Mapping[str, str]:
-        return dict(self._verified.addons) if self._verified is not None else {}
 
     def apply(self, capabilities: Capabilities) -> Capabilities:
         """zap 的映像與環境都可用時，只有 probe 通過才可用（帶著版本）；其他原因照原樣回報。"""
@@ -142,7 +138,12 @@ class EngineProber:
             if not self._expired(running):
                 return
             state = None
-        if state is not None and state.running and not self._expired(running):
+        if (
+            state is not None
+            and state.running
+            and not self._expired(running)
+            and self._within_limits(running)
+        ):
             return
         if state is None or state.running or state.exit_code is None:
             self._stop(running)
@@ -155,6 +156,15 @@ class EngineProber:
             )
         self._finish(running)
         self._record(result)
+
+    def _within_limits(self, running: _Running) -> bool:
+        """和掃描相同的用量檢查（條目數、深度、大小）：超過就停止，不等牆鐘的上限。"""
+        try:
+            self._workspace.check_output(running.probe_id)
+        except (ArtifactRejectedError, WorkspaceError) as exc:
+            logger.warning("zap 的 probe 的輸出不符合規則（%s）：停止", type(exc).__name__)
+            return False
+        return True
 
     def _expired(self, running: _Running) -> bool:
         return self._monotonic() - running.started_at > PROBE_WALL_CLOCK_SECONDS

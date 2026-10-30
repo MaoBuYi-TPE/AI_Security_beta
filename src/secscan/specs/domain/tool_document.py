@@ -57,7 +57,8 @@ def tool_document(
 def _load(document: bytes) -> JsonObject:
     try:
         parsed = json.loads(document.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    # ValueError 包含 JSONDecodeError 與超過位數上限的整數（不可信的資料；審查 L1）。
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise ToolDocumentError("文件不是 JSON") from None
     if not isinstance(parsed, dict):
         raise ToolDocumentError("文件必須是物件")

@@ -232,7 +232,8 @@ def test_robots_and_sitemap_are_read_only_when_in_scope() -> None:
 def test_the_active_scan_runs_only_the_allowlisted_rules(
     profile: ScanProfile, rules: tuple[int, ...], spec: ToolSpec | None
 ) -> None:
-    active = _job(_af(_plan(profile, spec=spec)), "activeScan")
+    scope = _scope(methods=(HttpMethod.GET, HttpMethod.POST))
+    active = _job(_af(_plan(profile, scope=scope, spec=spec)), "activeScan")
 
     assert active["parameters"]["threadPerHost"] == 1
     assert active["parameters"]["context"] == "target"
@@ -241,6 +242,26 @@ def test_the_active_scan_runs_only_the_allowlisted_rules(
     assert policy["defaultStrength"] == "low"
     assert [rule["id"] for rule in policy["rules"]] == list(rules)
     assert {rule["threshold"] for rule in policy["rules"]} == {"medium"}
+
+
+def _rules(profile: ScanProfile, methods: tuple[HttpMethod, ...]) -> set[int]:
+    spec = SPEC if profile is ScanProfile.API_ACTIVE_LAB else None
+    plan = _plan(profile, scope=_scope(methods=methods), spec=spec)
+    policy = _job(_af(plan), "activeScan")["policyDefinition"]
+    return {rule["id"] for rule in policy["rules"]}
+
+
+def test_rules_that_switch_to_a_method_outside_the_grant_stay_off() -> None:
+    """審查 L5（ZAP 的原始碼）：20018 與 40048 一律送 POST，40045 也送 POST。grant 不允許 POST 時
+    不執行（live 量到 grant 只允許 GET 時仍有 52 個 POST 被 guard 擋下，TOOLS.md §7.5）。
+    """
+    get_only = _rules(ScanProfile.WEB_ACTIVE_LAB, (HttpMethod.GET, HttpMethod.HEAD))
+    with_post = _rules(ScanProfile.WEB_ACTIVE_LAB, (HttpMethod.GET, HttpMethod.POST))
+
+    assert with_post == set(WEB_RULES)
+    assert with_post - get_only == {20018, 40045, 40048}
+    # api 的白名單沒有會改 method 的規則：只允許 POST 的 grant 也是完整的清單。
+    assert _rules(ScanProfile.API_ACTIVE_LAB, (HttpMethod.POST,)) == set(API_RULES)
 
 
 def test_the_profiles_do_not_share_one_rule_list() -> None:

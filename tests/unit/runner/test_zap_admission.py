@@ -7,6 +7,8 @@
 
 import copy
 import hashlib
+import json
+from collections.abc import Callable
 from dataclasses import replace
 from ipaddress import IPv4Address
 from typing import Any
@@ -28,6 +30,7 @@ from secscan.runner.domain.admission import (
 )
 from secscan.runner.domain.policy import (
     ENGINE_POLICIES,
+    ZAP_PROBE_PLAN_SHA256,
     ZAP_PROBE_SCRIPT_SHA256,
     ZAP_SCAN_SCRIPT_SHA256,
 )
@@ -229,6 +232,149 @@ def test_the_largest_normalized_spec_fits() -> None:
     plan = replace(_zap(ScanProfile.API_ACTIVE_LAB), inputs=(_zap().inputs[0], spec))
 
     admit(plan)
+
+
+# --- 輸入檔的內容（審查 M1）：AF plan 是 ZAP 的程式，admission 自己檢查，不只靠 builder ----------
+
+
+def _document(plan: ExecutionPlan) -> dict[str, Any]:
+    [item] = [item for item in plan.inputs if item.name == "plan.yaml"]
+    document = json.loads(item.content)
+    assert isinstance(document, dict)
+    return document
+
+
+def _with_plan_file(content: bytes) -> ExecutionPlan:
+    return replace(_zap(), inputs=(InputFile("plan.yaml", content),))
+
+
+def _job(document: dict[str, Any], kind: str) -> dict[str, Any]:
+    job = next(job for job in document["jobs"] if job["type"] == kind)
+    assert isinstance(job, dict)
+    return job
+
+
+def _variable_in_parameter(document: dict[str, Any]) -> None:
+    document["jobs"][0]["parameters"]["user"] = "${ZAP_AUTH_HEADER_VALUE}"
+
+
+def _variable_in_key(document: dict[str, Any]) -> None:
+    document["env"]["${HOME}"] = 1
+
+
+def _script_job(document: dict[str, Any]) -> None:
+    document["jobs"].append({"type": "script", "parameters": {"action": "run"}})
+
+
+def _plus_template(document: dict[str, Any]) -> None:
+    _job(document, "report")["parameters"]["template"] = "traditional-json-plus"
+
+
+def _report_elsewhere(document: dict[str, Any]) -> None:
+    _job(document, "report")["parameters"]["reportDir"] = "/tmp"  # noqa: S108
+
+
+def _two_reports(document: dict[str, Any]) -> None:
+    document["jobs"].append(copy.deepcopy(_job(document, "report")))
+
+
+def _no_report(document: dict[str, Any]) -> None:
+    document["jobs"] = [job for job in document["jobs"] if job["type"] != "report"]
+
+
+def _every_rule(document: dict[str, Any]) -> None:
+    _job(document, "activeScan")["policyDefinition"]["defaultThreshold"] = "medium"
+
+
+def _no_policy(document: dict[str, Any]) -> None:
+    del _job(document, "activeScan")["policyDefinition"]
+
+
+def _jobs_not_a_list(document: dict[str, Any]) -> None:
+    document["jobs"] = {"report": _job(document, "report")}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        _variable_in_parameter,
+        _variable_in_key,
+        _script_job,
+        _plus_template,
+        _report_elsewhere,
+        _two_reports,
+        _no_report,
+        _every_rule,
+        _no_policy,
+        _jobs_not_a_list,
+    ],
+)
+def test_an_automation_plan_outside_the_rules_is_rejected(
+    change: Callable[[dict[str, Any]], None],
+) -> None:
+    document = _document(_zap())
+    admit(_with_plan_file(json.dumps(document).encode()))
+    change(document)
+
+    assert _rejected(_with_plan_file(json.dumps(document).encode())) is (
+        PlanRejection.INPUT_NOT_ALLOWED
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # JSON 的跳脫：檔案中沒有 ${，解析之後才有。
+        json.dumps(_document(_zap())).replace('"failOnError"', '"\\u0024{X}"').encode(),
+        b"not json",
+        b"[]",
+        b"\xff",
+        b"1" * 5_000,
+        b"[" * 100_000,
+    ],
+)
+def test_an_unreadable_or_disguised_plan_is_rejected(content: bytes) -> None:
+    assert _rejected(_with_plan_file(content)) is PlanRejection.INPUT_NOT_ALLOWED
+
+
+def test_the_spec_is_not_an_automation_plan() -> None:
+    """規格不經過 AF 的代換：說明文字中的 ${ 照樣交給 ZAP。"""
+    plan = _zap(ScanProfile.API_ACTIVE_LAB)
+    spec = InputFile("openapi.json", b'{"info": {"description": "${HOME}"}}')
+
+    admit(replace(plan, inputs=(plan.inputs[0], spec)))
+
+
+def test_the_probe_plan_is_approved_by_its_digest() -> None:
+    first, second = plan_zap_probe(RUN_ID), plan_zap_probe(SCAN_ID)
+    assert first.inputs == second.inputs
+    [content] = [item.content for item in first.inputs]
+    assert hashlib.sha256(content).hexdigest() == ZAP_PROBE_PLAN_SHA256
+
+    changed = replace(first, inputs=(InputFile("probe.yaml", content.replace(b"low", b"high")),))
+    assert _rejected(changed) is PlanRejection.INPUT_NOT_ALLOWED
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"environment": (("SECSCAN_TARGET_AUTH", "none"),)},
+        {
+            "environment": (
+                ("SECSCAN_TARGET_AUTH", "header"),
+                ("ZAP_AUTH_HEADER", "Authorization"),
+                ("ZAP_AUTH_HEADER_SITE", "lab-web"),
+            ),
+            "target_auth": True,
+        },
+        {"target_auth": True},
+    ],
+)
+def test_the_probe_command_takes_no_auth(change: dict[str, Any]) -> None:
+    """審查 I2：probe 的樣板也有認證的規則（沒有環境變數、不帶認證），兩個樣板都 fail closed。"""
+    assert _rejected(replace(plan_zap_probe(RUN_ID), **change)) is (
+        PlanRejection.ENVIRONMENT_NOT_ALLOWED
+    )
 
 
 @pytest.mark.parametrize(
