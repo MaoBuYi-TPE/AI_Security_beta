@@ -320,6 +320,30 @@ def test_a_docker_outage_defers_settlement_and_keeps_the_policy_blocked(
     assert guard.policy_files() == []
 
 
+def test_a_docker_outage_stops_the_round_after_the_first_container(
+    orphan: Callable[..., Lease],
+    reconciler: ContainerReconciler,
+    runtime: SpyRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker 不可用時不必逐一嘗試其他容器（每個都會失敗）：這一輪在第一個之後就停。"""
+    first, second = orphan(), orphan()
+    runtime.failing.update({"state", "version"})
+    inspected: list[str] = []
+    state = runtime.state
+
+    def counted(name: str) -> object:
+        inspected.append(name)
+        return state(name)
+
+    monkeypatch.setattr(runtime, "state", counted)
+
+    assert reconciler.reconcile() == 0
+
+    assert inspected == [_name(first)]
+    assert _name(second) in runtime.containers
+
+
 def test_a_conflict_defers_only_that_container(
     orphan: Callable[..., Lease],
     reconciler: ContainerReconciler,
