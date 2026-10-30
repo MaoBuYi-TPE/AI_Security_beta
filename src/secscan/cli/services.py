@@ -4,7 +4,8 @@
     uv run secscan-admin worker [--once]
 
 - 都先確認 DB 就緒；收到 SIGTERM 或 SIGINT 時停止：runner 會停止並刪除執行中的容器，把 run 標成
-  interrupted（RUNNER_STOPPED）。
+  interrupted（RUNNER_STOPPED）。runner 啟動時先對帳上一個 runner 留下的 run 與容器，之後每 10 秒
+  一次（docs/DECISIONS.md §17.2）。
 - runner 經 RUNNER_DOCKER_URL（預設 socket-proxy）操作容器；SECRET_ENCRYPTION_KEYS 沒有設定時，
   需要 target 認證的 scan 會失敗（SECRET_UNAVAILABLE），其他照常。
 - --once：最多處理一個 run 就結束。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。
@@ -30,6 +31,7 @@ from secscan.migrations import head_revision
 from secscan.runner.config import RunnerSettings
 from secscan.runner.docker_runtime import DockerRuntime
 from secscan.runner.loop import RunnerLoop
+from secscan.runner.reconciler import ContainerReconciler
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.fake import FakeScript
@@ -122,18 +124,20 @@ def _runner_loop(
     workspace = Workspace(runner_settings.runs_dir, runner_settings.secrets_dir)
     policy = runner_settings.container_policy()
     guard = runner_settings.guard_channel()
+    queue = _queue(sessions, settings)
     loop = RunnerLoop(
         _fleet(sessions, owner, InstanceRole.RUNNER),
         runtime=runtime,
         workspace=workspace,
         guard=guard,
+        reconciler=ContainerReconciler(queue, runtime, workspace, guard),
         policy=policy,
         stop_requested=stop_requested,
         poll_seconds=runner_settings.poll_seconds,
     )
     loop.attach(
         ContainerRunner(
-            _queue(sessions, settings),
+            queue,
             runtime,
             workspace,
             owner=owner,

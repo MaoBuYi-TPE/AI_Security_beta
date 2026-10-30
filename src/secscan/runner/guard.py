@@ -176,17 +176,6 @@ class GuardChannel:
                 removed += 1
         return removed
 
-    def sweep(self) -> int:
-        """刪除上一個 runner 留下的 policy 與暫存檔（呼叫端先確認沒有其他存活的 runner）。"""
-        removed = 0
-        for entry in self._policies.iterdir():
-            info = entry.lstat()
-            leftover = entry.name.endswith(POLICY_SUFFIX) or entry.name.startswith(TEMP_PREFIX)
-            if leftover and not stat.S_ISDIR(info.st_mode):
-                entry.unlink()
-                removed += 1
-        return removed
-
 
 def _run_id(text: str) -> UUID | None:
     try:

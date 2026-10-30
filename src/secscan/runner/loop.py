@@ -1,10 +1,11 @@
 """runner 的常駐迴圈（docs/DECISIONS.md §14.6、§14.7）。
 
-- 啟動時：清掉上一個 runner 留下的 secret 與 guard 的 policy（沒有其他存活的 runner 時）、刪掉過期的
-  心跳列、probe 一次（也確認兩個 volume 與 policy 目錄可寫）。
+- 啟動時：先對帳（上一個 runner 留下的 run，docs/DECISIONS.md §17.2）、再依證據清理留下的 policy
+  與 secret（§17.4）、刪掉過期的心跳列、probe 一次（也確認兩個 volume 與 policy 目錄可寫）。
+- 每 10 秒對帳一次（在認領之前；監看一個 run 時不對帳）。
 - 每圈先讀 guard 的 status（docs/DECISIONS.md §15.7）、再寫心跳（含最近一次 probe 的結果），只認領
   probe 通過、而且 guard 可用時的引擎；probe 每 60 秒重做一次。
-- lease 失效或監看途中 Docker 不可用時記下、重新 probe，繼續處理下一個（run 留給 T13 的對帳）。
+- lease 失效或監看途中 Docker 不可用時記下、重新 probe，繼續處理下一個（run 留給對帳）。
   DB 錯誤直接往外拋：程序結束，由 compose 重啟。
 """
 
@@ -16,6 +17,7 @@ from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, Engin
 from secscan.runner.domain.runtime import ContainerRuntime, RuntimeUnavailableError
 from secscan.runner.guard import GuardChannel
 from secscan.runner.probe import probe, require_guard
+from secscan.runner.reconciler import ContainerReconciler
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.instances import Capabilities
@@ -26,6 +28,7 @@ from secscan.scans.queue import LeaseLostError, RunReport
 logger = logging.getLogger(__name__)
 
 PROBE_EVERY_SECONDS = 60.0
+RECONCILE_EVERY_SECONDS = 10.0
 
 
 class RunnerLoop:
@@ -36,6 +39,7 @@ class RunnerLoop:
         runtime: ContainerRuntime,
         workspace: Workspace,
         guard: GuardChannel,
+        reconciler: ContainerReconciler,
         policy: ContainerPolicy,
         engines: Mapping[Engine, EnginePolicy] = ENGINE_POLICIES,
         stop_requested: Callable[[], bool],
@@ -47,6 +51,7 @@ class RunnerLoop:
         self._runtime = runtime
         self._workspace = workspace
         self._guard = guard
+        self._reconciler = reconciler
         self._policy = policy
         self._engines = engines
         self._stop_requested = stop_requested
@@ -58,6 +63,7 @@ class RunnerLoop:
         self._effective = self._capabilities
         self._guard_writable = False
         self._probed_at = 0.0
+        self._reconciled_at = 0.0
         self.failures = 0
 
     @property
@@ -78,13 +84,16 @@ class RunnerLoop:
         """處理排隊中的 run，直到要求停止（once：最多處理一個，沒有工作就回來）。"""
         if self._runner is None:
             raise RuntimeError("先以 attach() 指定 runner")
-        self._sweep()
+        self._reconcile()
+        self._reconciler.sweep_orphans()
         self._fleet.prune()
         self._probe()
         reports: list[RunReport] = []
         while not self._stop_requested():
             if self._monotonic() - self._probed_at >= PROBE_EVERY_SECONDS:
                 self._probe()
+            if self._monotonic() - self._reconciled_at >= RECONCILE_EVERY_SECONDS:
+                self._reconcile()
             self._check_guard()
             self.beat()
             report = self._run_one(self._runner)
@@ -98,20 +107,9 @@ class RunnerLoop:
                 self._sleep(self._poll_seconds)
         return reports
 
-    def _sweep(self) -> None:
-        """刪除上一個 runner 留下的 secret 與 policy；還有其他存活的 runner 時不刪（可能正在使用）。
-
-        殘留的 policy 本來就會因為 renew_until 過期而被 guard 拒絕，刪除只是整理。
-        """
-        if self._fleet.others_alive():
-            logger.warning("還有其他存活的 runner：不清除 secret 與 policy 目錄")
-            return
-        removed = self._workspace.sweep_secrets()
-        if removed:
-            logger.warning("已刪除上一個 runner 留下的 %d 個 secret 目錄", removed)
-        policies = self._guard.sweep()
-        if policies:
-            logger.warning("已刪除上一個 runner 留下的 %d 個 guard policy", policies)
+    def _reconcile(self) -> None:
+        self._reconciler.reconcile()
+        self._reconciled_at = self._monotonic()
 
     def _probe(self) -> None:
         self._capabilities = probe(

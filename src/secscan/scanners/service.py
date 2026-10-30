@@ -42,13 +42,6 @@ class Fleet:
                 capabilities=capabilities_json(capabilities),
             )
 
-    def others_alive(self) -> bool:
-        """同一個角色是否還有其他 30 秒內有心跳的程序。"""
-        with self._sessions.begin() as session:
-            return RunnerInstanceRepository(session).others_alive(
-                self._role, excluding=self._owner, alive_within=ALIVE_WITHIN
-            )
-
     def prune(self) -> int:
         """刪掉 7 天沒有心跳的列（程序每次啟動都是新的一列）。"""
         with self._sessions.begin() as session:

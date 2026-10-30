@@ -16,7 +16,6 @@ import errno
 import hashlib
 import json
 import os
-import shutil
 import stat
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -173,17 +172,6 @@ class Workspace:
             if run_id is not None and entry.is_dir() and not entry.is_symlink():
                 runs.add(run_id)
         return frozenset(runs)
-
-    def sweep_secrets(self) -> int:
-        """刪除上一個 runner 留下的 secret（呼叫端先確認沒有其他存活的 runner）。"""
-        removed = 0
-        for entry in self._secrets.iterdir():
-            if entry.is_dir() and not entry.is_symlink():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink()
-            removed += 1
-        return removed
 
     def check_output(self, run_id: UUID) -> None:
         """容器執行中的用量檢查：條目數、深度與總大小（只 lstat，不開檔、不跟隨 symlink）。"""

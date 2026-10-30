@@ -69,6 +69,8 @@ class FakeContainerRuntime:
     removed: list[str] = field(default_factory=list)
     stopped: list[str] = field(default_factory=list)
     failing: set[str] = field(default_factory=set)
+    # 刪除時回 409 的容器（Docker：刪除已在進行中）。
+    conflicting: set[str] = field(default_factory=set)
     out_of_memory: bool = False
 
     def _check(self, operation: str) -> None:
@@ -128,6 +130,8 @@ class FakeContainerRuntime:
 
     def remove(self, name: str) -> None:
         self._check("remove")
+        if name in self.conflicting:
+            raise ContainerConflictError("刪除容器：已經在進行中")
         if self.containers.pop(name, None) is not None:
             self.removed.append(name)
 

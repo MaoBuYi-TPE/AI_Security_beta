@@ -1,6 +1,7 @@
 """runner 與 worker 的常駐迴圈（docs/DECISIONS.md §14.6、§14.7）。
 
-- 啟動時清掉殘留的 secret、刪掉過期的心跳列、probe；每圈寫心跳，probe 每 60 秒重做一次。
+- 啟動時對帳與清理（test_runner_loop_reconcile.py）、刪掉過期的心跳列、probe；每圈寫心跳，probe
+  每 60 秒重做一次。
 - probe 不通過就不認領；lease 失效或 Docker 中途不可用時記下，繼續處理下一個。
 每個測試用自己的資料庫（queue_database）。
 """
@@ -14,10 +15,11 @@ from sqlalchemy.orm import sessionmaker
 
 from secscan.runner.domain.policy import ContainerPolicy
 from secscan.runner.loop import RunnerLoop
+from secscan.runner.reconciler import ContainerReconciler
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript
-from secscan.scanners.domain.instances import Capabilities, InstanceRole
+from secscan.scanners.domain.instances import InstanceRole
 from secscan.scanners.service import Fleet
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.queue import ScanQueue
@@ -106,6 +108,7 @@ def _runner_loop(
         runtime=runtime,
         workspace=workspace,
         guard=channel,
+        reconciler=ContainerReconciler(queue, runtime, workspace, channel),
         policy=POLICY,
         stop_requested=stop_requested,
         sleep=clock.sleep,
@@ -150,7 +153,8 @@ def test_the_runner_loop_processes_queued_runs_until_stopped(
     tmp_path: Path,
     guard: GuardDouble,
 ) -> None:
-    (tmp_path / "secrets" / "left-over").mkdir()
+    # DB 沒有的 run 留下的 secret：啟動時依證據清掉（docs/DECISIONS.md §17.4）。
+    (tmp_path / "secrets" / "00000000-0000-4000-8000-000000000002").mkdir()
     queue_seed.scan(world.operator_a, scannable)
     queue_seed.scan(world.operator_a, queue_seed.scannable(world))
 
@@ -281,13 +285,18 @@ def test_the_worker_loop_once(queue: ScanQueue, queue_engine: Engine) -> None:
 
 
 def test_a_loop_needs_a_runner(
-    queue_engine: Engine, runtime: FakeContainerRuntime, workspace: Workspace, guard: GuardDouble
+    queue: ScanQueue,
+    queue_engine: Engine,
+    runtime: FakeContainerRuntime,
+    workspace: Workspace,
+    guard: GuardDouble,
 ) -> None:
     loop = RunnerLoop(
         _fleet(queue_engine, InstanceRole.RUNNER),
         runtime=runtime,
         workspace=workspace,
         guard=guard.channel(),
+        reconciler=ContainerReconciler(queue, runtime, workspace, guard.channel()),
         policy=POLICY,
         stop_requested=lambda: False,
         poll_seconds=2,
@@ -326,29 +335,6 @@ def test_reports_are_passed_on_and_a_lost_lease_is_counted(
     assert seen == [RunStatus.COLLECTED]
     assert runtime_hold == []
     assert loop.failures == 1
-
-
-def test_secrets_are_not_swept_while_another_runner_is_alive(
-    queue: ScanQueue,
-    queue_engine: Engine,
-    runtime: FakeContainerRuntime,
-    workspace: Workspace,
-    clock: FakeClock,
-    tmp_path: Path,
-    guard: GuardDouble,
-) -> None:
-    """第二個 runner（例如手動的 --once）不能刪掉正在執行的 run 的 secret（審查發現）。"""
-    Fleet(
-        sessionmaker(queue_engine, expire_on_commit=False),
-        owner="runner:other",
-        role=InstanceRole.RUNNER,
-        software_version="0.1.0",
-    ).beat(Capabilities(engines=()))
-    (tmp_path / "secrets" / "in-use").mkdir()
-
-    _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(once=True)
-
-    assert [path.name for path in (tmp_path / "secrets").iterdir()] == ["in-use"]
 
 
 def test_an_unwritable_volume_claims_nothing(
@@ -472,39 +458,3 @@ def test_a_guard_that_stops_is_noticed_before_the_next_claim(
         "fake": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"},
         "preflight": {"image": str(FAKE_IMAGE), "issue": "GUARD_UNAVAILABLE"},
     }
-
-
-def test_leftover_policies_are_swept_when_no_other_runner_is_alive(
-    queue: ScanQueue,
-    queue_engine: Engine,
-    runtime: FakeContainerRuntime,
-    workspace: Workspace,
-    clock: FakeClock,
-    guard: GuardDouble,
-) -> None:
-    (guard.policies / "00000000-0000-4000-8000-000000000001.json").write_bytes(b"{}")
-
-    _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(once=True)
-
-    assert guard.policy_files() == []
-
-
-def test_policies_are_not_swept_while_another_runner_is_alive(
-    queue: ScanQueue,
-    queue_engine: Engine,
-    runtime: FakeContainerRuntime,
-    workspace: Workspace,
-    clock: FakeClock,
-    guard: GuardDouble,
-) -> None:
-    Fleet(
-        sessionmaker(queue_engine, expire_on_commit=False),
-        owner="runner:other",
-        role=InstanceRole.RUNNER,
-        software_version="0.1.0",
-    ).beat(Capabilities(engines=()))
-    (guard.policies / "00000000-0000-4000-8000-000000000001.json").write_bytes(b"{}")
-
-    _runner_loop(queue, queue_engine, runtime, workspace, clock, guard=guard).run(once=True)
-
-    assert guard.policy_files() == ["00000000-0000-4000-8000-000000000001.json"]
