@@ -45,8 +45,8 @@ class Borrowed:
     """執行中的掃描容器的 proxy 帳密（測試借來從探針送請求）。"""
 
     run_id: str
-    token: str
     container: str
+    token: str = field(repr=False)
 
     def request(self, origin: str, path: str) -> bytes:
         credentials = base64.b64encode(f"{self.run_id}:{self.token}".encode()).decode()

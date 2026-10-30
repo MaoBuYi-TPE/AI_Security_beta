@@ -359,6 +359,85 @@ def test_policy_runs_lists_only_policy_files(guard: GuardDouble) -> None:
     assert guard.channel().policy_runs() == runs
 
 
+def test_an_entry_that_disappears_while_listing_is_skipped(
+    guard: GuardDouble, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """另一個 runner 正在以 rename 寫入：列出之後才消失的條目跳過，不讓啟動失敗。"""
+    kept = _activated(guard)
+    gone = _activated(guard)
+    temporary = guard.policies / ".tmp-gone"
+    temporary.write_bytes(b"x")
+    os.utime(temporary, (NOW - 61, NOW - 61))
+    real_lstat = Path.lstat
+
+    def vanishing(path: Path) -> os.stat_result:
+        if path.name in {policy_file_name(gone), ".tmp-gone"}:
+            raise FileNotFoundError(path.name)
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", vanishing)
+    channel = GuardChannel(
+        guard.policies,
+        guard.status_dir,
+        telemetry_dir=guard.telemetry,
+        listen=GUARD_LISTEN,
+        clock=lambda: NOW,
+    )
+
+    assert channel.policy_runs() == {kept}
+    assert channel.sweep_temporary(older_than=60) == 0
+
+
+def test_sweeping_tolerates_a_vanished_file_and_reports_other_errors(
+    guard: GuardDouble, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = guard.policies / ".tmp-stale"
+    stale.write_bytes(b"x")
+    os.utime(stale, (NOW - 61, NOW - 61))
+    channel = GuardChannel(
+        guard.policies,
+        guard.status_dir,
+        telemetry_dir=guard.telemetry,
+        listen=GUARD_LISTEN,
+        clock=lambda: NOW,
+    )
+
+    def vanished(path: Path) -> None:
+        raise FileNotFoundError(path.name)
+
+    def denied(path: Path) -> None:
+        raise PermissionError(path.name)
+
+    monkeypatch.setattr(Path, "unlink", vanished)
+    assert channel.sweep_temporary(older_than=60) == 0
+    monkeypatch.setattr(Path, "unlink", denied)
+    with pytest.raises(GuardUnavailableError):
+        channel.sweep_temporary(older_than=60)
+
+
+def test_an_entry_that_cannot_be_inspected_is_reported(
+    guard: GuardDouble, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _activated(guard)
+
+    def denied(path: Path) -> os.stat_result:
+        raise PermissionError(path.name)
+
+    monkeypatch.setattr(Path, "lstat", denied)
+
+    with pytest.raises(GuardUnavailableError):
+        guard.channel().policy_runs()
+
+
+def test_an_unreadable_policy_directory_is_reported(guard: GuardDouble) -> None:
+    guard.policies.rename(guard.policies.with_name("moved"))
+
+    with pytest.raises(GuardUnavailableError):
+        guard.channel().policy_runs()
+    with pytest.raises(GuardUnavailableError):
+        guard.channel().sweep_temporary(older_than=60)
+
+
 def test_only_stale_temporary_files_are_swept(guard: GuardDouble) -> None:
     """暫存檔可能是另一個 runner 正在寫的：超過 60 秒才刪。"""
     run_id = _activated(guard)

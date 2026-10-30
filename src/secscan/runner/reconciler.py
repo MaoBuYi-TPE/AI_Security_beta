@@ -7,7 +7,9 @@ list），每個待處理的 run：
 3. inspect 並核對 label：是這個 run 的容器就強制刪除；404 是已不存在；label 不符就不動那個容器
    （證明這個 run 的容器不存在），記 ERROR。
 4. 確認之後才在 DB 結算（runner 階段 → interrupted LEASE_EXPIRED），最後刪除 policy。
-Docker 出錯時不結算、policy 保持 blocked，下一輪再處理；同一段中斷只記一次。
+Docker 出錯時不結算、policy 保持 blocked，下一輪再處理。Docker 本身可用（version 有回應）、只有
+這個容器刪不掉時，延後它、繼續處理其他的（不讓一個壞掉的容器擋住整個佇列），每個 run 只記一次
+ERROR；Docker 不可用時這一輪就停，同一段中斷只記一次。
 
 啟動時另外依證據清理 policy 與 secret 目錄：只處理已結算或 DB 沒有的 run，不再刪除全部
 （舊的做法會在容器確認刪除之前刪掉孤兒容器的 policy）。
@@ -40,7 +42,7 @@ TEMPORARY_GRACE_SECONDS = 60.0
 
 class _Removal(StrEnum):
     GONE = "gone"  # 這個 run 的容器已不存在（刪除了、404，或同名的不是它）
-    CONFLICT = "conflict"  # 409：刪除進行中，下一輪再確認
+    DEFERRED = "deferred"  # 409（刪除進行中）或只有這個容器出錯：下一輪再確認
     DOCKER_DOWN = "docker_down"
 
 
@@ -62,6 +64,8 @@ class ContainerReconciler:
         self._engines = engines
         self._batch = batch
         self._docker_down = False
+        # 刪不掉容器的 run（已記過 ERROR）；確認刪除之後移除。
+        self._stuck: set[UUID] = set()
 
     def reconcile(self) -> int:
         """結算 lease 過期的 run；回傳結算的數量。
@@ -85,8 +89,13 @@ class ContainerReconciler:
         容器還沒確認刪除、或 lease 還有效的 run 跳過（由對帳或 owner 處理）。刪不掉容器就保留
         blocked 的 policy，下次啟動再處理。回傳清理的 run 數。
         """
-        self._guard.sweep_temporary(older_than=TEMPORARY_GRACE_SECONDS)
-        found = self._guard.policy_runs() | self._workspace.secret_runs()
+        try:
+            self._guard.sweep_temporary(older_than=TEMPORARY_GRACE_SECONDS)
+            found = self._guard.policy_runs() | self._workspace.secret_runs()
+        except (GuardUnavailableError, WorkspaceError) as exc:
+            # 不讓 runner 因此無法啟動：留下的檔案下次啟動再清，對帳照常進行。
+            logger.error("無法列出留下的 policy 或 secret（%s）：跳過這次清理", exc)
+            return 0
         cleaned = 0
         for run_id in sorted(found - self._queue.unsettled_runs(found)):
             removal = self._dispose(run_id, container_name(run_id))
@@ -121,16 +130,32 @@ class ContainerReconciler:
                 logger.error("容器 %s 沒有 run %s 的 label：不刪除它", name, run_id)
         except ContainerConflictError as exc:
             logger.warning("容器 %s 正在刪除（%s）：下一輪再確認", name, exc)
-            return _Removal.CONFLICT
+            return _Removal.DEFERRED
         except RuntimeUnavailableError as exc:
+            return self._failed(run_id, name, exc)
+        self._docker_available()
+        self._stuck.discard(run_id)
+        return _Removal.GONE
+
+    def _failed(self, run_id: UUID, name: str, exc: RuntimeUnavailableError) -> _Removal:
+        """Docker 本身可用就只是這個容器的問題：延後它、繼續處理其他的；否則這一輪停止。"""
+        try:
+            self._runtime.version()
+        except RuntimeUnavailableError:
             if not self._docker_down:
                 logger.warning("Docker 不可用（%s）：容器的對帳延到下一輪", exc)
             self._docker_down = True
             return _Removal.DOCKER_DOWN
+        self._docker_available()
+        if run_id not in self._stuck:
+            logger.error("無法確認容器 %s 已刪除（%s）：run %s 留到下一輪", name, exc, run_id)
+            self._stuck.add(run_id)
+        return _Removal.DEFERRED
+
+    def _docker_available(self) -> None:
         if self._docker_down:
             logger.info("Docker 已恢復：繼續容器的對帳")
         self._docker_down = False
-        return _Removal.GONE
 
     def _discard_policy(self, run_id: UUID) -> None:
         try:

@@ -22,6 +22,7 @@ from sqlalchemy import Engine, Row
 
 from secscan.guard.domain.policy import Policy, PolicyState
 from secscan.runner.domain.admission import PROXY_FILE, ContainerSpec
+from secscan.runner.domain.runtime import RuntimeUnavailableError
 from secscan.runner.reconciler import ContainerReconciler
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
@@ -300,7 +301,7 @@ def test_a_docker_outage_defers_settlement_and_keeps_the_policy_blocked(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     lease = orphan()
-    runtime.failing.add("state")
+    runtime.failing.update({"state", "version"})  # Docker 不可用：每個呼叫都失敗
 
     with caplog.at_level(logging.WARNING, logger="secscan.runner.reconciler"):
         assert reconciler.reconcile() == 0
@@ -334,6 +335,61 @@ def test_a_conflict_defers_only_that_container(
     assert _run(queue_seed, first.run_id).status == "running"
     assert _run(queue_seed, second.run_id).status == "interrupted"
     assert guard.policy_files() == [f"{first.run_id}.json"]
+
+
+def test_one_broken_container_does_not_hold_up_the_others(
+    orphan: Callable[..., Lease],
+    reconciler: ContainerReconciler,
+    runtime: SpyRuntime,
+    guard: GuardDouble,
+    queue_seed: Seeder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Docker 本身可用、只有最舊的那個容器刪不掉：其他的照常結算，那個 run 只記一次 ERROR。"""
+    first, second = orphan(), orphan()
+    runtime.broken.add(_name(first))
+
+    with caplog.at_level(logging.WARNING, logger="secscan.runner.reconciler"):
+        assert reconciler.reconcile() == 1
+        assert reconciler.reconcile() == 0
+
+    assert _run(queue_seed, first.run_id).status == "running"
+    assert _run(queue_seed, second.run_id).status == "interrupted"
+    policy = guard.policy(first.run_id)
+    assert policy is not None
+    assert policy.state is PolicyState.BLOCKED
+    about_first = [record for record in caplog.records if str(first.run_id) in record.message]
+    assert [record.levelno for record in about_first] == [logging.ERROR]
+    assert not any("Docker 不可用" in record.message for record in caplog.records)
+
+    runtime.broken.clear()
+    assert reconciler.reconcile() == 1
+    assert _run(queue_seed, first.run_id).status == "interrupted"
+
+
+def test_startup_cleans_the_others_when_one_container_is_broken(
+    reconciler: ContainerReconciler,
+    runtime: SpyRuntime,
+    channel: SpyChannel,
+    guard: GuardDouble,
+    orphan: Callable[..., Lease],
+) -> None:
+    template = orphan(expire=False)
+    first, second = sorted(
+        (Lease(uuid4(), uuid4(), ScanEngine.FAKE, OWNER) for _ in range(2)),
+        key=lambda lease: lease.run_id,
+    )
+    for unknown in (first, second):
+        channel.write(guard_policy_for(guard, template.run_id, unknown.run_id))
+        runtime.create(orphan_spec(unknown))
+    runtime.broken.add(_name(first))
+
+    assert reconciler.sweep_orphans() == 1
+
+    assert guard.policy(second.run_id) is None
+    policy = guard.policy(first.run_id)
+    assert policy is not None
+    assert policy.state is PolicyState.BLOCKED
 
 
 def test_a_container_that_is_already_gone_is_settled(
@@ -419,6 +475,31 @@ def test_a_container_left_by_a_finished_run_is_removed_without_changing_the_run(
     assert parsed.run_status is R.SUCCEEDED
 
 
+@pytest.mark.parametrize("operation", ["create", "start"])
+def test_a_failed_start_whose_container_cannot_be_removed_is_left_for_reconciliation(
+    make_runner: Callable[..., ContainerRunner],
+    reconciler: ContainerReconciler,
+    runtime: SpyRuntime,
+    queue_seed: Seeder,
+    world: World,
+    operation: str,
+) -> None:
+    """create／start 回錯誤時容器仍可能已建立或已啟動（例如 client 逾時）：刪不掉就不轉成結束的
+    狀態（之後的引擎會開始），留給對帳確認之後才結算。"""
+    queue_seed.scan(world.operator_a, queue_seed.scannable(world))
+    runtime.failing.update({operation, "remove"})
+
+    with pytest.raises(RuntimeUnavailableError):
+        make_runner().run_once(FAKE)
+
+    [row] = queue_seed.query("SELECT id, status FROM scanner_runs")
+    assert row.status == "running"
+    runtime.failing.clear()
+    _expire(queue_seed, row.id)
+    assert reconciler.reconcile() == 1
+    assert _run(queue_seed, row.id).status == "interrupted"
+
+
 # --- DoD 1：不重複啟動 -------------------------------------------------------------------------
 
 
@@ -489,7 +570,7 @@ def test_startup_cleans_what_settled_or_unknown_runs_left(
     reconciler.reconcile()  # 結算了，但 policy 刪不掉（保持 blocked）
     channel.fail_remove = False
     pending, leased = orphan(), orphan(expire=False)
-    runtime.failing.add("state")
+    runtime.failing.update({"state", "version"})  # Docker 不可用：每個呼叫都失敗
     reconciler.reconcile()  # Docker 不可用：pending 保持待處理
     runtime.failing.clear()
     unknown = Lease(uuid4(), uuid4(), ScanEngine.FAKE, OWNER)
@@ -519,7 +600,7 @@ def test_startup_keeps_the_blocked_policy_while_docker_is_down(
     unknown = Lease(uuid4(), uuid4(), ScanEngine.FAKE, OWNER)
     channel.write(guard_policy_for(guard, template.run_id, unknown.run_id))
     runtime.create(orphan_spec(unknown))
-    runtime.failing.add("state")
+    runtime.failing.update({"state", "version"})  # Docker 不可用：每個呼叫都失敗
 
     assert reconciler.sweep_orphans() == 0
 
@@ -556,3 +637,21 @@ def test_startup_keeps_the_policy_of_a_container_being_removed(
     policy = guard.policy(first.run_id)
     assert policy is not None
     assert policy.state is PolicyState.BLOCKED
+
+
+@pytest.mark.parametrize("directory", ["policies", "secrets"])
+def test_startup_cleanup_survives_an_unreadable_directory(
+    reconciler: ContainerReconciler,
+    guard: GuardDouble,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    directory: str,
+) -> None:
+    """目錄讀不出來：記 ERROR、跳過這次清理，不讓 runner 啟動失敗（對帳照常每 10 秒一次）。"""
+    target = guard.policies if directory == "policies" else tmp_path / "secrets"
+    target.rename(target.with_name(f"{target.name}-moved"))
+
+    with caplog.at_level(logging.ERROR, logger="secscan.runner.reconciler"):
+        assert reconciler.sweep_orphans() == 0
+
+    assert any("清理" in record.message for record in caplog.records)

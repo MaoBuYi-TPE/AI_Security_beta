@@ -238,7 +238,7 @@ def test_a_docker_outage_does_not_stop_the_loop_or_flood_the_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     orphan = _orphan(queue, runtime, workspace, guard, queue_seed, world)
-    runtime.failing.add("state")
+    runtime.failing.update({"state", "version"})  # Docker 不可用：每個呼叫都失敗
 
     with caplog.at_level(logging.WARNING, logger="secscan.runner.reconciler"):
         loop.run()

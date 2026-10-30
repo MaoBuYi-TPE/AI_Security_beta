@@ -15,6 +15,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
+from secscan.core.identifiers import canonical_uuid
 from secscan.core.json_types import JsonObject, JsonValue
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.scanners.domain.plan import ExecutionPlan
@@ -294,13 +295,7 @@ def managed_run_id(labels: Mapping[str, object]) -> UUID | None:
     if labels.get(f"{LABEL_PREFIX}managed") != "true":
         return None
     value = labels.get(f"{LABEL_PREFIX}run_id")
-    if not isinstance(value, str):
-        return None
-    try:
-        run_id = UUID(value)
-    except ValueError:
-        return None
-    return run_id if str(run_id) == value else None
+    return canonical_uuid(value) if isinstance(value, str) else None
 
 
 def _labels(plan: ExecutionPlan) -> Mapping[str, str]:

@@ -71,6 +71,8 @@ class FakeContainerRuntime:
     failing: set[str] = field(default_factory=set)
     # 刪除時回 409 的容器（Docker：刪除已在進行中）。
     conflicting: set[str] = field(default_factory=set)
+    # 刪除時回 500 的容器（Docker 本身可用，只有這個容器刪不掉，例如 device busy）。
+    broken: set[str] = field(default_factory=set)
     out_of_memory: bool = False
 
     def _check(self, operation: str) -> None:
@@ -131,7 +133,9 @@ class FakeContainerRuntime:
     def remove(self, name: str) -> None:
         self._check("remove")
         if name in self.conflicting:
-            raise ContainerConflictError("刪除容器：已經在進行中")
+            raise ContainerConflictError("刪除容器：衝突（HTTP 409）")
+        if name in self.broken:
+            raise RuntimeUnavailableError("刪除容器失敗（HTTP 500）")
         if self.containers.pop(name, None) is not None:
             self.removed.append(name)
 

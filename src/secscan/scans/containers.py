@@ -34,7 +34,7 @@ def leased() -> ColumnElement[bool]:
     )
 
 
-def pending() -> ColumnElement[bool]:
+def awaiting_removal() -> ColumnElement[bool]:
     """記下了容器、還沒確認刪除，而且 owner 不再處理（docs/DECISIONS.md §17.2）。"""
     runner_stage = ScannerRunModel.status.in_(sorted(RUNNER_STAGE_RUN_STATUSES))
     return and_(
@@ -53,7 +53,7 @@ class ContainerRecords:
         """依建立的順序，最多 limit 個（部分索引 ix_scanner_runs_pending_containers）。"""
         rows = self._session.execute(
             select(ScannerRunModel.id, ScannerRunModel.scan_id, ScannerRunModel.container_name)
-            .where(pending())
+            .where(awaiting_removal())
             .order_by(ScannerRunModel.created_at, ScannerRunModel.id)
             .limit(limit)
         )
@@ -73,7 +73,7 @@ class ContainerRecords:
         if scan_id is None:
             return False
         scan = self._progress.lock_scan(scan_id)
-        run = self._progress.run(run_id, conditions=(pending(),))
+        run = self._progress.run(run_id, conditions=(awaiting_removal(),))
         if scan is None or run is None:
             return False
         self._session.execute(

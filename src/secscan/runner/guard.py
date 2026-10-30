@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from secscan.core.identifiers import canonical_uuid
 from secscan.guard.domain.policy import (
     MAX_POLICY_BYTES,
     POLICY_SUFFIX,
@@ -152,12 +153,16 @@ class GuardChannel:
         return True
 
     def policy_runs(self) -> frozenset[UUID]:
-        """policy 目錄中留下 policy 的 run（檔名是標準格式的 `<run_id>.json`，不是目錄）。"""
+        """policy 目錄中留下 policy 的 run（檔名是標準格式的 `<run_id>.json`，不是目錄）。
+
+        列出之後才消失的條目（另一個 runner 正在寫入）跳過；目錄讀不出來時拋 GuardUnavailableError。
+        """
         runs = set()
-        for entry in self._policies.iterdir():
+        for entry in self._entries():
             stem, suffix = entry.name[: -len(POLICY_SUFFIX)], entry.name[-len(POLICY_SUFFIX) :]
-            run_id = _run_id(stem) if suffix == POLICY_SUFFIX else None
-            if run_id is not None and not stat.S_ISDIR(entry.lstat().st_mode):
+            run_id = canonical_uuid(stem) if suffix == POLICY_SUFFIX else None
+            info = _lstat(entry) if run_id is not None else None
+            if run_id is not None and info is not None and not stat.S_ISDIR(info.st_mode):
                 runs.add(run_id)
         return frozenset(runs)
 
@@ -165,24 +170,36 @@ class GuardChannel:
         """刪除超過 older_than 秒沒有更新的暫存檔（可能是另一個 runner 正在寫的，所以不全刪）。"""
         removed = 0
         cutoff = self._clock() - older_than
-        for entry in self._policies.iterdir():
-            info = entry.lstat()
-            if (
-                entry.name.startswith(TEMP_PREFIX)
-                and not stat.S_ISDIR(info.st_mode)
-                and info.st_mtime < cutoff
-            ):
+        for entry in self._entries():
+            info = _lstat(entry) if entry.name.startswith(TEMP_PREFIX) else None
+            if info is None or stat.S_ISDIR(info.st_mode) or info.st_mtime >= cutoff:
+                continue
+            try:
                 entry.unlink()
-                removed += 1
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise GuardUnavailableError(
+                    f"無法刪除 policy 的暫存檔（{type(exc).__name__}）"
+                ) from None
+            removed += 1
         return removed
 
+    def _entries(self) -> list[Path]:
+        try:
+            return list(self._policies.iterdir())
+        except OSError as exc:
+            raise GuardUnavailableError(f"無法列出 policy 目錄（{type(exc).__name__}）") from None
 
-def _run_id(text: str) -> UUID | None:
+
+def _lstat(path: Path) -> os.stat_result | None:
+    """不存在（列出之後才消失）是 None；其他錯誤拋 GuardUnavailableError。"""
     try:
-        run_id = UUID(text)
-    except ValueError:
+        return path.lstat()
+    except FileNotFoundError:
         return None
-    return run_id if str(run_id) == text else None
+    except OSError as exc:
+        raise GuardUnavailableError(f"無法讀取 policy 目錄（{type(exc).__name__}）") from None
 
 
 def _read_small(path: Path, limit: int) -> bytes:

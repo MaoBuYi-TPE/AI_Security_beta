@@ -130,7 +130,8 @@ def test_state(
     state: dict[str, object],
     expected: ContainerState,
 ) -> None:
-    docker_api.reply("GET", f"{PREFIX}/containers/{NAME}/json", 200, {"State": state})
+    payload = {"State": state, "Config": {"Labels": {}}}
+    docker_api.reply("GET", f"{PREFIX}/containers/{NAME}/json", 200, payload)
 
     assert runtime.state(NAME) == expected
 
@@ -149,7 +150,6 @@ LABELED_RUN = "6f1c2d3e-4b5a-4c6d-8e7f-001122334455"
         ({"Labels": {"secscan.managed": "true", "secscan.run_id": 7}}, None),
         ({"Labels": None}, None),
         ({}, None),
-        (None, None),
     ],
 )
 def test_state_reads_the_run_label(
@@ -163,6 +163,19 @@ def test_state_reads_the_run_label(
 
     assert state is not None
     assert state.run_label == (UUID(run_label) if run_label is not None else None)
+
+
+@pytest.mark.parametrize(
+    "payload", [{"State": {"Status": "running"}}, {"State": {"Status": "running"}, "Config": None}]
+)
+def test_state_without_the_config_is_a_malformed_reply(
+    runtime: DockerRuntime, docker_api: StubDocker, payload: dict[str, object]
+) -> None:
+    """真的 Docker 一定回傳 Config：缺少時不能當成「不是我們的容器」而結算。"""
+    docker_api.reply("GET", f"{PREFIX}/containers/{NAME}/json", 200, payload)
+
+    with pytest.raises(RuntimeUnavailableError):
+        runtime.state(NAME)
 
 
 def test_state_of_a_missing_container(runtime: DockerRuntime) -> None:

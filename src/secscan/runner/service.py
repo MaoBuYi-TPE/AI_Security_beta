@@ -136,6 +136,8 @@ class _Attempt:
     egress: RunEgress | None = None
     boot_id: UUID | None = None
     started_at: float | None = None
+    # 呼叫過 create：之後即使回錯誤，容器也可能已經建立、甚至已經啟動（例如 client 逾時）。
+    create_called: bool = False
 
 
 class _SecretUnavailableError(Exception):
@@ -250,7 +252,10 @@ class ContainerRunner:
             self._usage(attempt, outcome, removed=removed),
             container_removed=removed,
         )
-        if outcome.ending in _NEEDS_REMOVAL and not removed:
+        unconfirmed = outcome.ending in _NEEDS_REMOVAL or (
+            outcome.ending is _Ending.NOT_STARTED and attempt.create_called
+        )
+        if unconfirmed and not removed:
             raise RuntimeUnavailableError("無法確認容器已停止：run 留給對帳")
         return self._conclude(attempt.lease, outcome)
 
@@ -277,6 +282,7 @@ class ContainerRunner:
         if outcome is not None:
             return outcome
         try:
+            attempt.create_called = True
             self._runtime.create(spec)
             self._runtime.start(spec.name)
             attempt.started_at = self._monotonic()

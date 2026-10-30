@@ -13,13 +13,18 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import Engine, Row
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
+from secscan.scans.containers import ContainerRecords
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
-from secscan.scans.queue import LeaseLostError, RunUsage, ScanQueue
+from secscan.scans.queue import Heartbeat, LeaseLostError, QueueOperations, RunUsage, ScanQueue
+from secscan.scans.run_records import RunRecords
+from secscan.scans.service import ScanService
 from tests.integration.api_support import LAB, Seeder, World
+from tests.integration.database import ProvisionedDatabase
+from tests.integration.locks import Race, wait_until_waiting_for_a_lock
 
 pytestmark = pytest.mark.integration
 
@@ -27,6 +32,7 @@ OWNER = "runner-records-1"
 FAKE = frozenset({ScanEngine.FAKE})
 IMAGE = "busybox:1.38.0@sha256:" + "ab" * 32
 USAGE = RunUsage(requests_sent=3, requests_denied=0, traffic_seconds=2)
+RACER = "secscan-settle-racer"
 R = RunStatus
 S = ScanStatus
 
@@ -318,3 +324,114 @@ def test_unsettled_runs_are_the_ones_still_in_use(
 
     assert unsettled == {pending.run_id, leased.run_id}
     assert queue.unsettled_runs(set()) == frozenset()
+
+
+# --- 並行（以獨立連線在背景執行，pg_stat_activity 確認它在等列鎖） ----------------------------
+
+
+def _settling(
+    queue_engine: Engine, run_id: UUID, queue_seed: Seeder, racer: Race[Any], *, waits: bool
+) -> None:
+    """持有結算的 transaction（scan 與 run 都鎖住、還沒 commit）時讓對手開始。
+
+    waits：對手要等鎖（確認它在等）；否則它在結算 commit 之前就結束。
+    """
+    with Session(queue_engine, expire_on_commit=False) as holder, holder.begin():
+        assert ContainerRecords(holder).settle(run_id) is True
+        racer.start()
+        if waits:
+            wait_until_waiting_for_a_lock(queue_seed, RACER)
+        else:
+            racer.join()
+    racer.join()
+
+
+def test_two_reconcilers_racing_settle_once(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+) -> None:
+    lease = _launched(queue, queue_seed, world)
+    _expire(queue_seed, lease.run_id)
+    racer = Race(
+        queue_database, RACER, lambda session: ContainerRecords(session).settle(lease.run_id)
+    )
+
+    _settling(queue_engine, lease.run_id, queue_seed, racer, waits=True)
+
+    assert (racer.errors, racer.results) == ([], [False])
+    assert _events(queue_seed, lease.run_id).count(("interrupted", "LEASE_EXPIRED")) == 1
+
+
+def test_a_frozen_owner_waking_during_settlement_loses_its_lease(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+) -> None:
+    """結算還沒 commit 時 owner 醒來心跳：lease 已過期，條件在舊的資料上就不成立，不必等鎖就失效
+    （過期的 lease 不能延長），之後也不能再寫入。"""
+    lease = _launched(queue, queue_seed, world)
+    _expire(queue_seed, lease.run_id)
+
+    def beat(session: Session) -> Heartbeat:
+        return QueueOperations(session, lab=LAB).heartbeat(lease, clock=lambda: datetime.now(UTC))
+
+    racer = Race(queue_database, RACER, beat)
+
+    _settling(queue_engine, lease.run_id, queue_seed, racer, waits=False)
+
+    assert (racer.errors, racer.results) == ([], [Heartbeat(valid=False, cancel_requested=False)])
+    assert _run(queue_seed, lease.run_id).status == "interrupted"
+
+
+def test_a_frozen_owner_cannot_record_usage_during_settlement(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+) -> None:
+    lease = _launched(queue, queue_seed, world)
+    _expire(queue_seed, lease.run_id)
+
+    def record(session: Session) -> None:
+        RunRecords(session).record_usage(lease, USAGE, container_removed=True)
+
+    racer = Race(queue_database, RACER, record)
+
+    _settling(queue_engine, lease.run_id, queue_seed, racer, waits=False)
+
+    assert [type(error) for error in racer.errors] == [LeaseLostError]
+    assert _run(queue_seed, lease.run_id).requests_sent is None
+
+
+def test_a_cancel_during_settlement_sees_the_interrupted_scan(
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_database: ProvisionedDatabase,
+    queue_seed: Seeder,
+    world: World,
+) -> None:
+    """取消等 scan 的鎖；結算 commit 之後 scan 已終止，取消不改變任何東西。"""
+    lease = _launched(queue, queue_seed, world)
+    _expire(queue_seed, lease.run_id)
+
+    def cancel(session: Session) -> ScanStatus:
+        scan = ScanService(session, lab=LAB).cancel(
+            world.operator_a.principal, lease.scan_id, request_id=None
+        )
+        return scan.status
+
+    racer = Race(queue_database, RACER, cancel)
+
+    _settling(queue_engine, lease.run_id, queue_seed, racer, waits=True)
+
+    assert (racer.errors, racer.results) == ([], [S.INTERRUPTED])
+    [row] = queue_seed.query(
+        "SELECT cancel_requested_at FROM scans WHERE id = :id", id=lease.scan_id
+    )
+    assert row.cancel_requested_at is None

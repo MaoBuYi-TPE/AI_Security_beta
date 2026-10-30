@@ -180,6 +180,46 @@ def test_secret_runs_lists_the_runs_that_left_secrets(
     assert workspace.secret_runs() == runs
 
 
+def test_an_unreadable_secrets_directory_is_reported(
+    workspace: Workspace, dirs: tuple[Path, Path]
+) -> None:
+    dirs[1].rename(dirs[1].with_name("moved"))
+
+    with pytest.raises(WorkspaceError):
+        workspace.secret_runs()
+
+
+def test_discarding_a_directory_removed_meanwhile_is_fine(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """另一個對帳者同時刪掉了目錄：不存在也算成功。"""
+    workspace.write_secrets(RUN, {PROXY_FILE: "proxy"})
+    real_rmdir = os.rmdir
+
+    def raced(path: object, *args: object, **kwargs: object) -> None:
+        real_rmdir(path, *args, **kwargs)  # type: ignore[arg-type]
+        raise FileNotFoundError("gone")
+
+    monkeypatch.setattr(os, "rmdir", raced)
+
+    workspace.discard_secrets(RUN)
+
+
+def test_discarding_does_not_follow_a_symlinked_run_directory(
+    workspace: Workspace, dirs: tuple[Path, Path]
+) -> None:
+    """secret 目錄被換成 symlink：不刪除它指向的地方的檔案（以 dir fd 加 O_NOFOLLOW 操作）。"""
+    elsewhere = dirs[0] / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / PROXY_FILE).write_bytes(b"keep")
+    (dirs[1] / str(RUN)).symlink_to(elsewhere)
+
+    with pytest.raises(WorkspaceError):
+        workspace.discard_secrets(RUN)
+
+    assert (elsewhere / PROXY_FILE).read_bytes() == b"keep"
+
+
 # --- 收集 ----------------------------------------------------------------------------------
 
 

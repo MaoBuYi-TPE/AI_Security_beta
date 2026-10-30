@@ -134,6 +134,7 @@ def test_the_worker_moves_on_after_an_unexpected_error(
     assert _status(queue_seed, broken.run_id) == ("normalizing", None)  # lease 過期之後重試
     [record] = [record for record in caplog.records if str(broken.run_id) in record.message]
     assert "ValueError" in record.message
+    assert "test_parse_attempts.py:" in record.message  # 最內層的位置（沒有訊息）
     assert CANARY not in caplog.text
 
 

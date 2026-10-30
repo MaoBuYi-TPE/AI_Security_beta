@@ -19,7 +19,8 @@ class RuntimeUnavailableError(Exception):
 
 
 class ContainerConflictError(RuntimeUnavailableError):
-    """同名的容器已經存在（同一個 run 不會啟動第二個容器）。"""
+    """Docker 回 409：create 時同名的容器已經存在（同一個 run 不會啟動第二個容器）；remove 時
+    刪除已在進行中。"""
 
 
 @dataclass(frozen=True, slots=True)

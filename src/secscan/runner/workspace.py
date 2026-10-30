@@ -24,6 +24,7 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from secscan.core.identifiers import canonical_uuid
 from secscan.runner.domain.admission import SECRET_FILES
 from secscan.scanners.domain.plan import InputFile
 
@@ -153,22 +154,37 @@ class Workspace:
             raise WorkspaceError(f"無法寫入 secret（{_reason(exc)}）") from None
 
     def discard_secrets(self, run_id: UUID) -> None:
-        """刪除 run 的每一個 secret 檔與目錄；不存在也算成功。"""
+        """刪除 run 的每一個 secret 檔與目錄；不存在也算成功。
+
+        以 dir fd 加 O_NOFOLLOW 刪除：目錄被換成 symlink 時拒絕，不刪它指向的地方的檔案。
+        """
         secret_dir = self._secrets / str(run_id)
         try:
-            for name in SECRET_FILES:
-                (secret_dir / name).unlink(missing_ok=True)
-            secret_dir.rmdir()
+            dir_fd = os.open(secret_dir, _DIRECTORY)
         except FileNotFoundError:
             return
         except OSError as exc:
             raise WorkspaceError(f"無法刪除 secret（{_reason(exc)}）") from None
+        try:
+            for name in SECRET_FILES:
+                _unlink_if_present(name, dir_fd)
+            os.rmdir(secret_dir)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise WorkspaceError(f"無法刪除 secret（{_reason(exc)}）") from None
+        finally:
+            os.close(dir_fd)
 
     def secret_runs(self) -> frozenset[UUID]:
         """secrets volume 中留下 secret 的 run（標準格式的 run_id 目錄；不跟隨 symlink）。"""
+        try:
+            entries = list(self._secrets.iterdir())
+        except OSError as exc:
+            raise WorkspaceError(f"無法列出 secret 目錄（{_reason(exc)}）") from None
         runs = set()
-        for entry in self._secrets.iterdir():
-            run_id = _run_id(entry.name)
+        for entry in entries:
+            run_id = canonical_uuid(entry.name)
             if run_id is not None and entry.is_dir() and not entry.is_symlink():
                 runs.add(run_id)
         return frozenset(runs)
@@ -204,12 +220,11 @@ class Workspace:
             os.close(run_fd)
 
 
-def _run_id(text: str) -> UUID | None:
+def _unlink_if_present(name: str, dir_fd: int) -> None:
     try:
-        run_id = UUID(text)
-    except ValueError:
-        return None
-    return run_id if str(run_id) == text else None
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return
 
 
 def _reason(exc: OSError) -> str:
