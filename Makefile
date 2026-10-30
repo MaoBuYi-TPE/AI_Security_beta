@@ -192,7 +192,8 @@ down:
 # 否則 volume 還在使用中刪不掉），再刪 compose 的服務、volume 與網路。
 # 會中斷 stack 的測試（停掉 guard、kill runner）放在最後執行。
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
-	tests/live/test_budget_live.py tests/live/test_guard_failover_live.py
+	tests/live/test_budget_live.py tests/live/test_revocation_live.py \
+	tests/live/test_guard_failover_live.py
 test-live-runner: env docker-check images build
 	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }
 	@$(MAKE) --no-print-directory scan-net SCAN_NET=$(LIVE_SCAN_NET) SCAN_SUBNET=$(LIVE_SCAN_SUBNET) \
