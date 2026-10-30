@@ -269,6 +269,25 @@ def test_runs_without_a_container_are_settled_without_docker(
     assert _run(queue_seed, lease.run_id).error_code == "LEASE_EXPIRED"
 
 
+def test_a_secret_that_cannot_be_removed_does_not_keep_the_container(
+    orphan: Callable[..., Lease],
+    reconciler: ContainerReconciler,
+    runtime: SpyRuntime,
+    queue_seed: Seeder,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    lease = orphan()
+    (tmp_path / "secrets" / str(lease.run_id) / "stray").write_bytes(b"x")  # rmdir 會失敗
+
+    with caplog.at_level(logging.ERROR, logger="secscan.runner.reconciler"):
+        assert reconciler.reconcile() == 1
+
+    assert runtime.containers == {}
+    assert _run(queue_seed, lease.run_id).status == "interrupted"
+    assert any("secret" in record.message for record in caplog.records)
+
+
 # --- Docker 出錯 -------------------------------------------------------------------------------
 
 
@@ -499,3 +518,25 @@ def guard_policy_for(guard: GuardDouble, source: UUID, run_id: UUID) -> Policy:
     policy = guard.policy(source)
     assert policy is not None
     return replace(policy, run_id=run_id, state=PolicyState.ACTIVE)
+
+
+def test_startup_keeps_the_policy_of_a_container_being_removed(
+    reconciler: ContainerReconciler,
+    runtime: SpyRuntime,
+    channel: SpyChannel,
+    guard: GuardDouble,
+    orphan: Callable[..., Lease],
+) -> None:
+    template = orphan(expire=False)
+    first, second = (Lease(uuid4(), uuid4(), ScanEngine.FAKE, OWNER) for _ in range(2))
+    for unknown in (first, second):
+        channel.write(guard_policy_for(guard, template.run_id, unknown.run_id))
+        runtime.create(orphan_spec(unknown))
+    runtime.conflicting.add(_name(first))
+
+    assert reconciler.sweep_orphans() == 1
+
+    assert guard.policy(second.run_id) is None
+    policy = guard.policy(first.run_id)
+    assert policy is not None
+    assert policy.state is PolicyState.BLOCKED

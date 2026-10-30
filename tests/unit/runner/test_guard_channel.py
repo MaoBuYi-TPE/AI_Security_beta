@@ -352,6 +352,7 @@ def test_policy_runs_lists_only_policy_files(guard: GuardDouble) -> None:
     runs = {_activated(guard), _activated(guard)}
     (guard.policies / ".tmp-abc").write_bytes(b"x")
     (guard.policies / "README").write_bytes(b"keep")
+    (guard.policies / "notes.json").write_bytes(b"x")
     (guard.policies / f"{str(uuid4()).upper()}.json").write_bytes(b"x")  # 不是標準格式
     (guard.policies / f"{uuid4()}.json").mkdir()
 
