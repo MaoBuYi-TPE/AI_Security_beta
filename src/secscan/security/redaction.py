@@ -14,13 +14,17 @@
 取捨與已知限制（依名稱與樣式判斷，不保證認得所有秘密；呼叫端仍應只放必要的欄位）：
 - 寧可多遮：例如名稱裡的「Basic scan」也會被當成認證值遮掉。
 - 緊接在英數字後面的 JWT 不遮（為了讓比對維持線性時間）；前面有空白、`=`、`:`、引號等就會遮。
-- 還不處理：HAR 那種 `{"name": "Cookie", "value": …}` 成對的格式、URL 中的帳密與 query 參數、
-  `password=…` 之類的文字。T08（認證設定）與 M3（證據遮罩）需要時再擴充，並補對應的測試。
+- 還不處理：HAR 那種 `{"name": "Cookie", "value": …}` 成對的格式。
+
+工具輸出（T15，docs/DECISIONS.md §19.5）另外有 redact_url 與 redact_text：URL 的帳密、敏感名稱的
+query 與 fragment 參數，文字中的 `名稱=值`、JSON 的 `"名稱": "值"`、行首的 `名稱: 值`（header）與
+cookie 的值。只遮罩、不截斷（截斷由呼叫端在遮罩之後進行），重複套用結果不變。
 """
 
 import re
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
+from urllib.parse import unquote_plus
 
 from secscan.core.json_types import JsonObject, JsonValue
 
@@ -131,3 +135,96 @@ def _mask(text: str) -> str:
             return masked
         current = masked
     return REDACTED
+
+
+# --- 工具輸出（docs/DECISIONS.md §19.5）---------------------------------------------------
+
+# 呼叫端給的值（例如 URL 中敏感參數的值）短於這個長度就不遮：太短的值會把一般文字遮掉。
+MIN_VALUE_LENGTH = 4
+_NAME = r"[A-Za-z0-9_.\-\[\]]"
+# 名稱前面不可緊接名稱的字元：比對只從名稱的開頭開始，維持線性時間。值不含 <、>：遮罩後的
+# 「名稱=<REDACTED>」不會再被比對，重複套用結果不變。
+_PAIR = re.compile(rf"(?<!{_NAME})({_NAME}{{1,64}})=([^&\s;,\"'<>]+)")
+_JSON_PAIR = re.compile(r'"([^"\\\n]{1,64})"(\s*:\s*)"((?:[^"\\]|\\.)*)"')
+_HEADER = re.compile(r"^([A-Za-z0-9-]{1,64})([ \t]*:[ \t]*)(\S[^\n]*)", re.MULTILINE)
+_COOKIE_VALUE = re.compile(r"=([^;\s]+)")
+_COOKIE_HEADERS = frozenset({"cookie", "set-cookie"})
+
+
+def redact_url(url: str) -> str:
+    """URL 的帳密、敏感名稱的 query 與 fragment 參數，以及文字樣式的秘密（Bearer、JWT…）。
+
+    以原始的字串處理（不經 urlsplit 重組）：不合法的 URL 也遮得到，其他部分保持原樣。
+    """
+    head, hash_mark, fragment = url.partition("#")
+    base, question, query = head.partition("?")
+    return _mask(_without_userinfo(base) + question + _pairs(query) + hash_mark + _pairs(fragment))
+
+
+def sensitive_query_values(url: str) -> tuple[str, ...]:
+    """URL 中敏感名稱的參數的值（原樣與解碼後）：在 evidence 等文字中也要遮掉（redact_text）。"""
+    head, _, fragment = url.partition("#")
+    query = head.partition("?")[2]
+    values: list[str] = []
+    for pair in (*query.split("&"), *fragment.split("&")):
+        name, equals, value = pair.partition("=")
+        if equals and value and is_sensitive_key(unquote_plus(name)):
+            values.extend({value, unquote_plus(value)})
+    return tuple(values)
+
+
+def redact_text(text: str, *, values: Collection[str] = ()) -> str:
+    """文字中的秘密：呼叫端給的值、Bearer／Basic／JWT、行首的敏感 header、cookie 的值、
+    JSON 的敏感欄位與 `名稱=值`。
+    """
+    masked = _mask(_literal(text, values))
+    masked = _HEADER.sub(_header, masked)
+    masked = _JSON_PAIR.sub(_json_pair, masked)
+    return _PAIR.sub(_pair, masked)
+
+
+def _literal(text: str, values: Collection[str]) -> str:
+    usable = sorted({value for value in values if len(value) >= MIN_VALUE_LENGTH}, key=len)
+    if not usable:
+        return text
+    pattern = re.compile("|".join(re.escape(value) for value in reversed(usable)))
+    return pattern.sub(REDACTED, text)
+
+
+def _without_userinfo(base: str) -> str:
+    start = base.find("://")
+    if start < 0:
+        return base
+    authority_end = base.find("/", start + 3)
+    authority = base[start + 3 : authority_end if authority_end >= 0 else len(base)]
+    if "@" not in authority:
+        return base
+    host = authority.rpartition("@")[2]
+    return base[: start + 3] + f"{REDACTED}@{host}" + base[start + 3 + len(authority) :]
+
+
+def _pairs(query: str) -> str:
+    redacted = []
+    for pair in query.split("&"):
+        name, equals, value = pair.partition("=")
+        sensitive = equals and value and is_sensitive_key(unquote_plus(name))
+        redacted.append(f"{name}={REDACTED}" if sensitive else pair)
+    return "&".join(redacted)
+
+
+def _header(match: re.Match[str]) -> str:
+    name, separator, value = match.groups()
+    if name.lower() in _COOKIE_HEADERS:
+        count = 0 if name.lower() == "cookie" else 1
+        return name + separator + _COOKIE_VALUE.sub(f"={REDACTED}", value, count=count)
+    return name + separator + REDACTED if is_sensitive_key(name) else match.group(0)
+
+
+def _json_pair(match: re.Match[str]) -> str:
+    name, separator, _ = match.groups()
+    return f'"{name}"{separator}"{REDACTED}"' if is_sensitive_key(name) else match.group(0)
+
+
+def _pair(match: re.Match[str]) -> str:
+    name = match.group(1)
+    return f"{name}={REDACTED}" if is_sensitive_key(name) else match.group(0)

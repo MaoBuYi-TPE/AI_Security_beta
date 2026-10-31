@@ -39,6 +39,8 @@ compose.override.yaml
 # 掃描產物與實驗原始輸出（可能含敏感資料，不進版本控制）
 artifacts/
 runs/
+# make record-fixtures 錄製的 ZAP 輸出（人工審查之後才搬進 tests/fixtures/）
+recordings/
 benchmarks/results/
 
 # IDE

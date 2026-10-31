@@ -1,7 +1,8 @@
-"""run 的狀態轉換與 scan 狀態的彙總（docs/DECISIONS.md §13.4、ARCHITECTURE.md §8）。
+"""run 的狀態轉換與 scan 狀態的彙總（docs/DECISIONS.md §13.4、§19.8、ARCHITECTURE.md §8）。
 
 scan 的狀態不獨立轉換：每次 run 轉換之後，以 aggregate() 由所有 run 的狀態與「是否要求過取消」
-重新算出，和 run 的轉換在同一個 transaction 寫入，所以兩者不會不一致。
+重新算出，和 run 的轉換在同一個 transaction 寫入，所以兩者不會不一致。preflight 是平台的健檢，
+不是結果引擎：呼叫端把它的狀態以 checks 分開傳入。
 """
 
 from collections.abc import Collection, Iterable, Mapping
@@ -114,6 +115,12 @@ class RunErrorCode(StrEnum):
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     # 解析 MAX_PARSE_ATTEMPTS 次都沒有在 lease 內完成（docs/DECISIONS.md §17.6）。
     PARSE_ATTEMPTS_EXHAUSTED = "PARSE_ATTEMPTS_EXHAUSTED"
+    # 引擎輸出的判定（docs/DECISIONS.md §19.2）：輸出缺少、不合法、版本不支援或和退出碼矛盾；
+    # 引擎回報錯誤（部分結果入庫）；guard 沒有轉送任何請求；引擎在自己的時間上限停止（timed_out）。
+    OUTPUT_INVALID = "OUTPUT_INVALID"
+    ENGINE_REPORTED_ERRORS = "ENGINE_REPORTED_ERRORS"
+    NO_TARGET_TRAFFIC = "NO_TARGET_TRAFFIC"
+    ENGINE_TIMEOUT = "ENGINE_TIMEOUT"
 
 
 # lease 過期的解析退回 collected 重試，最多嘗試幾次（第這麼多次過期時 failed）。
@@ -156,8 +163,9 @@ _RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = MappingProxyType(
         RunStatus.CANCELLING: frozenset({RunStatus.CANCELLED, RunStatus.INTERRUPTED}),
         RunStatus.COLLECTED: frozenset({RunStatus.NORMALIZING}),
         # lease 過期時退回 collected：解析不可變的 artifact 可以安全重試（CLAUDE.md §8）。
+        # timed_out：引擎在自己的時間上限停止，解析輸出之後才知道（§19.2）。
         RunStatus.NORMALIZING: frozenset(
-            {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.COLLECTED}
+            {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.TIMED_OUT, RunStatus.COLLECTED}
         ),
     }
 )
@@ -182,29 +190,43 @@ def plan_run_transition(
         )
 
 
-def aggregate(runs: Iterable[RunStatus], *, cancel_requested: bool) -> ScanStatus:
-    """由所有 run 的狀態算出 scan 的狀態；和 run 的順序無關（docs/DECISIONS.md §13.4）。"""
-    statuses = tuple(runs)
-    if not statuses:
-        raise ValueError("scan 至少要有一個 run")
-    present = frozenset(statuses)
-    if present <= TERMINAL_RUN_STATUSES:
-        return _finished(present, cancel_requested=cancel_requested)
-    return _in_progress(present, cancel_requested=cancel_requested)
+def aggregate(
+    runs: Iterable[RunStatus],
+    *,
+    cancel_requested: bool,
+    checks: Iterable[RunStatus] = (),
+) -> ScanStatus:
+    """由所有 run 的狀態算出 scan 的狀態；和 run 的順序無關（docs/DECISIONS.md §13.4）。
+
+    runs 是掃描引擎的 run，checks 是 preflight（§19.8）：進行中時一起看；全部終止時 preflight
+    不算結果，只決定 completed 或 partially_completed（與 interrupted）。
+    """
+    scanning = tuple(runs)
+    if not scanning:
+        raise ValueError("scan 至少要有一個掃描引擎的 run")
+    performed = frozenset(scanning)
+    checked = frozenset(checks)
+    if performed | checked <= TERMINAL_RUN_STATUSES:
+        return _finished(performed, checked, cancel_requested=cancel_requested)
+    return _in_progress(performed | checked, cancel_requested=cancel_requested)
 
 
-def _finished(present: Collection[RunStatus], *, cancel_requested: bool) -> ScanStatus:
-    # interrupted 排在最前面：它無法證明工作已正常停止。要求過取消、但 runner 沒有確認就遺失時，
-    # 也不能說是 cancelled（確認之後才是 cancelled，CLAUDE.md §8；審查發現）。
-    if RunStatus.INTERRUPTED in present:
+def _finished(
+    performed: Collection[RunStatus], checked: Collection[RunStatus], *, cancel_requested: bool
+) -> ScanStatus:
+    # interrupted 排在最前面：它無法證明工作已正常停止（preflight 也一樣）。要求過取消、但 runner
+    # 沒有確認就遺失時，也不能說是 cancelled（確認之後才是 cancelled，CLAUDE.md §8；審查發現）。
+    if RunStatus.INTERRUPTED in performed or RunStatus.INTERRUPTED in checked:
         return ScanStatus.INTERRUPTED
     if cancel_requested:
         return ScanStatus.CANCELLED
-    if RunStatus.TIMED_OUT in present:
+    if RunStatus.TIMED_OUT in performed:
         return ScanStatus.TIMED_OUT
-    if present == {RunStatus.SUCCEEDED}:
-        return ScanStatus.COMPLETED
-    if RunStatus.SUCCEEDED in present:
+    if set(performed) == {RunStatus.SUCCEEDED}:
+        if set(checked) <= {RunStatus.SUCCEEDED}:
+            return ScanStatus.COMPLETED
+        return ScanStatus.PARTIALLY_COMPLETED
+    if RunStatus.SUCCEEDED in performed:
         return ScanStatus.PARTIALLY_COMPLETED
     return ScanStatus.FAILED
 

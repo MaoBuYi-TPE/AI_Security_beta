@@ -107,5 +107,6 @@ def test_revoking_the_grant_stops_a_running_scan(
     assert len(borrowed_paths) == 1 + len(allowed)
     assert fake_engine(item, scan_id)["error_code"] == "SCOPE_REVOKED"
     wait_for(lambda: scan_containers(scan_id) == [] or None, timeout=30)
-    # preflight 在撤銷之前已經成功：彙總是 partially_completed（docs/DECISIONS.md §13.4）。
-    assert item.status(scan_id) == "partially_completed"
+    # preflight 在撤銷之前已經成功，但它不是結果引擎：掃描引擎都沒有成功 → failed
+    # （docs/DECISIONS.md §19.8；T14 之前是 partially_completed）。
+    assert item.status(scan_id) == "failed"

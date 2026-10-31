@@ -189,9 +189,15 @@ class ScanProgress:
         self._scans.append_event(scan.id, EventType.RUN_STATUS, payload, run_id=run.id)
 
     def settle(self, scan: LockedScan) -> ScanStatus:
-        """由所有 run 重新彙總 scan 的狀態；改變時寫入狀態、結束的時間與事件。"""
+        """由所有 run 重新彙總 scan 的狀態；改變時寫入狀態、結束的時間與事件。
+
+        preflight 以 checks 分開傳入：它不是結果引擎（docs/DECISIONS.md §19.8）。
+        """
+        runs = self.runs(scan.id)
         status = aggregate(
-            (run.status for run in self.runs(scan.id)), cancel_requested=scan.cancel_requested
+            (run.status for run in runs if run.engine is not Engine.PREFLIGHT),
+            cancel_requested=scan.cancel_requested,
+            checks=(run.status for run in runs if run.engine is Engine.PREFLIGHT),
         )
         if status is scan.status:
             return status

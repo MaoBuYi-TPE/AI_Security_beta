@@ -1,0 +1,86 @@
+Found Java version 17.0.20.1
+Available memory: 8005 MB
+Using JVM args: -Xmx1536m
+2026-10-31T06:43:32.264261725Z main ERROR Could not determine local host name
+java.net.UnknownHostException: 08942456bae3: 08942456bae3: Temporary failure in name resolution
+	at java.base/java.net.InetAddress.getLocalHost(InetAddress.java:1671)
+	at org.apache.logging.log4j.core.util.NetUtils.getHostname(NetUtils.java:71)
+	at org.apache.logging.log4j.core.util.NetUtils.getLocalHostname(NetUtils.java:56)
+	at org.apache.logging.log4j.core.LoggerContext.lambda$setConfiguration$2(LoggerContext.java:691)
+	at java.base/java.util.concurrent.ConcurrentHashMap.computeIfAbsent(ConcurrentHashMap.java:1708)
+	at org.apache.logging.log4j.core.LoggerContext.setConfiguration(LoggerContext.java:691)
+	at org.apache.logging.log4j.core.LoggerContext.reconfigure(LoggerContext.java:786)
+	at org.apache.logging.log4j.core.LoggerContext.reconfigure(LoggerContext.java:808)
+	at org.apache.logging.log4j.core.LoggerContext.start(LoggerContext.java:311)
+	at org.apache.logging.log4j.core.impl.Log4jContextFactory.getContext(Log4jContextFactory.java:160)
+	at org.apache.logging.log4j.core.impl.Log4jContextFactory.getContext(Log4jContextFactory.java:48)
+	at org.apache.logging.log4j.LogManager.getContext(LogManager.java:139)
+	at org.apache.logging.log4j.LogManager.getLogger(LogManager.java:557)
+	at org.zaproxy.zap.eventBus.SimpleEventBus.<clinit>(SimpleEventBus.java:59)
+	at org.zaproxy.zap.ZAP.<clinit>(ZAP.java:60)
+Caused by: java.net.UnknownHostException: 08942456bae3: Temporary failure in name resolution
+	at java.base/java.net.Inet6AddressImpl.lookupAllHostAddr(Native Method)
+	at java.base/java.net.InetAddress$PlatformNameService.lookupAllHostAddr(InetAddress.java:934)
+	at java.base/java.net.InetAddress.getAddressesFromNameService(InetAddress.java:1543)
+	at java.base/java.net.InetAddress$NameServiceAddresses.get(InetAddress.java:852)
+	at java.base/java.net.InetAddress.getAllByName0(InetAddress.java:1533)
+	at java.base/java.net.InetAddress.getLocalHost(InetAddress.java:1666)
+	... 14 more
+
+2026-10-31T06:43:32.376989872Z main ERROR Could not determine local host name
+java.net.UnknownHostException: 08942456bae3: 08942456bae3: Temporary failure in name resolution
+	at java.base/java.net.InetAddress.getLocalHost(InetAddress.java:1671)
+	at org.apache.logging.log4j.core.util.NetUtils.getHostname(NetUtils.java:71)
+	at org.apache.logging.log4j.core.util.NetUtils.getLocalHostname(NetUtils.java:56)
+	at org.apache.logging.log4j.core.LoggerContext.lambda$setConfiguration$2(LoggerContext.java:691)
+	at java.base/java.util.concurrent.ConcurrentHashMap.computeIfAbsent(ConcurrentHashMap.java:1708)
+	at org.apache.logging.log4j.core.LoggerContext.setConfiguration(LoggerContext.java:691)
+	at org.apache.logging.log4j.core.LoggerContext.reconfigure(LoggerContext.java:786)
+	at org.apache.logging.log4j.core.LoggerContext.setConfigLocation(LoggerContext.java:762)
+	at org.apache.logging.log4j.core.config.Configurator.reconfigure(Configurator.java:299)
+	at org.parosproxy.paros.Constant.setUpLogging(Constant.java:912)
+	at org.parosproxy.paros.Constant.initializeFilesAndDirectories(Constant.java:623)
+	at org.parosproxy.paros.Constant.<init>(Constant.java:436)
+	at org.parosproxy.paros.Constant.createInstance(Constant.java:1437)
+	at org.zaproxy.zap.ZapBootstrap.start(ZapBootstrap.java:70)
+	at org.zaproxy.zap.CommandLineBootstrap.start(CommandLineBootstrap.java:48)
+	at org.zaproxy.zap.ZAP.main(ZAP.java:100)
+Caused by: java.net.UnknownHostException: 08942456bae3: Temporary failure in name resolution
+	at java.base/java.net.Inet6AddressImpl.lookupAllHostAddr(Native Method)
+	at java.base/java.net.InetAddress$PlatformNameService.lookupAllHostAddr(InetAddress.java:934)
+	at java.base/java.net.InetAddress.getAddressesFromNameService(InetAddress.java:1543)
+	at java.base/java.net.InetAddress$NameServiceAddresses.get(InetAddress.java:852)
+	at java.base/java.net.InetAddress.getAllByName0(InetAddress.java:1533)
+	at java.base/java.net.InetAddress.getLocalHost(InetAddress.java:1666)
+	... 15 more
+
+667 [main] INFO  org.parosproxy.paros.Constant - Copying default configuration to /tmp/zap/config.xml
+784 [main] INFO  org.parosproxy.paros.Constant - Creating directory /tmp/zap/session
+784 [main] INFO  org.parosproxy.paros.Constant - Creating directory /tmp/zap/dirbuster
+784 [main] INFO  org.parosproxy.paros.Constant - Creating directory /tmp/zap/fuzzers
+784 [main] INFO  org.parosproxy.paros.Constant - Creating directory /tmp/zap/plugin
+Oct 31, 2026 6:43:35 AM java.util.prefs.FileSystemPreferences$1 run
+WARNING: Couldn't create user preferences directory. User preferences are unusable.
+Oct 31, 2026 6:43:35 AM java.util.prefs.FileSystemPreferences$1 run
+WARNING: java.io.IOException: No such file or directory
+Job passiveScan-config set scanOnlyInScope = true
+Job spider set context = target
+Job spider set url = http://lab-x:3000/
+Job spider set maxDuration = 1
+Job spider set maxDepth = 5
+Job spider set threadCount = 1
+Job passiveScan-wait set maxDuration = 1
+Job report set template = traditional-json
+Job report set reportDir = /scan/out
+Job report set reportFile = zap-report
+Job passiveScan-config started
+Job passiveScan-config finished, time taken: 00:00:00
+Job spider started
+Job spider requesting URL http://lab-x:3000
+Job spider failed to access URL http://lab-x:3000 check that it is valid : lab-x: Temporary failure in name resolution
+Job spider finished, time taken: 00:00:00
+Job report started
+Job report generated report /scan/out/zap-report.json
+Job report finished, time taken: 00:00:00
+Automation plan failures:
+	Job spider failed to access URL http://lab-x:3000 check that it is valid : lab-x: Temporary failure in name resolution

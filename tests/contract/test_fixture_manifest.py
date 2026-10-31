@@ -21,7 +21,7 @@ import pytest
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 MANIFEST_PATH = FIXTURES_DIR / "manifest.json"
-DATA_SUFFIXES = {".json", ".jsonl", ".ndjson", ".xml"}
+DATA_SUFFIXES = {".json", ".jsonl", ".ndjson", ".xml", ".log"}
 
 # 第三段允許為空（alg=none 的 JWT）。base64 編碼的 JSON 沒有兩個 "."，不會誤判。
 JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*")

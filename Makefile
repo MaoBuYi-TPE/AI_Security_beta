@@ -50,7 +50,7 @@ LIVE_COMPOSE = $(LIVE_ENV) $(LIVE_EXTRA_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner \
-	test-live-zap
+	test-live-zap record-fixtures
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -205,7 +205,8 @@ test-live-runner: env docker-check images build
 		$(LIVE_COMPOSE) up -d --wait db \
 		&& DB_PORT=55434 $(UV_RUN) alembic upgrade head >/dev/null \
 		&& $(LIVE_COMPOSE) up -d --wait \
-		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(UV_RUN) pytest -m live -p no:cacheprovider $(LIVE_TESTS) \
+		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(LIVE_PYTEST_ENV) $(UV_RUN) pytest -m live \
+			-p no:cacheprovider $(LIVE_TESTS) \
 		|| status=$$?; \
 		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
 			ids=$$(docker ps -aq --filter "network=$$net"); \
@@ -221,3 +222,10 @@ test-live-runner: env docker-check images build
 test-live-zap: LIVE_TESTS := tests/live/test_zap_live.py
 test-live-zap: LIVE_EXTRA_ENV := SECSCAN_LIVE_PREVIEW_ENGINES=zap
 test-live-zap: test-live-runner
+
+# 錄製 ZAP 的真實輸出（docs/DECISIONS.md §19.9）：同一個 live 流程，只執行錄製的情境（anonymous），
+# 輸出到 recordings/zap/<情境>/（gitignore）。人工審查之後才搬進 tests/fixtures/zap/。約 15 分鐘。
+record-fixtures: LIVE_TESTS := tests/live/test_zap_record_live.py
+record-fixtures: LIVE_EXTRA_ENV := SECSCAN_LIVE_PREVIEW_ENGINES=zap
+record-fixtures: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/zap
+record-fixtures: test-live-runner

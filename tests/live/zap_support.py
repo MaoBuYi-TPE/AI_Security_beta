@@ -41,7 +41,8 @@ class Site:
         return [record for record in records if "ready" not in record]
 
 
-def start_site(name: str, *, ip: str, alias: str) -> Site:
+def start_site(name: str, *, ip: str, alias: str, port: int = SITE_PORT) -> Site:
+    """port 不是 SITE_PORT 時，target 的 port 沒有人聽（guard 連不上，由 mitmproxy 回 502）。"""
     site = Site(name)
     docker("rm", "-f", site.container, check=False)
     docker(
@@ -70,7 +71,7 @@ def start_site(name: str, *, ip: str, alias: str) -> Site:
         "-u",
         "/site/zap_site.py",
         name,
-        str(SITE_PORT),
+        str(port),
     )
     wait_for(lambda: '"ready": true' in docker("logs", site.container), timeout=20)
     return site

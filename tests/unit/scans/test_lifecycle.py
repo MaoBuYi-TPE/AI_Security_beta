@@ -1,4 +1,4 @@
-"""run 的轉換與 scan 狀態的彙總（docs/DECISIONS.md §13.4）；純函式，整張表都測。"""
+"""run 的轉換與 scan 狀態的彙總（docs/DECISIONS.md §13.4、§19.8）；純函式，整張表都測。"""
 
 import itertools
 
@@ -34,7 +34,8 @@ ALLOWED: dict[RunStatus, frozenset[RunStatus]] = {
     R.COLLECTING: frozenset({R.COLLECTED, R.FAILED, R.CANCELLING, R.INTERRUPTED}),
     R.CANCELLING: frozenset({R.CANCELLED, R.INTERRUPTED}),
     R.COLLECTED: frozenset({R.NORMALIZING}),
-    R.NORMALIZING: frozenset({R.SUCCEEDED, R.FAILED, R.COLLECTED}),
+    # ZAP 在 plan 的 maxDuration 自行停止：解析之後才知道（§19.2）。
+    R.NORMALIZING: frozenset({R.SUCCEEDED, R.FAILED, R.TIMED_OUT, R.COLLECTED}),
     R.SUCCEEDED: frozenset(),
     R.FAILED: frozenset(),
     R.TIMED_OUT: frozenset(),
@@ -146,6 +147,43 @@ def test_aggregate(runs: list[RunStatus], cancel_requested: bool, expected: Scan
     assert aggregate(runs, cancel_requested=cancel_requested) is expected
 
 
+# preflight 是平台的健檢，不是結果引擎（§19.8）：checks 分開傳入。
+@pytest.mark.parametrize(
+    ("runs", "checks", "expected"),
+    [
+        ([R.SUCCEEDED], [R.SUCCEEDED], S.COMPLETED),
+        ([R.SUCCEEDED], [R.FAILED], S.PARTIALLY_COMPLETED),
+        ([R.SUCCEEDED], [R.TIMED_OUT], S.PARTIALLY_COMPLETED),
+        # 原本是 partially_completed：preflight 成功不能讓沒有掃描結果的 scan 算部分完成
+        ([R.FAILED], [R.SUCCEEDED], S.FAILED),
+        ([R.CANCELLED], [R.SUCCEEDED], S.FAILED),
+        ([R.FAILED], [R.FAILED], S.FAILED),
+        ([R.TIMED_OUT], [R.SUCCEEDED], S.TIMED_OUT),
+        ([R.SUCCEEDED, R.FAILED], [R.SUCCEEDED], S.PARTIALLY_COMPLETED),
+        ([R.SUCCEEDED], [R.INTERRUPTED], S.INTERRUPTED),
+        # 進行中：看所有的 run
+        ([R.QUEUED], [R.RUNNING], S.RUNNING),
+        ([R.QUEUED], [R.QUEUED], S.QUEUED),
+        ([R.QUEUED], [R.SUCCEEDED], S.RUNNING),
+        ([R.QUEUED], [R.NORMALIZING], S.NORMALIZING),
+    ],
+)
+def test_preflight_is_not_a_result_engine(
+    runs: list[RunStatus], checks: list[RunStatus], expected: ScanStatus
+) -> None:
+    assert aggregate(runs, cancel_requested=False, checks=checks) is expected
+
+
+def test_a_cancelled_scan_with_checks_is_still_cancelled() -> None:
+    assert aggregate([R.SUCCEEDED], cancel_requested=True, checks=[R.SUCCEEDED]) is S.CANCELLED
+    assert aggregate([R.QUEUED], cancel_requested=True, checks=[R.RUNNING]) is S.CANCELLING
+
+
+def test_aggregate_needs_a_scanning_run_besides_the_checks() -> None:
+    with pytest.raises(ValueError, match="run"):
+        aggregate([], cancel_requested=False, checks=[R.SUCCEEDED])
+
+
 def test_aggregate_needs_at_least_one_run() -> None:
     with pytest.raises(ValueError, match="run"):
         aggregate([], cancel_requested=False)
@@ -163,6 +201,34 @@ def test_aggregate_ignores_the_order_of_runs(
     assert aggregate(shuffled, cancel_requested=cancel_requested) is aggregate(
         runs, cancel_requested=cancel_requested
     )
+
+
+CHECK_LISTS = st.lists(st.sampled_from(list(RunStatus)), max_size=1)
+
+
+@given(RUN_LISTS, CHECK_LISTS, st.booleans(), st.data())
+def test_aggregate_with_checks_ignores_the_order_of_runs(
+    runs: list[RunStatus], checks: list[RunStatus], cancel_requested: bool, data: st.DataObject
+) -> None:
+    shuffled = data.draw(st.permutations(runs))
+
+    assert aggregate(shuffled, cancel_requested=cancel_requested, checks=checks) is aggregate(
+        runs, cancel_requested=cancel_requested, checks=checks
+    )
+
+
+@given(RUN_LISTS, CHECK_LISTS, st.booleans())
+def test_with_checks_the_scan_is_terminal_exactly_when_every_run_is(
+    runs: list[RunStatus], checks: list[RunStatus], cancel_requested: bool
+) -> None:
+    status = aggregate(runs, cancel_requested=cancel_requested, checks=checks)
+
+    all_terminal = all(run in TERMINAL_RUN_STATUSES for run in [*runs, *checks])
+    assert (status in TERMINAL_SCAN_STATUSES) is all_terminal
+    if status in {S.COMPLETED, S.PARTIALLY_COMPLETED}:
+        assert R.SUCCEEDED in runs
+    if status is S.COMPLETED:
+        assert set(checks) <= {R.SUCCEEDED}
 
 
 @given(RUN_LISTS, st.booleans())
@@ -222,6 +288,16 @@ def test_every_gate_reason_has_a_run_error_code() -> None:
     assert GATE_ERROR_CODES[UnusableReason.TARGET_DISABLED] is RunErrorCode.TARGET_DISABLED
     assert GATE_ERROR_CODES[UnusableReason.WRONG_TARGET] is RunErrorCode.SCOPE_MISMATCH
     assert GATE_ERROR_CODES[UnusableReason.ORIGIN_NOT_GRANTED] is RunErrorCode.SCOPE_MISMATCH
+
+
+def test_the_parser_outcomes_have_error_codes() -> None:
+    """ZAP 的判定（§19.2、§19.11）：DB 只檢查格式，不必 migration。"""
+    assert {
+        RunErrorCode.OUTPUT_INVALID,
+        RunErrorCode.ENGINE_REPORTED_ERRORS,
+        RunErrorCode.NO_TARGET_TRAFFIC,
+        RunErrorCode.ENGINE_TIMEOUT,
+    } <= set(RunErrorCode)
 
 
 def test_run_error_codes_are_upper_snake_case() -> None:
