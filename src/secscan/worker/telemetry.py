@@ -4,6 +4,7 @@
 格式不符（含最後一行沒有換行、對不到請求或重複的回應）、不是一般檔案或超過上限都回傳 None，原因記在
 log（不含路徑）：這個 run 的 coverage 就不算有量測依據。沒有檔案也是 None，由呼叫端依 guard 記下的
 轉送數判斷是不是根本沒有流量。
+summary（§20.3）以同樣的方式讀：轉送數、各原因的拒絕數、是否用盡預算與時間，寫進 result_details。
 """
 
 import logging
@@ -14,12 +15,16 @@ from uuid import UUID
 
 from secscan.grants.domain.scope import MAX_REQUESTS
 from secscan.guard.domain.telemetry import (
+    MAX_SUMMARY_BYTES,
     MAX_TELEMETRY_LINE_BYTES,
     ForwardedRequest,
+    RunSummary,
     TelemetryError,
     TelemetryRecord,
     UpstreamResponse,
     decode_line,
+    decode_summary,
+    summary_file_name,
     telemetry_file_name,
 )
 from secscan.scans.domain.coverage import Exchange
@@ -37,10 +42,25 @@ class TelemetryReader:
         self._directory = directory
         self._max_bytes = max_bytes
 
+    def summary(self, run_id: UUID) -> RunSummary | None:
+        """guard 為這個 run 寫的 summary；沒有、讀不到或格式不符是 None。"""
+        try:
+            raw = self._read(summary_file_name(run_id), MAX_SUMMARY_BYTES)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            logger.warning("run %s 的 summary 讀不到（%s）", run_id, type(exc).__name__)
+            return None
+        try:
+            return decode_summary(raw, run_id=run_id)
+        except TelemetryError as exc:
+            logger.warning("run %s 的 summary 格式不符（%s）", run_id, type(exc).__name__)
+            return None
+
     def exchanges(self, run_id: UUID) -> tuple[Exchange, ...] | None:
         """轉送的請求（依序）與它們的上游 status（沒有回應是 None）。"""
         try:
-            raw = self._read(run_id)
+            raw = self._read(telemetry_file_name(run_id), self._max_bytes)
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as exc:
@@ -56,8 +76,8 @@ class TelemetryReader:
             logger.warning("run %s 的 telemetry 格式不符（%s）", run_id, type(exc).__name__)
             return None
 
-    def _read(self, run_id: UUID) -> bytes:
-        descriptor = os.open(self._directory / telemetry_file_name(run_id), _OPEN)
+    def _read(self, name: str, max_bytes: int) -> bytes:
+        descriptor = os.open(self._directory / name, _OPEN)
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise ValueError("不是一般檔案")
@@ -65,7 +85,7 @@ class TelemetryReader:
             total = 0
             while chunk := os.read(descriptor, _CHUNK):
                 total += len(chunk)
-                if total > self._max_bytes:
+                if total > max_bytes:
                     raise ValueError("超過上限")
                 chunks.append(chunk)
         finally:

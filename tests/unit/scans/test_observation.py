@@ -1,11 +1,13 @@
 """觀察的輸入契約（docs/DECISIONS.md §19.3）：parser 的輸出，與引擎無關。"""
 
 import dataclasses
+import json
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from secscan.guard.domain.requests import Reason
 from secscan.scans.domain.lifecycle import ERROR_REQUIRED_RUN_STATUSES, RunErrorCode, RunStatus
 from secscan.scans.domain.observation import (
     MAX_DETAILS_BYTES,
@@ -18,6 +20,7 @@ from secscan.scans.domain.observation import (
     outcome_from_details,
     result_details,
 )
+from secscan.scans.domain.traffic import AuthHealth, GuardTraffic
 
 TIMED_OUT = RunOutcome(RunStatus.TIMED_OUT, RunErrorCode.ENGINE_TIMEOUT)
 SUCCEEDED = RunOutcome(RunStatus.SUCCEEDED)
@@ -119,6 +122,67 @@ def test_result_details_keep_the_counts_and_the_outcome() -> None:
         "traffic_verified": True,
         "problem": None,
         "components": {"reports": "0.46.0"},
+        "guard_traffic": None,
+    }
+
+
+def test_result_details_keep_the_guard_traffic() -> None:
+    """guard 的 telemetry 6 小時後刪除：明細寫進 result_details（§20.3）。時間是 UTC ISO 8601。"""
+    traffic = GuardTraffic(
+        forwarded=5,
+        denied={"PATH_AMBIGUOUS": 2},
+        exhausted=False,
+        first_at=1_700_000_000.25,
+        last_at=1_700_000_060.0,
+        answered=5,
+        auth=AuthHealth(accepted=3, rejected=2, regressed=2),
+    )
+
+    details = result_details(ParsedRun(parser_version="p/1", outcome=SUCCEEDED, traffic=traffic))
+
+    assert details["guard_traffic"] == {
+        "forwarded": 5,
+        "denied": {"PATH_AMBIGUOUS": 2},
+        "exhausted": False,
+        "first_at": "2023-11-14T22:13:20.250000+00:00",
+        "last_at": "2023-11-14T22:14:20+00:00",
+        "answered": 5,
+        "auth": {
+            "accepted": 3,
+            "rejected": 2,
+            "regressed": 2,
+            "probe_rejected": 0,
+            "lost": True,
+        },
+    }
+
+
+def test_a_rejected_probe_is_kept_in_the_details() -> None:
+    traffic = GuardTraffic(
+        forwarded=2,
+        answered=2,
+        auth=AuthHealth(accepted=1, rejected=1, regressed=0, probe_rejected=1),
+    )
+
+    details = result_details(ParsedRun(parser_version="p/1", outcome=SUCCEEDED, traffic=traffic))
+
+    assert details["guard_traffic"]["auth"]["probe_rejected"] == 1  # type: ignore[call-overload,index]
+    assert details["guard_traffic"]["auth"]["lost"] is True  # type: ignore[call-overload,index]
+
+
+def test_unverified_traffic_has_no_answers_or_auth_counts() -> None:
+    details = result_details(
+        ParsedRun(parser_version="p/1", outcome=SUCCEEDED, traffic=GuardTraffic(forwarded=0))
+    )
+
+    assert details["guard_traffic"] == {
+        "forwarded": 0,
+        "denied": {},
+        "exhausted": False,
+        "first_at": None,
+        "last_at": None,
+        "answered": None,
+        "auth": None,
     }
 
 
@@ -139,6 +203,16 @@ def test_the_details_stay_small(duplicates: int, truncated: int) -> None:
         truncated_fields=truncated,
         excluded=dict.fromkeys(Exclusion, 10**9),
         components=dict.fromkeys((f"addon-{index}" for index in range(9)), "1.44.0"),
+        traffic=GuardTraffic(
+            forwarded=10**9,
+            denied=dict.fromkeys((reason.value for reason in Reason), 10**9),
+            exhausted=True,
+            first_at=4_102_444_800.123456,
+            last_at=4_102_444_800.123456,
+            answered=10**9,
+            auth=AuthHealth(accepted=10**9, rejected=10**9, regressed=10**9),
+        ),
     )
 
-    assert len(str(result_details(parsed)).encode()) < MAX_DETAILS_BYTES
+    # DB 存的是 JSONB 的文字（json.dumps 的形狀）：以它計算（§19.6 的 CHECK）。
+    assert len(json.dumps(result_details(parsed)).encode()) < MAX_DETAILS_BYTES

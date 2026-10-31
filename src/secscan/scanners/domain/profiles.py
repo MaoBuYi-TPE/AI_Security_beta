@@ -67,7 +67,7 @@ def _engine(profile: ScanProfile, status: EngineStatus) -> ProfileEngine:
         version=status.version,
         image=status.image,
         rule_count=len(ACTIVE_SCAN_RULES[profile]) if is_zap else None,
-        definition_sha256=_zap_definition(profile) if is_zap else None,
+        definition_sha256=zap_definition_sha256(profile) if is_zap else None,
         grant_requirements=_grant_requirements(status.engine, profile),
     )
 
@@ -78,7 +78,8 @@ def _grant_requirements(engine: Engine, profile: ScanProfile) -> tuple[str, ...]
     return ()
 
 
-def _zap_definition(profile: ScanProfile) -> str:
+def zap_definition_sha256(profile: ScanProfile) -> str:
+    """runner 在 run 開始時記下（§20.2）：之後改了規則，已執行的 run 仍是當時的定義。"""
     definition = {
         "method_switching_rules": {
             str(rule): method.value for rule, method in METHOD_SWITCHING_RULES.items()

@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -108,7 +108,8 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，一律拆除；T11 起在 live 自己的 lab 網路上啟動接收端與探針（SEC-02～SEC-10、取消與故障），T12 加上預算與 preflight，T13 加上 runner 中斷後的對帳與撤銷 grant；不啟動 Juice Shop、VAmPI |
 | make test-live-zap | M3（T14 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，以真的 ZAP 掃描 live lab 網路上的小型網站，走完 API → ZAP → worker → 查詢的閉環（T15）；約 13 分鐘 |
 | make test-contract | M3（T15 已建立） | 對固定 fixture 測 Parser 契約與 fixture 的完整性（不連網、不碰 Docker 與 DB） |
-| make test-live-lab | M3 起 | 需要 `ENABLE_LIVE_LAB_TESTS=1`、LAB_ONLY、有效 grant，並通過隔離檢查才執行 |
+| make test-live-lab | M3（T16 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，測試在 live 自己的 lab 網路上逐一啟動 Juice Shop、VAmPI（弱點版、安全版、短 token），以真的 ZAP 經平台掃描（正例／負例、token 失效、工具超時、取消）；量測印在輸出、錄製到 `recordings/lab/`（gitignore）；約 27 分鐘 |
+| make lab-images | M3（T16 已建立） | 以 digest pull `compose.lab.yaml` 鎖定的靶機映像，不啟動容器 |
 | make record-fixtures | M3（T15 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：只在 live lab 網路重新錄製 ZAP 的輸出到 `recordings/zap/`（gitignore），人工審查之後才搬進 `tests/fixtures/zap/`；約 8 分鐘 |
 | make bench | M5 起 | 透過自己的 API 執行實驗，結果輸出到 benchmarks/results/ |
 

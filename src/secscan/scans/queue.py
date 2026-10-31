@@ -444,6 +444,14 @@ class ScanQueue:
         with self._sessions.begin() as session:
             return self._operations(session).heartbeat(lease, clock=self._clock)
 
+    def record_plan(
+        self, lease: Lease, *, plan_hash: str, profile_definition_sha256: str | None
+    ) -> None:
+        with self._sessions.begin() as session:
+            RunRecords(session).record_plan(
+                lease, plan_hash=plan_hash, profile_definition_sha256=profile_definition_sha256
+            )
+
     def record_usage(
         self, lease: Lease, usage: RunUsage, *, container_removed: bool = False
     ) -> None:

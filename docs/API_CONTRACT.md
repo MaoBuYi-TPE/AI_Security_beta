@@ -955,8 +955,8 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
   "auth_role": "standard_user",
   "budget": {"requests_per_second": 2, "max_requests": 1000, "max_duration_seconds": 1500},
   "engines": [
-    {"engine": "preflight", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null},
-    {"engine": "fake", "sequence": 2, "status": "queued", "error_code": null, "started_at": null, "finished_at": null}
+    {"engine": "preflight", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null},
+    {"engine": "fake", "sequence": 2, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null}
   ],
   "coverage": {
     "eligible_operations": 13,
@@ -983,7 +983,7 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
   - `budget_usage`：各容器 run 實際轉送與被 guard 拒絕的請求數、容器啟動到停止的秒數。開始過的 run 有任何一項不明（guard 重啟、telemetry 讀不出來、容器沒確認刪除）時，那一項是 null，不以 0 冒充。
   - `auth.preflight`：`passed`、`failed`、`inconclusive`（匿名的請求也符合期望，或匿名的請求沒有有效的回應：證明不了端點有受保護）、`blocked`（guard 拒絕）、`not_executed`（沒有可用的回應；in-process 的 runner 一律如此）；還沒結束是 null。
   - `coverage_measured`：有規格、所有 run 都結束、至少一個容器 run，而且每個容器 run 的 telemetry 都已對應到 operation。`observed_operations` 是實際取得上游回應的請求對應到的 operation 數（preflight 的請求不算；不代表所有漏洞種類都測過了）；`authenticated_operations` 是其中以認證取得 401、403 以外回應的數量，而且要 preflight 是 `passed`（否則是 0），匿名的 scan 是 null。沒有量測依據時兩者都是 null。
-  - `limitations`：`NO_API_SPEC`、`TRAFFIC_TELEMETRY_UNAVAILABLE`（沒有量測依據）、`AUTHENTICATION_NOT_VERIFIED`（綁定了 profile，但 preflight 不是 `passed`）。
+  - `limitations`：`NO_API_SPEC`、`TRAFFIC_TELEMETRY_UNAVAILABLE`（沒有量測依據）、`AUTHENTICATION_NOT_VERIFIED`（綁定了 profile，但 preflight 不是 `passed`）、`AUTHENTICATION_LOST`（T16：綁定了 profile，解析時由 guard 的 telemetry 判定憑證在掃描中途失效，部分結果不是以這個身分取得的；這時 `authenticated_operations` 是 null。平台不重新登入，`DECISIONS.md` §20.4）、`AUTHENTICATION_HEALTH_UNKNOWN`（T16：綁定了 profile，但有解析過的 run 沒有認證的計數，看不出憑證是否整段有效）。沒有 `AUTHENTICATION_LOST` 不等於憑證整段有效：判斷依據是靶機回的 status，過期時回 302 或 200 登入頁的靶機看不出來。
   - `eligible_operations` 是建立時在範圍內的 operation 數，不代表實際測到了。
 - `fixture`：有 fake 引擎就是 true，表示結果不是真的掃描。`results_complete` 只有 `completed` 才是 true。
 - scan、每個引擎的 run、凍結的 operation、事件 `scan.created` 與 audit 在同一個 transaction 寫入；中途失敗時什麼都不留下。
@@ -1170,13 +1170,28 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
   "time_limit_reached": true,
   "traffic_verified": true,
   "problem": null,
-  "components": {"reports": "0.46.0"}
+  "components": {"reports": "0.46.0"},
+  "guard_traffic": {
+    "forwarded": 1170,
+    "denied": {"PATH_AMBIGUOUS": 12},
+    "exhausted": false,
+    "first_at": "2026-10-31T10:00:03.120000+00:00",
+    "last_at": "2026-10-31T10:09:51.904000+00:00",
+    "answered": 1170,
+    "auth": {"accepted": 1050, "rejected": 120, "regressed": 0, "probe_rejected": 0, "lost": false}
+  }
 }
 ```
 
 - `traffic_verified` 是 false：沒有 guard 的 telemetry 可以核對，少了一層排除（`DECISIONS.md` §19.4）。
 - `problem`：輸出不能用的原因（穩定的代碼，例如 `report_not_json`、`report_version`、`summary_mismatch`）。
 - `components`：這個 run 用到的 add-on 版本（映像以 digest 鎖定）。
+- `guard_traffic`（T16，`DECISIONS.md` §20.3、§20.4）：guard 為這個 run 記下的流量明細，解析時寫入（guard 的 telemetry 6 小時後刪除，這裡留著）。`forwarded` 是轉送數，`denied` 是各原因的拒絕數（guard 的原因代碼），`exhausted` 是用盡預算，`first_at`／`last_at` 是第一個與最後一個轉送的時間。telemetry 不能核對時 `answered` 與 `auth` 是 null。`auth` 是帶認證 header、得到上游回應的請求：`accepted`（401、403 以外）、`rejected`、`regressed`（同一個 method 與 path 接受過憑證、最後一次被拒絕的數量）、`probe_rejected`（auth profile 的 preflight 端點被拒絕的次數）；`lost` 是 regressed 達到 2、probe_rejected 大於 0，或沒有一個被接受、只有被拒絕。T16 之前的結果、guard 沒有這個 run 的紀錄時，整個欄位是 null。
+
+每個引擎另外有（T16，`DECISIONS.md` §20.2）：
+
+- `plan_hash`：runner 準備執行的 ExecutionPlan（映像 digest、指令、非秘密的環境變數、輸入檔的 sha256、資源與牆鐘上限；plan 中有 profile 的規則與 maxDuration）的 sha256，在建立容器之前寫入、之後不能改。plan 沒有產生的 run 是 null（還沒開始、`PLAN_REJECTED`、剩下的預算不夠 ZAP 執行的 `BUDGET_EXHAUSTED`）；不收集的 run（`TIME_LIMIT_EXCEEDED`、guard 回報的 `BUDGET_EXHAUSTED`、取消）與之後才失敗的（`GUARD_UNAVAILABLE`）也有。hash 相同代表執行的內容相同；反之不成立：maxDuration 隨剩下的預算與 grant 的期限改變，fake 的輸入檔含 run 的 id。
+- `profile_definition_sha256`：zap 的 run 開始時的規則定義（和 `GET /scan-profiles` 的 `definition_sha256` 同一個算法）；之後改了規則，已執行的 run 仍是當時的值。其他引擎是 null。
 
 ## 18. Runner、worker 與掃描器（T10 已實作）
 

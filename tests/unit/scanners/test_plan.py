@@ -1,8 +1,20 @@
-"""ExecutionPlan 的資料型別（docs/DECISIONS.md §14.3）：映像一律帶 tag 與 digest，上限是正整數。"""
+"""ExecutionPlan 的資料型別（docs/DECISIONS.md §14.3）：映像一律帶 tag 與 digest，上限是正整數。
+
+plan_hash 是實際執行的內容的 sha256（§20.2）：run 與 scan 的 id 之外的每個欄位都算。
+"""
+
+from uuid import UUID
 
 import pytest
 
-from secscan.scanners.domain.plan import ImageReference, InputFile, ResourceLimits
+from secscan.scanners.domain.plan import (
+    ExecutionPlan,
+    ImageReference,
+    InputFile,
+    ResourceLimits,
+    plan_hash,
+)
+from secscan.scans.domain.catalog import Engine
 
 DIGEST = "sha256:" + "ab" * 32
 
@@ -67,3 +79,55 @@ def test_input_names(name: str) -> None:
 def test_input_names_are_plain(name: str) -> None:
     with pytest.raises(ValueError, match="輸入檔"):
         InputFile(name, b"{}")
+
+
+def _plan(**changes: object) -> ExecutionPlan:
+    values: dict[str, object] = {
+        "run_id": UUID(int=1),
+        "scan_id": UUID(int=2),
+        "engine": Engine.ZAP,
+        "image": ImageReference.parse(f"zaproxy/zap-stable:20261016@{DIGEST}"),
+        "entrypoint": ("/bin/sh", "-c"),
+        "arguments": ("run",),
+        "environment": (("SITE", "http://lab:3000"),),
+        "inputs": (InputFile("plan.yaml", b'{"maxDuration": 840}'),),
+        "target_auth": False,
+        "limits": ResourceLimits(memory_bytes=1, nano_cpus=1, pids=1, wall_clock_seconds=900),
+    }
+    return ExecutionPlan(**{**values, **changes})  # type: ignore[arg-type]
+
+
+def test_the_plan_hash_is_stable_across_runs() -> None:
+    """run 與 scan 的 id 不算：同樣的 plan 在不同的 run 得到同一個 hash（可以比較）。"""
+    first = plan_hash(_plan())
+
+    assert first == plan_hash(_plan(run_id=UUID(int=8), scan_id=UUID(int=9)))
+    assert len(first) == 64
+    assert int(first, 16) >= 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"image": ImageReference.parse(f"zaproxy/zap-stable:20261017@{DIGEST}")},
+        {"entrypoint": ("/bin/sh",)},
+        {"arguments": ("run", "again")},
+        {"environment": (("SITE", "http://lab:3001"),)},
+        {"inputs": (InputFile("plan.yaml", b'{"maxDuration": 900}'),)},
+        {"inputs": (InputFile("plan.yml", b'{"maxDuration": 840}'),)},
+        {"target_auth": True},
+        {"engine": Engine.PREFLIGHT},
+        {"limits": ResourceLimits(memory_bytes=2, nano_cpus=1, pids=1, wall_clock_seconds=900)},
+        {"limits": ResourceLimits(memory_bytes=1, nano_cpus=1, pids=1, wall_clock_seconds=901)},
+    ],
+)
+def test_everything_that_is_executed_changes_the_plan_hash(change: dict[str, object]) -> None:
+    """規則與 maxDuration 在 plan.yaml 中，映像 digest、資源與牆鐘上限都算（§20.2）。"""
+    assert plan_hash(_plan(**change)) != plan_hash(_plan())
+
+
+def test_fields_do_not_bleed_into_each_other() -> None:
+    joined = _plan(arguments=("a", "b"))
+    merged = _plan(arguments=("a b",))
+
+    assert plan_hash(joined) != plan_hash(merged)

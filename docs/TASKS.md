@@ -1285,11 +1285,83 @@
       - **T19**：在 observations 加上 rule group、fingerprint 與 finding；以 `raw_severity` 與 `severity_label` 正規化。
       - **M4（Nuclei）**：輸出 `ObservationInput`；`aggregate()` 的 `checks` 不必改；`/scan-profiles` 加上模板的定義。
       - **T21／T23**：報告要編碼 evidence、attack、other_info（目標的不可信內容）；artifact 的下載、原始證據加密、runs volume 的保留期限。
-- [ ] T16 執行 ZAP 真實 e2e 與失敗情境。
+- [x] T16 執行 ZAP 真實 e2e 與失敗情境。
   - DoD：
     - Juice Shop 與 VAmPI 的已知正例/負例、Token 失效、工具超時、取消，都有真實證據。
     - 保留版本與 guard 的流量資訊。
     - 依量測結果調整 lab profile 的預算，並留下紀錄。
+  - 交付（2026-10-31，done）：
+    - 使用者的決定：
+      - Token 失效：量測＋偵測揭露（短 TTL 的 VAmPI 誘發真實失效；coverage 標 `AUTHENTICATION_LOST`；不做掃描中重新登入）。
+      - 預算用盡：維持不收集，以量測佐證；更正 ARCHITECTURE 的矛盾。
+      - 版本與流量：擴充並持久化（每個 run 的 `plan_hash`、profile 定義的 sha256、guard 的流量明細）。
+      - 正例／負例：只做兩個靶機的小型集；完整的資料集與 fixture app 留給 T30。
+    - 範圍：
+      - **run 的版本**（migration `0011`）：`scanner_runs.plan_hash`（ExecutionPlan 的 sha256）與 `profile_definition_sha256`。runner 在建立容器之前以 fenced update 寫入；DB 以 CHECK 與 trigger 保證格式、只屬於容器版的 run 或 zap、只能寫一次。API 的每個引擎揭露。
+      - **guard 的流量明細**（`scans/domain/traffic.py`）：worker 讀 guard 的 summary 與 telemetry，把轉送數、各原因的拒絕數、是否用盡、時間與帶認證的請求的計數寫進 `result_details.guard_traffic`（telemetry 6 小時後刪除，這裡留著）。summary 嚴格解析：時間與計數有上限、超長的整數是格式不符、`scan_id` 要和 lease 相同。
+      - **憑證失效的偵測**：同一個 operation 接受過、最後被拒絕（2 個以上）；auth profile 的 preflight 端點被拒絕；或沒有一個被接受。coverage 加上 `AUTHENTICATION_LOST`，`authenticated_operations` 改為 null；看不出時是 `AUTHENTICATION_HEALTH_UNKNOWN`。
+      - **lab profile 的預算**：job 自己的時間上限改成 0，只由 plan 的 maxDuration 限制（量測發現 job 的上限會無聲地截斷掃描）；速率、請求數、時間、資源、強度、時間型規則依量測維持，理由記在 `DECISIONS.md` §20.5。
+      - **live**：`make test-live-lab`（`tests/live/test_lab_zap_live.py`、`lab_support.py`）與 `make lab-images`。
+      - 設計決定與取捨見 `DECISIONS.md` §20，量測見 `TOOLS.md` §7.7，案例表見 `SECURITY_AND_TESTING.md` §4。
+    - 實作時和計畫不同的地方：
+      - **預算的調整**：計畫預期調整速率、請求數與時間的上限。量測顯示兩個靶機都只用到預算的 1/4 以內，預算不是瓶頸，所以維持；真正要調的是 job 自己的時間上限（推翻 §18.5）。
+      - **正例的來源**：計畫以為 web profile 掃 Juice Shop、api profile 掃 VAmPI 就會有注入的命中。量測兩者都只有 passive 的告警：Juice Shop 的注入點都在前端呼叫的 API，traditional spider 走不到；VAmPI 的 SQLi 在 path 參數，被 guard 的 `PATH_AMBIGUOUS` 拒絕。所以多加了兩件事：以操作者上傳的一個 operation 的規格掃 Juice Shop 的 REST 搜尋（經平台命中 SQLi），以及不經平台的對照實驗（同一個映像與 plan，證明 VAmPI 的漏報完全來自 guard）。
+      - **認證失效的偵測**：計畫只有「accepted→rejected 的轉換」。實作時發現公開端點拿過期的 token 仍回 200，所以改成以 operation 為單位的「退化」，再加上 preflight 端點的探針；審查之後加上「只有被拒絕」與 `AUTHENTICATION_HEALTH_UNKNOWN`，失效時不給 `authenticated_operations`。
+      - **`plan_hash`**：直接雜湊 ExecutionPlan（映像 digest、參數、輸入檔、資源），不另外組 profile、預算、add-on 的欄位。寫入點在確認 guard 可用之前，文件的措辭是「準備執行的 plan」。
+      - **guard 的 403 的安全 header**：量測沒有任何對 guard 拒絕回應的告警，不改 guard。
+      - **沒有量到**：cookie 與 ZAP 的 session cookie 的合併、body 的 `_method`（兩個靶機都用 bearer、都不支援 method override），留給 T30。
+    - 檔案：
+      - 程式：
+        - 新增：`scans/domain/traffic.py`、`migrations/versions/v0011_run_provenance.py`
+        - 修改：`scans/`（`domain/observation.py`、`domain/usage.py`、`domain/model.py`、`models.py`、`run_records.py`、`queue.py`、`repository.py`、`schemas.py`）、`scanners/domain/`（`plan.py`、`profiles.py`、`zap/plan.py`）、`runner/service.py`、`worker/`（`telemetry.py`、`zap.py`）、`guard/domain/`（`telemetry.py`、`strict.py`）
+      - 部署：`Makefile`（`lab-images`、`test-live-lab`、`LIVE_PYTEST_ARGS`）
+      - 測試：
+        - unit：`tests/unit/scans/test_traffic.py`（新）、`test_observation.py`、`test_scan_out.py`、`test_usage.py`、`tests/unit/scanners/test_plan.py`、`tests/unit/scanners/zap/test_plan.py`、`tests/unit/worker/test_telemetry_reader.py`、`tests/unit/guard/test_telemetry_format.py`
+        - integration：`test_run_provenance.py`（新）、`test_worker_zap.py`、`test_observations_api.py`、`test_schema_constraints.py`
+        - live：`tests/live/test_lab_zap_live.py`、`lab_support.py`（新）、`zap_support.py`（`lab()` 接受靶機的 host、IP、port）；`receiver.py` 不動
+      - 文件：`DECISIONS.md` §18.5、§20、`API_CONTRACT.md`、`ARCHITECTURE.md` §3.4、§3.5、§4、§6、`SECURITY_AND_TESTING.md` §4、`TOOLS.md` §7.7、`SOURCES.md`（S103、S104）、`README.md`、`START_HERE.md`、`CLAUDE.md`
+    - DoD 對照：
+      - **已知正例**：Juice Shop 的 REST 搜尋經平台命中 SQLi（`q`）；設定類的正例（CSP、CORS、`X-Content-Type-Options`、`Server`）以實際的 header 確認。VAmPI 的 SQLi 是平台的漏報：ZAP 送出 `name1'`，guard 拒絕；對照實驗不經 guard 命中。
+      - **已知負例**：VAmPI 安全版沒有 active scan 規則的告警；對照實驗的安全版也沒有 SQLi。
+      - **Token 失效**：90 秒的 VAmPI token 在掃描中途過期 → `AUTHENTICATION_LOST`（兩輪結果相同），正常的 token 不誤判。
+      - **工具超時**：plan 的 maxDuration → `timed_out`（`ENGINE_TIMEOUT`），觀察入庫。
+      - **取消**：取消後 9 秒 `cancelled`、容器刪除、guard 不再轉送。
+      - **版本與流量**：每個 run 的 `plan_hash`、profile 定義與 `guard_traffic`（含不收集的 run 的 `plan_hash`）。
+      - **預算**：依量測調整 job 的時間上限，其他上限維持，數字與理由記在 `DECISIONS.md` §20.5。
+    - 實際執行的測試（2026-10-31）：
+      - `make test`：5195 passed、1 skipped（5 分 35 秒），coverage 99.90%（`traffic.py`、`usage.py`、`schemas.py`、`worker/zap.py`、`worker/telemetry.py`、`guard/domain/telemetry.py`、`strict.py`、`plan.py` 的 line 與 branch 都是 100%）。
+      - `make lint`、`make typecheck`（ruff、mypy、import-linter）：通過。
+      - `ENABLE_LIVE_LAB_TESTS=1 make test-live-lab`：
+        - 第一輪：7 failed（量測有效；`definitions` 在 ZAP 可用之前讀取，`/scan-profiles` 是空的；預算 150 秒的 run 被 activeScan 自己的上限截斷，回報成功；Juice Shop 的 preflight 選錯端點）。
+        - 第二輪（修正之後）：8 passed（26 分 15 秒）。
+        - 審查修正之後的第三輪：8 passed（26 分 14 秒；`make test-live-lab` 含建置共 27 分鐘），數字和第二輪一致，token 失效的 run 的 `authenticated_operations` 是 null。
+      - 審查修正之後的回歸：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap` 11 passed（11 分 18 秒）、`make test-live-runner` 42 passed（5 分 48 秒）。三者跑完都確認沒有殘留的容器、volume、網路。
+      - 最終的 live 之後，pre-commit 的 mypy 抓到 `scans/domain/usage.py` 的型別註記錯誤（先前的指令把 mypy 接在 `| tail` 後面，錯誤的退出碼沒有被看到）：只改型別註記、不改執行行為，修正之後單元測試、mypy 與 pre-commit 通過，沒有重跑 live。
+      - 突變檢查（獨立的 git worktree，腳本不進 repo）：40 個，第一輪 35 個被擋下、5 個存活。補測試之後 3 個被擋下（序列化的 `probe_rejected`、匿名的 scan 不加 limitation、preflight 的 run 沒有 profile 定義），2 個是等價或無效的突變（summary 的讀取上限和 decode 的上限相同；雙重 decode 仍檢查 run_id）。
+      - 案例表的確認方式逐項在靶機上核對（JS-01 到 VA-06）。
+    - 沒有依 TDD 的地方（如實記錄）：
+      - `authentication_lost` 的形狀分支、`TelemetryReader.summary` 的「不是一般檔案」與突變檢查補的 3 個測試，是在實作之後寫的。
+      - `tests/live/` 與 `Makefile` 以實際執行驗證，沒有 RED 的步驟；live 的斷言依第一輪的量測修正（KeyError、超時的預算、Juice Shop 的 preflight 端點）。
+      - `test_never_accepted_is_not_a_regression` 的斷言隨審查的決定改變（只有被拒絕也算失效）。
+    - 審查：
+      - code-reviewer：APPROVE（0 CRITICAL、0 HIGH、2 MEDIUM、5 LOW）。
+        - 修正：summary 的時間戳溢位讓整個 run 失去結果、偵測的召回與「未知」的揭露、轉送 0 個的語意、`plan_hash` 的措辭、`denied` 是可變的 dict。
+        - 沒有修正：runner 層 `record_plan` 失效的測試（在建立任何資源之前，只是保險）。
+      - security-reviewer：0 CRITICAL、0 HIGH、2 MEDIUM、5 LOW。
+        - 修正：失效時仍呈現已認證的數字、「只有被拒絕」的盲點、`plan_hash` 在 DB 層的只寫一次、summary 的範圍與 `scan_id`、超長的整數、錄製未遮罩的輸出、文件的漂移。
+        - 接受並記入 `DECISIONS.md` §20.4、§20.8：status 是靶機回的（過期時回 302 或登入頁看不出來）、誤判 `lost` 是偏向安全的方向、observation 的身分由 T19 處理。
+        - 沒有採用：探針以「不符合 preflight 的 expected_status」判斷（ZAP 對 preflight 端點的攻擊會回 400、500，誤判太多）。
+    - 限制：
+      - guard 的 path 規則讓 path 參數的注入測不到（VAmPI 每次 232 個、34%）；放寬需要使用者決定（安全取捨）。
+      - 平台在兩個靶機上分不出 VAmPI 的弱點版與安全版；Juice Shop 的 web profile 只有設定類的告警。
+      - 認證失效的偵測依賴靶機的 401、403；observation 仍標 scan 的身分。
+      - 不收集的 run 沒有 `guard_traffic`。
+      - T11 的證據缺口（同一條連線上多個請求的收包證據）仍在。
+    - 給後續任務：
+      - **使用者決定**：是否放寬 guard 的 path 規則（解碼之後再比對範圍；`DECISIONS.md` §15.10、§20.7 的量化）。
+      - **T30**：fixture app 要有 traditional spider 走得到、query 或 form 參數的注入點，作為 web profile 的正例；量測 cookie 的合併與 `_method`；完整的 ground truth 與抽樣複核。
+      - **T19**：fingerprint 與複掃比較要讀 run 的 `guard_traffic.auth.lost`，失效的 run 的 observation 不能併入已認證身分的 finding，也不能據以標 `not_observed`。
+      - **M5（bench）**：以 fixture app 重新檢討速率與強度（兩個靶機的量測沒有顯示需要調整）。
 - [ ] T30 建立自製 fixture app 與 ground truth 初稿。
   - DoD：
     - fixture app 可以切換弱點版與修補版，只放在 lab_net。

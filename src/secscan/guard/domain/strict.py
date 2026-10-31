@@ -91,7 +91,11 @@ def load_object(
             parse_float=float if floats else reject("浮點數"),
             parse_constant=reject(" NaN 或 Infinity"),
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    except error:
+        raise
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        # ValueError 涵蓋 JSONDecodeError 與超過位數上限的整數（T16 的審查）；上面的 hook 自己的
+        # error 也是 ValueError，保留它的訊息。
         raise error(f"{label} 不是 UTF-8 的 JSON") from None
     if not isinstance(document, dict):
         raise error(f"{label} 必須是 JSON 物件")

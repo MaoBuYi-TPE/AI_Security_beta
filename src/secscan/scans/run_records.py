@@ -135,6 +135,17 @@ class RunRecords:
             .execution_options(synchronize_session=False)
         )
 
+    def record_plan(
+        self, lease: Lease, *, plan_hash: str, profile_definition_sha256: str | None
+    ) -> None:
+        """runner 在建立容器之前記下實際執行的內容（§20.2；只能一次）。"""
+        self._fenced_update(
+            lease,
+            {"plan_hash": plan_hash, "profile_definition_sha256": profile_definition_sha256},
+            ScannerRunModel.plan_hash.is_(None),
+            problem="lease 已過期、不屬於這個 runner，或已經記錄過 plan",
+        )
+
     def record_usage(
         self, lease: Lease, usage: RunUsage, *, container_removed: bool = False
     ) -> None:

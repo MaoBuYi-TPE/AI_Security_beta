@@ -246,7 +246,13 @@ def test_a_scan_shows_the_result_of_each_engine(
         "traffic_verified": True,
         "problem": None,
         "components": {"reports": "0.46.0"},
+        # T16 之前寫入的結果沒有 guard 的流量明細（§20.3）。
+        "guard_traffic": None,
     }
+    assert (engines["zap"]["plan_hash"], engines["zap"]["profile_definition_sha256"]) == (
+        None,
+        None,
+    )
 
 
 def test_the_list_of_scans_also_shows_the_result(

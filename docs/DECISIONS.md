@@ -1623,7 +1623,7 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 
 ### 18.5 時間與預算
 
-- `maxDuration` = min（剩下的時間、`floor(分到的請求數 / 速率)`、grant 的 `valid_until − now`）− 60 秒（JVM 啟動與報告的保留時間）。預算或時間用完之前 ZAP 自己停止，report 仍會寫出（退出碼 2）。job 的上限以分鐘計，至少 1（0 是不限）。
+- `maxDuration` = min（剩下的時間、`floor(分到的請求數 / 速率)`、grant 的 `valid_until − now`）− 60 秒（JVM 啟動與報告的保留時間）。預算或時間用完之前 ZAP 自己停止，report 仍會寫出（退出碼 2）。job 的上限以分鐘計，至少 1（0 是不限）。**T16 推翻**：job 的上限一律是 0，只由 plan 的 maxDuration 限制（§20.5）。
 - 算出來不到 60 秒：不建立容器，failed（`BUDGET_EXHAUSTED`，不送流量）。
 - runner 的牆鐘上限照舊是硬性的上限（`TIME_LIMIT_EXCEEDED`）；guard 回報預算用盡時照舊立刻停止、不收集（T15／T16 檢討：ZAP 自己的速率加上這裡的計算，正常情況下不會先用完請求數）。
 
@@ -1824,6 +1824,124 @@ T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作
 - ZAP 報告的 URI 和實際送出的 target 是否逐字相同：T15 的真實報告都相同，但小型網站沒有 active scan 的命中。若 ZAP 以未編碼的形式寫出 attack 的 query（空白、非 ASCII），第 2 層會把真的結果排除（計數揭露）；T16 以 Juice Shop、VAmPI 的真實命中確認。
 - 收集中途中斷時（run 留在 collecting，由對帳標成 interrupted），out/ 可能還有沒遮罩的檔案：沒有 manifest，worker 不會讀；runs volume 的保留期限在 T23。
 - 不在 T15：Juice Shop、VAmPI 的 e2e 與預算調整、token 失效、path 中 `%` 的覆蓋缺口、cookie 的合併、`_method`（T16）；rule group、正規化的 severity、fingerprint、finding（T19）；報告與 artifact 的下載、原始證據加密、runs volume 的保留期限（T21／T23）；HTTPS、AJAX spider、多個 runner；T11 的同一條連線證據缺口仍記為未實作。
+
+## 20. T16 補充決定：Juice Shop、VAmPI 的真實 e2e、token 失效、run 的版本與 guard 的流量明細（2026-10-31）
+
+T16 讓平台以真的 ZAP 掃描兩個標準靶機（OWASP Juice Shop v20.3.0、VAmPI 的弱點版與安全版），產生正例／負例、token 失效、工具超時與取消的真實證據，並依量測調整 lab profile 的預算。以下是實作前定下的細節與推翻既有文件的地方；量測的數字在 §20.6 與 `TOOLS.md` §7.7。
+
+使用者的決定（2026-10-31）：
+1. **Token 失效 → 量測＋偵測揭露**：以短 TTL 的 VAmPI 誘發真實失效；worker 從 guard 的 telemetry 判斷憑證在掃描中途失效，coverage 加上 `AUTHENTICATION_LOST`，不把失效後的結果當成已認證。**不做掃描中重新登入**（§16.8 的重新驗證延後）。
+2. **預算用盡 → 維持不收集＋量測佐證**：量測確認 ZAP 以 plan 的 maxDuration 在預算之前自行停止（`timed_out`／`ENGINE_TIMEOUT`，有收集）；更正 ARCHITECTURE 的矛盾，`BUDGET_EXHAUSTED` 的行為不變。
+3. **版本與流量 → 擴充並持久化**：每個 run 記下實際執行的 plan 與 profile 定義的 sha256（migration 0011），guard 的流量明細寫進 `result_details`，API 揭露。
+4. **正例／負例 → 只做兩個靶機的小型集**：以官方的弱點清單為來源（`SOURCES.md` S103、S104），建立足以驗證 ZAP e2e 與 vulnerable／secure 對照的小型案例表（`SECURITY_AND_TESTING.md` §4）；完整的 12+12、6+6 資料集與自製的 fixture app 留給 T30。
+
+### 20.1 推翻或修改既有文件的地方
+
+| 原本 | 改成 | 理由 |
+|---|---|---|
+| ARCHITECTURE §3.4「預算用盡時……保存已有資料」；§19.2「guard 回報預算用盡……不收集（T16 檢討）」 | 維持不收集（`BUDGET_EXHAUSTED`、`TIME_LIMIT_EXCEEDED` 的 out/ 沒有遮罩，不交給 worker）；ARCHITECTURE 更正 | 使用者決定 2。§18.5 的公式讓 plan 的 maxDuration 比剩下的時間與請求數都短 60 秒，ZAP 會先自行停止並寫出報告；T16 以量測確認（§20.6） |
+| §16.8：preflight 不證明之後整段維持登入狀態，「M3 依量測再加上掃描中的重新驗證」 | T16 只做偵測與揭露（§20.4）；掃描中的重新驗證與重新登入延後（不在 M3） | 使用者決定 1、CLAUDE.md §9「失效時標記覆蓋不足，不以匿名結果冒充」 |
+| §19.10：profile 的 `definition_sha256` 只在 `GET /scan-profiles` 即時計算 | 每個 run 記下 `plan_hash` 與 `profile_definition_sha256`（§20.2） | 使用者決定 3、CLAUDE.md §8「調整需記錄 profile hash 並在報告揭露」 |
+| guard 的拒絕原因、是否用盡、時間只在 tmpfs 的 summary（6 小時後刪除）；DB 只有拒絕的總數 | 解析時寫進 `result_details.guard_traffic`（§20.3） | 使用者決定 3 |
+| §18.5：job 的上限以分鐘計、至少 1（spider 1/4、passiveScan-wait 1/10、activeScan 全部與每條規則 1/4） | job 的上限一律是 0（不限），只由 plan 的 `maxDuration` 限制（§20.5） | T16 量測：activeScan 在自己的上限停止時 AF 回報成功，截斷的掃描看起來是完整的 |
+| §18.4：時間型的注入規則「T16 再評估」 | 維持排除（§20.5） | 兩個靶機沒有可以受益的注入點 |
+
+### 20.2 run 的版本（migration `0011`）
+
+- `scanner_runs` 新增 `plan_hash`、`profile_definition_sha256`（都可為 null）。
+- **`plan_hash`** = `scanners/domain/plan.py` 的 `plan_hash(plan)`：runner **準備執行**的 ExecutionPlan 的 canonical JSON（引擎、映像的 tag 與 digest、entrypoint、參數、非秘密的環境變數、每個輸入檔的名稱與 sha256、是否掛 secret、記憶體／CPU／pid／牆鐘上限）的 sha256。profile 的規則、強度、門檻與 maxDuration 都在 plan.yaml 中；速率與請求數是 scan 的 `budget`（已揭露），由 guard 執行，不在 plan 中。
+  - 不含 ExecutionPlan 的 run 與 scan 的 id，但輸入檔的內容可能含有：fake 的 `run.json` 有 run 與 scan 的 id，每個 run 的值都不同；zap 的 maxDuration 與牆鐘上限取決於剩下的預算與 grant 的剩餘時間，grant 的期限是限制因素時也會逐 run 不同（T16 的審查）。所以 hash 相同代表執行的內容相同，反之不成立。
+- **`profile_definition_sha256`**：zap 的 run 開始時，`scanners/domain/profiles.py` 的 `zap_definition_sha256(profile)`（和 `GET /scan-profiles` 同一個算法）。之後改了規則，已執行的 run 仍是當時的定義。
+- **寫入時間**：runner 在 plan 通過 `build_container` 之後、確認 guard 可用與建立容器之前，以 lease 做 fenced update（條件 `plan_hash IS NULL`，只能一次）。所以不收集的 run（`TIME_LIMIT_EXCEEDED`、guard 回報 `BUDGET_EXHAUSTED`、取消、`ENGINE_FAILED`）也留得住版本，之後才失敗的 `GUARD_UNAVAILABLE`、建立容器失敗、建立之前取消的 run 也有（沒有送出流量）。null 的只有 plan 沒有產生的 run：沒有開始執行（排隊中取消、prepare 時 gate 不通過）、`PLAN_REJECTED`、剩下的時間或請求數不夠 ZAP 執行（`BUDGET_EXHAUSTED`，沒有容器）。
+- CHECK：sha256 的格式（64 個小寫 hex）；有 `plan_hash` 就一定已在 prepare 時記下容器名稱；profile 定義只屬於 zap，而且要和 `plan_hash` 一起。trigger `scanner_runs_plan_once`：`plan_hash` 有值之後兩個欄位都不能再改（DB 層的保護，T16 的安全審查，比照 0009 的 `container_removed_at`）。run 結束之後由 0009 的 trigger 凍結。
+- API：`GET /scans/{id}` 的每個引擎加上兩個欄位（`API_CONTRACT.md` §17）。
+
+### 20.3 guard 的流量明細（`result_details.guard_traffic`）
+
+- worker 解析 zap 的 run 時，`TelemetryReader` 另外讀 guard 的 `<run>.summary.json`（嚴格解析、不跟隨 symlink、64 KiB 上限；讀不到或格式不符是 null，原因記在 log）。純函式 `scans/domain/traffic.py` 的 `guard_traffic(summary, exchanges, probe=…)` 算出：轉送數、各原因的拒絕數、是否用盡預算、第一個與最後一個轉送的時間、得到上游回應的數量，以及 §20.4 的認證計數。
+- telemetry 讀不到或和 summary 的轉送數對不上（§16.6 的條件：最多少一行）時，回應數與認證的計數是 null：殘缺的檔案不能當作依據。轉送 0 個時沒有 telemetry 的檔案也是有依據的（回應數 0，和 zap 的判定相同）。summary 不存在（guard 沒有這個 run 的紀錄）、或屬於另一個 scan 時整個是 null。
+- **summary 的範圍**（T16 的審查）：guard 寫的 summary 仍是不可信的輸入。時間要在 9999-12-31 之前、計數不超過 10^12（`guard/domain/telemetry.py` 的 `MAX_EPOCH_SECONDS`、`MAX_COUNT`），超過位數上限的整數也是格式不符（`strict.py` 原本只接 `JSONDecodeError`，會冒出未處理的 `ValueError`；runner 讀 summary 也受益）。否則轉成日期或寫進 4 KiB 的 `result_details` 時會丟例外，整個 run 在重試 3 次之後失去結果。
+- 不論判定都寫入（`OUTPUT_INVALID`、`ENGINE_REPORTED_ERRORS` 的 run 也有），和判定在同一個 transaction。大小：21 種拒絕原因與每個計數都是 10^9 時，整個 `result_details` 仍在 4 KiB 以內（單元測試）。
+- 只有 zap 的 run（preflight 與 fake 沒有 `result_details`）；不收集的 run 沒有（residual：只有 `budget_usage` 的總數）。
+
+### 20.4 憑證在掃描中途失效（偵測與揭露，不重新登入）
+
+- 訊號只來自 guard 的 telemetry（guard 記下每個轉送的請求是否帶認證 header，以及上游的 status），不看工具的輸出。只看帶認證 header、得到上游回應的請求；401、403 是被拒絕（和 §16.6 相同）。
+- **退化**：同一個 (method, path) 接受過憑證、最後一次卻被拒絕。只看「最後一次」：被拒絕之後又接受（例如某個 payload 讓端點回 401）不算。不管憑證的公開端點拿過期的 token 仍回 200（VAmPI 的 `/books/v1`、`/users/v1`），所以不能只看最後幾個請求是否都被拒絕。
+- **探針**：auth profile 的 preflight 端點（method 與 path，§12.5）是已知需要認證的。掃描中帶憑證打它被拒絕，憑證在那時已經無效。這也涵蓋 preflight 之後、ZAP 的第一個請求之前就過期的情形（沒有任何接受過的請求，看不出退化）。
+- **只有被拒絕**（T16 的審查）：帶認證的請求一個都沒有被接受、只有被拒絕。ZAP 沒有打到探針、而且靶機的端點都需要認證時，這是唯一看得出的訊號。
+- **判定**：退化的 operation 達到 2 個、探針被拒絕，或只有被拒絕 → `lost`。一個 operation 的最後一次被拒絕可能是 payload 造成的，所以退化要 2 個以上；探針沒有 payload 的問題（preflight 是固定的 GET、不帶參數），1 次就算。門檻在 §20.6 以量測檢查（同一個靶機、正常的 token 時不應判定為失效）。
+- **揭露**：
+  - `result_details.guard_traffic.auth`（accepted、rejected、regressed、probe_rejected、lost）。
+  - scan 綁定了 auth profile、任何一個 run 判定 `lost` 時，coverage 的 `limitations` 加上 `AUTHENTICATION_LOST`，而且 `authenticated_operations` 是 null：過期的 token 打到公開端點仍是 200，會被算成已認證（T16 的安全審查）。
+  - 綁定了 auth profile、有解析過的 run 沒有認證的計數（guard 沒有紀錄、telemetry 不完整、T16 之前的結果）時，加上 `AUTHENTICATION_HEALTH_UNKNOWN`：沒有 `AUTHENTICATION_LOST` 不等於憑證整段有效（T16 的審查）。
+  - run 與 scan 的狀態不變（工具本身沒有失敗）；observation 仍標 scan 的 `auth_role`，以 limitation 揭露「部分結果不是以這個身分取得的」。
+- **偵測的限制**（訊號是靶機自己回的 status，平台證明不了憑證有效）：
+  - 過期時回 302（導向登入頁）、200 的登入頁、400、404 或 5xx 的靶機看不出來；web profile 的偵測力因此低於 api。
+  - 只有一個受保護 operation、而且 ZAP 沒打到探針的 API，最多退化 1 個，看不出來。
+  - WAF 或封鎖讓多個先前 200 的 operation 改回 403 時，會被判定為失效（偏向安全的方向）。
+- **不做**：掃描中重新驗證、重新登入（§16.8 原本寫在 M3，使用者決定延後）；判斷失效發生在哪個時間點之後的 observation（observation 沒有對應到 telemetry 的請求序號）。T19 的 fingerprint 與複掃比較要讀 run 的 `auth.lost`：失效的 run 的 observation 不能併入已認證身分的 finding，也不能據以把複掃標成 `not_observed`（交接）。
+
+### 20.5 lab profile 的預算：依量測的調整
+
+量測（§20.6、`TOOLS.md` §7.7）之後的結論與調整：
+
+| 項目 | 量測 | 決定 |
+|---|---|---|
+| **job 自己的時間上限**（spider `maxDuration`、`passiveScan-wait` `maxDuration`、activeScan `maxScanDurationInMins`、`maxRuleDurationInMins`；§18.5 原本是 plan 時間的 1/4、1/10、全部、1/4，至少 1 分鐘） | 預算 150 秒（plan 90 秒）的 VAmPI：activeScan 在自己的上限（1 分鐘）停止，只轉送 107 個（完整的掃描是 425 個），AF 回報 `succeeded`、log 沒有任何警告：**被截斷的掃描看起來是完整的** | **改成 0**（AF 的「不限」），只由 plan 的 `maxDuration` 限制。plan 到期是警告 → `timed_out`（`ENGINE_TIMEOUT`、`time_limit_reached`），截斷看得見（CLAUDE.md §8）。推翻 §18.5「job 的上限至少 1（0 是不限）」。代價：一條慢的規則或很大的網站可能用掉整個 plan，結果是看得見的 `timed_out`。第二輪：預算 180 秒的 run 是 `timed_out`（§20.6） |
+| 速率、請求數、時間的上限（`grants/domain/scope.py`：2 req/s、5,000 次、1,500 秒） | VAmPI 的 api scan 約 310 秒、轉送 425 個；Juice Shop 的 web scan 約 200 秒、256 個。用到時間上限的 21%、請求數上限的 9%；實際速率約 1.5 req/s（上限 2）。沒有任何 run 撞到預算（`exhausted` 都是 false） | **維持**。兩個靶機的檢出受限於「找得到的注入點」與 guard 的 path 規則（§20.7），不是預算；提高速率只讓掃描變快，不會多檢出。M5 的 bench 以 fixture app 再檢討 |
+| 容器的資源（記憶體 3 GiB、2 CPU、1,024 pids；JVM heap 1,536 MiB、tmpfs 768 MiB） | ZAP 的記憶體峰值 619–1,265 MiB（兩輪；Juice Shop 帶 bearer 最高）；靶機 111–212 MiB | **維持**：heap 與 tmpfs 的上限加起來接近 2.3 GiB，3 GiB 留有餘裕 |
+| 強度 `low`、門檻 `medium` | 掃描都在預算的 1/4 以內結束 | **維持**：提高強度只增加同一批注入點的 payload，量測沒有顯示會多檢出；T30 的 fixture app 有可達的注入點之後再比較 |
+| 時間型的注入規則（40019–40022、40027、90037；§18.4「T16 再評估」） | 鎖定映像的時間型 SQLi 規則只針對 MySQL、Hypersonic、Oracle、PostgreSQL、MSSQL（`TOOLS.md` §7.4），兩個靶機都是 SQLite；VAmPI 的注入點在 path，被 guard 拒絕；兩個靶機的已知清單沒有 OS 命令注入（90037；Juice Shop 的 RCE 是反序列化與 SSTi，在 traditional spider 走不到的端點）。開了也只是多送沒有作用的 payload | **維持排除** |
+| `RESERVED_SECONDS = 60` | run 的總時間比流量的時間多約 30 秒（JVM 啟動、報告、收集） | **維持** |
+
+- 每個 run 的 `plan_hash` 已包含這些值（§20.2）：調整前後的 run 以 hash 區分，報告揭露。
+- runner 的牆鐘上限（`runner/domain/policy.py` 的 1,500 秒）與 `MAX_DURATION_SECONDS` 相同，沒有調整，所以不必連動。
+
+### 20.6 量測（`make test-live-lab`，2026-10-31）
+
+第二輪（job 的上限是 0、修正第一輪的測試之後；8 passed，26 分 15 秒）：
+
+| 情境 | profile／認證 | run | 秒 | 轉送 | 拒絕（原因） | 407 | 觀察 | ZAP 峰值 |
+|---|---|---|---|---|---|---|---|---|
+| VAmPI 弱點版 | api／bearer | succeeded | 312 | 425 | 258（`PATH_AMBIGUOUS` 232、`PATH_NOT_AUTHORIZED` 26） | 139 | 11（passive 3 種） | 632 MiB |
+| VAmPI，預算 180 秒 | api／anonymous | **timed_out**（`ENGINE_TIMEOUT`） | 139 | 204 | 60（`PATH_AMBIGUOUS`） | 40 | 11 | 683 MiB |
+| VAmPI，取消 | api／anonymous | cancelled | 取消後 9 秒 | — | — | — | — | — |
+| VAmPI 安全版 | api／bearer | succeeded | 310 | 425 | 258（同上） | 139 | 10（passive 3 種） | 653 MiB |
+| VAmPI，token 90 秒 | api／bearer | succeeded | 307 | 425 | 230（`PATH_AMBIGUOUS` 204） | 125 | 11 | 722 MiB |
+| Juice Shop | web／anonymous | succeeded | 193 | 256（回應 253） | 0 | 110 | 9（passive 3 種） | 846 MiB |
+| Juice Shop | web／bearer | succeeded | 204 | 256（回應 253） | 0 | 110 | 9 | 916 MiB |
+| Juice Shop 的 REST 搜尋 | api（操作者的規格）／anonymous | succeeded | 51 | 59 | 6（`PATH_NOT_AUTHORIZED`） | 4 | 2（含 **SQL Injection**） | 654 MiB |
+
+- **token 失效**：90 秒的 token，接受 351、拒絕 74、退化 2 個 operation、探針 0（ZAP 只在匯入時打過一次 `/me`）→ `lost`，coverage 是 `AUTHENTICATION_LOST`。兩輪結果相同。正常的 token（3600 秒）的 bearer 掃描：拒絕 0、退化 0（門檻 2 沒有誤判）。
+- **工具超時**：job 的上限改成 0 之後，預算 180 秒（plan 120 秒）的 run 是 `timed_out`、`time_limit_reached: true`、觀察入庫，不是 runner 的 `TIME_LIMIT_EXCEEDED`。plan 的 maxDuration 中斷的是 activeScan（§19 的離線量測是 `delay` job）。
+- **預算用盡不收集的佐證**：所有 run 的 `exhausted` 都是 false。§18.5 的公式讓 plan 在預算之前停止，正常的情況不會先撞到 guard 的預算。
+- **preflight 不被 200 騙過**：第一輪以 Juice Shop 的 `/rest/user/whoami` 當 preflight。這個端點只看 cookie，帶 bearer 與匿名都回 200 `{"user":{}}`，平台判定 `failed`、coverage 是 `AUTHENTICATION_NOT_VERIFIED`（CLAUDE.md §9 的「不能只用 200 判定成功」）；同一個掃描中帶 bearer 的 253 個請求都被接受（`/api/*` 以 Authorization 驗證）。第二輪改用 `/api/Addresss`，`passed`。
+- **guard 的 403 沒有被告警**：所有 run 的 `excluded.guard_denied`、`guard_response` 都是 0。拒絕的回應沒有成為 instance，不為拒絕回應加安全 header（§19.4 的交接）。
+- **URI 與 telemetry**：每個觀察的 (method, path) 都是 guard 為這個 run 轉送過的請求（live 測試的斷言）。Juice Shop 有 3 個請求沒有上游回應，排除 2 個 instance（`not_answered`）。
+- **報告大小**：5.9–15.2 KB，遠低於 8 MiB 的上限。
+- **AF 的訊息**：正常的 run 只有 plan 的 URL 與數量（`Job spider found 51 URLs`、`Job openapi added 10 URLs`），沒有靶機的內容。
+- **reactive 407**：每個 run 4–139 個，不計入預算（§16.8）。
+- 第一輪（job 有自己的上限）的差異：預算 150 秒的 run 被 activeScan 自己的上限截斷、回報 `succeeded`（§20.5）；7 個測試在斷言時失敗（`definitions` 在 ZAP 可用之前讀取，`/scan-profiles` 是空的），量測本身有效，數字和第二輪相近。
+
+### 20.7 正例與負例（小型集；`SECURITY_AND_TESTING.md` §4 的案例表）
+
+- **Juice Shop 的 REST 搜尋的 SQLi**（S104 的 Database Schema、User Credentials）：經完整的平台（API → runner → guard → ZAP → worker → 查詢）**命中**：`40018 SQL Injection`，`GET /rest/products/search`，參數 `q`（query），attack `apple'`，ZAP 的等級 High、信心 Low，evidence 是 500 回應。注入點是前端呼叫的 API，traditional spider 走不到，以操作者上傳的一個 operation 的規格掃描。
+- **VAmPI 的 SQLi**（S103；`/users/v1/{username}` 以字串組 SQL）：ZAP 送出了探測（`/users/v1/name1%27`），guard 以 `PATH_AMBIGUOUS` 拒絕（§15.10 的取捨），探測沒有到達靶機，**平台漏報**。量化：每次 VAmPI 的掃描有 232 個 path 參數的攻擊被拒（`/users/v1/…` 106、`/books/v1/…` 126），佔 guard 判斷的請求的 34%。
+- **對照實驗**（不經平台；同一個鎖定的映像、第一輪實際使用的 plan.yaml 與規格；只接一個 internal 的網路，沒有 guard 與速率限制）：弱點版 34 秒內命中 `40018 SQL Injection`（High，`GET /users/v1/%27`，參數 `username`），安全版沒有。結論：漏報完全來自 guard 的 path 規則，ZAP 本身判斷正確。是否放寬 §15.10（解碼之後再比對範圍）是需要使用者決定的安全取捨，T16 不改（只量化與揭露，§18.10 的決定）。
+- **VAmPI 的負例**：安全版沒有任何 active scan 規則的告警（live 測試的斷言）；但弱點版也只有 passive 的告警，所以這組對照在平台上**分不出**弱點版與安全版（原因同上）。
+- **設定類的正例**（passive，以實際的回應 header 可確認）：Juice Shop 缺 CSP（10038）、`Access-Control-Allow-Origin: *`（10098）；VAmPI 缺 `X-Content-Type-Options`（10021）、`Server` header 透露版本（10036）。VAmPI 的兩種在弱點版與安全版都有（和 `vulnerable` 開關無關）。
+- **漏報、不在 ZAP 能力範圍**：BOLA、mass assignment、未授權改密碼、使用者列舉、JWT 弱金鑰、缺速率限制（VAmPI）；Juice Shop 的 DOM／Reflected XSS 與大部分 challenge 在前端路由，traditional spider 只走到靜態資源與 `/ftp`。Juice Shop 的 `/ftp` 目錄列表（Confidential Document，回 200、標題 `listing directory /ftp`）有被請求，但 Directory Browsing（0）沒有告警。
+
+### 20.8 殘餘風險與不在 T16 範圍
+
+- guard 的 path 規則讓 path 參數的注入測不到（§20.7）：報告必須揭露；放寬需要使用者決定。
+- 認證失效的偵測有限制（§20.4）：靶機以 302 或 200 的登入頁表示過期時看不出來；observation 仍標 scan 的身分（T19 要讀 `auth.lost`）。
+- 不收集的 run（guard 回報預算用盡、runner 的牆鐘上限、取消）沒有 `guard_traffic`，只有 `budget_usage` 的總數與 `plan_hash`。
+- `plan_hash` 不含 runner 的容器政策（網路、capability、掛載）：那些是 runner 固定的設定，不隨 run 改變。
+- 正例與負例只是小型集：完整的 12＋12、6＋6、可切換弱點與修補的 fixture app 在 T30；cookie 與 ZAP 自己的 session cookie 的合併、body 的 `_method`（T14 的交接）在 T16 沒有量到（兩個靶機都用 bearer、都不支援 method override），留給 T30 的 fixture app。
+- Juice Shop 只能以 bearer 認證 `/api/*`：它的頁面與 `/rest/user/whoami` 看 cookie，web profile 帶 bearer 的掃描大部分仍是匿名的內容。
+- 不在 T16：掃描中重新驗證與重新登入、預算用盡時收集部分輸出（使用者決定）；Nuclei（T17、T18）；rule group、fingerprint、finding（T19）；HTTPS、AJAX spider、多個 runner；T11 的同一條連線的證據缺口仍記為未實作。
 
 ## 來源
 

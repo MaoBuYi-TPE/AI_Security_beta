@@ -3,8 +3,13 @@
 只描述「跑什麼」：映像、指令、非秘密的環境變數、要放進 in/ 的輸入檔、是否掛載 target 的 secret
 （只有參照）與上限。host path、網路、user、privileged 這些「怎麼跑」不在這裡：由 runner 固定的
 容器政策決定，plan 想放也放不進去。
+
+plan_hash 是 run 實際執行的內容的 sha256（docs/DECISIONS.md §20.2）：runner 在建立容器之前寫進
+scanner_runs，沒有收集的 run 也留得住版本。
 """
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from uuid import UUID
@@ -81,3 +86,27 @@ class ExecutionPlan:
     # 是否把這個 run 的 target secret 唯讀掛進容器（值由 runner 在啟動前解密寫入）。
     target_auth: bool
     limits: ResourceLimits
+
+
+def plan_hash(plan: ExecutionPlan) -> str:
+    """canonical JSON 的 sha256：run 與 scan 的 id 不算（同樣的 plan 在不同的 run 可以比較）。
+
+    輸入檔以名稱與內容的 sha256 表示；環境變數只有非秘密的設定（§14.3）。
+    """
+    document = {
+        "engine": plan.engine.value,
+        "image": str(plan.image),
+        "entrypoint": list(plan.entrypoint),
+        "arguments": list(plan.arguments),
+        "environment": [list(pair) for pair in plan.environment],
+        "inputs": [[item.name, hashlib.sha256(item.content).hexdigest()] for item in plan.inputs],
+        "target_auth": plan.target_auth,
+        "limits": {
+            "memory_bytes": plan.limits.memory_bytes,
+            "nano_cpus": plan.limits.nano_cpus,
+            "pids": plan.limits.pids,
+            "wall_clock_seconds": plan.limits.wall_clock_seconds,
+        },
+    }
+    canonical = json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()

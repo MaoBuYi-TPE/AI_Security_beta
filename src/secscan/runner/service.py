@@ -47,7 +47,8 @@ from secscan.runner.guard import GuardChannel, GuardUnavailableError
 from secscan.runner.plans import ENGINE_IMAGES, RunPlanner, secret_files
 from secscan.runner.workspace import ArtifactRejectedError, Workspace, WorkspaceError
 from secscan.scanners.domain.fake import FakeScript
-from secscan.scanners.domain.plan import ExecutionPlan
+from secscan.scanners.domain.plan import ExecutionPlan, plan_hash
+from secscan.scanners.domain.profiles import zap_definition_sha256
 from secscan.scanners.domain.zap.plan import PlanWindowTooSmallError
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
@@ -56,6 +57,7 @@ from secscan.scans.queue import (
     HEARTBEAT_INTERVAL,
     LEASE_DURATION,
     EgressScope,
+    Launch,
     LeaseLostError,
     RunReport,
     RunUsage,
@@ -213,7 +215,20 @@ class ContainerRunner:
         except PlanWindowTooSmallError:
             logger.warning("剩下的時間、請求數或 grant 的期限不夠執行：run %s", lease.run_id)
             return self._never_started(lease, RunErrorCode.BUDGET_EXHAUSTED)
+        self._record_plan(lease, launch, plan)
         return self._execute(_Attempt(lease, spec.name), launch.secret, launch.egress, plan, spec)
+
+    def _record_plan(self, lease: Lease, launch: Launch, plan: ExecutionPlan) -> None:
+        """建立容器之前記下實際執行的內容（§20.2）：之後不收集的 run 也查得到版本。"""
+        profile = launch.scan_profile
+        definition = (
+            zap_definition_sha256(profile)
+            if lease.engine is Engine.ZAP and profile is not None
+            else None
+        )
+        self._queue.record_plan(
+            lease, plan_hash=plan_hash(plan), profile_definition_sha256=definition
+        )
 
     def _never_started(self, lease: Lease, error_code: RunErrorCode) -> RunReport:
         """沒有流量，也從未建立容器。"""

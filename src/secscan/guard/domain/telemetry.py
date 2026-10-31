@@ -18,6 +18,9 @@ from secscan.guard.domain.strict import StrictDocument, dump_canonical, load_obj
 TELEMETRY_SCHEMA = 1
 MAX_SUMMARY_BYTES = 64 * 1024
 MAX_TELEMETRY_LINE_BYTES = 2048
+# 讀的一方把時間轉成日期（9999-12-31 之前）、把計數寫進有大小上限的 result_details（T16 的審查）。
+MAX_EPOCH_SECONDS = 253_402_300_799
+MAX_COUNT = 10**12
 _SUMMARY_FIELDS = frozenset(
     {
         "schema",
@@ -62,7 +65,7 @@ class RunSummary:
 
     def __post_init__(self) -> None:
         if not _count(self.forwarded):
-            raise TelemetryError("forwarded 必須是非負整數")
+            raise TelemetryError("forwarded 必須是非負整數（有上限）")
         if not all(key in _REASONS and _count(value) for key, value in self.denied.items()):
             raise TelemetryError("denied 必須是 guard 的拒絕原因與非負整數")
         for value in (self.first_at, self.last_at):
@@ -222,17 +225,21 @@ def _check_sequence(sequence: int, at: float) -> None:
 
 
 def _count(value: object) -> bool:
-    return type(value) is int and value >= 0
+    return type(value) is int and 0 <= value <= MAX_COUNT
 
 
 def _timestamp(value: object) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and value >= 0
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and 0 <= value <= MAX_EPOCH_SECONDS
+    )
 
 
 def _time(value: object) -> float:
-    if not isinstance(value, int | float) or isinstance(value, bool) or value < 0:
+    if not _timestamp(value):
         raise TelemetryError("時間必須是非負的 epoch 秒")
-    return float(value)
+    return float(value)  # type: ignore[arg-type]
 
 
 def _optional_time(value: object) -> float | None:

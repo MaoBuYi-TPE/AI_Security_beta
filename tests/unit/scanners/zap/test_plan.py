@@ -308,20 +308,27 @@ def test_the_plan_parameters_bound_the_run() -> None:
     }
 
 
-def test_job_durations_are_whole_minutes_and_never_unlimited() -> None:
+@pytest.mark.parametrize("remaining", [RESERVED_SECONDS + MIN_PLAN_SECONDS, 1_500])
+def test_only_the_plan_bounds_the_time(remaining: int) -> None:
+    """job 自己的上限一律是 0（AF 的「不限」），只有 plan 的 maxDuration 限制時間（§20.5）。
+
+    T16 量測：activeScan 在自己的上限停止時 AF 回報成功，被截斷的掃描看起來是完整的；plan 的
+    maxDuration 到期則是警告（timed_out），截斷看得見。
+    """
     budget = ZapBudget(
         requests_per_second=2,
         max_requests=5_000,
-        remaining_seconds=RESERVED_SECONDS + MIN_PLAN_SECONDS,
+        remaining_seconds=remaining,
         valid_for_seconds=86_400,
     )
 
     document = _af(_plan(budget=budget))
 
-    assert _job(document, "spider")["parameters"]["maxDuration"] == 1
-    assert _job(document, "passiveScan-wait")["parameters"]["maxDuration"] == 1
+    assert document["env"]["parameters"]["maxDuration"] == remaining - RESERVED_SECONDS
+    assert _job(document, "spider")["parameters"]["maxDuration"] == 0
+    assert _job(document, "passiveScan-wait")["parameters"]["maxDuration"] == 0
     active = _job(document, "activeScan")["parameters"]
-    assert (active["maxScanDurationInMins"], active["maxRuleDurationInMins"]) == (1, 1)
+    assert (active["maxScanDurationInMins"], active["maxRuleDurationInMins"]) == (0, 0)
 
 
 # --- 時間與預算 --------------------------------------------------------------------------------

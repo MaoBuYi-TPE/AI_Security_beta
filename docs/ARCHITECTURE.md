@@ -169,14 +169,14 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 **預算**：
 
 - 起始預算為每個 target 合計 2 requests/s、burst=1、最多 5,000 次、發流量的牆鐘時間 25 分鐘。這是 M0–M2 的保守起始值，不保證沒有副作用。
-- M3 依量測調整 lab profile，並記錄 profile hash。
+- M3 依量測調整 lab profile，並記錄 profile hash（T16：每個 run 記下 `plan_hash` 與 profile 定義的 sha256，`DECISIONS.md` §20.2）。
 - 預算從第一次 preflight 發流量開始計算，包含所有引擎、爬蟲、驗證、認證刷新（未來）與重試。
 - 工具本身也設保守上限，但最終由 guard 的共享預算限制。
 
 **分配與用盡**：
 
 - 單一 runner 下各引擎依序執行；預算預先分配給各引擎，總額不變。不夠用時明確標記 coverage limited。
-- 預算用盡時，立即禁止新的出站請求、停止工具、保存已有資料。
+- 預算用盡時，立即禁止新的出站請求、停止工具。**T16 更正**（`DECISIONS.md` §20.1）：guard 回報用盡（`BUDGET_EXHAUSTED`）或 runner 的牆鐘上限（`TIME_LIMIT_EXCEEDED`）時**不收集**工具的輸出（out/ 沒有遮罩，不交給 worker）；ZAP 的 plan 以 maxDuration 在預算之前自行停止並寫出報告（`timed_out`／`ENGINE_TIMEOUT`，結果入庫），正常的情況不會先撞到預算。原本「保存已有資料」與程式不一致，以程式為準；guard 的流量明細與 run 的版本仍保存（§20.2、§20.3）。
 - 收集與正規化另設短時間與大小上限，不能無限延長掃描。
 
 **取消**：
@@ -198,6 +198,7 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 - **API operation coverage**：把請求的 method + path 對應到 OpenAPI operation。
 - **安全測試證據**：被拒絕的請求與原因，搭配 canary 的收包紀錄。
 - **T12 已實作**（`DECISIONS.md` §16.3、§16.6）：前兩項都由 guard 的 telemetry 計算，API 以 `budget_usage` 與 coverage 的 `observed_operations`、`authenticated_operations` 揭露；拒絕只計數（不逐行記）。
+- **T16 已實作**（`DECISIONS.md` §20.3、§20.4）：worker 解析 zap 的 run 時，把 guard 的 summary（各原因的拒絕數、是否用盡、時間）與 telemetry 的計數寫進 `result_details.guard_traffic`（telemetry 6 小時後刪除，這裡留著）；同時以帶認證的請求判斷憑證是否在掃描中途失效（同一個 operation 接受過、最後被拒絕；或 auth profile 的 preflight 端點被拒絕），失效時 coverage 加上 `AUTHENTICATION_LOST`。不重新登入。
 
 ## 4. 模組與依賴方向
 
@@ -284,7 +285,7 @@ ExecutionPlan 只能包含：
 - 資源與時間限制
 - template ID 的 allowlist
 - proxy 設定
-- profile hash
+- profile hash（T16：`plan_hash` 是整個 plan 的 sha256，zap 另記 profile 定義的 sha256，`DECISIONS.md` §20.2）
 - run ID
 
 不能包含使用者指定的 host path、shell、任意映像或網路名稱。
@@ -332,7 +333,7 @@ ExecutionPlan 只能包含：
 | auth_profiles | id、target_id、name、role_label（同一個 target 內唯一）、建立的 key 與時間；建立後不可變（T08 已建立） |
 | auth_profile_versions | profile_id、version、type、header_name、preflight（method、path、expected_status、expected_json）、encrypted_secret（Fernet token，被取代就清除）、secret_erased_at、建立的 key 與時間（T08 已建立；原規劃的單一資料表改成兩張，理由見 `DECISIONS.md` §12.3） |
 | scans | id、queue_position（identity，佇列的先後）、project_id、target_id、凍結的 target_origin、scope_grant_id、api_spec_id、auth_profile_id 與版本、auth_role、scan_profile、預算、status、idempotency_key 與 request_sha256、cancel_requested_at、建立的 key 與時間、finished_at（T09 已建立；快照以複合 FK 引用不可變的資料，不另存 snapshot JSON，理由見 `DECISIONS.md` §13.1；manifest 在 M2） |
-| scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code、container_name、image_ref、用量（requests_allotted、requests_sent、requests_denied、traffic_seconds）、preflight_result、coverage_recorded；同時是 runner 與 worker 的工作佇列（T09 已建立；容器名稱與映像在 T10 加入，用量、preflight 與 coverage 在 T12，engine_version 在 M3；不自動重跑，所以沒有 attempt） |
+| scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code、container_name、image_ref、用量（requests_allotted、requests_sent、requests_denied、traffic_seconds）、preflight_result、coverage_recorded、解析的結果（T15）、plan_hash 與 profile_definition_sha256（T16）；同時是 runner 與 worker 的工作佇列（T09 已建立；容器名稱與映像在 T10 加入，用量、preflight 與 coverage 在 T12，解析的結果與 engine_version 在 T15，實際執行的 plan 在 T16；不自動重跑，所以沒有 attempt） |
 | runner_instances | id、role（runner/worker）、owner（唯一）、software_version、capabilities（引擎、映像與不可用的原因）、heartbeat_at、created_at；每個程序一列，30 秒內有心跳才算存活（T10 新增） |
 | scan_operations | scan_id、ordinal、method、path、operation_id、ineligible_reason；建立 scan 時凍結的 inventory 與 grant 的判斷，coverage 的分母（T09 新增） |
 | findings | id、target_id、fingerprint、kind、normalized_severity、owasp_2025、owasp_api_2023、mapping_source、mapping_version、triage/lifecycle、first/last_seen |
