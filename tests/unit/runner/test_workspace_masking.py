@@ -20,6 +20,7 @@ from secscan.runner.workspace import (
     CollectionLimits,
     Workspace,
     WorkspaceError,
+    _check_name,
 )
 from secscan.security.secret_masking import PROXY_TOKEN_MARK, TARGET_SECRET_MARK, SecretMasker
 
@@ -369,3 +370,12 @@ def test_the_replacement_keeps_the_file_private(
     workspace.collect(RUN, exit_code=0, inputs=(), masker=MASKER)
 
     assert (out / "zap.log").stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("name", [" ", "   ", "\u3000"])
+def test_blank_names_are_refused_by_the_check(name: str) -> None:
+    """全空白的檔名存不進 artifacts（path_not_blank）：在收集時就拒絕，worker 不會寫入失敗。"""
+    with pytest.raises(ArtifactRejectedError) as caught:
+        _check_name(name)
+
+    assert caught.value.issue is ArtifactIssue.NAME_NOT_ALLOWED

@@ -254,7 +254,7 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
 - **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；Nuclei 的 JSONL、Schemathesis 的輸出與報告的 Markdown 在 M4 之後。
-- **SEC-14**：T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；工具的輸出、證據與報告中的 token（以已知的 secret 值精確遮罩）在 M3 之後，不標成完成。
+- **SEC-14**：T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；Nuclei、Schemathesis 的輸出與報告中的 token 在 M4 之後，不標成完成。
 - **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。模板的 allowlist 在 M4（Nuclei）加入。
 - **SEC-18**：T10 涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；T15 涵蓋遮罩的兩階段與 worker 只讀 manifest 列出的檔案；artifact 的下載在 M5。
@@ -352,6 +352,12 @@ T12 已涵蓋（`tests/live/test_budget_live.py`、`test_runner_live.py`；live 
 - preflight 的端到端：綁定 auth profile 的 scan 經 API、runner、busybox 容器、guard 送出帶認證與匿名的 `GET /me`，target 收到兩個請求（只有第一個帶 `Authorization`、Host 是 canonical、沒有 `Proxy-*`、來源是 guard），結果 `passed`，`budget_usage` 是 2，coverage 有量測依據；canary secret 不在接收端的紀錄中。實作時以這個測試發現 busybox nc 半關閉連線的問題（`DECISIONS.md` §16 的依據）。
 
 T10 已涵蓋（`make test-live-runner`，`tests/live/`；獨立的 compose 專案、自己的 DB，跑完一律拆除；fake 引擎，不連 lab）：api、runner、worker 沒有 docker.sock、不是 privileged；socket-proxy 唯讀掛 socket、只接 docker_net；runner 容器內呼叫不該開放的 API 都是 403／405、沒有產生容器；api、worker 連不到 socket-proxy；`GET /scanners` 顯示 fake 可用；fake scan 的容器非 root、唯讀、無 capability、IPC 與 cgroup namespace 是 private、只有三個 volume subpath（只看得到自己的 in/、out/ 與 secret）、secret 0400、解析不到 proxy／db／api／runner、沒有預設路由，完成後容器與 secret 都刪除；取消後 30 秒內刪除容器；secrets volume 是 tmpfs；canary secret 不在任何容器的 log 與設定中。
+
+T15 已涵蓋（`make test-live-zap`；數字在 `TOOLS.md` §7.6）：
+- 完整的閉環：API → 真的 ZAP → worker → `GET /scans/{id}/observations`；每個觀察都是網站真的收到的請求；manifest 的 hash 等於 runs volume 中遮罩之後的檔案。
+- 遮罩（SEC-14）：bearer、`api_key_header`、cookie 三種認證，靶機把 secret 寫進回應、ZAP 帶進報告，out/ 與 API 都看不到原文，看得到佔位。
+- 語意：maxDuration 是 `timed_out`、觀察保留；零告警是 `succeeded`；目標沒有回應是 `NO_TARGET_TRAFFIC`，ZAP 對 mitmproxy 錯誤頁的告警不入庫。
+- 尚未涵蓋：active scan 真的命中的告警（小型網站沒有弱點）、guard 的 403 被告警的情況，都在 T16 以 Juice Shop、VAmPI 量測。
 
 ### 4.5 故障注入
 

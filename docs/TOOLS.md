@@ -282,3 +282,15 @@ web 31 條、api 13 條、排除 22 條。probe 以鎖定的映像執行兩份�
 8 MiB 在 worker 的 `mem_limit`（256m）之內；上限維持 8 MiB，T16 以真實的大報告重新確認。
 
 **T14 還沒量測的項目**：以 maxDuration 結束時的退出碼是 2（上表）。
+
+**完整的閉環（`make test-live-zap`，開放 zap、移除預覽開關之後；審查的修正之前與之後各跑一次，都是 11 passed，11 分 12 秒、11 分 15 秒，跑完沒有殘留的容器、volume、網路）**：
+
+- web、anonymous：guard 放行 272 個，拒絕的只有 407 GET 14 個；run `succeeded`、scan `completed`；每個觀察的 (method, path) 都是網站真的收到的請求；manifest 的 hash 等於 runs volume 中遮罩之後的檔案。
+- api、bearer：放行 16 個，拒絕 407 GET 78、`PATH_AMBIGUOUS` GET 136、`PATH_NOT_AUTHORIZED` GET 14 個。
+- **遮罩**：`/api/echo` 把認證 header 寫進 HTML 註解，ZAP 的 Suspicious Comments（10027）把註解帶進報告。bearer、`api_key_header`、cookie 三種都是報告中遮罩 2 次：out/ 的報告與 log、`GET /observations` 的回應都沒有 secret 的原文，看得到 `[REDACTED:target-secret]`。worker 能解析遮罩之後的報告（0400、runner 的 uid）。
+- maxDuration（web，120 秒）：run `timed_out`（`ENGINE_TIMEOUT`）、scan `timed_out`，觀察保留。
+- 零告警（加了安全 header 的端點）：run `succeeded`、0 個觀察、guard 有轉送、網站有收到請求。
+- 目標沒有回應（port 沒有人聽）：run `failed`（`NO_TARGET_TRAFFIC`），0 個觀察，`excluded.not_answered` 大於 0。
+- 取消：封鎖之後被拒 2 個，kill 到 die 2.05 秒。參照炸彈：`succeeded`。
+
+M2 的 `make test-live-runner`：42 passed（5 分 41 秒），撤銷授權的 scan 是 `failed`（`DECISIONS.md` §19.8）。

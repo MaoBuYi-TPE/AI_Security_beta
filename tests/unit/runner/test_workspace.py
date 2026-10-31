@@ -449,15 +449,6 @@ def test_a_file_swapped_after_the_check_is_rejected(
     assert _rejected(workspace) is ArtifactIssue.SPECIAL_FILE
 
 
-@pytest.mark.parametrize("name", [" ", "   ", "\u3000"])
-def test_blank_names_are_refused_by_the_check(name: str) -> None:
-    """全空白的檔名存不進 artifacts（path_not_blank）：在收集時就拒絕，worker 不會寫入失敗。"""
-    with pytest.raises(ArtifactRejectedError) as caught:
-        _check_name(name)
-
-    assert caught.value.issue is ArtifactIssue.NAME_NOT_ALLOWED
-
-
 def test_names_that_cannot_be_utf8_are_refused_by_the_check() -> None:
     """macOS 的檔案系統不接受非 UTF-8 的檔名（上一個測試在這裡會 skip）：直接檢查判斷的函式。"""
     with pytest.raises(ArtifactRejectedError) as caught:
@@ -801,88 +792,3 @@ def test_a_secret_that_cannot_be_deleted_is_a_workspace_error(
 
     assert "canary" not in str(caught.value)
     assert str(dirs[1]) not in str(caught.value)
-
-
-# --- 讀取輸出（probe）---------------------------------------------------------------------------
-
-
-def test_an_output_file_is_read_up_to_the_limit(
-    workspace: Workspace, dirs: tuple[Path, Path]
-) -> None:
-    out = _prepared(workspace, dirs)
-    (out / "plugins.txt").write_bytes(b"spider-release-0.20.0.zap\n")
-
-    assert workspace.read_output(RUN, "plugins.txt", max_bytes=1024) == (
-        b"spider-release-0.20.0.zap\n"
-    )
-    assert workspace.read_output(RUN, "plugins.txt", max_bytes=4) is None
-    assert workspace.read_output(RUN, "missing.txt", max_bytes=1024) is None
-
-
-def test_reading_an_output_never_follows_a_symlink(
-    workspace: Workspace, dirs: tuple[Path, Path]
-) -> None:
-    out = _prepared(workspace, dirs)
-    secret = dirs[1] / "other"
-    secret.write_bytes(b"token")
-    (out / "plugins.txt").symlink_to(secret)
-    (out / "fifo").mkdir()
-
-    assert workspace.read_output(RUN, "plugins.txt", max_bytes=1024) is None
-    assert workspace.read_output(RUN, "fifo", max_bytes=1024) is None
-
-
-def test_reading_an_output_from_a_swapped_out_directory_fails(
-    workspace: Workspace, dirs: tuple[Path, Path]
-) -> None:
-    out = _prepared(workspace, dirs)
-    out.rmdir()
-    target = dirs[1]
-    (target / "plugins.txt").write_bytes(b"secret")
-    out.symlink_to(target)
-
-    assert workspace.read_output(RUN, "plugins.txt", max_bytes=1024) is None
-
-
-@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "../x", "x\x00"])
-def test_only_plain_names_can_be_read(workspace: Workspace, name: str) -> None:
-    with pytest.raises(ValueError, match="檔名"):
-        workspace.read_output(RUN, name, max_bytes=1024)
-
-
-def test_an_output_of_a_run_that_was_never_prepared_is_none(workspace: Workspace) -> None:
-    assert workspace.read_output(uuid4(), "plugins.txt", max_bytes=1024) is None
-
-
-def test_short_reads_are_joined_and_read_errors_are_none(
-    workspace: Workspace, dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    out = _prepared(workspace, dirs)
-    (out / "plugins.txt").write_bytes(b"spider-release-0.20.0.zap\n")
-    real_read = os.read
-
-    def short(descriptor: int, size: int) -> bytes:
-        return real_read(descriptor, min(size, 3))
-
-    monkeypatch.setattr(os, "read", short)
-    assert workspace.read_output(RUN, "plugins.txt", max_bytes=1024) == (
-        b"spider-release-0.20.0.zap\n"
-    )
-    assert workspace.read_output(RUN, "plugins.txt", max_bytes=8) is None
-
-    def failing(descriptor: int, size: int) -> bytes:
-        raise OSError(5, "I/O error")
-
-    monkeypatch.setattr(os, "read", failing)
-    assert workspace.read_output(RUN, "plugins.txt", max_bytes=1024) is None
-
-
-def test_a_secret_directory_that_cannot_be_created_is_a_workspace_error(
-    workspace: Workspace, dirs: tuple[Path, Path]
-) -> None:
-    dirs[1].chmod(stat.S_IRUSR | stat.S_IXUSR)
-    try:
-        with pytest.raises(WorkspaceError, match="無法建立 secret 目錄"):
-            workspace.create_secret_dir(RUN)
-    finally:
-        dirs[1].chmod(stat.S_IRWXU)

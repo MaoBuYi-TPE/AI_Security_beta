@@ -20,7 +20,7 @@ from secscan.guard.domain.telemetry import (
 )
 from secscan.runner.workspace import Workspace
 from secscan.scans.domain.catalog import Engine as ScanEngine
-from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
+from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.queue import LeaseLostError, RunReport, RunUsage, ScanQueue
@@ -232,6 +232,31 @@ def test_only_preflight_runs_can_have_a_result(
     with pytest.raises(LeaseLostError):
         queue.record_preflight(parsing, PreflightResult.PASSED)
     assert _result(queue_seed, lease.run_id) == ("normalizing", None)
+
+
+def test_a_succeeded_preflight_does_not_make_a_failed_scan_partial(
+    queue: ScanQueue, queue_seed: Seeder, world: World
+) -> None:
+    """preflight 不是結果引擎（docs/DECISIONS.md §19.8）：掃描引擎失敗時 scan 是 failed。"""
+    scannable = queue_seed.scannable(world)
+    scan = queue_seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
+    preflight = queue.claim("runner-1", frozenset({ScanEngine.PREFLIGHT}))
+    assert preflight is not None
+    queue.prepare(preflight)
+    queue.advance(preflight, RunStatus.COLLECTING)
+    queue.advance(preflight, RunStatus.COLLECTED)
+    parsing = queue.claim_collected("worker-1", frozenset({ScanEngine.PREFLIGHT}))
+    assert parsing is not None
+    queue.advance(parsing, RunStatus.SUCCEEDED)
+    fake = queue.claim("runner-1", FAKE)
+    assert fake is not None
+    queue.prepare(fake)
+
+    progress = queue.advance(fake, RunStatus.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
+
+    assert progress.scan_status is ScanStatus.FAILED
+    [row] = queue_seed.query("SELECT status FROM scans WHERE id = :id", id=scan.id)
+    assert row.status == "failed"
 
 
 # --- coverage（docs/DECISIONS.md §16.6）------------------------------------------------------

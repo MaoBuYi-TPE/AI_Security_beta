@@ -1787,8 +1787,9 @@ T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作
 
 ### 19.9 fixture 與錄製
 
-- `make record-fixtures`（需要 `ENABLE_LIVE_LAB_TESTS=1`）：同一個 live 流程，只執行 anonymous 的錄製情境，輸出到 gitignore 的 `recordings/zap/`；人工審查之後才搬進 `tests/fixtures/zap/<情境>/`（`report.json`、`zap.log`，manifest 記下退出碼、情境、映像、版本與錄製日期）。
-- 離線的情境（`--network none`）：連不到 host（退出碼 1、有報告）、ZAP 啟動失敗（1、沒有報告）、maxDuration（2）。
+- `make record-fixtures`（需要 `ENABLE_LIVE_LAB_TESTS=1`）：同一個 live 流程，只執行 anonymous 的錄製情境（沒有目標的 secret 可以寫進輸出），輸出到 gitignore 的 `recordings/zap/`；人工審查之後才搬進 `tests/fixtures/zap/<情境>/`（`report.json`、`zap.log`、`telemetry.jsonl`，manifest 記下退出碼、情境、映像、版本與錄製日期）。錄製的情境：`findings`、`clean`、`timeout`、`unanswered`。
+- 離線的情境（`--network none`，手動錄製）：`unreachable`（連不到 host，退出碼 1、有報告）、`engine-error`（ZAP 啟動失敗，退出碼 1、沒有報告）。
+- 真實的命中（active scan 的告警）要到 T16：小型網站沒有弱點，T15 的 `findings` 只有 passive 的告警。
 - 壞掉的輸出在測試中由真實報告的位元組衍生，不存成檔案。
 
 ### 19.10 API、開放 zap、移除預覽開關

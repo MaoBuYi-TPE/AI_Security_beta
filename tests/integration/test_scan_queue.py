@@ -280,22 +280,6 @@ def test_one_engine_succeeding_and_another_failing_is_partially_completed(
     assert scan.finished_at is not None
 
 
-def test_a_succeeded_preflight_does_not_make_a_failed_scan_partial(
-    queue: ScanQueue, queue_seed: Seeder, world: World, scannable: Scannable
-) -> None:
-    """preflight 不是結果引擎（docs/DECISIONS.md §19.8）：掃描引擎失敗時 scan 是 failed。"""
-    scan = queue_seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
-    preflight = _collect(queue, _claimed(queue, engines=frozenset({ScanEngine.PREFLIGHT})))
-    assert queue.advance(preflight, R.SUCCEEDED) == Progress(R.SUCCEEDED, S.RUNNING)
-    fake = _claimed(queue)
-    queue.prepare(fake)
-
-    progress = queue.advance(fake, R.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
-
-    assert progress == Progress(run_status=R.FAILED, scan_status=S.FAILED)
-    assert _scan(queue_seed, scan.id).status == "failed"
-
-
 # --- lease ---------------------------------------------------------------------------------
 
 
