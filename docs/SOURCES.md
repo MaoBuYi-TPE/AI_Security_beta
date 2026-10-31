@@ -109,6 +109,11 @@
 | S103 | [VAmPI — README 的 List of Vulnerabilities 與原始碼](https://github.com/erev0s/VAmPI)（以鎖定映像 `erev0s/vampi@sha256:0a5a224b…` 內的 `/vampi/README.md`、`models/user_model.py`、`api_views/` 為準） | 弱點清單：SQLi、未授權改密碼、BOLA、mass assignment、debug 端點的過度資料暴露、使用者與密碼列舉、RegexDOS、缺速率限制、JWT 弱簽章金鑰。`vulnerable=1` 時 `get_user` 以字串組 SQL（`/users/v1/{username}`），`0` 時用 ORM；`tokentimetolive` 預設 60 秒，過期時受保護的端點回 401；資料庫要先 `GET /createdb`（會清空重建）。T16 的正例／負例（`SECURITY_AND_TESTING.md` §4） |
 | S104 | [OWASP Juice Shop — challenges.yml](https://github.com/juice-shop/juice-shop/blob/master/data/static/challenges.yml)（以鎖定映像 `bkimminich/juice-shop:v20.3.0@sha256:cea5a4af…` 內的 `/juice-shop/data/static/challenges.yml` 為準） | 116 個 challenge 的 key、名稱與類別，例如 Confidential Document（`/ftp` 的目錄列表）、Error Handling、Exposed Metrics、Database Schema 與 Login Admin（SQLi）、Reflected／DOM XSS（前端路由，traditional spider 不一定走得到）。JWT 的期限是 6 小時。T16 的正例（`SECURITY_AND_TESTING.md` §4） |
 
+| S105 | [RFC 3986 §2.3、§2.4、§6.2.2.1](https://www.rfc-editor.org/rfc/rfc3986.html) | T33：先分離元件再解碼；percent hex 大小寫等價。拒絕 encoded unreserved 是專案政策，不是 RFC 宣告其非法 |
+| S106 | [WHATWG URL Standard](https://url.spec.whatwg.org/#concept-basic-url-parser) | URL 解析轉換的探索來源；不是 T33 對所有瀏覽器／proxy 的相容保證 |
+| S107 | [Spring CVE-2016-5007](https://spring.io/security/cve-2016-5007/) | 授權與路由對空白修剪的差異可能造成繞過；T33 以反例保留其他伺服器的證據界線 |
+| S108 | [Werkzeug routing](https://werkzeug.palletsprojects.com/en/stable/routing/)、[Express routing](https://expressjs.com/en/guide/routing.html) | 框架路由概念；T33 驗收以鎖定映像中的 Flask 2.2.2／Werkzeug 2.2.3、Express 4.22.3／path-to-regexp 0.1.13 及實際 route echo 為準，不將最新版文件當成鎖定版本證據 |
+
 ## 需要在 M0–M2 實際確認的事項
 
 > T03（2026-10-17）已完成以下 1–6 針對三個引擎與 egress 的 M0 部分，結果與證據見 `TOOLS.md`。第 7 項由 T10（2026-10-27）完成：改用 wollomatic/socket-proxy，逐一放行 method＋path（`DECISIONS.md` §14.1），以 live 測試確認。DNS/IP 綁定、redirect 重檢、HTTPS CA 等留待 T11。

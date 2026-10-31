@@ -304,6 +304,12 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 13 分鐘；只掃 live lab 網路上的小型網站）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-lab`（約 27 分鐘；Juice Shop 與 VAmPI，結果見 `docs/TOOLS.md` §7.7）。
 - 設計見 `docs/DECISIONS.md` §18、§19、§20；量測與規則的審查見 `docs/TOOLS.md` §7。
 
+#### Guard 的受控編碼路徑（T33，實驗）
+
+一般掃描仍使用 `strict-1`，拒絕百分比編碼 path。`encoded-params-1` 只在明確授權路由的參數段接受受控白名單，拒絕編碼分隔符、雙重編碼、控制字元及解析歧義；不改寫轉送路徑。這是鎖定 Flask／Express Lab 的實驗政策，尚未正式啟用。設計、版本限制與驗收門檻見 [T33 實作計劃](docs/T33_IMPLEMENTATION_PLAN.md) 與 [安全決策 §21](docs/DECISIONS.md)。
+
+run 查詢揭露 `guard_policy_version`，流量摘要新增 `policy_version` 與 `forwarded_encoded`；無可信證據時回 null。升級 migration 0012 前先停止認領、排空 run，再一起更新 runner、Guard、worker。有實驗版紀錄時不可降級刪去版本證據。一般 API 不提供政策選擇，普通 compose 固定 strict；專用測試入口為 `ENABLE_LIVE_LAB_TESTS=1 make test-live-guard-paths`。實測結果與尚未證明的要求以 `docs/TASKS.md` 的 T33 交付紀錄為準。
+
 #### 隔離 lab 靶場（T03）
 
 需要先啟動 OrbStack（`orb start`）。lab 只接 internal network、不發布任何 port：

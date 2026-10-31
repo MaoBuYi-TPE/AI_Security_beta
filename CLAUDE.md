@@ -4,7 +4,7 @@
 - 畢業專題，1 人開發，2026/10/16 – 2027/06/30；只做後端，不建立 React、Vue、Next.js 或其他前端。
 - 題目：Web 與 API 多引擎動態安全檢測暨結果整合後端系統之設計與實作。
 - 以 REST API、內建 API 文件及 JSON/Markdown 報告展示；不開發互動式儀表板。
-- **目前進度：M0、M1、M2 完成；M3 進行中（T15、T16 完成，下一步 T30）。** 每完成一個里程碑就更新這一行。
+- **目前進度：M0、M1、M2 完成；M3 進行中（T15、T16 完成，T33 實作與驗證中，之後 T30）。** 每完成一個里程碑就更新這一行。
 - 先檢查實際檔案，不得假設程式、指令或測試已存在。
 - 沒有真實掃描數據前，不得杜撰成功紀錄、效能、版本號或測試結果。
 
@@ -138,6 +138,7 @@
 - Live 指令必須檢查 LAB_ONLY、有效 grant、網路隔離及 `ENABLE_LIVE_LAB_TESTS=1`。
 
 ## 14. 每次交付
+- T33：`ENABLE_LIVE_LAB_TESTS=1 make test-live-guard-paths` 執行受控編碼 A/B 與原始收包驗證；一般 compose 固定 `strict-1`，不得以變更預設完成測試。設計及驗收以 `docs/T33_IMPLEMENTATION_PLAN.md`、`docs/DECISIONS.md` §21 為準。
 - 只做目前里程碑；架構與範圍更動先在 `docs/DECISIONS.md` 留下理由，不靜默擴張。
 - 回報修改檔案、實作內容、實際執行的測試、未執行的測試與原因。
 - README、API 規格、TASKS 同步更新；只有符合 DoD 的項目可標完成。

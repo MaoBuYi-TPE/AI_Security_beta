@@ -1172,6 +1172,8 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
   "problem": null,
   "components": {"reports": "0.46.0"},
   "guard_traffic": {
+    "policy_version": "strict-1",
+    "forwarded_encoded": 0,
     "forwarded": 1170,
     "denied": {"PATH_AMBIGUOUS": 12},
     "exhausted": false,
@@ -1192,6 +1194,10 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 
 - `plan_hash`：runner 準備執行的 ExecutionPlan（映像 digest、指令、非秘密的環境變數、輸入檔的 sha256、資源與牆鐘上限；plan 中有 profile 的規則與 maxDuration）的 sha256，在建立容器之前寫入、之後不能改。plan 沒有產生的 run 是 null（還沒開始、`PLAN_REJECTED`、剩下的預算不夠 ZAP 執行的 `BUDGET_EXHAUSTED`）；不收集的 run（`TIME_LIMIT_EXCEEDED`、guard 回報的 `BUDGET_EXHAUSTED`、取消）與之後才失敗的（`GUARD_UNAVAILABLE`）也有。hash 相同代表執行的內容相同；反之不成立：maxDuration 隨剩下的預算與 grant 的期限改變，fake 的輸入檔含 run 的 id。
 - `profile_definition_sha256`：zap 的 run 開始時的規則定義（和 `GET /scan-profiles` 的 `definition_sha256` 同一個算法）；之後改了規則，已執行的 run 仍是當時的值。其他引擎是 null。
+- `guard_policy_version`（T33）：`strict-1` 或 `encoded-params-1`，與 `plan_hash` 在同一筆受 lease 保護的更新寫入；有 plan 後不可改。歷史資料與尚未產生 plan 的 run 是 null，歷史 null 只按 strict 解讀，不偽造當時的版本紀錄。建立 scan 的 API 沒有政策選擇欄位。
+
+T33 的 `guard_traffic.policy_version` 是 summary 宣告的政策版本；`forwarded_encoded` 是可信、完整 telemetry 中含百分比編碼 path 的轉送次數（保留重複）。歷史 result 缺少這兩個 key 時皆回 null。版本、run/scan id、計數或逐筆授權不一致時，`traffic_verified` 為 false，`answered`、`auth`、`forwarded_encoded` 與 observed coverage 不宣稱已驗證；不因計數為零而略過一致性檢查。strict 保留最後一行的既有容忍，實驗版要求逐筆數量與 summary 完全相等；編碼轉送數在任一政策都要求完整資料。這些欄位驗證的是 Guard 證據，並非靶機收包證明。
+
 
 ## 18. Runner、worker 與掃描器（T10 已實作）
 

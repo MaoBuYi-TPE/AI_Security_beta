@@ -37,7 +37,7 @@ T10 起的測試隔離（`tests/isolation.py`，`DECISIONS.md` §14.9）：測�
 | SEC-05 | 使用 IPv4/IPv6、替代 host 表示、userinfo 等差異 | 嚴格解析或明確拒絕；不能繞過 allowlist |
 | SEC-06 | 連宿主/metadata/DB/docker-socket-proxy/Docker 控制端 | 應用層與網路層雙重阻擋；隔離接收端證明 |
 | SEC-07 | 掃描器不使用 proxy 嘗試直連 | 網路層拒絕；不能僅靠 HTTP_PROXY 環境變數 |
-| SEC-08 | 禁止 path/method、編碼路徑歧義 | 禁止端點實際收包為 0；無法可靠辨識時 fail closed |
+| SEC-08 | 禁止 path/method、編碼路徑歧義 | 禁止端點實際收包為 0；無法可靠辨識時 fail closed；T33 實驗僅以鎖定 Flask／Express Lab 驗收，strict 維持全拒編碼 |
 | SEC-09 | HTTPS CONNECT/authority/SNI 不相符 | 在上游連線前拒絕；未核准目標無 TLS sniffing 連線 |
 | SEC-10 | 上游憑證無效/guard 配置失敗 | 拒絕或標 profile 不可用，不以 skip verify 避開 |
 | SEC-11 | OpenAPI remote/file ref、深度/大小異常 | 解析拒絕且無外部讀檔/出網 |
@@ -164,6 +164,23 @@ T15 已涵蓋：
 - **parser（SEC-17）**：真實的報告都接受；由真實報告衍生的每一種壞掉的輸出都是問題代碼、不丟例外（截斷、空檔、非 UTF-8、重複的 key、NaN、浮點數、超長的整數、過深的巢狀、超過上限、缺少或型別錯誤的欄位、其他版本）；任意的 bytes 與 JSON 只會得到判定（Hypothesis）。
 - **判定**：退出碼與 AF 摘要的每種組合、沒有報告的退出碼 1、報告列出但讀不到、log 缺少；重複的事件；欄位的截斷在遮罩之後；識別不含 ZAP 每次都不同的 instance id。
 - **排除**：每一層各自的計數、telemetry 缺少時改看拒絕訊息、有 telemetry 時目標放進拒絕的文字不能隱藏告警、有上游回應就算目標的回應（不看 status）。`scope_reason` 和 guard 的完整判斷一致（Hypothesis）。
+
+T33 測試矩陣（實作中，通過狀態以 TASKS 交付紀錄及 TOOLS §7.8 為準）：
+
+| 類別 | 必須保持的斷言 |
+|---|---|
+| 正常編碼 | E 白名單逐字、大小寫 hex、混合字面；解碼出的 `{}` 是資料；query 不參與 path 解碼 |
+| 非 canonical／歧義 | `%41`、`%7E`、編碼點、slash/backslash、分號、query/fragment 分隔符、`%25`、雙重編碼、控制字元、非 ASCII 全部拒絕 |
+| 授權邊界 | 同一 allowed route 的全部段；編碼只落在佔位；段數、尾斜線、大小寫、allow_all_paths、排除 literal 潛在重疊；不能拼接不同路由 |
+| strict 回歸 | 與原有 path_problem / classify 對照；method/origin/Host/IP/redirect、override、DNS、預算、取消、撤回與清理維持原有檢查 |
+| 版本與證據 | DB 單欄位改版、舊 lease、不可變 plan；未知 schema/版本；summary/run/scan 不一致；零流量不得掩蓋錯配；實驗版缺一行也不可宣稱 coverage |
+| 跨元件 | telemetry 原始編碼不變；Guard/parser 同版判定；coverage 對應 literal 資料；hex canonical 配對與 auth health；舊 fixture 不改 |
+| 性質與反例 | 所有放行有同一路由授權、分段與尾斜線不變、bytes 範圍全覆蓋；非 Lab 的副檔名剝除反例明確保留 |
+| SEC-08 收包 | 固定拒絕語料 target/canary 收包為零，前後正常請求證明紀錄器活著；重複次數保留，不以集合掩蓋多送 |
+
+新增 T33-VA-01：VAmPI 弱點版 `/users/v1/{username}` 的 `%27` 到達靶機，ZAP SQLi 經相同政策解析入庫；安全版為負例。Juice Shop 保留搜尋 SQLi 對照，另使用真實參數路由。以上是驗收條件，不能以舊 T16 的量測替代。
+
+URL 模型分成鎖定 Flask/Werkzeug、Express 的驗收與其他解析模式的探索。`/a/admin.json/%27` 在副檔名剝除模型可能命中 excluded `/a/admin/{id}`；這是限制案例，不是所有模型安全的測試。Guard allow log 發生在 commit/forward 前，量測須比對 committed telemetry 與獨立靶機入口紀錄。原始 request-target/header/body 證據只保存受限加密檔，公開衍生摘要須先檢查秘密。完整 TCP 位元組等同性、其他代理、keep-alive/pipelining 安全矩陣與 body `_method` 未因本次 path 放寬而自動獲證明。
 
 ### 4.2 Contract / Parser
 

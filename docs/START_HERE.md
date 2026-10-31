@@ -109,6 +109,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make test-live-zap | M3（T14 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，以真的 ZAP 掃描 live lab 網路上的小型網站，走完 API → ZAP → worker → 查詢的閉環（T15）；約 13 分鐘 |
 | make test-contract | M3（T15 已建立） | 對固定 fixture 測 Parser 契約與 fixture 的完整性（不連網、不碰 Docker 與 DB） |
 | make test-live-lab | M3（T16 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，測試在 live 自己的 lab 網路上逐一啟動 Juice Shop、VAmPI（弱點版、安全版、短 token），以真的 ZAP 經平台掃描（正例／負例、token 失效、工具超時、取消）；量測印在輸出、錄製到 `recordings/lab/`（gitignore）；約 27 分鐘 |
+| make test-live-guard-paths | M3（T33） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：隔離 Lab 的 strict／encoded 雙政策、固定探針、鎖定 Flask／Express route echo、靶機入口加密證據；一般掃描仍 strict。實測狀態見 TASKS |
 | make lab-images | M3（T16 已建立） | 以 digest pull `compose.lab.yaml` 鎖定的靶機映像，不啟動容器 |
 | make record-fixtures | M3（T15 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：只在 live lab 網路重新錄製 ZAP 的輸出到 `recordings/zap/`（gitignore），人工審查之後才搬進 `tests/fixtures/zap/`；約 8 分鐘 |
 | make bench | M5 起 | 透過自己的 API 執行實驗，結果輸出到 benchmarks/results/ |

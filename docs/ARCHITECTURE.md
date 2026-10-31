@@ -200,6 +200,16 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 - **T12 已實作**（`DECISIONS.md` §16.3、§16.6）：前兩項都由 guard 的 telemetry 計算，API 以 `budget_usage` 與 coverage 的 `observed_operations`、`authenticated_operations` 揭露；拒絕只計數（不逐行記）。
 - **T16 已實作**（`DECISIONS.md` §20.3、§20.4）：worker 解析 zap 的 run 時，把 guard 的 summary（各原因的拒絕數、是否用盡、時間）與 telemetry 的計數寫進 `result_details.guard_traffic`（telemetry 6 小時後刪除，這裡留著）；同時以帶認證的請求判斷憑證是否在掃描中途失效（同一個 operation 接受過、最後被拒絕；或 auth profile 的 preflight 端點被拒絕），失效時 coverage 加上 `AUTHENTICATION_LOST`。不重新登入。
 
+### 3.6 T33 的政策版本與請求路徑
+
+一般 runner 固定使用 `strict-1`。實驗 `encoded-params-1` 使用獨立的 `RequestPath`：按原始斜線分段後逐段嚴格解碼一次；只有明確 allowed route 的佔位可以承接編碼資料，所有段必須由同一路由授權。Grant、OpenAPI 與 preflight 的宣告語法維持原有規則。詳細白名單、排除優先與歧義分類見 `DECISIONS.md` §21；正規化只供比較，不改寫轉送的 path/query。
+
+`PathEncoding` 位於 grants domain；Guard 的 `GuardPolicyVersion` 對應其解析模式，使 grants 不反向依賴 Guard。runner 在建立容器前以同一筆 fenced 更新保存 plan hash 與版本；policy schema 3、summary schema 2 均帶版本。worker 以 DB 的 run 版本讀取與重新授權 telemetry，產生同一份 `TelemetryEvidence` 供 parser、coverage、流量摘要使用。版本不符優先於零流量捷徑，實驗版不容忍缺失 telemetry 行。ZAP 的回應核對與 auth health 只統一 `%HH` 的 hex 大小寫，不解碼路徑；coverage 以解析後的段匹配 operation，解碼出的 `{}` 仍是資料。
+
+migration 0012 不回填歷史版本。部署先停止認領、排空 run，再升級 schema 與 runner/Guard/worker，避免混合版本運作。有實驗版 run 紀錄時禁止降級移除版本；僅 strict/null 的降級先恢復 0011 的不可變 trigger/function。普通 compose 寫死 strict，測試 override 只供 `test-live-guard-paths` 使用；同一 stack 切換前須排空，不同時啟動第二個 runner。
+
+驗證結論限於 digest 鎖定的 Flask/Werkzeug 與 Express Lab。其他伺服器的 trim、副檔名剝除或 Unicode 正規化仍可能有不同解讀，已知反例保留在 contract 測試，不宣稱普遍安全。
+
 ## 4. 模組與依賴方向
 
 程式依功能分模組（`src/secscan/<feature>/`），每個模組都包含 router、service、schemas、models、repository。各層責任：

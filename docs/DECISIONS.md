@@ -1311,6 +1311,8 @@ main | cli → migrations → health | runner | worker → scanners → scans �
 
 ### 15.10 取捨與不在 T11 範圍
 
+> T33 後續：strict 的本節行為保持；實驗版的受控編碼、共同證據信任檢查與驗證限制見 §21。
+
 取捨（殘餘風險）：
 - path 中的 `%` 一律拒絕：會擋掉工具放在 path 的 payload，部分 ZAP 檢查無法執行；刻意 fail closed，M3 依量測決定。
 - body 中的 `_method`（例如表單欄位）擋不到；lab 的靶機另外確認是否支援這個寫法。
@@ -1746,6 +1748,8 @@ T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作
 
 ### 19.4 排除 guard 的回應（分層，不排除真的結果）
 
+> T33 後續：strict 的本節行為保持；實驗版的受控編碼、共同證據信任檢查與驗證限制見 §21。
+
 1. instance 的 URI 不是 target 的 origin → `out_of_scope`。
 2. **重算 guard 的靜態規則**：`guard/domain/requests.py` 的 `request_reason` 中與請求本身有關的部分抽成純函式 `scope_reason`，guard 改呼叫它（行為不變，guard 的測試照舊）。parser 以同一個函式判斷 instance：guard 一定會拒絕的 → `guard_denied`。涵蓋 `PATH_AMBIGUOUS`（T14 的 api 情境 163 個中有 136 個）、範圍外的 path 與 method。
 3. telemetry 完整時，(method, path) 沒有任何得到上游回應的轉送 → `not_answered`：涵蓋 guard 的拒絕與 mitmproxy 自己產生的回應（502 等）。
@@ -1926,6 +1930,8 @@ T16 讓平台以真的 ZAP 掃描兩個標準靶機（OWASP Juice Shop v20.3.0�
 
 ### 20.7 正例與負例（小型集；`SECURITY_AND_TESTING.md` §4 的案例表）
 
+> T33 後續：strict 的本節行為保持；實驗版的受控編碼、共同證據信任檢查與驗證限制見 §21。
+
 - **Juice Shop 的 REST 搜尋的 SQLi**（S104 的 Database Schema、User Credentials）：經完整的平台（API → runner → guard → ZAP → worker → 查詢）**命中**：`40018 SQL Injection`，`GET /rest/products/search`，參數 `q`（query），attack `apple'`，ZAP 的等級 High、信心 Low，evidence 是 500 回應。注入點是前端呼叫的 API，traditional spider 走不到，以操作者上傳的一個 operation 的規格掃描。
 - **VAmPI 的 SQLi**（S103；`/users/v1/{username}` 以字串組 SQL）：ZAP 送出了探測（`/users/v1/name1%27`），guard 以 `PATH_AMBIGUOUS` 拒絕（§15.10 的取捨），探測沒有到達靶機，**平台漏報**。量化：每次 VAmPI 的掃描有 232 個 path 參數的攻擊被拒（`/users/v1/…` 106、`/books/v1/…` 126），佔 guard 判斷的請求的 34%。
 - **對照實驗**（不經平台；同一個鎖定的映像、第一輪實際使用的 plan.yaml 與規格；只接一個 internal 的網路，沒有 guard 與速率限制）：弱點版 34 秒內命中 `40018 SQL Injection`（High，`GET /users/v1/%27`，參數 `username`），安全版沒有。結論：漏報完全來自 guard 的 path 規則，ZAP 本身判斷正確。是否放寬 §15.10（解碼之後再比對範圍）是需要使用者決定的安全取捨，T16 不改（只量化與揭露，§18.10 的決定）。
@@ -1935,6 +1941,8 @@ T16 讓平台以真的 ZAP 掃描兩個標準靶機（OWASP Juice Shop v20.3.0�
 
 ### 20.8 殘餘風險與不在 T16 範圍
 
+> T33 後續：strict 的本節行為保持；實驗版的受控編碼、共同證據信任檢查與驗證限制見 §21。
+
 - guard 的 path 規則讓 path 參數的注入測不到（§20.7）：報告必須揭露；放寬需要使用者決定。
 - 認證失效的偵測有限制（§20.4）：靶機以 302 或 200 的登入頁表示過期時看不出來；observation 仍標 scan 的身分（T19 要讀 `auth.lost`）。
 - 不收集的 run（guard 回報預算用盡、runner 的牆鐘上限、取消）沒有 `guard_traffic`，只有 `budget_usage` 的總數與 `plan_hash`。
@@ -1942,6 +1950,141 @@ T16 讓平台以真的 ZAP 掃描兩個標準靶機（OWASP Juice Shop v20.3.0�
 - 正例與負例只是小型集：完整的 12＋12、6＋6、可切換弱點與修補的 fixture app 在 T30；cookie 與 ZAP 自己的 session cookie 的合併、body 的 `_method`（T14 的交接）在 T16 沒有量到（兩個靶機都用 bearer、都不支援 method override），留給 T30 的 fixture app。
 - Juice Shop 只能以 bearer 認證 `/api/*`：它的頁面與 `/rest/user/whoami` 看 cookie，web profile 帶 bearer 的掃描大部分仍是匿名的內容。
 - 不在 T16：掃描中重新驗證與重新登入、預算用盡時收集部分輸出（使用者決定）；Nuclei（T17、T18）；rule group、fingerprint、finding（T19）；HTTPS、AJAX spider、多個 runner；T11 的同一條連線的證據缺口仍記為未實作。
+
+## 21. T33：實驗性的編碼路由參數（2026-11-01）
+
+狀態：實作中，尚未完成 live 驗收。完整交付計劃見 [T33_IMPLEMENTATION_PLAN.md](T33_IMPLEMENTATION_PLAN.md)。本節更新 §15.10、§19.4、§20.7、§20.8 的後續處理；一般掃描仍維持 strict-1。
+
+### 21.1 安全設計與明確介面
+
+#### 版本
+
+- GuardPolicyVersion：strict-1、encoded-params-1，定義於 guard/domain/policy.py。
+- PathEncoding：REJECT、ROUTE_PARAMETERS，定義於 grants/domain/request_paths.py。grants 不依賴 guard。
+- strict-1 凍結 T11–T16 的請求判斷；encoded-params-1 為待驗證的實驗版本。
+- 公布後以每個版本的黃金語料固定判斷；改變政策判斷須增加新版本，保留舊實作以解析歷史 run。
+- 未知版本拒絕，不偷偷改用 strict。只有歷史 DB null 明確映射 strict-1。
+
+#### RequestPath 與受控解碼
+
+新增 PathAmbiguity、RequestPath、parse_request_path、canonical_path。RequestPath 及其段落為 frozen 型別，保存原始 path、原始與 decoded 段落、是否含編碼及尾斜線；不使用 Route 的 None 表示編碼段。
+
+1. 既有 request-target 形狀檢查先拒絕不可見 ASCII 與原始 #。在第一個原始 ? 切出 path，query 沿用原規則。
+2. path 必須以 / 開頭，原始長度最多 512；先按原始 / 分段。維持根目錄與單一尾斜線語意，拒絕中間空段、原始 . 與 ..。
+3. 一般字元沿用 [A-Za-z0-9._~!$&'()+,=:@-]。原始未編碼的大括號仍拒絕。
+4. % 只能接兩個十六進位字元，須先嚴格驗證 triplet；不依賴接受正負號的寬鬆數字解析。
+5. 每個 triplet 只解碼一次；decoded byte 只能屬於 E：
+
+   空白、!、"、$、&、'、(、)、+、,、:、<、=、>、@、[、]、^、反引號、{、|、}。
+
+6. 拒絕 encoded unreserved、/、反斜線、?、#、;、%、*、控制字元、DEL 與所有非 ASCII byte。
+7. encoded-params-1 中，任一段若只由點、空白與 + 組成就拒絕，包括未編碼的一般段。strict-1 對 ..+ 的既有行為保持不變並揭露。
+8. decoded {username} 永遠只是參數資料；不可送回 parse_route，也不可變成授權佔位。
+9. canonical_path 僅把合法 %hh 轉為 %HH。不得 unquote、trim、替換 +、合併斜線或移除點段；原始資料保留供證據比對。
+10. 轉送 request.data.path 與 query 完全不改寫。
+
+拒絕 encoded unreserved 是本專案選擇的保守政策，**不是 RFC 宣告這些 URI 非法**。RFC 3986 §2.3、§2.4、§6.2.2.1 分別說明 unreserved 等價性、先分離元件再解碼，以及 percent hex 大小寫正規化：
+[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html)
+
+#### ScopeRules.classify_request
+
+維持既有 ScopeRules.classify、parse_route、Route、covers 的宣告語意；新增 covers_request 與 classify_request，接受獨立 RequestPath。
+
+- 允許：段數、一般 literal 的大小寫與尾斜線符合原規則；含編碼的段只可由佔位涵蓋。必須由同一條完整 allowed pattern 授權，不能拼接不同 pattern。
+- allow_all_paths 遇到編碼段回 PathAmbiguity 的 no-route-parameter。
+- 排除：先比對整條 pattern 是否「可能相符」：段數相同、忽略尾斜線，且每個位置為排除佔位、請求編碼段，或一般 literal 不分大小寫相同。
+- 可能相符且任何編碼段對到排除 literal，回 exclusion-overlap；所有編碼段只對到排除佔位則回 PATH_EXCLUDED。
+- 不可能相符的排除不阻擋。所有排除檢查完成後才檢查 method 與 allowed route。
+- 此規則會使 excluded /users/v1/_debug 阻擋同形 /users/v1/{username} 的全部編碼探測；這是刻意的覆蓋取捨，不改成子序列判斷。
+
+#### reason、detail 與 log
+
+下列歧義維持對外 PATH_AMBIGUOUS；detail 只進安全 log：
+
+| detail | 條件 |
+|---|---|
+| syntax | 原始語法、長度、空段、原始未編碼大括號等不符 |
+| percent-encoding | strict-1 的 path 含 % |
+| invalid-percent | 不完整、非 hex 或帶正負號的 triplet |
+| encoded-separator | 解出 /、反斜線、?、#、; |
+| double-encoding | %25 |
+| encoded-control | 控制字元、DEL、非 ASCII |
+| non-canonical | encoded unreserved |
+| encoded-wildcard | %2A |
+| dot-segment | 段落只由點、空白、+ 組成 |
+| no-route-parameter | allow_all_paths 沒有明確路由參數授權 |
+| exclusion-overlap | 可能相符的排除 literal 與編碼段重疊 |
+
+安全語法但沒有任何 allowed route 涵蓋時仍回 PATH_NOT_AUTHORIZED；其他現有 reason 保留。先檢查 path 語法，再依排除、method、允許順序判斷；多個語法錯誤按 path 由左至右取第一個，固定於黃金語料。
+
+放行的編碼參數 detail 為 encoded-route-parameter。每筆有可信 policy 的決定記錄 policy_version；尚未驗證 policy 的拒絕填 null。path 上限由 200 改為 PATH_MAX_LENGTH（512）；仍不記 query、header 值與 token。
+
+### 21.2 持久化、開關與相容性
+
+#### DB 與 API
+
+- 新增 v0012_guard_policy_version，不修改已合併的 v0011。
+- scanner_runs.guard_policy_version 可為 null；非 null 僅允許兩個明確版本且必須有 plan_hash。
+- 不回填舊 run。null 表示未記錄政策版本，不能當成「已執行 strict」的流量證明。
+- record_plan 在同一個 fenced update 寫入 plan_hash、profile hash 與版本；第一次寫 plan 必須同時有版本。
+- 更新 scanner_runs_plan_once 的函式及 BEFORE UPDATE OF 欄位清單；防止只改版本、清空 plan、使用舊 lease 等繞過。
+- downgrade 僅容許沒有實驗版 run 的資料庫，先還原 v0011 的函式與 trigger 再移除新欄位；存在 encoded-params-1 紀錄時拒絕降級，避免刪欄位後被舊程式誤認為 strict。升降級與拒絕行為只在隔離測試 DB 驗證，不能用降級切回嚴格政策。
+- engines[].guard_policy_version 原樣揭露，可為 null；guard_traffic.policy_version 保存 Guard 回報值；forwarded_encoded 為精確整數或 null。
+- 舊 result_details 缺新欄位時 API 回 null，不補造 0 或 strict-1。維持 4 KiB 上限，補 JSONB 實際位元組大小與序列化測試；不將逐筆 path 或 detail 分布塞進 DB。
+
+#### Runner 與部署
+
+- RunnerSettings.guard_policy_version 對應 RUNNER_GUARD_POLICY_VERSION，只接受 enum，預設 strict-1。
+- cli/services 傳給 ContainerRunner；record_plan 與 RunEgress.open 使用同一值。實驗版啟動時記 warning。
+- compose.yaml 的 runner 寫死 RUNNER_GUARD_POLICY_VERSION: strict-1，不使用環境插值。
+- 新增 compose.guard-paths.yaml，只覆寫該 runner 的這一個環境變數；只有 make test-live-guard-paths 引用。
+- LIVE_ENV、其他 live targets、.env.example 不加入實驗設定；一般 API client 不能選版。
+- 明確界線：此方案保證預設 compose 與一般 API 嚴格，**不能保證直接啟動的 runner 不會讀到操作者自行設定的環境變數**。有主機控制權的操作者仍可啟用實驗，正式使用前另行決策。
+
+#### Guard schema 與 telemetry
+
+- policy schema 3 必填 policy_version；status.policy_schema 同步為 3。舊、新映像不符時 runner 不認領。
+- summary schema 2 必填 policy_version；部署採停止認領、排空 run、一起更新 runner／Guard／worker。
+- ForwardedRequest 的格式驗證接受 REJECT 與 ROUTE_PARAMETERS 語法的聯集；這只是結構解析，不代表該 run 有授權。
+- recorder 對同 run 的記憶體紀錄與重啟續寫檢查版本一致；不能把兩版本混成同一份 summary。
+- 舊 schema 1 summary 僅以精確舊欄位格式作 strict 歷史相容讀取；不能為 encoded-params-1 提供已驗證依據。未知 schema／版本拒絕。
+
+### 21.3 Worker、parser、coverage 與認證計數
+
+#### 統一且明確的信任結果
+
+新增明確的 telemetry 一致性／信任結果，區分可信、缺資料、不一致，不只把 exchanges 設成 None。
+
+Worker 從 run 上下文取得 DB 版本（歷史 null → strict）、凍結 grant、scan/run id，依序：
+
+1. 嚴格讀取 summary 與 JSONL，核對 run、scan、政策版本與既有 boot／計數規則。
+2. 使用該 run 的 grant 與 encoding，重新判斷每筆 method/path 都應被放行。
+3. 不一致時記安全錯誤代碼，保留可解析的 Guard 回報版本；不記 coverage、traffic_verified=false，不因這項資料錯誤重試。
+4. 不一致狀態優先於所有「forwarded=0」捷徑；零流量不得掩蓋版本衝突或越權行。
+5. 缺資料維持現有不足證據語意，不冒充成功量測；真正可信的零流量仍按既有規則處理。
+6. parser 與 coverage 使用同一檢查入口／結果，不能一方拒絕紀錄、另一方重新讀取後信任。
+
+這能證明**紀錄中的 method/path 與凍結政策一致**；JSONL 沒有完整 query、origin、header、DNS/IP，不能稱為完整「沒有越權流量」證明，也不能發現共用 classifier 的共同錯誤。仍須獨立靶機證據。
+
+#### 各消費端
+
+- scope_reason 增加必填 encoding；由 run policy version 映射，不使用隱含預設。
+- observed_operations 增加必填 encoding，使用 RequestPath。編碼段只對應 operation 佔位；不會因 decoded {x} 生成佔位。
+- 防禦性解析失敗跳過該筆，不丟例外；若來源是該 run 的 telemetry，前述整體一致性檢查仍須判為不可信，不能靠跳過壞資料獲得 coverage。
+- parser 的 not_answered、traffic 的認證健康度 key 使用 method 加 canonical_path；只統一 percent hex 大小寫。
+- 原始 URI/path 不被替換；不合併不同 request 的資料，保留原有 method/path 粒度限制。
+- PARSER_VERSION 維持；以舊 strict fixtures 與輸出快照證明相容。新增的信任檢查與結果欄位另記為 T33 行為，不宣稱所有不可信舊輸入也完全相同。
+- forwarded_encoded 只有逐筆紀錄可信且 request 行數精確等於 summary.forwarded 才計算；缺一行也回 null。不能直接沿用允許少最後一行的 telemetry_complete 當作精確計數條件。strict 保留既有少最後一行的相容規則並揭露限制；實驗版缺一行就不宣稱完整流量已驗證，也不記 coverage。
+
+### 21.4 驗證界線、量測與未證明事項
+
+使用者已決定安全驗收限於鎖定 Flask／Werkzeug 與 Express 的實際 Lab 解析鏈。其他 URL 模型與串接是對抗式探索，不能宣稱通用保證。保留反例：allowed /a/{x}/{y}、excluded /a/admin/{id} 時，/a/admin.json/%27 經去副檔名可能落入排除；若鎖定 Lab 也重現越權，就阻擋驗收，不降格為範圍外限制。
+
+安全不變式在量測前固定；SQLi 命中與流量數量如實記錄，不改規則去湊命中。固定語料比較政策差異；ZAP 掃描會因新回應改變後續探針，不宣稱兩次掃描差集只有編碼 path。A/B 每組重建靶機種子，同一 stack 切換前排空所有 run。
+
+Guard allow log 是判定，不等於已轉送；多重集合比較以 committed telemetry 與靶機獨立原始證據為準。log 若解碼或截斷就不能宣稱逐字相同。原始錄製受限且加密，進 repo 的衍生表須審查 path 內秘密及 fixture manifest，不能假設 ZAP 永遠不會把秘密放入 path。
+
+實測結果待 T33 正式執行後填入 TOOLS §7.8 與任務交付紀錄，目前不宣稱通過。未證明：一般 proxy 解碼後重組請求、其他 framework 的別名／trim、IIS／Windows 行為、既有 keep-alive／pipelining 收包缺口、body _method。實驗不得用於這些部署。T30 使用的版本與正式啟用由使用者看過證據後決定。
 
 ## 來源
 

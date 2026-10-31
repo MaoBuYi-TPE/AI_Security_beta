@@ -1362,7 +1362,17 @@
       - **T30**：fixture app 要有 traditional spider 走得到、query 或 form 參數的注入點，作為 web profile 的正例；量測 cookie 的合併與 `_method`；完整的 ground truth 與抽樣複核。
       - **T19**：fingerprint 與複掃比較要讀 run 的 `guard_traffic.auth.lost`，失效的 run 的 observation 不能併入已認證身分的 finding，也不能據以標 `not_observed`。
       - **M5（bench）**：以 fixture app 重新檢討速率與強度（兩個靶機的量測沒有顯示需要調整）。
+- [ ] T33 guard 的 path 編碼規則：有條件放寬（實驗用，T30 的前置）。
+  - 前置：T16。使用者的決定（2026-11-01）：有條件放寬加上安全的 path 正規化，不全面放行 `%`；證明安全之前預設維持現行的嚴格行為。
+  - DoD：
+    - 安全設計寫進 `DECISIONS.md` §21：依 RFC 3986 先分段、再逐段受控解碼；只在 grant 明確授權的 `{佔位}` 接受編碼；編碼的分隔符、雙重編碼、路徑穿越、無效編碼與解析可能不一致的情況一律 fail closed；guard 轉送的位元組不變。
+    - Guard Policy Version：`strict-1`（預設，等於現行行為）與 `encoded-params-1`（實驗）；每個 run 記下版本（DB、API、guard log），一般掃描不能選擇。
+    - unit、integration、contract、live 涵蓋正常 path、編碼的路由參數、歧義 path、越權 path 與不同的 URL 解析行為。
+    - 以隔離的 VAmPI 與 Juice Shop 對照兩個版本的 ZAP 結果：VAmPI 的 SQLi 在既有 grant 內是否被偵測、沒有任何超出授權範圍的請求、靶機收到的請求等於 guard 轉送的請求；保留原始請求、guard 判斷、靶機收到的紀錄與安全的流量統計，記下版本、映像 digest 與 commit。
+    - 是否正式啟用由使用者看過證據之後決定。
+  - 狀態：in_progress（2026-11-01）。依 `T33_IMPLEMENTATION_PLAN.md` 修訂版實作中；包含完整的 path 核心、版本資料流、四層測試與 Lab A/B 證據，通過後以 PR 合併 main。尚未完成驗收。
 - [ ] T30 建立自製 fixture app 與 ground truth 初稿。
+  - 前置：T33。正式的 ground truth 評估在 T33 之後進行；使用哪個 guard policy version 由使用者在 T33 之後決定，並記在每個 run。被 guard 擋下的案例另外分類（平台阻擋），不計入掃描器的漏報。
   - DoD：
     - fixture app 可以切換弱點版與修補版，只放在 lab_net。
     - 約 12 個資安案例與 6 個 contract/robustness 案例，都寫好預期行為與確認方式。
