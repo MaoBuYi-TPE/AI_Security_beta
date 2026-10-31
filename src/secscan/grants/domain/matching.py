@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Self
 
+from secscan.grants.domain.request_paths import PathAmbiguity, RequestPath
 from secscan.grants.domain.scope import Scope, check_path
 
 
@@ -59,6 +60,32 @@ def _segment_covers(expected: str | None, actual: str | None, *, lenient: bool) 
     return expected.lower() == actual.lower() if lenient else expected == actual
 
 
+def covers_request(pattern: Route, request: RequestPath) -> bool:
+    """完整允許比對：編碼資料只可出現在同一條 pattern 明確授權的佔位。"""
+    if len(pattern.segments) != len(request.segments):
+        return False
+    if pattern.trailing_slash != request.trailing_slash:
+        return False
+    return all(
+        expected is None or (not actual.encoded and expected == actual.raw)
+        for expected, actual in zip(pattern.segments, request.segments, strict=True)
+    )
+
+
+def _request_excluded(pattern: Route, request: RequestPath) -> bool:
+    if len(pattern.segments) != len(request.segments):
+        return False
+    pairs = tuple(zip(pattern.segments, request.segments, strict=True))
+    if not all(
+        expected is None or actual.encoded or expected.lower() == actual.raw.lower()
+        for expected, actual in pairs
+    ):
+        return False
+    if any(expected is not None and actual.encoded for expected, actual in pairs):
+        raise PathAmbiguity("exclusion-overlap")
+    return True
+
+
 class IneligibleReason(StrEnum):
     """operation 不在 grant 範圍內的原因（穩定的對外代碼）。"""
 
@@ -99,5 +126,19 @@ class ScopeRules:
         if self.allow_all_paths or any(
             covers(pattern, route, lenient=False) for pattern in self.allowed
         ):
+            return None
+        return IneligibleReason.PATH_NOT_AUTHORIZED
+
+    def classify_request(self, *, method: str, path: RequestPath) -> IneligibleReason | None:
+        """實際請求的排除 → method → 允許；歧義排除回 PathAmbiguity。"""
+        if any(_request_excluded(pattern, path) for pattern in self.excluded):
+            return IneligibleReason.PATH_EXCLUDED
+        if method not in self.methods:
+            return IneligibleReason.METHOD_NOT_AUTHORIZED
+        if self.allow_all_paths:
+            if path.encoded:
+                raise PathAmbiguity("no-route-parameter")
+            return None
+        if any(covers_request(pattern, path) for pattern in self.allowed):
             return None
         return IneligibleReason.PATH_NOT_AUTHORIZED

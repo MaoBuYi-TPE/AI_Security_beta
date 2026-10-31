@@ -12,13 +12,14 @@ from collections.abc import Mapping
 from typing import TextIO
 from uuid import UUID
 
-from secscan.grants.domain.scope import HttpMethod
+from secscan.grants.domain.scope import PATH_MAX_LENGTH, HttpMethod
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.requests import RequestView, split_target
 
 _FIELDS_ATTRIBUTE = "guard_fields"
 _KNOWN_METHODS = frozenset({*(method.value for method in HttpMethod), "CONNECT", "TRACE"})
 _HOST_LIMIT = 100
-_PATH_LIMIT = 200
+_PATH_LIMIT = PATH_MAX_LENGTH
 
 
 class _JsonFormatter(logging.Formatter):
@@ -58,11 +59,13 @@ class GuardLog:
         view: RequestView | None,
         upstream: str | None = None,
         detail: str | None = None,
+        policy_version: GuardPolicyVersion | None = None,
     ) -> None:
         fields: dict[str, object] = {
             "decision": "allow" if allowed else "deny",
             "reason": reason,
             "detail": detail,
+            "policy_version": None if policy_version is None else policy_version.value,
             "run_id": None if run_id is None else str(run_id),
             "upstream": upstream,
         }

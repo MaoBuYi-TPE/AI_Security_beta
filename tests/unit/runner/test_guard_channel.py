@@ -20,6 +20,7 @@ from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.credentials import parse_proxy_authorization, token_digest
 from secscan.guard.domain.policy import (
     MAX_POLICY_BYTES,
+    GuardPolicyVersion,
     Policy,
     PolicyState,
     policy_file_name,
@@ -75,6 +76,7 @@ def guard(tmp_path: Path) -> GuardDouble:
 def _open(channel: GuardChannel, **overrides: object) -> RunEgress:
     options: dict[str, object] = {
         "lease": LEASE,
+        "policy_version": GuardPolicyVersion.STRICT,
         "egress": _egress(),
         "endpoint": ENDPOINT,
         "now": NOW,

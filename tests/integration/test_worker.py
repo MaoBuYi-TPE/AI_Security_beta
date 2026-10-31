@@ -418,3 +418,28 @@ def test_a_lost_lease_skips_the_run_instead_of_stopping_the_worker(
     reports = Worker(queue, owner="worker-1").drain()
 
     assert [report.run_id for report in reports] == [second.run_id]
+
+
+def test_inconsistent_preflight_telemetry_is_not_measured_coverage(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    runs: Path,
+    tmp_path: Path,
+) -> None:
+    from secscan.guard.domain.policy import GuardPolicyVersion
+    from secscan.guard.domain.telemetry import RunSummary, encode_summary, summary_file_name
+
+    lease = _collected_preflight(queue, queue_seed, world, runs, {}, sent=0)
+    summary = RunSummary(
+        lease.run_id,
+        lease.scan_id,
+        UUID(int=1),
+        0,
+        policy_version=GuardPolicyVersion.ENCODED_PARAMS,
+    )
+    (tmp_path / summary_file_name(lease.run_id)).write_bytes(encode_summary(summary))
+
+    _worker(queue, runs, tmp_path).drain()
+
+    assert _coverage(queue_seed, lease.run_id) == (False, [])

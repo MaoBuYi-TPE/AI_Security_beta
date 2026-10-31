@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import replace
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from secscan.guard.addon import APPROVAL_KEY, GuardAddon
 from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.credentials import new_token, token_digest
 from secscan.guard.domain.policy import (
+    GuardPolicyVersion,
     Policy,
     PolicyState,
     encode_policy,
@@ -92,6 +94,7 @@ def main() -> None:
     run_id, token = uuid.uuid4(), new_token()
     now = int(time.time())
     policy = Policy(
+        policy_version=GuardPolicyVersion.STRICT,
         run_id=run_id,
         scan_id=uuid.uuid4(),
         state=PolicyState.ACTIVE,
@@ -170,6 +173,30 @@ def main() -> None:
     checks["telemetry_records_the_upstream_status"] = (
         isinstance(records[-1], UpstreamResponse) and records[-1].status == 200
     )
+
+    encoded_id = uuid.uuid4()
+    encoded_policy = replace(
+        policy, run_id=encoded_id, policy_version=GuardPolicyVersion.ENCODED_PARAMS
+    )
+    write_atomic(directory, policy_file_name(encoded_id), encode_policy(encoded_policy))
+    for index, target in enumerate(("/api/items/name%3c+%20part?x=%2F", "/api/items/%7Bid%7D")):
+        encoded = _flow(encoded_id, token, url="http://lab-target:8080" + target)
+        raw_target = encoded.request.data.path
+        asyncio.run(addon.requestheaders(encoded))
+        addon.request(encoded)
+        checks[f"encoded_{index}_allowed"] = encoded.response is None
+        checks[f"encoded_{index}_raw_target_unchanged"] = (
+            encoded.request.data.path == raw_target == target.encode("ascii")
+        )
+        encoded.response = http.Response.make(200, b"ok")
+        addon.response(encoded)
+    for index, target in enumerate(("/api/items/%2f", "/api/items/%252e", "/api/items/%41")):
+        refused = _flow(encoded_id, token, url="http://lab-target:8080" + target)
+        asyncio.run(addon.requestheaders(refused))
+        checks[f"encoded_ambiguous_{index}_denied"] = (
+            refused.response is not None
+            and refused.response.headers.get("X-Secscan-Guard") == "PATH_AMBIGUOUS"
+        )
 
     tcp = tflow.ttcpflow()
     addon.tcp_start(tcp)

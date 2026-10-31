@@ -22,7 +22,7 @@ from secscan.guard.domain.credentials import (
     proxy_url,
     token_digest,
 )
-from secscan.guard.domain.policy import Policy, PolicyState
+from secscan.guard.domain.policy import GuardPolicyVersion, Policy, PolicyState
 from secscan.runner.guard import GuardChannel
 from secscan.scanners.domain.zap.config import zap_properties
 from secscan.scans.domain.model import Lease
@@ -77,6 +77,7 @@ class RunEgress:
         channel: GuardChannel,
         *,
         lease: Lease,
+        policy_version: GuardPolicyVersion,
         egress: EgressScope,
         endpoint: GuardEndpoint,
         now: float,
@@ -87,6 +88,7 @@ class RunEgress:
         grant = egress.scope
         policy = Policy(
             run_id=lease.run_id,
+            policy_version=policy_version,
             scan_id=lease.scan_id,
             state=PolicyState.ACTIVE,
             token_sha256=token_digest(token),

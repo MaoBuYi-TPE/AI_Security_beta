@@ -17,6 +17,7 @@ from secscan.guard import store as store_module
 from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.policy import (
     MAX_POLICY_BYTES,
+    GuardPolicyVersion,
     Policy,
     PolicyError,
     PolicyState,
@@ -33,6 +34,7 @@ RUN_ID = UUID("6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b")
 
 def _policy(run_id: UUID = RUN_ID, *, renew_until: int = 1_767_598_830) -> Policy:
     return Policy(
+        policy_version=GuardPolicyVersion.STRICT,
         run_id=run_id,
         scan_id=uuid4(),
         state=PolicyState.ACTIVE,

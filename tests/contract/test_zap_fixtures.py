@@ -12,6 +12,7 @@ import pytest
 
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import HttpMethod, Scope
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.telemetry import ForwardedRequest, UpstreamResponse, decode_line
 from secscan.scanners.domain.zap.report import ZapReport, parse_report
 from secscan.scanners.domain.zap.results import ZapOutput, interpret
@@ -33,6 +34,8 @@ def _output(scenario: str) -> ZapOutput:
     exchanges = _exchanges(telemetry) if telemetry.exists() else None
     report = directory / "report.json"
     return ZapOutput(
+        policy_version=GuardPolicyVersion.STRICT,
+        telemetry_trusted=True,
         exit_code=entry["exit_code"],
         report=report.read_bytes() if report.exists() else None,
         report_listed=report.exists(),

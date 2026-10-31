@@ -17,6 +17,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from secscan.grants.domain.request_paths import canonical_path
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.telemetry import RunSummary
 from secscan.scans.domain.coverage import REJECTED_CREDENTIALS, Exchange, telemetry_complete
 
@@ -53,19 +55,23 @@ class GuardTraffic:
     # telemetry 不能用時是 None。
     answered: int | None = None
     auth: AuthHealth | None = None
+    policy_version: GuardPolicyVersion | None = None
+    forwarded_encoded: int | None = None
 
 
 def auth_health(
     exchanges: Iterable[Exchange], *, probe: tuple[str, str] | None = None
 ) -> AuthHealth:
     """exchanges 依轉送的順序（guard 依序號寫入）；probe 是 preflight 的 (method, path)。"""
+    if probe is not None:
+        probe = (probe[0], canonical_path(probe[1]))
     accepted = rejected = probe_rejected = 0
     ever_accepted: set[tuple[str, str]] = set()
     last_rejected: dict[tuple[str, str], bool] = {}
     for exchange in exchanges:
         if not exchange.authenticated or exchange.status is None:
             continue
-        key = (exchange.method, exchange.path)
+        key = (exchange.method, canonical_path(exchange.path))
         refused = exchange.status in REJECTED_CREDENTIALS
         if refused:
             rejected += 1
@@ -85,6 +91,7 @@ def guard_traffic(
     exchanges: tuple[Exchange, ...] | None,
     *,
     probe: tuple[str, str] | None = None,
+    trusted: bool,
 ) -> GuardTraffic | None:
     """summary 是 None：guard 沒有這個 run 的紀錄（沒有任何請求經過，或檔案已不在）。
 
@@ -94,13 +101,23 @@ def guard_traffic(
         return None
     answered: int | None = None
     health: AuthHealth | None = None
-    if summary.forwarded == 0:
+    if trusted and summary.forwarded == 0:
         answered, health = 0, NO_AUTHENTICATED_TRAFFIC
-    elif exchanges is not None and telemetry_complete(exchanges, forwarded=summary.forwarded):
+    elif (
+        trusted
+        and exchanges is not None
+        and telemetry_complete(exchanges, forwarded=summary.forwarded)
+    ):
         answered = sum(1 for exchange in exchanges if exchange.status is not None)
         health = auth_health(exchanges, probe=probe)
     return GuardTraffic(
         forwarded=summary.forwarded,
+        policy_version=summary.policy_version,
+        forwarded_encoded=(
+            sum("%" in item.path for item in (exchanges or ()))
+            if trusted and len(exchanges or ()) == summary.forwarded
+            else None
+        ),
         denied=MappingProxyType(dict(sorted(summary.denied.items()))),
         exhausted=summary.exhausted,
         first_at=summary.first_at,

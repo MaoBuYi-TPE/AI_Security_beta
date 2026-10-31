@@ -16,7 +16,7 @@ import pytest
 
 from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard.domain.budget import RunBudget
-from secscan.guard.domain.policy import Policy, PolicyState
+from secscan.guard.domain.policy import GuardPolicyVersion, Policy, PolicyState
 from secscan.guard.domain.requests import Reason
 from secscan.guard.domain.telemetry import (
     ForwardedRequest,
@@ -37,6 +37,7 @@ NOW = 1_767_598_800.0
 
 def _policy(max_requests: int = 3, run_id: UUID = RUN) -> Policy:
     return Policy(
+        policy_version=GuardPolicyVersion.STRICT,
         run_id=run_id,
         scan_id=SCAN,
         state=PolicyState.ACTIVE,

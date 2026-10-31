@@ -16,6 +16,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.telemetry import RunSummary
 from secscan.scans.domain.coverage import Exchange
 from secscan.scans.domain.traffic import (
@@ -40,6 +41,7 @@ def _summary(forwarded: int, **changes: object) -> RunSummary:
         "scan_id": uuid.UUID(int=2),
         "boot_id": uuid.UUID(int=3),
         "forwarded": forwarded,
+        "policy_version": GuardPolicyVersion.STRICT,
     }
     return RunSummary(**{**values, **changes})  # type: ignore[arg-type]
 
@@ -190,7 +192,7 @@ def test_traffic_keeps_the_guard_summary_and_the_answers() -> None:
     )
     exchanges = (_exchange("/a"), _exchange("/a", status=401), _exchange("/b", status=None))
 
-    traffic = guard_traffic(summary, exchanges, probe=("GET", "/a"))
+    traffic = guard_traffic(summary, exchanges, probe=("GET", "/a"), trusted=True)
 
     assert traffic is not None
     assert traffic.forwarded == 3
@@ -202,7 +204,7 @@ def test_traffic_keeps_the_guard_summary_and_the_answers() -> None:
 
 
 def test_no_summary_means_no_guard_record() -> None:
-    assert guard_traffic(None, ()) is None
+    assert guard_traffic(None, (), trusted=True) is None
 
 
 @pytest.mark.parametrize(
@@ -214,7 +216,7 @@ def test_incomplete_telemetry_keeps_only_the_summary(
     exchanges: tuple[Exchange, ...] | None,
 ) -> None:
     """telemetry 讀不到或和 summary 的轉送數對不上：不給回應數與認證的計數（沒有依據）。"""
-    traffic = guard_traffic(_summary(3, denied={"RATE_LIMITED": 4}), exchanges)
+    traffic = guard_traffic(_summary(3, denied={"RATE_LIMITED": 4}), exchanges, trusted=True)
 
     assert traffic is not None
     assert traffic.denied == {"RATE_LIMITED": 4}
@@ -224,7 +226,7 @@ def test_incomplete_telemetry_keeps_only_the_summary(
 
 def test_one_missing_line_is_still_complete() -> None:
     """summary 先寫、行後寫（§16.3）：最多少一行，仍算完整（和 coverage 相同的條件）。"""
-    traffic = guard_traffic(_summary(2), (_exchange("/a"),))
+    traffic = guard_traffic(_summary(2), (_exchange("/a"),), trusted=True)
 
     assert traffic is not None
     assert traffic.answered == 1
@@ -242,7 +244,7 @@ def test_only_rejections_mean_the_credential_never_worked() -> None:
 
 def test_no_forwarded_requests_is_a_verified_empty_record() -> None:
     """guard 記下轉送 0 個：沒有 telemetry 的檔案也是有依據的（和 results.py 的 _answers 相同）。"""
-    traffic = guard_traffic(_summary(0, denied={"PATH_EXCLUDED": 3}), None)
+    traffic = guard_traffic(_summary(0, denied={"PATH_EXCLUDED": 3}), None, trusted=True)
 
     assert traffic is not None
     assert traffic.answered == 0
@@ -251,8 +253,58 @@ def test_no_forwarded_requests_is_a_verified_empty_record() -> None:
 
 
 def test_the_denied_counts_are_read_only() -> None:
-    traffic = guard_traffic(_summary(1, denied={"PATH_EXCLUDED": 3}), (_exchange("/a"),))
+    traffic = guard_traffic(
+        _summary(1, denied={"PATH_EXCLUDED": 3}), (_exchange("/a"),), trusted=True
+    )
 
     assert traffic is not None
     with pytest.raises(TypeError):
         traffic.denied["PATH_EXCLUDED"] = 0  # type: ignore[index]
+
+
+def test_auth_probe_uses_the_same_hex_canonical_form_as_requests() -> None:
+    health = auth_health([_exchange("/users/name%3C", status=403)], probe=("GET", "/users/name%3c"))
+
+    assert health.probe_rejected == 1
+
+
+def test_auth_health_combines_hex_case_without_decoding() -> None:
+    health = auth_health(
+        [
+            _exchange("/users/name%3c"),
+            _exchange("/users/name%3C", status=403),
+            _exchange("/users/name<"),
+        ]
+    )
+
+    assert health.regressed == 1
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_forwarded_encoded_requires_exact_trusted_telemetry(trusted: bool) -> None:
+    summary = _summary(2, policy_version=GuardPolicyVersion.ENCODED_PARAMS)
+    exchanges = (_exchange("/users/a%27"), _exchange("/users/plain"))
+
+    traffic = guard_traffic(summary, exchanges, trusted=trusted)
+
+    assert traffic is not None
+    assert traffic.policy_version is GuardPolicyVersion.ENCODED_PARAMS
+    assert traffic.forwarded_encoded == (1 if trusted else None)
+    assert traffic.answered == (2 if trusted else None)
+
+
+def test_legacy_missing_last_line_never_claims_an_exact_encoded_count() -> None:
+    traffic = guard_traffic(_summary(2), (_exchange("/users/plain"),), trusted=True)
+
+    assert traffic is not None
+    assert traffic.answered == 1
+    assert traffic.forwarded_encoded is None
+
+
+def test_inconsistent_zero_is_not_reported_as_measured_zero() -> None:
+    traffic = guard_traffic(_summary(0), None, trusted=False)
+
+    assert traffic is not None
+    assert traffic.answered is None
+    assert traffic.auth is None
+    assert traffic.forwarded_encoded is None

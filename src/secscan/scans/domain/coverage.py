@@ -11,7 +11,8 @@ operation：method 相同，operation 的 route 以 §11.6 的規則（不寬鬆
 from collections.abc import Iterable, Mapping, Sized
 from dataclasses import dataclass
 
-from secscan.grants.domain.matching import Route, covers, parse_route
+from secscan.grants.domain.matching import Route, covers_request, parse_route
+from secscan.grants.domain.request_paths import PathAmbiguity, PathEncoding, parse_request_path
 
 REJECTED_CREDENTIALS = frozenset({401, 403})
 
@@ -43,7 +44,7 @@ def telemetry_complete(exchanges: Sized, *, forwarded: int) -> bool:
 
 
 def observed_operations(
-    operations: Iterable[FrozenOperation], exchanges: Iterable[Exchange]
+    operations: Iterable[FrozenOperation], exchanges: Iterable[Exchange], *, encoding: PathEncoding
 ) -> Mapping[int, bool]:
     """ordinal → 是否有帶認證、而且認證沒有被拒絕的請求。"""
     routes = [(operation, parse_route(operation.path)) for operation in operations]
@@ -52,17 +53,22 @@ def observed_operations(
         if exchange.status is None:
             continue
         accepted = exchange.authenticated and exchange.status not in REJECTED_CREDENTIALS
-        for ordinal in _matches(routes, exchange):
+        for ordinal in _matches(routes, exchange, encoding):
             observed[ordinal] = observed.get(ordinal, False) or accepted
     return observed
 
 
-def _matches(routes: list[tuple[FrozenOperation, Route]], exchange: Exchange) -> list[int]:
-    path = parse_route(exchange.path)
+def _matches(
+    routes: list[tuple[FrozenOperation, Route]], exchange: Exchange, encoding: PathEncoding
+) -> list[int]:
+    try:
+        path = parse_request_path(exchange.path, encoding=encoding)
+    except PathAmbiguity:
+        return []
     candidates = [
         (sum(segment is None for segment in route.segments), operation.ordinal)
         for operation, route in routes
-        if operation.method == exchange.method and covers(route, path, lenient=False)
+        if operation.method == exchange.method and covers_request(route, path)
     ]
     if not candidates:
         return []

@@ -14,6 +14,7 @@ from uuid import UUID
 
 import pytest
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.telemetry import (
     MAX_COUNT,
     MAX_EPOCH_SECONDS,
@@ -34,6 +35,7 @@ RUN = UUID("6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b")
 SCAN = UUID("0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d")
 BOOT = UUID("3c4d5e6f-7081-4293-a4b5-c6d7e8f90a1b")
 SUMMARY = RunSummary(
+    policy_version=GuardPolicyVersion.STRICT,
     run_id=RUN,
     scan_id=SCAN,
     boot_id=BOOT,
@@ -66,7 +68,7 @@ def _summary(**overrides: Any) -> bytes:
 @pytest.mark.parametrize(
     "raw",
     [
-        _summary(schema=2),
+        _summary(schema=3),
         _summary(extra=1),
         _summary(forwarded=-1),
         _summary(forwarded=True),

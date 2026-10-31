@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from secscan.core.json_types import JsonObject
 from secscan.grants.schemas import BudgetIn, BudgetOut
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Scan, ScanEvent, ScannerRun
@@ -108,6 +109,8 @@ class GuardTrafficOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     forwarded: int
+    policy_version: GuardPolicyVersion | None = None
+    forwarded_encoded: int | None = None
     denied: dict[str, int]
     exhausted: bool
     first_at: datetime | None
@@ -167,6 +170,7 @@ class EngineRunOut(BaseModel):
     # （§20.2）；沒有建立容器的 run 是 null。
     plan_hash: str | None
     profile_definition_sha256: str | None
+    guard_policy_version: GuardPolicyVersion | None
     # 解析過才有值（fake、preflight 與還沒解析的 run 是 null）。
     result: RunResultOut | None
 
@@ -181,6 +185,7 @@ class EngineRunOut(BaseModel):
             finished_at=run.finished_at,
             plan_hash=run.plan_hash,
             profile_definition_sha256=run.profile_definition_sha256,
+            guard_policy_version=run.guard_policy_version,
             result=RunResultOut.of(run.result) if run.result is not None else None,
         )
 

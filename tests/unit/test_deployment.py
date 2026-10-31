@@ -440,3 +440,26 @@ def test_the_preview_switch_is_gone() -> None:
     """T15 開放 zap 時移除（docs/DECISIONS.md §19.10）：部署的設定不留下這個開關。"""
     assert "PREVIEW_ENGINES" not in (ROOT / "compose.yaml").read_text(encoding="utf-8")
     assert "PREVIEW_ENGINES" not in MAKEFILE
+
+
+def test_guard_policy_experiment_is_only_in_the_dedicated_live_override() -> None:
+    assert SERVICES["runner"]["environment"]["RUNNER_GUARD_POLICY_VERSION"] == "strict-1"
+    override = yaml.safe_load((ROOT / "compose.guard-paths.yaml").read_text())
+    assert override == {
+        "services": {
+            "runner": {
+                "environment": {
+                    "RUNNER_GUARD_POLICY_VERSION": "encoded-params-1",
+                }
+            }
+        }
+    }
+    assert "RUNNER_GUARD_POLICY_VERSION" not in (ROOT / ".env.example").read_text()
+    before, dedicated = MAKEFILE.split("test-live-guard-paths: env", 1)
+    assert "compose.guard-paths.yaml" not in before
+    assert dedicated.count("-f compose.guard-paths.yaml") == 1
+    assert dedicated.index("guard_paths_support drain") < dedicated.index(
+        "-f compose.guard-paths.yaml"
+    )
+    assert "T33_POLICY_PHASE=strict-1" in dedicated
+    assert "T33_POLICY_PHASE=encoded-params-1" in dedicated

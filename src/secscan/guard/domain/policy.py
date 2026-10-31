@@ -1,4 +1,4 @@
-"""runner 寫給 guard 的 policy（docs/DECISIONS.md §15.3）：每個 run 一個檔案，schema 1。
+"""runner 寫給 guard 的 policy（docs/DECISIONS.md §15.3、§21）：每個 run 一個檔案，schema 3。
 
 guard 只依 policy 放行流量，所以格式只有一種寫法：
 - encode_policy：排序的 key、沒有多餘的空白、只有 ASCII。
@@ -14,13 +14,14 @@ from enum import StrEnum
 from uuid import UUID
 
 from secscan.grants.domain.matching import ScopeRules
+from secscan.grants.domain.request_paths import PathEncoding
 from secscan.grants.domain.scope import HttpMethod, InvalidScopeError, Scope
 from secscan.guard.domain.budget import BudgetError, RunBudget
 from secscan.guard.domain.strict import dump_canonical, load_object
 from secscan.targets.domain import InvalidOriginError, Origin, parse_ipv4, parse_origin
 
-# schema 2（T12）：加上這個 run 的預算與認證 header 的名稱。
-POLICY_SCHEMA = 2
+# schema 3（T33）：每個 run 必須明確指定不可變的判斷政策版本。
+POLICY_SCHEMA = 3
 # 最大的 grant（256 個 512 字元的 path 等，§10.9）約 165 KB。
 MAX_POLICY_BYTES = 512 * 1024
 POLICY_SUFFIX = ".json"
@@ -50,6 +51,7 @@ _FIELDS = frozenset(
         "burst",
         "max_requests",
         "auth_header",
+        "policy_version",
     }
 )
 _METHODS = frozenset(method.value for method in HttpMethod)
@@ -58,6 +60,17 @@ _METHODS = frozenset(method.value for method in HttpMethod)
 class PolicyState(StrEnum):
     ACTIVE = "active"
     BLOCKED = "blocked"
+
+
+class GuardPolicyVersion(StrEnum):
+    STRICT = "strict-1"
+    ENCODED_PARAMS = "encoded-params-1"
+
+    @property
+    def encoding(self) -> PathEncoding:
+        if self is GuardPolicyVersion.STRICT:
+            return PathEncoding.REJECT
+        return PathEncoding.ROUTE_PARAMETERS
 
 
 _STATES = frozenset(state.value for state in PolicyState)
@@ -84,8 +97,11 @@ class Policy:
     scope: Scope
     budget: RunBudget
     auth_header: str | None
+    policy_version: GuardPolicyVersion
 
     def __post_init__(self) -> None:
+        if not isinstance(self.policy_version, GuardPolicyVersion):
+            raise PolicyError("policy_version 必須是已知的 GuardPolicyVersion")
         if not isinstance(self.token_sha256, str) or not _TOKEN_DIGEST.fullmatch(self.token_sha256):
             raise PolicyError("token_sha256 必須是 64 個小寫十六進位字元")
         for field in ("not_after", "renew_until"):
@@ -150,6 +166,7 @@ def encode_policy(policy: Policy) -> bytes:
             "burst": policy.budget.burst,
             "max_requests": policy.budget.max_requests,
             "auth_header": policy.auth_header,
+            "policy_version": policy.policy_version.value,
         }
     )
 
@@ -189,6 +206,7 @@ def decode_policy(raw: bytes, *, run_id: UUID) -> Policy:
                 max_requests=document.integer("max_requests"),
             ),
             auth_header=_auth_header(document.raw("auth_header")),
+            policy_version=_policy_version(document.string("policy_version")),
         )
     except (InvalidScopeError, InvalidOriginError, BudgetError) as exc:
         raise PolicyError(f"範圍或預算不合規則：{exc}") from None
@@ -200,6 +218,13 @@ def _auth_header(value: object) -> str | None:
     if not isinstance(value, str):
         raise PolicyError("auth_header 必須是字串或 null")
     return value
+
+
+def _policy_version(value: str) -> GuardPolicyVersion:
+    try:
+        return GuardPolicyVersion(value)
+    except ValueError:
+        raise PolicyError("policy_version 必須是已知的政策版本") from None
 
 
 def _method(value: str) -> HttpMethod:

@@ -25,6 +25,7 @@ from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.policy import (
     MAX_POLICY_BYTES,
     POLICY_SCHEMA,
+    GuardPolicyVersion,
     Policy,
     PolicyError,
     PolicyState,
@@ -70,6 +71,7 @@ def _policy(**overrides: Any) -> Policy:
         "scope": _scope(),
         "budget": RunBudget(requests_per_second=2, burst=1, max_requests=4_000),
         "auth_header": "authorization",
+        "policy_version": GuardPolicyVersion.STRICT,
     }
     values.update(overrides)
     return Policy(**values)
@@ -106,6 +108,7 @@ def test_encodes_the_documented_flat_structure() -> None:
         "burst": 1,
         "max_requests": 4_000,
         "auth_header": "authorization",
+        "policy_version": GuardPolicyVersion.STRICT,
     }
 
 
@@ -246,7 +249,8 @@ def test_policy_must_have_exactly_one_origin() -> None:
         _document(extra=1),
         {key: value for key, value in _document().items() if key != "paths"},
         _document(schema=1),  # T11 的格式：沒有預算，guard 不能接受
-        _document(schema=3),
+        _document(schema=2),  # T12 的格式也缺少政策版本
+        _document(schema=4),
         _document(schema=True),
         _document(schema="1"),
         _document(not_after=True),
@@ -346,5 +350,5 @@ def test_anonymous_scans_have_no_auth_header() -> None:
     assert json.loads(encode_policy(policy))["auth_header"] is None
 
 
-def test_the_schema_is_version_2() -> None:
-    assert POLICY_SCHEMA == 2
+def test_the_schema_is_version_3() -> None:
+    assert POLICY_SCHEMA == 3

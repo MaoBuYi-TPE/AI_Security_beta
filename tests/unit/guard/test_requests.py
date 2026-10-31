@@ -15,6 +15,7 @@ from secscan.grants.domain.scope import HttpMethod, Scope, path_problem
 from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.policy import (
     CompiledPolicy,
+    GuardPolicyVersion,
     Policy,
     PolicyState,
     compile_policy,
@@ -53,6 +54,7 @@ def _compiled(
     )
     return compile_policy(
         Policy(
+            policy_version=GuardPolicyVersion.STRICT,
             run_id=UUID(int=1),
             scan_id=UUID(int=2),
             state=PolicyState.ACTIVE,
@@ -447,7 +449,10 @@ def test_a_passing_request_is_always_inside_the_grant(
 def test_scope_reason_needs_only_the_method_and_the_target(
     method: str, target: str, expected: Reason | None
 ) -> None:
-    assert scope_reason(method, target, _compiled().rules) is expected
+    assert (
+        scope_reason(method, target, _compiled().rules, GuardPolicyVersion.STRICT.encoding)
+        is expected
+    )
 
 
 @given(
@@ -459,4 +464,6 @@ def test_scope_reason_agrees_with_the_full_check(method: str, target: str) -> No
     compiled = _compiled()
     view = _view(method=method, target=target)
 
-    assert scope_reason(method, target, compiled.rules) is request_reason(view, compiled)
+    assert scope_reason(
+        method, target, compiled.rules, GuardPolicyVersion.STRICT.encoding
+    ) is request_reason(view, compiled)

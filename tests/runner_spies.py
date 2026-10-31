@@ -16,7 +16,7 @@ from uuid import UUID
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
-from secscan.guard.domain.policy import Policy, PolicyState
+from secscan.guard.domain.policy import GuardPolicyVersion, Policy, PolicyState
 from secscan.runner.domain.admission import PROXY_FILE, ContainerSpec, build_container
 from secscan.runner.domain.policy import ContainerPolicy
 from secscan.runner.egress import RunEgress
@@ -141,6 +141,7 @@ def abandon(
     assert launch.egress is not None
     egress = RunEgress.open(
         channel,
+        policy_version=GuardPolicyVersion.STRICT,
         lease=lease,
         egress=launch.egress,
         endpoint=ENDPOINT,

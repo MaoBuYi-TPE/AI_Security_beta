@@ -20,7 +20,7 @@ import pytest
 from sqlalchemy import Engine
 
 from secscan.guard.domain.credentials import token_digest
-from secscan.guard.domain.policy import PolicyState
+from secscan.guard.domain.policy import GuardPolicyVersion, PolicyState
 from secscan.runner.domain.admission import PROXY_FILE
 from secscan.runner.domain.runtime import RuntimeUnavailableError
 from secscan.runner.service import ContainerRunner
@@ -111,6 +111,7 @@ def make_runner(
     def factory(**overrides: Any) -> ContainerRunner:
         options: dict[str, Any] = {
             "owner": OWNER,
+            "guard_policy_version": GuardPolicyVersion.STRICT,
             "policy": POLICY,
             "script": FakeScript(hold_seconds=12),
             "cipher": shared_cipher(),
@@ -689,3 +690,55 @@ def test_a_summary_from_another_guard_boot_is_not_trusted(
     report = _report(make_runner())
 
     assert _usage(queue_seed, report.run_id)[1:3] == (None, None)
+
+
+@pytest.mark.parametrize("version", list(GuardPolicyVersion))
+@pytest.mark.parametrize("restored", [False, True])
+def test_policy_drift_during_a_run_blocks_before_stopping(
+    make_runner: Callable[..., ContainerRunner],
+    channel: SpyChannel,
+    guard: GuardDouble,
+    log: list[str],
+    clock: FakeClock,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    version: GuardPolicyVersion,
+    restored: bool,
+    runtime: SpyRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+
+    def drift() -> None:
+        policy = channel.written[0]
+        assert policy.policy_version is version
+        [row] = queue_seed.query(
+            "SELECT guard_policy_version FROM scanner_runs WHERE id = :id", id=policy.run_id
+        )
+        assert row.guard_policy_version == version.value
+        wrong = (
+            GuardPolicyVersion.STRICT
+            if version is GuardPolicyVersion.ENCODED_PARAMS
+            else GuardPolicyVersion.ENCODED_PARAMS
+        )
+        guard.write_summary(policy.run_id, policy.scan_id, forwarded=0, policy_version=wrong)
+
+    remove = runtime.remove
+
+    def remove_and_restore(name: str) -> None:
+        remove(name)
+        if restored:
+            policy = channel.written[0]
+            guard.write_summary(policy.run_id, policy.scan_id, forwarded=0, policy_version=version)
+
+    monkeypatch.setattr(runtime, "remove", remove_and_restore)
+    clock.at(2, drift)
+    report = _report(make_runner(guard_policy_version=version, script=FakeScript(hold_seconds=300)))
+
+    assert report.run_status is R.INTERRUPTED
+    assert _error(queue_seed, report.run_id) == RunErrorCode.GUARD_UNAVAILABLE
+    stopping = without_renewals(log)
+    assert stopping[stopping.index("stop") - 1] == "policy:blocked"
+    assert _usage(queue_seed, report.run_id)[1:3] == (None, None)
+    assert 5 <= _usage(queue_seed, report.run_id)[3] < 30

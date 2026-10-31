@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript
@@ -95,6 +96,7 @@ def make_runner(
             endpoint=ENDPOINT,
             sleep=clock.sleep,
             monotonic=clock.monotonic,
+            guard_policy_version=GuardPolicyVersion.STRICT,
         )
 
     return factory
@@ -119,7 +121,8 @@ def _web_scan(
 
 def _provenance(seed: Seeder, run_id: UUID) -> Any:
     [row] = seed.query(
-        "SELECT status, error_code, plan_hash, profile_definition_sha256 FROM scanner_runs "
+        "SELECT status, error_code, plan_hash, profile_definition_sha256, "
+        "guard_policy_version FROM scanner_runs "
         "WHERE id = :id",
         id=run_id,
     )
@@ -143,6 +146,7 @@ def test_the_runner_records_what_it_executed(
 
     assert report is not None
     row = _provenance(queue_seed, report.run_id)
+    assert row.guard_policy_version == "strict-1"
     assert row.plan_hash is not None
     assert len(row.plan_hash) == 64
     assert row.profile_definition_sha256 == zap_definition_sha256(ScanProfile.WEB_ACTIVE_LAB)
@@ -163,6 +167,7 @@ def test_an_uncollected_run_keeps_its_version(
     assert report is not None
     row = _provenance(queue_seed, report.run_id)
     assert (row.status, row.error_code) == ("failed", "ENGINE_FAILED")
+    assert row.guard_policy_version == "strict-1"
     assert row.plan_hash is not None
     assert row.profile_definition_sha256 is not None
 
@@ -184,6 +189,7 @@ def test_a_run_without_a_container_has_no_plan(
         None,
         None,
     )
+    assert row.guard_policy_version is None
     assert runtime.created == []
 
 
@@ -260,6 +266,7 @@ def test_a_preflight_run_has_a_plan_but_no_profile_definition(
 
     assert preflight is not None
     row = _provenance(queue_seed, preflight.run_id)
+    assert row.guard_policy_version == "strict-1"
     assert row.plan_hash is not None
     assert row.profile_definition_sha256 is None
 
@@ -271,17 +278,29 @@ def test_the_plan_is_recorded_once(queue: ScanQueue, queue_seed: Seeder, world: 
     launch = queue.prepare_launch(lease, image_ref=str(ZAP_IMAGE))
     assert launch.progress.run_status is RunStatus.RUNNING
 
-    queue.record_plan(lease, plan_hash=SHA, profile_definition_sha256=SHA)
+    queue.record_plan(
+        lease,
+        plan_hash=SHA,
+        profile_definition_sha256=SHA,
+        guard_policy_version=GuardPolicyVersion.STRICT,
+    )
 
     with pytest.raises(LeaseLostError):
-        queue.record_plan(lease, plan_hash="cd" * 32, profile_definition_sha256=None)
+        queue.record_plan(
+            lease,
+            plan_hash="cd" * 32,
+            profile_definition_sha256=None,
+            guard_policy_version=GuardPolicyVersion.STRICT,
+        )
     assert _provenance(queue_seed, lease.run_id).plan_hash == SHA
 
 
 # --- DB 約束 -------------------------------------------------------------------------------
 
 SET_PLAN = (
-    "UPDATE scanner_runs SET plan_hash = :plan, profile_definition_sha256 = :definition "
+    "UPDATE scanner_runs SET plan_hash = CAST(:plan AS text), "
+    "profile_definition_sha256 = :definition, "
+    "guard_policy_version = CASE WHEN CAST(:plan AS text) IS NULL THEN NULL ELSE 'strict-1' END "
     "WHERE id = :run"
 )
 
@@ -370,3 +389,167 @@ def test_the_database_keeps_the_first_plan(
             text("UPDATE scanner_runs SET heartbeat_at = heartbeat_at WHERE id = :run"),
             {"run": run_id},
         )
+
+
+@pytest.mark.parametrize("version", [None, "unknown-1"])
+def test_a_new_plan_requires_a_known_policy_in_the_same_update(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    queue_engine: Engine,
+    version: str | None,
+) -> None:
+    run_id = _running(queue, queue_seed, world, ScanEngine.ZAP)
+
+    with Session(queue_engine) as session:
+        error = violation(
+            session,
+            "UPDATE scanner_runs SET plan_hash = :plan, guard_policy_version = :version "
+            "WHERE id = :id",
+            {"plan": SHA, "version": version, "id": run_id},
+        )
+
+    if version is None:
+        assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
+        assert "requires its guard policy version" in str(error)
+    else:
+        assert error.diag.constraint_name == "ck_scanner_runs_guard_policy_version_valid"
+    assert _provenance(queue_seed, run_id).plan_hash is None
+
+
+def test_policy_cannot_exist_without_a_plan(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    queue_engine: Engine,
+) -> None:
+    run_id = _running(queue, queue_seed, world, ScanEngine.ZAP)
+
+    with Session(queue_engine) as session:
+        error = violation(
+            session,
+            "UPDATE scanner_runs SET guard_policy_version = 'strict-1' WHERE id = :id",
+            {"id": run_id},
+        )
+
+    assert error.diag.constraint_name == "ck_scanner_runs_guard_policy_version_valid"
+
+
+@pytest.mark.parametrize("version", [None, "encoded-params-1"])
+def test_policy_only_updates_cannot_bypass_the_plan_trigger(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    queue_engine: Engine,
+    version: str | None,
+) -> None:
+    run_id = _running(queue, queue_seed, world, ScanEngine.ZAP)
+    queue_seed.execute(SET_PLAN, plan=SHA, definition=SHA, run=run_id)
+
+    with Session(queue_engine) as session:
+        error = violation(
+            session,
+            "UPDATE scanner_runs SET guard_policy_version = :version WHERE id = :id",
+            {"version": version, "id": run_id},
+        )
+
+    assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
+    assert _provenance(queue_seed, run_id).guard_policy_version == "strict-1"
+
+
+def test_expired_lease_cannot_record_policy_or_plan(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+) -> None:
+    _web_scan(queue_seed, world)
+    lease = queue.claim(OWNER, ZAP)
+    assert lease is not None
+    queue.prepare_launch(lease, image_ref=str(ZAP_IMAGE))
+    queue_seed.execute(
+        "UPDATE scanner_runs SET lease_expires_at = now() - interval '1 second' WHERE id = :id",
+        id=lease.run_id,
+    )
+
+    with pytest.raises(LeaseLostError):
+        queue.record_plan(
+            lease,
+            plan_hash=SHA,
+            profile_definition_sha256=SHA,
+            guard_policy_version=GuardPolicyVersion.ENCODED_PARAMS,
+        )
+
+    row = _provenance(queue_seed, lease.run_id)
+    assert row.plan_hash is row.guard_policy_version is None
+
+
+def test_migration_preserves_queued_running_and_terminal_history_without_backfill(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    queue_engine: Engine,
+) -> None:
+    from secscan.scans.domain.lifecycle import RunErrorCode
+    from tests.integration.test_migrations import _migrate
+
+    _web_scan(queue_seed, world)
+    lease = queue.claim(OWNER, ZAP)
+    assert lease is not None
+    queue.prepare_launch(lease, image_ref=str(ZAP_IMAGE))
+    queue.record_plan(
+        lease,
+        plan_hash=SHA,
+        profile_definition_sha256=SHA,
+        guard_policy_version=GuardPolicyVersion.STRICT,
+    )
+    queue.advance(lease, RunStatus.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
+    running = _running(queue, queue_seed, world, ScanEngine.ZAP)
+    queue_seed.execute(SET_PLAN, plan=SHA, definition=SHA, run=running)
+    _web_scan(queue_seed, world)  # queued、尚未執行 plan
+    before = queue_seed.query("SELECT id, status, plan_hash FROM scanner_runs ORDER BY id")
+    assert {row.status for row in before} == {"queued", "running", "failed"}
+
+    _migrate(queue_engine, "down", "0011")
+    _migrate(queue_engine, "up", "head")
+
+    after = queue_seed.query("SELECT id, status, plan_hash FROM scanner_runs ORDER BY id")
+    assert after == before
+    assert all(
+        row.guard_policy_version is None
+        for row in queue_seed.query("SELECT guard_policy_version FROM scanner_runs")
+    )
+    with Session(queue_engine) as session:
+        error = violation(
+            session,
+            "UPDATE scanner_runs SET guard_policy_version = 'strict-1' WHERE id = :id",
+            {"id": running},
+        )
+    assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
+    assert queue.result_context(lease).policy_version is GuardPolicyVersion.STRICT
+    _migrate(queue_engine, "down", "0011")
+    _migrate(queue_engine, "up", "head")
+    assert queue_seed.query("SELECT id, status, plan_hash FROM scanner_runs ORDER BY id") == before
+
+
+def test_downgrade_refuses_to_erase_experimental_evidence(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    queue_engine: Engine,
+) -> None:
+    from tests.integration.test_migrations import _migrate
+
+    run_id = _running(queue, queue_seed, world, ScanEngine.ZAP)
+    queue_seed.execute(
+        "UPDATE scanner_runs SET plan_hash = :plan, guard_policy_version = 'encoded-params-1' "
+        "WHERE id = :id",
+        plan=SHA,
+        id=run_id,
+    )
+
+    with pytest.raises(RuntimeError, match="拒絕移除版本證據"):
+        _migrate(queue_engine, "down", "0011")
+
+    assert _provenance(queue_seed, run_id).guard_policy_version == "encoded-params-1"
+    [row] = queue_seed.query("SELECT version_num FROM alembic_version")
+    assert row.version_num == "0012"

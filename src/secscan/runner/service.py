@@ -32,6 +32,7 @@ from secscan.auth_profiles.domain.credentials import (
     masking_values,
 )
 from secscan.auth_profiles.domain.model import StoredSecret
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.runner.domain.admission import (
     AUTH_HEADER_FILE,
     PROXY_FILE,
@@ -162,6 +163,7 @@ class ContainerRunner:
         cipher: SecretCipher | None,
         guard: GuardChannel,
         endpoint: GuardEndpoint,
+        guard_policy_version: GuardPolicyVersion,
         engine_policies: Mapping[Engine, EnginePolicy] = ENGINE_POLICIES,
         stop_requested: Callable[[], bool] = lambda: False,
         on_heartbeat: Callable[[], None] = lambda: None,
@@ -178,6 +180,7 @@ class ContainerRunner:
         self._cipher = cipher
         self._guard = guard
         self._endpoint = endpoint
+        self._guard_policy_version = guard_policy_version
         self._engine_policies = engine_policies
         self._stop_requested = stop_requested
         self._on_heartbeat = on_heartbeat
@@ -227,7 +230,10 @@ class ContainerRunner:
             else None
         )
         self._queue.record_plan(
-            lease, plan_hash=plan_hash(plan), profile_definition_sha256=definition
+            lease,
+            plan_hash=plan_hash(plan),
+            profile_definition_sha256=definition,
+            guard_policy_version=self._guard_policy_version,
         )
 
     def _never_started(self, lease: Lease, error_code: RunErrorCode) -> RunReport:
@@ -310,6 +316,7 @@ class ContainerRunner:
         return RunEgress.open(
             self._guard,
             lease=lease,
+            policy_version=self._guard_policy_version,
             egress=egress,
             endpoint=self._endpoint,
             now=now,
@@ -462,19 +469,30 @@ class ContainerRunner:
         if not self._renewed(attempt, renew_until):
             self._stop(attempt)
             return _Outcome(_Ending.GUARD_LOST)
-        if self._exhausted(attempt):
+        ending = self._telemetry_stop(attempt)
+        if ending is not None:
             self._stop(attempt)
-            return _Outcome(_Ending.BUDGET_EXHAUSTED)
+            return _Outcome(ending)
         return None
 
-    def _exhausted(self, attempt: _Attempt) -> bool:
-        """guard 的 summary 說已轉送到上限。讀不出來時不停止：上限仍由 guard 強制。"""
+    def _telemetry_stop(self, attempt: _Attempt) -> _Ending | None:
+        """可解析的摘要若與本 run 政策不符，先封鎖再停止；預算仍由 guard 強制。"""
         try:
             summary = self._guard.summary(attempt.lease.run_id)
         except GuardUnavailableError as exc:
             logger.warning("讀不到 run %s 的 telemetry（%s）", attempt.lease.run_id, exc)
-            return False
-        return summary is not None and summary.exhausted
+            return None
+        if summary is None:
+            return None
+        if (
+            attempt.egress is None
+            or summary.scan_id != attempt.lease.scan_id
+            or summary.boot_id != attempt.boot_id
+            or summary.policy_version is not attempt.egress.policy.policy_version
+        ):
+            logger.error("run %s 的 telemetry 政策或身分不符：停止", attempt.lease.run_id)
+            return _Ending.GUARD_LOST
+        return _Ending.BUDGET_EXHAUSTED if summary.exhausted else None
 
     def _renewed(self, attempt: _Attempt, renew_until: float) -> bool:
         """guard 仍可用、沒有重啟過（boot_id 相同），而且續約寫得出去。"""
@@ -533,7 +551,7 @@ class ContainerRunner:
             return RunUsage(requests_sent=0, requests_denied=0, traffic_seconds=seconds)
         run_id = attempt.lease.run_id
         unknown = RunUsage(requests_sent=None, requests_denied=None, traffic_seconds=seconds)
-        if not removed:
+        if not removed or outcome.ending is _Ending.GUARD_LOST:
             return unknown
         try:
             summary = self._guard.summary(run_id)
@@ -541,15 +559,13 @@ class ContainerRunner:
             logger.error("讀不到 run %s 的 telemetry（%s）：用量留空", run_id, exc)
             return unknown
         if summary is None:
-            same_guard = (
-                outcome.ending is not _Ending.GUARD_LOST
-                and self._guard.health().boot_id == attempt.boot_id
-            )
+            same_guard = self._guard.health().boot_id == attempt.boot_id
             return RunUsage(0, 0, seconds) if same_guard else unknown
         if (
             summary.scan_id != attempt.lease.scan_id
             or summary.boot_id != attempt.boot_id
             or summary.forwarded > egress.policy.budget.max_requests
+            or summary.policy_version is not egress.policy.policy_version
         ):
             logger.error("run %s 的 telemetry 和 policy 不符：用量留空", run_id)
             return unknown

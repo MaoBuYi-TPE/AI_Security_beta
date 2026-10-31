@@ -13,7 +13,9 @@ import stat
 from pathlib import Path
 from uuid import UUID
 
+from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import MAX_REQUESTS
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.telemetry import (
     MAX_SUMMARY_BYTES,
     MAX_TELEMETRY_LINE_BYTES,
@@ -28,6 +30,7 @@ from secscan.guard.domain.telemetry import (
     telemetry_file_name,
 )
 from secscan.scans.domain.coverage import Exchange
+from secscan.worker.evidence import EvidenceState, TelemetryEvidence, verify_telemetry
 
 # 每個轉送的請求最多兩行（請求與回應）。
 DEFAULT_MAX_BYTES = MAX_REQUESTS * 2 * MAX_TELEMETRY_LINE_BYTES
@@ -41,6 +44,57 @@ class TelemetryReader:
     def __init__(self, directory: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> None:
         self._directory = directory
         self._max_bytes = max_bytes
+
+    def evidence(
+        self,
+        run_id: UUID,
+        *,
+        scan_id: UUID,
+        policy_version: GuardPolicyVersion,
+        requests_sent: int | None,
+        rules: ScopeRules,
+    ) -> TelemetryEvidence:
+        """只讀一次；parser 和 coverage 共用這份結果，錯誤不能化為可信零流量。"""
+        summary = None
+        exchanges = None
+        read_failure: tuple[EvidenceState, str] | None = None
+        try:
+            summary_raw = self._optional_read(summary_file_name(run_id), MAX_SUMMARY_BYTES)
+            if summary_raw is not None:
+                summary = decode_summary(summary_raw, run_id=run_id)
+            raw = self._optional_read(telemetry_file_name(run_id), self._max_bytes)
+            if raw is not None:
+                if raw and not raw.endswith(b"\n"):
+                    raise TelemetryError("telemetry 最後一行不完整")
+                exchanges = _paired(
+                    [decode_line(line) for line in raw.splitlines(keepends=True)],
+                    contiguous=policy_version is GuardPolicyVersion.ENCODED_PARAMS,
+                )
+        except (TelemetryError, RecursionError):
+            read_failure = EvidenceState.INCONSISTENT, "telemetry_invalid"
+        except (OSError, ValueError):
+            read_failure = EvidenceState.MISSING, "telemetry_unreadable"
+        # 即使 JSONL 讀取失敗，也先核對已解析的 summary；不能保存別的 scan 的用量。
+        result = verify_telemetry(
+            run_id=run_id,
+            scan_id=scan_id,
+            policy_version=policy_version,
+            requests_sent=requests_sent,
+            rules=rules,
+            summary=summary,
+            exchanges=exchanges,
+        )
+        if result.state is not EvidenceState.INCONSISTENT and read_failure is not None:
+            result = TelemetryEvidence(read_failure[0], summary, exchanges, read_failure[1])
+        if result.problem is not None:
+            logger.warning("run %s 的 telemetry 無法驗證（%s）", run_id, result.problem)
+        return result
+
+    def _optional_read(self, name: str, maximum: int) -> bytes | None:
+        try:
+            return self._read(name, maximum)
+        except FileNotFoundError:
+            return None
 
     def summary(self, run_id: UUID) -> RunSummary | None:
         """guard 為這個 run 寫的 summary；沒有、讀不到或格式不符是 None。"""
@@ -71,7 +125,7 @@ class TelemetryReader:
             return None
         try:
             records = [decode_line(line) for line in raw.splitlines(keepends=True)]
-            return _paired(records)
+            return _paired(records, contiguous=False)
         except (TelemetryError, RecursionError) as exc:
             logger.warning("run %s 的 telemetry 格式不符（%s）", run_id, type(exc).__name__)
             return None
@@ -93,10 +147,15 @@ class TelemetryReader:
         return b"".join(chunks)
 
 
-def _paired(records: list[TelemetryRecord]) -> tuple[Exchange, ...]:
+def _paired(records: list[TelemetryRecord], *, contiguous: bool) -> tuple[Exchange, ...]:
     requests = [record for record in records if isinstance(record, ForwardedRequest)]
     statuses: dict[int, int] = {}
     known = {request.sequence for request in requests}
+    sequences = [request.sequence for request in requests]
+    if sequences != sorted(known):
+        raise TelemetryError("請求序號重複或倒序")
+    if contiguous and sequences != list(range(1, len(requests) + 1)):
+        raise TelemetryError("實驗版請求序號不完整")
     for record in records:
         if isinstance(record, UpstreamResponse):
             if record.sequence not in known or record.sequence in statuses:

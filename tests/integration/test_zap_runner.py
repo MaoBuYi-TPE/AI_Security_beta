@@ -26,6 +26,7 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.runner.domain.admission import ContainerSpec, managed_run_id
 from secscan.runner.domain.policy import ContainerPolicy
 from secscan.runner.plans import ENGINE_IMAGES
@@ -136,6 +137,7 @@ def make_runner(
             endpoint=ENDPOINT,
             sleep=clock.sleep,
             monotonic=clock.monotonic,
+            guard_policy_version=GuardPolicyVersion.STRICT,
         )
 
     return factory
@@ -590,6 +592,7 @@ def _slow_runner(
         sleep=clock.sleep,
         monotonic=clock.monotonic,
         on_heartbeat=lambda: workspace.beats.append(1),
+        guard_policy_version=GuardPolicyVersion.STRICT,
     )
     return runner, workspace
 

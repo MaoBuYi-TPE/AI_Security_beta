@@ -258,6 +258,8 @@ def test_engine_runs_show_the_guard_traffic() -> None:
     out = _out((zap,), auth=None)
 
     assert out["engines"][0]["result"]["guard_traffic"] == {
+        "policy_version": None,
+        "forwarded_encoded": None,
         "forwarded": 9,
         "denied": {"PATH_AMBIGUOUS": 1},
         "exhausted": False,
@@ -297,3 +299,34 @@ def test_anonymous_scans_never_lose_a_credential() -> None:
     zap = _run(1, Engine.ZAP, result=_zap_result(_lost(lost=True)))
 
     assert _out((zap,), auth=None)["coverage"]["limitations"] == []
+
+
+def test_policy_provenance_is_explicit_but_historical_values_stay_null() -> None:
+    from secscan.guard.domain.policy import GuardPolicyVersion
+
+    runs = (
+        _run(1, Engine.ZAP, guard_policy_version=GuardPolicyVersion.ENCODED_PARAMS),
+        _run(2, Engine.ZAP),
+    )
+
+    out = _out(runs)
+
+    assert out["engines"][0]["guard_policy_version"] == "encoded-params-1"
+    assert out["engines"][1]["guard_policy_version"] is None
+
+
+def test_old_guard_traffic_fields_remain_null_in_the_api() -> None:
+    details = _zap_result(GuardTraffic(forwarded=0)).details
+    details = dict(details)
+    traffic = details["guard_traffic"]
+    assert isinstance(traffic, dict)
+    del traffic["policy_version"]
+    del traffic["forwarded_encoded"]
+    result = _zap_result(GuardTraffic(forwarded=0))
+    from dataclasses import replace
+
+    out = _out((_run(1, Engine.ZAP, result=replace(result, details=details)),))
+
+    traffic = out["engines"][0]["result"]["guard_traffic"]
+    assert traffic["policy_version"] is None
+    assert traffic["forwarded_encoded"] is None

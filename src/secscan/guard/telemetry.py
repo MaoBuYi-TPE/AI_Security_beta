@@ -21,7 +21,7 @@ from pathlib import Path
 from uuid import UUID
 
 from secscan.guard.domain.budget import RunLedger
-from secscan.guard.domain.policy import Policy
+from secscan.guard.domain.policy import GuardPolicyVersion, Policy
 from secscan.guard.domain.requests import Reason
 from secscan.guard.domain.telemetry import (
     ForwardedRequest,
@@ -54,6 +54,7 @@ class _RunRecord:
     """一個 run 在記憶體中的計數（guard 內部、單執行緒；不對外）。"""
 
     scan_id: UUID
+    policy_version: GuardPolicyVersion
     ledger: RunLedger
     maximum: int
     touched: float
@@ -186,6 +187,8 @@ class TelemetryRecorder:
             self._runs[policy.run_id] = record
         elif record.scan_id != policy.scan_id:
             raise TelemetryWriteError("run 的 scan 與之前不同")
+        elif record.policy_version is not policy.policy_version:
+            raise TelemetryWriteError("run 的政策版本與之前不同")
         record.maximum = policy.budget.max_requests
         record.touched = self._clock()
         return record
@@ -195,7 +198,9 @@ class TelemetryRecorder:
         try:
             raw = (self._directory / summary_file_name(policy.run_id)).read_bytes()
         except FileNotFoundError:
-            return _RunRecord(policy.scan_id, RunLedger(), maximum, self._clock())
+            return _RunRecord(
+                policy.scan_id, policy.policy_version, RunLedger(), maximum, self._clock()
+            )
         except OSError as exc:
             raise TelemetryWriteError(f"summary 讀不出來（{reason(exc)}）") from None
         try:
@@ -204,8 +209,11 @@ class TelemetryRecorder:
             raise TelemetryWriteError("summary 損毀") from None
         if summary.scan_id != policy.scan_id:
             raise TelemetryWriteError("summary 屬於別的 scan")
+        if summary.policy_version is not policy.policy_version:
+            raise TelemetryWriteError("summary 的政策版本與 run 不同")
         return _RunRecord(
             scan_id=summary.scan_id,
+            policy_version=summary.policy_version,
             ledger=RunLedger(forwarded=summary.forwarded),
             maximum=maximum,
             touched=self._clock(),
@@ -226,6 +234,7 @@ class TelemetryRecorder:
             scan_id=record.scan_id,
             boot_id=self._boot_id,
             forwarded=record.ledger.forwarded,
+            policy_version=record.policy_version,
             denied=dict(record.denied),
             exhausted=record.ledger.exhausted(maximum=record.maximum),
             first_at=record.first_at,

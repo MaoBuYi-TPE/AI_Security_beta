@@ -7,6 +7,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.requests import Reason
 from secscan.scans.domain.lifecycle import ERROR_REQUIRED_RUN_STATUSES, RunErrorCode, RunStatus
 from secscan.scans.domain.observation import (
@@ -141,6 +142,8 @@ def test_result_details_keep_the_guard_traffic() -> None:
     details = result_details(ParsedRun(parser_version="p/1", outcome=SUCCEEDED, traffic=traffic))
 
     assert details["guard_traffic"] == {
+        "policy_version": None,
+        "forwarded_encoded": None,
         "forwarded": 5,
         "denied": {"PATH_AMBIGUOUS": 2},
         "exhausted": False,
@@ -176,6 +179,8 @@ def test_unverified_traffic_has_no_answers_or_auth_counts() -> None:
     )
 
     assert details["guard_traffic"] == {
+        "policy_version": None,
+        "forwarded_encoded": None,
         "forwarded": 0,
         "denied": {},
         "exhausted": False,
@@ -204,7 +209,9 @@ def test_the_details_stay_small(duplicates: int, truncated: int) -> None:
         excluded=dict.fromkeys(Exclusion, 10**9),
         components=dict.fromkeys((f"addon-{index}" for index in range(9)), "1.44.0"),
         traffic=GuardTraffic(
-            forwarded=10**9,
+            forwarded=10**12,
+            policy_version=GuardPolicyVersion.ENCODED_PARAMS,
+            forwarded_encoded=10**12,
             denied=dict.fromkeys((reason.value for reason in Reason), 10**9),
             exhausted=True,
             first_at=4_102_444_800.123456,

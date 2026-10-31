@@ -8,6 +8,7 @@
 
 import pytest
 
+from secscan.grants.domain.request_paths import PathEncoding
 from secscan.scans.domain.coverage import (
     Exchange,
     FrozenOperation,
@@ -32,17 +33,22 @@ def _exchange(
 def test_requests_map_to_the_matching_operation() -> None:
     exchanges = [_exchange("/items/7"), _exchange("/items", "POST", auth=True)]
 
-    assert observed_operations(OPERATIONS, exchanges) == {0: False, 2: True}
+    assert observed_operations(OPERATIONS, exchanges, encoding=PathEncoding.REJECT) == {
+        0: False,
+        2: True,
+    }
 
 
 def test_the_most_specific_operation_wins() -> None:
-    assert observed_operations(OPERATIONS, [_exchange("/items/special")]) == {1: False}
+    assert observed_operations(
+        OPERATIONS, [_exchange("/items/special")], encoding=PathEncoding.REJECT
+    ) == {1: False}
 
 
 def test_one_authenticated_request_is_enough() -> None:
     exchanges = [_exchange("/items/1"), _exchange("/items/2", auth=True), _exchange("/items/3")]
 
-    assert observed_operations(OPERATIONS, exchanges) == {0: True}
+    assert observed_operations(OPERATIONS, exchanges, encoding=PathEncoding.REJECT) == {0: True}
 
 
 def test_other_methods_paths_and_shapes_do_not_count() -> None:
@@ -54,15 +60,24 @@ def test_other_methods_paths_and_shapes_do_not_count() -> None:
         _exchange("/users/1/orders"),
     ]
 
-    assert observed_operations(OPERATIONS, exchanges) == {}
+    assert observed_operations(OPERATIONS, exchanges, encoding=PathEncoding.REJECT) == {}
 
 
 def test_nested_placeholders_match_one_segment_each() -> None:
-    assert observed_operations(OPERATIONS, [_exchange("/users/1/orders/9")]) == {3: False}
+    assert observed_operations(
+        OPERATIONS, [_exchange("/users/1/orders/9")], encoding=PathEncoding.REJECT
+    ) == {3: False}
 
 
 def test_requests_without_a_response_are_not_coverage() -> None:
-    assert observed_operations(OPERATIONS, [_exchange("/items/7", auth=True, status=None)]) == {}
+    assert (
+        observed_operations(
+            OPERATIONS,
+            [_exchange("/items/7", auth=True, status=None)],
+            encoding=PathEncoding.REJECT,
+        )
+        == {}
+    )
 
 
 def test_rejected_credentials_are_not_authenticated_coverage() -> None:
@@ -72,7 +87,11 @@ def test_rejected_credentials_are_not_authenticated_coverage() -> None:
         _exchange("/users/1/orders/2", auth=True, status=500),
     ]
 
-    assert observed_operations(OPERATIONS, exchanges) == {0: False, 1: False, 3: True}
+    assert observed_operations(OPERATIONS, exchanges, encoding=PathEncoding.REJECT) == {
+        0: False,
+        1: False,
+        3: True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -82,3 +101,19 @@ def test_rejected_credentials_are_not_authenticated_coverage() -> None:
 def test_telemetry_is_complete_within_one_line(lines: int, forwarded: int, complete: bool) -> None:
     """summary 先寫、行後寫（§16.3）：不會比轉送數多，中途失敗時最多少一行。"""
     assert telemetry_complete(range(lines), forwarded=forwarded) is complete
+
+
+@pytest.mark.parametrize("path", ["/items/a%27", "/items/%7Busername%7D", "/items/a%3c"])
+def test_encoded_parameter_data_covers_only_a_parameter_operation(path: str) -> None:
+    assert observed_operations(
+        OPERATIONS, [_exchange(path)], encoding=PathEncoding.ROUTE_PARAMETERS
+    ) == {0: False}
+    assert observed_operations(OPERATIONS, [_exchange(path)], encoding=PathEncoding.REJECT) == {}
+
+
+@pytest.mark.parametrize("path", ["/items/%41", "/items/%252F", "/items/%2F", "/items/{id}"])
+def test_ambiguous_paths_never_count_as_coverage(path: str) -> None:
+    assert (
+        observed_operations(OPERATIONS, [_exchange(path)], encoding=PathEncoding.ROUTE_PARAMETERS)
+        == {}
+    )

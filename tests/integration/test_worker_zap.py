@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.telemetry import (
     ForwardedRequest,
     RunSummary,
@@ -94,7 +95,14 @@ def dirs(tmp_path: Path) -> Dirs:
     return created
 
 
-def _scan(seed: Seeder, world: World, origin: str, *, authenticated: bool = False) -> UUID:
+def _scan(
+    seed: Seeder,
+    world: World,
+    origin: str,
+    *,
+    authenticated: bool = False,
+    paths: tuple[str, ...] = (),
+) -> UUID:
     target = seed.target(world.operator_a, world.project_a.id, origin, kind=TargetKind.WEB)
     profile = seed.auth_profile(world.operator_a, target) if authenticated else None
     grant = seed.approve(
@@ -102,8 +110,8 @@ def _scan(seed: Seeder, world: World, origin: str, *, authenticated: bool = Fals
         seed.grant(
             world.operator_a,
             target,
-            paths=(),
-            allow_all_paths=True,
+            paths=paths,
+            allow_all_paths=not paths,
             excluded_paths=("/admin",),
             methods=("GET", "HEAD"),
         ),
@@ -133,18 +141,27 @@ def _collected(
     denied: dict[str, int] | None = None,
     telemetry: bytes | None = None,
     authenticated: bool = False,
+    policy_version: GuardPolicyVersion | None = None,
+    paths: tuple[str, ...] = (),
 ) -> Lease:
     """一個 zap 的 run 收集好這份 fixture 的輸出（runner 的 workspace 寫的 manifest）。
 
     有 telemetry 的 fixture 另外寫 guard 的 summary（轉送數與 denied 的各原因）。
     """
     log = _entry(scenario, "zap.log")
-    _scan(seed, world, origin or log["target"], authenticated=authenticated)
+    _scan(seed, world, origin or log["target"], authenticated=authenticated, paths=paths)
     if authenticated:
         _collect_preflight(queue)
     lease = queue.claim("runner-1", ZAP)
     assert lease is not None
     queue.prepare_launch(lease, image_ref=str(ZAP_IMAGE))
+    if policy_version is not None:
+        queue.record_plan(
+            lease,
+            plan_hash="a" * 64,
+            profile_definition_sha256=None,
+            guard_policy_version=policy_version,
+        )
     workspace = Workspace(dirs.runs, dirs.secrets)
     workspace.prepare(lease.run_id, (PLAN,))
     out = dirs.runs / str(lease.run_id) / "out"
@@ -159,7 +176,13 @@ def _collected(
     if telemetry is not None:
         (dirs.telemetry / telemetry_file_name(lease.run_id)).write_bytes(telemetry)
         sent = _requests(telemetry)
-        _summary(dirs, lease, forwarded=sent, denied=denied or {})
+        _summary(
+            dirs,
+            lease,
+            forwarded=sent,
+            denied=denied or {},
+            policy_version=policy_version or GuardPolicyVersion.STRICT,
+        )
     queue.record_usage(lease, RunUsage(requests_sent=sent, requests_denied=0, traffic_seconds=1))
     queue.advance(lease, RunStatus.COLLECTING)
     code = exit_code if exit_code is not None else log["exit_code"]
@@ -192,7 +215,14 @@ def _requests(lines: bytes) -> int:
     return sum(1 for line in lines.splitlines() if b'"e":"request"' in line.replace(b" ", b""))
 
 
-def _summary(dirs: Dirs, lease: Lease, *, forwarded: int, denied: dict[str, int]) -> None:
+def _summary(
+    dirs: Dirs,
+    lease: Lease,
+    *,
+    forwarded: int,
+    denied: dict[str, int],
+    policy_version: GuardPolicyVersion = GuardPolicyVersion.STRICT,
+) -> None:
     summary = RunSummary(
         run_id=lease.run_id,
         scan_id=lease.scan_id,
@@ -201,6 +231,7 @@ def _summary(dirs: Dirs, lease: Lease, *, forwarded: int, denied: dict[str, int]
         denied=denied,
         first_at=1_700_000_000.0,
         last_at=1_700_000_100.0,
+        policy_version=policy_version,
     )
     (dirs.telemetry / summary_file_name(lease.run_id)).write_bytes(encode_summary(summary))
 
@@ -525,7 +556,13 @@ def test_a_summary_of_another_scan_is_not_used(
 ) -> None:
     """summary 的 scan_id 要和 lease 相同（T16 的審查）：不同就當成沒有 guard 的紀錄。"""
     lease = _collected(queue, queue_seed, world, dirs, "findings")
-    summary = RunSummary(run_id=lease.run_id, scan_id=UUID(int=7), boot_id=UUID(int=1), forwarded=1)
+    summary = RunSummary(
+        run_id=lease.run_id,
+        scan_id=UUID(int=7),
+        boot_id=UUID(int=1),
+        forwarded=1,
+        policy_version=GuardPolicyVersion.STRICT,
+    )
     (dirs.telemetry / summary_file_name(lease.run_id)).write_bytes(encode_summary(summary))
 
     _worker(queue, dirs).drain()

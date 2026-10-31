@@ -16,6 +16,7 @@ from hypothesis import strategies as st
 
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import HttpMethod, Scope
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.requests import DENY_MESSAGE
 from secscan.guard.domain.telemetry import ForwardedRequest, UpstreamResponse, decode_line
 from secscan.scanners.domain.zap.policy import REQUIRED_ADDONS, ZAP_VERSION
@@ -110,6 +111,8 @@ def _recorded(scenario: str) -> ZapOutput:
         rules=_rules(target),
         forwarded=len(exchanges) if exchanges is not None else 0,
         exchanges=exchanges,
+        policy_version=GuardPolicyVersion.STRICT,
+        telemetry_trusted=True,
     )
 
 
@@ -348,6 +351,8 @@ def test_any_bytes_only_produce_an_outcome(
         rules=_rules(origin),
         forwarded=None,
         exchanges=None,
+        policy_version=GuardPolicyVersion.STRICT,
+        telemetry_trusted=True,
     )
 
     assert interpret(output).outcome == OUTPUT_INVALID
@@ -690,3 +695,47 @@ def test_the_source_index_counts_what_was_excluded() -> None:
     parsed = _findings(change)
 
     assert parsed.observations[0].source_index == 1
+
+
+def test_experimental_output_requires_exact_request_count() -> None:
+    output = _recorded("findings")
+    assert output.exchanges is not None
+    output = replace(
+        output,
+        policy_version=GuardPolicyVersion.ENCODED_PARAMS,
+        exchanges=output.exchanges[:-1],
+    )
+
+    assert not interpret(output).traffic_verified
+
+
+@pytest.mark.parametrize("forwarded", [0, 1])
+def test_inconsistent_evidence_cannot_become_verified_traffic(forwarded: int) -> None:
+    output = replace(_recorded("clean"), forwarded=forwarded, telemetry_trusted=False)
+
+    assert not interpret(output).traffic_verified
+
+
+def test_encoded_answers_only_canonicalize_hex_and_preserve_raw_evidence() -> None:
+    output = _recorded("findings")
+    output = replace(
+        output,
+        policy_version=GuardPolicyVersion.ENCODED_PARAMS,
+        rules=_rules(str(output.origin), paths=("/users/{name}",)),
+        forwarded=1,
+        exchanges=(Exchange("GET", "/users/name%3c", False, 200),),
+    )
+    output = _changed(
+        output, lambda doc: _only(doc).update(uri=f"{output.origin}/users/name%3C", method="GET")
+    )
+
+    parsed = interpret(output)
+
+    assert parsed.traffic_verified
+    assert len(parsed.observations) == 1
+    assert parsed.observations[0].path == "/users/name%3C"
+    assert parsed.parser_version == PARSER_VERSION == "zap-traditional-json/1"
+    different = _changed(
+        output, lambda doc: _instance(doc).update(uri=f"{output.origin}/users/name%27")
+    )
+    assert interpret(different).excluded == {Exclusion.NOT_ANSWERED: 1}

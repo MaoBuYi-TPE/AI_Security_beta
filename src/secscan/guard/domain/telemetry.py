@@ -11,17 +11,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from secscan.grants.domain.scope import HttpMethod, path_problem
+from secscan.grants.domain.request_paths import PathAmbiguity, PathEncoding, parse_request_path
+from secscan.grants.domain.scope import HttpMethod
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.requests import Reason
 from secscan.guard.domain.strict import StrictDocument, dump_canonical, load_object
 
-TELEMETRY_SCHEMA = 1
+TELEMETRY_SCHEMA = 2
 MAX_SUMMARY_BYTES = 64 * 1024
 MAX_TELEMETRY_LINE_BYTES = 2048
 # 讀的一方把時間轉成日期（9999-12-31 之前）、把計數寫進有大小上限的 result_details（T16 的審查）。
 MAX_EPOCH_SECONDS = 253_402_300_799
 MAX_COUNT = 10**12
-_SUMMARY_FIELDS = frozenset(
+_LEGACY_SUMMARY_FIELDS = frozenset(
     {
         "schema",
         "run_id",
@@ -34,6 +36,7 @@ _SUMMARY_FIELDS = frozenset(
         "last_at",
     }
 )
+_SUMMARY_FIELDS = _LEGACY_SUMMARY_FIELDS | {"policy_version"}
 _REQUEST_FIELDS = frozenset({"e", "seq", "t", "method", "path", "auth"})
 _RESPONSE_FIELDS = frozenset({"e", "seq", "t", "status"})
 _REASONS = frozenset(reason.value for reason in Reason)
@@ -58,12 +61,15 @@ class RunSummary:
     scan_id: UUID
     boot_id: UUID
     forwarded: int
+    policy_version: GuardPolicyVersion
     denied: Mapping[str, int] = field(default_factory=dict)
     exhausted: bool = False
     first_at: float | None = None
     last_at: float | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.policy_version, GuardPolicyVersion):
+            raise TelemetryError("policy_version 必須是已知的政策版本")
         if not _count(self.forwarded):
             raise TelemetryError("forwarded 必須是非負整數（有上限）")
         if not all(key in _REASONS and _count(value) for key, value in self.denied.items()):
@@ -81,6 +87,7 @@ def encode_summary(summary: RunSummary) -> bytes:
     return dump_canonical(
         {
             "schema": TELEMETRY_SCHEMA,
+            "policy_version": summary.policy_version.value,
             "run_id": str(summary.run_id),
             "scan_id": str(summary.scan_id),
             "boot_id": str(summary.boot_id),
@@ -94,16 +101,15 @@ def encode_summary(summary: RunSummary) -> bytes:
 
 
 def decode_summary(raw: bytes, *, run_id: UUID) -> RunSummary:
+    schema = _summary_schema(raw)
     document = load_object(
         raw,
-        fields=_SUMMARY_FIELDS,
+        fields=_LEGACY_SUMMARY_FIELDS if schema == 1 else _SUMMARY_FIELDS,
         max_bytes=MAX_SUMMARY_BYTES,
         label="summary",
         error=TelemetryError,
         floats=True,
     )
-    if document.integer("schema") != TELEMETRY_SCHEMA:
-        raise TelemetryError(f"schema 必須是 {TELEMETRY_SCHEMA}")
     if document.uuid("run_id") != run_id:
         raise TelemetryError("run_id 與檔名不同")
     denied = document.raw("denied")
@@ -114,11 +120,33 @@ def decode_summary(raw: bytes, *, run_id: UUID) -> RunSummary:
         scan_id=document.uuid("scan_id"),
         boot_id=document.uuid("boot_id"),
         forwarded=document.integer("forwarded"),
+        policy_version=(GuardPolicyVersion.STRICT if schema == 1 else _summary_version(document)),
         denied=dict(denied),
         exhausted=document.boolean("exhausted"),
         first_at=_optional_time(document.raw("first_at")),
         last_at=_optional_time(document.raw("last_at")),
     )
+
+
+def _summary_schema(raw: bytes) -> int:
+    # 只用來選擇欄位集合，後續 load_object 仍檢查重複鍵、型別與所有值；不寬鬆猜版本。
+    if len(raw) > MAX_SUMMARY_BYTES:
+        raise TelemetryError("summary 太長")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise TelemetryError("summary 不是 UTF-8 的 JSON") from None
+    schema = document.get("schema") if isinstance(document, dict) else None
+    if type(schema) is not int or schema not in {1, TELEMETRY_SCHEMA}:
+        raise TelemetryError("schema 必須是 1 或 2")
+    return schema
+
+
+def _summary_version(document: StrictDocument) -> GuardPolicyVersion:
+    try:
+        return GuardPolicyVersion(document.string("policy_version"))
+    except ValueError:
+        raise TelemetryError("policy_version 必須是已知的政策版本") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,10 +161,21 @@ class ForwardedRequest:
         _check_sequence(self.sequence, self.at)
         if self.method not in _METHODS:
             raise TelemetryError("method 必須是 grant 可以允許的 method")
-        if path_problem(self.path) is not None:
+        if not _request_path_valid(self.path):
             raise TelemetryError("path 必須是合規則、不含 query 的 path")
         if type(self.authenticated) is not bool:
             raise TelemetryError("auth 必須是布林值")
+
+
+def _request_path_valid(path: str) -> bool:
+    # 格式聯集不是授權。worker 必須依凍結的 grant 與該 run 的版本重新驗證每一行。
+    for encoding in PathEncoding:
+        try:
+            parse_request_path(path, encoding=encoding)
+        except PathAmbiguity:
+            continue
+        return True
+    return False
 
 
 @dataclass(frozen=True, slots=True)

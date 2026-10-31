@@ -11,6 +11,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from secscan.core.config import ENV_FILE
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.runner.domain.policy import ContainerPolicy
 from secscan.runner.egress import GuardEndpoint
 from secscan.runner.guard import GuardChannel
@@ -27,6 +28,8 @@ class RunnerSettings(BaseSettings):
         extra="ignore",
         frozen=True,
     )
+
+    guard_policy_version: GuardPolicyVersion = GuardPolicyVersion.STRICT
 
     # Docker 的位址：只接受 tcp://主機:port（socket-proxy）或 unix:///絕對路徑。
     docker_url: str = Field(default="tcp://socket-proxy:2375", min_length=1)

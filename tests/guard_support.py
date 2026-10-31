@@ -9,7 +9,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from secscan.guard.domain.policy import POLICY_SCHEMA, Policy, decode_policy, policy_file_name
+from secscan.guard.domain.policy import (
+    POLICY_SCHEMA,
+    GuardPolicyVersion,
+    Policy,
+    decode_policy,
+    policy_file_name,
+)
 from secscan.guard.domain.status import STATUS_FILE_NAME, GuardStatus, encode_status
 from secscan.guard.domain.telemetry import RunSummary, encode_summary, summary_file_name
 from secscan.guard.files import remove_file, write_atomic
@@ -51,8 +57,10 @@ class GuardDouble:
         denied: dict[str, int] | None = None,
         exhausted: bool = False,
         boot_id: UUID | None = None,
+        policy_version: GuardPolicyVersion = GuardPolicyVersion.STRICT,
     ) -> None:
         summary = RunSummary(
+            policy_version=policy_version,
             run_id=run_id,
             scan_id=scan_id,
             boot_id=boot_id or self.boot_id,

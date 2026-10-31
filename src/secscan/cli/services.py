@@ -11,6 +11,7 @@
 - --once：最多處理一個 run 就結束。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。
 """
 
+import logging
 import os
 import signal
 import threading
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.migrations import head_revision
 from secscan.runner.config import RunnerSettings
 from secscan.runner.docker_runtime import DockerRuntime
@@ -87,6 +89,10 @@ def run_runner(
     once: bool,
     report: Report,
 ) -> int:
+    if runner_settings.guard_policy_version is GuardPolicyVersion.ENCODED_PARAMS:
+        logging.getLogger(__name__).warning(
+            "實驗用 Guard policy encoded-params-1 已啟用；只限隔離 Lab"
+        )
     try:
         runtime = DockerRuntime.connect(runner_settings.docker_url)
     except ValueError as exc:
@@ -146,6 +152,7 @@ def _runner_loop(
             cipher=cipher,
             guard=guard,
             endpoint=runner_settings.guard_endpoint(),
+            guard_policy_version=runner_settings.guard_policy_version,
             stop_requested=stop_requested,
             on_heartbeat=loop.beat,
         )

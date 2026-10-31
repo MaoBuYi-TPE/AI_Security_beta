@@ -19,6 +19,7 @@ from secscan.core.pagination import Page, PageRequest
 from secscan.grants.domain.matching import IneligibleReason
 from secscan.grants.domain.scope import Budget
 from secscan.grants.models import ScopeGrantModel
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import ACTIVE_SCAN_STATUSES, RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import (
@@ -415,6 +416,11 @@ def _run(model: ScannerRunModel) -> ScannerRun:
         result=_result(model),
         plan_hash=model.plan_hash,
         profile_definition_sha256=model.profile_definition_sha256,
+        guard_policy_version=(
+            GuardPolicyVersion(model.guard_policy_version)
+            if model.guard_policy_version is not None
+            else None
+        ),
     )
 
 

@@ -18,7 +18,13 @@ from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard.addon import GuardAddon
 from secscan.guard.domain.budget import RateLimiter, RunBudget
 from secscan.guard.domain.credentials import token_digest
-from secscan.guard.domain.policy import Policy, PolicyState, encode_policy, policy_file_name
+from secscan.guard.domain.policy import (
+    GuardPolicyVersion,
+    Policy,
+    PolicyState,
+    encode_policy,
+    policy_file_name,
+)
 from secscan.guard.events import GuardLog, guard_logger
 from secscan.guard.files import write_atomic
 from secscan.guard.store import PolicyStore
@@ -53,6 +59,7 @@ def make_policy(
     run_id: UUID = RUN_ID,
 ) -> Policy:
     return Policy(
+        policy_version=GuardPolicyVersion.STRICT,
         run_id=run_id,
         scan_id=SCAN_ID,
         state=state,

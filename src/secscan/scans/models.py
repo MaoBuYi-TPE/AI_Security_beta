@@ -373,6 +373,11 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             "AND plan_hash IS NOT NULL)",
             name="profile_definition_valid",
         ),
+        CheckConstraint(
+            "guard_policy_version IS NULL OR (guard_policy_version IN "
+            "('strict-1', 'encoded-params-1') AND plan_hash IS NOT NULL)",
+            name="guard_policy_version_valid",
+        ),
     )
 
     scan_id: Mapped[UUID] = mapped_column(ForeignKey("scans.id", ondelete="RESTRICT"))
@@ -402,6 +407,7 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     result_details: Mapped[JsonObject | None] = mapped_column(JSONB)
     plan_hash: Mapped[str | None] = mapped_column(String(SHA256_BYTES * 2))
     profile_definition_sha256: Mapped[str | None] = mapped_column(String(SHA256_BYTES * 2))
+    guard_policy_version: Mapped[str | None] = mapped_column(String(32))
 
 
 class ScanEventModel(Base):

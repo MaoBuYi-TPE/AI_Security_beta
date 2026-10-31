@@ -12,6 +12,7 @@ from uuid import UUID
 
 import pytest
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.telemetry import (
     MAX_SUMMARY_BYTES,
     ForwardedRequest,
@@ -102,6 +103,7 @@ SUMMARY = RunSummary(
     exhausted=False,
     first_at=1.0,
     last_at=2.0,
+    policy_version=GuardPolicyVersion.STRICT,
 )
 
 
@@ -147,3 +149,90 @@ def test_a_summary_that_is_not_a_regular_file_is_none(tmp_path: Path) -> None:
     (tmp_path / summary_file_name(RUN)).mkdir()
 
     assert TelemetryReader(tmp_path).summary(RUN) is None
+
+
+def test_duplicate_request_sequences_are_not_valid_evidence(tmp_path: Path) -> None:
+    _write(tmp_path, encode_line(REQUEST) + encode_line(REQUEST))
+
+    assert TelemetryReader(tmp_path).exchanges(RUN) is None
+
+
+@pytest.mark.parametrize("broken", ["invalid", "unreadable"])
+def test_foreign_summary_is_not_kept_when_request_log_cannot_be_read(
+    tmp_path: Path,
+    broken: str,
+) -> None:
+    from secscan.grants.domain.matching import ScopeRules
+    from secscan.worker.evidence import EvidenceState
+
+    foreign = RunSummary(
+        RUN, UUID(int=7), UUID(int=1), 37, policy_version=GuardPolicyVersion.STRICT
+    )
+    (tmp_path / summary_file_name(RUN)).write_bytes(encode_summary(foreign))
+    if broken == "invalid":
+        _write(tmp_path, b"invalid\n")
+    else:
+        (tmp_path / telemetry_file_name(RUN)).mkdir()
+
+    result = TelemetryReader(tmp_path).evidence(
+        RUN,
+        scan_id=UUID(int=8),
+        policy_version=GuardPolicyVersion.STRICT,
+        requests_sent=0,
+        rules=ScopeRules(allowed=(), allow_all_paths=True, excluded=(), methods=frozenset({"GET"})),
+    )
+
+    assert result.state is EvidenceState.INCONSISTENT
+    assert result.summary is None
+    assert result.problem == "summary_identity"
+
+
+@pytest.mark.parametrize("sequences", [(2, 1), (7, 9)])
+def test_experimental_request_sequence_must_be_complete_and_in_order(
+    tmp_path: Path,
+    sequences: tuple[int, int],
+) -> None:
+    from secscan.grants.domain.matching import ScopeRules
+    from secscan.worker.evidence import EvidenceState
+
+    summary = RunSummary(
+        RUN, UUID(int=8), UUID(int=1), 2, policy_version=GuardPolicyVersion.ENCODED_PARAMS
+    )
+    (tmp_path / summary_file_name(RUN)).write_bytes(encode_summary(summary))
+    _write(
+        tmp_path,
+        b"".join(encode_line(dataclasses.replace(REQUEST, sequence=seq)) for seq in sequences),
+    )
+    result = TelemetryReader(tmp_path).evidence(
+        RUN,
+        scan_id=UUID(int=8),
+        policy_version=GuardPolicyVersion.ENCODED_PARAMS,
+        requests_sent=2,
+        rules=ScopeRules(allowed=(), allow_all_paths=True, excluded=(), methods=frozenset({"GET"})),
+    )
+
+    assert result.state is EvidenceState.INCONSISTENT
+
+
+def test_legacy_request_sequences_must_also_increase(tmp_path: Path) -> None:
+    _write(tmp_path, encode_line(dataclasses.replace(REQUEST, sequence=2)) + encode_line(REQUEST))
+
+    assert TelemetryReader(tmp_path).exchanges(RUN) is None
+
+
+def test_legacy_resume_can_leave_one_missing_sequence(tmp_path: Path) -> None:
+    from secscan.grants.domain.matching import ScopeRules
+
+    summary = RunSummary(RUN, UUID(int=8), UUID(int=1), 3, policy_version=GuardPolicyVersion.STRICT)
+    (tmp_path / summary_file_name(RUN)).write_bytes(encode_summary(summary))
+    _write(tmp_path, encode_line(REQUEST) + encode_line(dataclasses.replace(REQUEST, sequence=3)))
+
+    result = TelemetryReader(tmp_path).evidence(
+        RUN,
+        scan_id=UUID(int=8),
+        policy_version=GuardPolicyVersion.STRICT,
+        requests_sent=3,
+        rules=ScopeRules(allowed=(), allow_all_paths=True, excluded=(), methods=frozenset({"GET"})),
+    )
+
+    assert result.trusted

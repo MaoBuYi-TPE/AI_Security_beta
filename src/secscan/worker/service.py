@@ -23,6 +23,7 @@ from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from secscan.grants.domain.request_paths import PathEncoding
 from secscan.scanners.domain.preflight import (
     ANONYMOUS_OUTPUT,
     AUTHENTICATED_OUTPUT,
@@ -30,13 +31,14 @@ from secscan.scanners.domain.preflight import (
     evaluate,
 )
 from secscan.scans.domain.catalog import Engine
-from secscan.scans.domain.coverage import observed_operations, telemetry_complete
+from secscan.scans.domain.coverage import observed_operations
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.observation import RunOutcome
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, RunReport, ScanQueue
 from secscan.worker.artifacts import ArtifactReader
+from secscan.worker.evidence import TelemetryEvidence, verify_telemetry
 from secscan.worker.telemetry import TelemetryReader
 from secscan.worker.zap import ZapParser
 
@@ -62,7 +64,7 @@ class Worker:
         self._telemetry = telemetry
         self._engines = engines
         self._monotonic = monotonic
-        self._zap = ZapParser(queue, artifacts, telemetry)
+        self._zap = ZapParser(queue, artifacts)
 
     def drain(
         self,
@@ -104,12 +106,32 @@ class Worker:
 
     def _normalize(self, lease: Lease, keepalive: Callable[[], None]) -> RunReport:
         outcome = RunOutcome(RunStatus.SUCCEEDED)
+        context = self._queue.result_context(lease)
+        evidence = (
+            self._telemetry.evidence(
+                lease.run_id,
+                scan_id=lease.scan_id,
+                policy_version=context.policy_version,
+                requests_sent=context.requests_sent,
+                rules=context.rules,
+            )
+            if self._telemetry is not None
+            else verify_telemetry(
+                run_id=lease.run_id,
+                scan_id=lease.scan_id,
+                policy_version=context.policy_version,
+                requests_sent=context.requests_sent,
+                rules=context.rules,
+                summary=None,
+                exchanges=None,
+            )
+        )
         if lease.engine is Engine.PREFLIGHT:
             self._queue.record_preflight(lease, self._preflight(lease))
         elif lease.engine is Engine.ZAP:
-            outcome = self._zap.parse(lease, keepalive)
+            outcome = self._zap.parse(lease, keepalive, context=context, evidence=evidence)
         keepalive()
-        self._coverage(lease)
+        self._coverage(lease, context.policy_version.encoding, evidence)
         keepalive()
         progress = self._queue.advance(lease, outcome.status, error_code=outcome.error_code)
         return RunReport.of(lease, progress)
@@ -140,19 +162,19 @@ class Worker:
         )
         return evaluate(definition, authenticated, anonymous)
 
-    def _coverage(self, lease: Lease) -> None:
+    def _coverage(self, lease: Lease, encoding: PathEncoding, evidence: TelemetryEvidence) -> None:
         inputs = self._queue.coverage_inputs(lease)
         if inputs.recorded:
             return
-        if lease.engine is Engine.PREFLIGHT or inputs.requests_sent == 0:
+        if not evidence.trusted:
+            return
+        if lease.engine is Engine.PREFLIGHT:
             self._queue.record_coverage(lease, {})
             return
-        if inputs.requests_sent is None or self._telemetry is None:
-            return
-        exchanges = self._telemetry.exchanges(lease.run_id)
-        if exchanges is None or not telemetry_complete(exchanges, forwarded=inputs.requests_sent):
-            return
-        self._queue.record_coverage(lease, observed_operations(inputs.operations, exchanges))
+        self._queue.record_coverage(
+            lease,
+            observed_operations(inputs.operations, evidence.exchanges or (), encoding=encoding),
+        )
 
 
 def _origin(exc: BaseException) -> str:

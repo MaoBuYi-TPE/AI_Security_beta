@@ -14,6 +14,7 @@ COPY src/secscan/core/text.py /opt/secscan-guard/secscan/core/text.py
 COPY src/secscan/grants/__init__.py /opt/secscan-guard/secscan/grants/__init__.py
 COPY src/secscan/grants/domain/__init__.py /opt/secscan-guard/secscan/grants/domain/__init__.py
 COPY src/secscan/grants/domain/matching.py /opt/secscan-guard/secscan/grants/domain/matching.py
+COPY src/secscan/grants/domain/request_paths.py /opt/secscan-guard/secscan/grants/domain/request_paths.py
 COPY src/secscan/grants/domain/scope.py /opt/secscan-guard/secscan/grants/domain/scope.py
 COPY src/secscan/guard/__init__.py /opt/secscan-guard/secscan/guard/__init__.py
 COPY src/secscan/guard/addon.py /opt/secscan-guard/secscan/guard/addon.py

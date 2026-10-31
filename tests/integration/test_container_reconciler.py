@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import Engine, Row
 
-from secscan.guard.domain.policy import Policy, PolicyState
+from secscan.guard.domain.policy import GuardPolicyVersion, Policy, PolicyState
 from secscan.runner.domain.admission import PROXY_FILE, ContainerSpec
 from secscan.runner.domain.runtime import RuntimeUnavailableError
 from secscan.runner.reconciler import ContainerReconciler
@@ -115,6 +115,7 @@ def make_runner(
     def factory(**overrides: Any) -> ContainerRunner:
         options: dict[str, Any] = {
             "owner": "runner-reconciler-2",
+            "guard_policy_version": GuardPolicyVersion.STRICT,
             "policy": POLICY,
             "script": FakeScript(hold_seconds=1),
             "cipher": shared_cipher(),

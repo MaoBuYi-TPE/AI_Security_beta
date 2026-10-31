@@ -233,6 +233,10 @@ def _traffic_details(traffic: GuardTraffic | None) -> JsonValue:
     denied: JsonObject = dict(traffic.denied)
     return {
         "forwarded": traffic.forwarded,
+        "policy_version": (
+            traffic.policy_version.value if traffic.policy_version is not None else None
+        ),
+        "forwarded_encoded": traffic.forwarded_encoded,
         "denied": denied,
         "exhausted": traffic.exhausted,
         "first_at": _utc(traffic.first_at),

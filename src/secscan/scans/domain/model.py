@@ -11,6 +11,7 @@ from uuid import UUID
 from secscan.core.json_types import JsonObject
 from secscan.grants.domain.matching import IneligibleReason
 from secscan.grants.domain.scope import Budget
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.scans.domain.catalog import Engine, PlannedRun, ScanProfile
 from secscan.scans.domain.lifecycle import (
     ERROR_REQUIRED_RUN_STATUSES,
@@ -83,6 +84,7 @@ class ScannerRun:
     # 實際執行的 ExecutionPlan 與 zap 的 profile 定義（§20.2）：runner 建立容器之前寫入。
     plan_hash: str | None = None
     profile_definition_sha256: str | None = None
+    guard_policy_version: GuardPolicyVersion | None = None
 
     def __post_init__(self) -> None:
         if (self.status in ERROR_REQUIRED_RUN_STATUSES) != (self.error_code is not None):

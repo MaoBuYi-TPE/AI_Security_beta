@@ -22,6 +22,7 @@ from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.grants.domain.lifecycle import ScopeGrant
 from secscan.grants.domain.scope import Scope
 from secscan.guard.domain.budget import RunBudget
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.scans.containers import ContainerRecords, PendingContainer
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import (
@@ -445,11 +446,19 @@ class ScanQueue:
             return self._operations(session).heartbeat(lease, clock=self._clock)
 
     def record_plan(
-        self, lease: Lease, *, plan_hash: str, profile_definition_sha256: str | None
+        self,
+        lease: Lease,
+        *,
+        plan_hash: str,
+        profile_definition_sha256: str | None,
+        guard_policy_version: GuardPolicyVersion,
     ) -> None:
         with self._sessions.begin() as session:
             RunRecords(session).record_plan(
-                lease, plan_hash=plan_hash, profile_definition_sha256=profile_definition_sha256
+                lease,
+                plan_hash=plan_hash,
+                profile_definition_sha256=profile_definition_sha256,
+                guard_policy_version=guard_policy_version,
             )
 
     def record_usage(

@@ -33,6 +33,7 @@ from secscan.guard.domain.requests import (
     GUARD_HEADER,
     Reason,
     RequestView,
+    ambiguity_detail,
     canonical_authority,
     header_key,
     request_reason,
@@ -266,7 +267,14 @@ class GuardAddon:
         policy = compiled.policy
         reason = run_state_reason(policy, now=self._clock()) or request_reason(view, compiled)
         if reason is not None:
-            raise _DeniedError(reason, policy=policy)
+            detail = (
+                ambiguity_detail(
+                    view.method, view.target, compiled.rules, policy.policy_version.encoding
+                )
+                if reason is Reason.PATH_AMBIGUOUS
+                else None
+            )
+            raise _DeniedError(reason, policy=policy, detail=detail)
         if self._recorder.pending(policy) >= max_pending(policy.budget):
             raise _DeniedError(Reason.RATE_LIMITED, policy=policy)
         if not self._recorder.reserve(policy):
@@ -286,7 +294,13 @@ class GuardAddon:
             self._release(flow)
             raise
         self._log.decision(
-            allowed=True, reason=None, run_id=policy.run_id, view=view, upstream=str(upstream)
+            allowed=True,
+            reason=None,
+            run_id=policy.run_id,
+            view=view,
+            upstream=str(upstream),
+            policy_version=policy.policy_version,
+            detail="encoded-route-parameter" if "%" in split_target(view.target)[0] else None,
         )
 
     async def _pace(self, policy: Policy) -> None:
@@ -434,6 +448,7 @@ class GuardAddon:
             run_id=denied.run_id,
             view=view,
             detail=denied.detail,
+            policy_version=None if denied.policy is None else denied.policy.policy_version,
         )
 
     def _count_denial(self, denied: _DeniedError) -> None:

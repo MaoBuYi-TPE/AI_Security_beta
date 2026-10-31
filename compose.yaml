@@ -153,6 +153,8 @@ services:
       RUNNER_FAKE_OUTCOME: ${RUNNER_FAKE_OUTCOME:-succeed}
       RUNNER_FAKE_HOLD_SECONDS: ${RUNNER_FAKE_HOLD_SECONDS:-0}
       RUNNER_GUARD_PROXY: ${SECSCAN_GUARD_IP:-10.89.8.254}:8080
+      # T33: only the dedicated isolated live override may enable the experiment.
+      RUNNER_GUARD_POLICY_VERSION: strict-1
     volumes:
       - runs:/runs
       - run_secrets:/run-secrets

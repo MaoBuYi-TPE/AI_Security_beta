@@ -9,7 +9,9 @@
 
 authority 逐字比對（parser differential，SEC-05）：mitmproxy 解出的 host、port、scheme，以及唯一的
 Host header，都必須和 policy 的 canonical origin 相同；大寫、結尾的點、IP 的其他寫法都不放行。
-path 不做正規化：會讓伺服器解讀成別的 path 的寫法（`%`、`;`、`//`、`.`、`..`、反斜線）一律拒絕。
+strict-1 凍結原有規則（path 中 `%`、`;`、`//`、`.`、`..`、反斜線一律拒絕）。
+encoded-params-1 先分段、再解碼白名單內的資料；編碼段只可由同一條 grant route 的佔位授權，
+並以保守的 exclusion-overlap 拒絕可能落入排除路由的請求。轉送的 path 與 query 完全不改寫。
 
 scope_reason 是其中只看 method 與 target 的部分：T15 的 parser 以同一套規則判斷告警的請求是不是
 guard 一定會拒絕的（docs/DECISIONS.md §19.4）。
@@ -23,7 +25,7 @@ from types import MappingProxyType
 from urllib.parse import unquote_plus
 
 from secscan.grants.domain.matching import IneligibleReason, ScopeRules
-from secscan.grants.domain.scope import path_problem
+from secscan.grants.domain.request_paths import PathAmbiguity, PathEncoding, parse_request_path
 from secscan.guard.domain.policy import CompiledPolicy, Policy, PolicyState
 from secscan.targets.domain import DEFAULT_HTTP_PORT, HTTP_SCHEME, Origin
 
@@ -149,13 +151,26 @@ def request_reason(view: RequestView, compiled: CompiledPolicy) -> Reason | None
     )
 
 
-def scope_reason(method: str, target: str, rules: ScopeRules) -> Reason | None:
+def scope_reason(
+    method: str, target: str, rules: ScopeRules, encoding: PathEncoding
+) -> Reason | None:
     """request_reason 中只看 method 與 target 的規則（不看 header 與 authority）。"""
     return (
         _target_shape_reason(method, target)
         or _method_key_reason(target)
-        or _path_reason(method, target, rules)
+        or _path_reason(method, target, rules, encoding)
     )
+
+
+def ambiguity_detail(
+    method: str, target: str, rules: ScopeRules, encoding: PathEncoding
+) -> str | None:
+    """只回固定的歧義細項；呼叫方在對應 PATH_AMBIGUOUS 時記錄，不含請求資料。"""
+    if _target_shape_reason(method, target) is not None:
+        return "syntax"
+    if _method_key_reason(target) is not None:
+        return None
+    return _path_decision(method, target, rules, encoding)[1]
 
 
 def canonical_authority(origin: Origin) -> str:
@@ -221,16 +236,27 @@ def _authority_reason(view: RequestView, origin: Origin) -> Reason | None:
 
 
 def _scope_reason(view: RequestView, compiled: CompiledPolicy) -> Reason | None:
-    return _path_reason(view.method, view.target, compiled.rules)
+    return _path_reason(
+        view.method, view.target, compiled.rules, compiled.policy.policy_version.encoding
+    )
 
 
-def _path_reason(method: str, target: str, rules: ScopeRules) -> Reason | None:
+def _path_reason(
+    method: str, target: str, rules: ScopeRules, encoding: PathEncoding
+) -> Reason | None:
+    return _path_decision(method, target, rules, encoding)[0]
+
+
+def _path_decision(
+    method: str, target: str, rules: ScopeRules, encoding: PathEncoding
+) -> tuple[Reason | None, str | None]:
     path, _ = split_target(target)
-    # 字面的 {x} 會被 parse_route 當成佔位（涵蓋任何一段），所以請求中不接受大括號。
-    if path_problem(path) is not None or "{" in path or "}" in path:
-        return Reason.PATH_AMBIGUOUS
-    ineligible = rules.classify(method=method, path=path)
-    return None if ineligible is None else _SCOPE_REASONS[ineligible]
+    try:
+        request = parse_request_path(path, encoding=encoding)
+        ineligible = rules.classify_request(method=method, path=request)
+    except PathAmbiguity as exc:
+        return Reason.PATH_AMBIGUOUS, exc.detail
+    return (None if ineligible is None else _SCOPE_REASONS[ineligible]), None
 
 
 def _valid_header(name: str, value: str) -> bool:

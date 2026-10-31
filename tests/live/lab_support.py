@@ -100,17 +100,19 @@ def _run(target: Target, image: str, options: list[str], ready: str) -> Target:
     return target
 
 
-def start_juice_shop() -> Target:
+def start_juice_shop(*, host: str | None = None) -> Target:
     """compose.lab.yaml 的 juice-shop：NODE_ENV=unsafe、1 GiB；rootfs 可寫（啟動時寫 SQLite）。"""
-    target = Target(f"{PREFIX}juice-shop", _host("juice"), JUICE_SHOP_IP, JUICE_SHOP_PORT)
+    target = Target(f"{PREFIX}juice-shop", host or _host("juice"), JUICE_SHOP_IP, JUICE_SHOP_PORT)
     options = ["--memory", "1g", "-e", "NODE_ENV=unsafe"]
     return _run(target, lab_image("juice-shop"), options, "/rest/admin/application-version")
 
 
-def start_vampi(*, vulnerable: bool, token_seconds: int = LONG_TOKEN_SECONDS) -> Target:
+def start_vampi(
+    *, vulnerable: bool, token_seconds: int = LONG_TOKEN_SECONDS, host: str | None = None
+) -> Target:
     """compose.lab.yaml 的 vampi：唯讀 rootfs、DB 在 tmpfs、512 MiB；建好之後呼叫 /createdb。"""
     kind = "vampi-vuln" if vulnerable else "vampi-secure"
-    target = Target(f"{PREFIX}{kind}", _host(kind), VAMPI_IP, VAMPI_PORT)
+    target = Target(f"{PREFIX}{kind}", host or _host(kind), VAMPI_IP, VAMPI_PORT)
     options = [
         "--memory",
         "512m",

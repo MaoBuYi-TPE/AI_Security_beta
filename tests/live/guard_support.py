@@ -31,7 +31,9 @@ from pathlib import Path
 from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.guard.domain.budget import RunBudget
 from secscan.guard.domain.credentials import new_token, token_digest
-from secscan.guard.domain.policy import Policy, PolicyState, encode_policy, policy_file_name
+from secscan.guard.domain.policy import (
+    GuardPolicyVersion, Policy, PolicyState, encode_policy, policy_file_name,
+)
 from secscan.guard.files import remove_file, write_atomic
 from secscan.targets.domain import parse_ipv4, parse_origin
 
@@ -45,6 +47,7 @@ if spec["remove"]:
 now = int(time.time())
 token = spec["token"] or new_token()
 policy = Policy(
+    policy_version=GuardPolicyVersion(spec["policy_version"]),
     run_id=run_id,
     scan_id=uuid.uuid4(),
     state=PolicyState(spec["state"]),
@@ -95,6 +98,7 @@ def write_policy(
     rate: int = 2,
     max_requests: int = 1000,
     auth_header: str | None = "authorization",
+    policy_version: str = "strict-1",
 ) -> LivePolicy:
     """在 runner 容器內寫入 policy（runner 的程式、VM 的時鐘）；reuse 時沿用 run_id 與 token。"""
     spec = {
@@ -113,6 +117,7 @@ def write_policy(
         "rate": rate,
         "max_requests": max_requests,
         "auth_header": auth_header,
+        "policy_version": policy_version,
     }
     output = docker(
         "exec",

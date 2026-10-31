@@ -16,6 +16,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import Engine, Row
 from sqlalchemy.orm import Session, sessionmaker
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.runner.domain.admission import (
     AUTH_HEADER_FILE,
     PROXY_FILE,
@@ -108,6 +109,7 @@ def make_runner(
     def factory(**overrides: Any) -> ContainerRunner:
         options: dict[str, Any] = {
             "owner": OWNER,
+            "guard_policy_version": GuardPolicyVersion.STRICT,
             "policy": POLICY,
             "script": FakeScript(hold_seconds=3),
             "cipher": shared_cipher(),
@@ -768,6 +770,7 @@ def test_output_over_the_limits_stops_the_container(
         endpoint=ENDPOINT,
         sleep=clock.sleep,
         monotonic=clock.monotonic,
+        guard_policy_version=GuardPolicyVersion.STRICT,
     )
 
     report = _report(runner)

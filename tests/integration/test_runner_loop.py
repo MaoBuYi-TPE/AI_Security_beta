@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.runner.domain.policy import ContainerPolicy
 from secscan.runner.loop import RunnerLoop
 from secscan.runner.reconciler import ContainerReconciler
@@ -136,6 +137,7 @@ def _runner_loop(
             on_heartbeat=loop.beat,
             sleep=clock.sleep,
             monotonic=clock.monotonic,
+            guard_policy_version=GuardPolicyVersion.STRICT,
         )
     )
     return loop

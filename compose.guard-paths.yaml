@@ -1,0 +1,5 @@
+# T33 only: make test-live-guard-paths drains the strict runner before this override.
+services:
+  runner:
+    environment:
+      RUNNER_GUARD_POLICY_VERSION: encoded-params-1

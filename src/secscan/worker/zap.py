@@ -9,17 +9,15 @@ import logging
 from collections.abc import Callable
 from dataclasses import replace
 
-from secscan.guard.domain.telemetry import RunSummary
 from secscan.scanners.domain.zap.report import MAX_REPORT_BYTES
 from secscan.scanners.domain.zap.results import ZapOutput, interpret
 from secscan.scanners.domain.zap.script import LOG_FILE, REPORT_FILE
-from secscan.scans.domain.coverage import Exchange
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.observation import ArtifactKind, ArtifactRecord, RunOutcome
 from secscan.scans.domain.traffic import guard_traffic
 from secscan.scans.queue import ResultContext, ScanQueue
 from secscan.worker.artifacts import ArtifactReader, RunManifest
-from secscan.worker.telemetry import TelemetryReader
+from secscan.worker.evidence import TelemetryEvidence
 
 # AF 的進度加上 stderr：正常的情況只有幾 KB。
 MAX_LOG_BYTES = 8 * 1024 * 1024
@@ -32,24 +30,26 @@ class ZapParser:
         self,
         queue: ScanQueue,
         artifacts: ArtifactReader | None,
-        telemetry: TelemetryReader | None,
     ) -> None:
         self._queue = queue
         self._artifacts = artifacts
-        self._telemetry = telemetry
 
-    def parse(self, lease: Lease, keepalive: Callable[[], None]) -> RunOutcome:
-        context = self._queue.result_context(lease)
+    def parse(
+        self,
+        lease: Lease,
+        keepalive: Callable[[], None],
+        *,
+        context: ResultContext,
+        evidence: TelemetryEvidence,
+    ) -> RunOutcome:
         if context.stored is not None:
             return context.stored
         manifest = self._artifacts.manifest(lease.run_id) if self._artifacts is not None else None
-        exchanges = summary = None
-        if self._telemetry is not None:
-            exchanges = self._telemetry.exchanges(lease.run_id)
-            summary = _of_scan(self._telemetry.summary(lease.run_id), lease)
-        output = self._output(lease, context, manifest, exchanges)
+        output = self._output(lease, context, manifest, evidence)
         keepalive()
-        traffic = guard_traffic(summary, exchanges, probe=self._probe(lease))
+        traffic = guard_traffic(
+            evidence.summary, evidence.exchanges, probe=self._probe(lease), trusted=evidence.trusted
+        )
         parsed = replace(interpret(output), traffic=traffic)
         keepalive()
         self._queue.record_results(
@@ -71,7 +71,7 @@ class ZapParser:
         lease: Lease,
         context: ResultContext,
         manifest: RunManifest | None,
-        exchanges: tuple[Exchange, ...] | None,
+        evidence: TelemetryEvidence,
     ) -> ZapOutput:
         report = log = None
         if self._artifacts is not None and manifest is not None:
@@ -84,17 +84,11 @@ class ZapParser:
             log=log,
             origin=context.origin,
             rules=context.rules,
+            policy_version=context.policy_version,
             forwarded=context.requests_sent,
-            exchanges=exchanges,
+            exchanges=evidence.exchanges,
+            telemetry_trusted=evidence.trusted,
         )
-
-
-def _of_scan(summary: RunSummary | None, lease: Lease) -> RunSummary | None:
-    """guard 的 summary 屬於這個 scan 才使用（檔名已是 run_id，decode 時比對過）。"""
-    if summary is not None and summary.scan_id != lease.scan_id:
-        logger.warning("run %s 的 summary 屬於其他 scan：不使用", lease.run_id)
-        return None
-    return summary
 
 
 def _records(manifest: RunManifest | None) -> tuple[ArtifactRecord, ...]:

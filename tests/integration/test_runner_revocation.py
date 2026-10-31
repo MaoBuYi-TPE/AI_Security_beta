@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.api_keys.service import ApiKeyService
 from secscan.grants.service import ScopeGrantService
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.runner.fake import FakeRunner
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
@@ -132,6 +133,7 @@ def make_runner(
     def factory(**overrides: Any) -> ContainerRunner:
         options: dict[str, Any] = {
             "owner": OWNER,
+            "guard_policy_version": GuardPolicyVersion.STRICT,
             "policy": POLICY,
             "script": FakeScript(hold_seconds=12),
             "cipher": shared_cipher(),

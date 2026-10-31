@@ -16,6 +16,7 @@ from secscan.auth_profiles.domain.preflight import Preflight
 from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.repository import ScopeGrantRepository
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import FrozenOperation
 from secscan.scans.domain.lifecycle import RunStatus
@@ -89,6 +90,7 @@ class ResultContext:
     rules: ScopeRules
     requests_sent: int | None
     stored: RunOutcome | None
+    policy_version: GuardPolicyVersion
 
 
 class RunRecords:
@@ -136,12 +138,21 @@ class RunRecords:
         )
 
     def record_plan(
-        self, lease: Lease, *, plan_hash: str, profile_definition_sha256: str | None
+        self,
+        lease: Lease,
+        *,
+        plan_hash: str,
+        profile_definition_sha256: str | None,
+        guard_policy_version: GuardPolicyVersion,
     ) -> None:
         """runner 在建立容器之前記下實際執行的內容（§20.2；只能一次）。"""
         self._fenced_update(
             lease,
-            {"plan_hash": plan_hash, "profile_definition_sha256": profile_definition_sha256},
+            {
+                "plan_hash": plan_hash,
+                "profile_definition_sha256": profile_definition_sha256,
+                "guard_policy_version": guard_policy_version.value,
+            },
             ScannerRunModel.plan_hash.is_(None),
             problem="lease 已過期、不屬於這個 runner，或已經記錄過 plan",
         )
@@ -272,6 +283,7 @@ class RunRecords:
                 ScanModel.scope_grant_id,
                 ScannerRunModel.requests_sent,
                 ScannerRunModel.result_details,
+                ScannerRunModel.guard_policy_version,
             )
             .join(ScanModel, ScanModel.id == ScannerRunModel.scan_id)
             .where(ScannerRunModel.id == lease.run_id)
@@ -285,6 +297,11 @@ class RunRecords:
             rules=ScopeRules.of(grant.scope),
             requests_sent=row.requests_sent,
             stored=outcome_from_details(details) if details is not None else None,
+            policy_version=(
+                GuardPolicyVersion(row.guard_policy_version)
+                if row.guard_policy_version is not None
+                else GuardPolicyVersion.STRICT
+            ),
         )
 
     def record_results(

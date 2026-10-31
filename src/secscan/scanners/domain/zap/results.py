@@ -21,6 +21,8 @@ from urllib.parse import unquote_plus
 
 from secscan.core.text import display_text
 from secscan.grants.domain.matching import ScopeRules
+from secscan.grants.domain.request_paths import canonical_path
+from secscan.guard.domain.policy import GuardPolicyVersion
 from secscan.guard.domain.requests import DENY_MESSAGE, scope_reason, split_target
 from secscan.scanners.domain.zap.log import PlanSummary, parse_summary
 from secscan.scanners.domain.zap.policy import REQUIRED_ADDONS
@@ -79,8 +81,11 @@ class ZapOutput:
     log: bytes | None = field(repr=False)
     origin: Origin
     rules: ScopeRules
+    policy_version: GuardPolicyVersion
     forwarded: int | None
     exchanges: tuple[Exchange, ...] | None = field(repr=False)
+    # Worker 的一致性失敗必須覆蓋 forwarded=0 的捷徑。
+    telemetry_trusted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,8 +127,12 @@ def _consistent(exit_code: int | None, summary: PlanSummary) -> bool:
 
 
 def _parsed(output: ZapOutput, report: ZapReport, summary: PlanSummary) -> ParsedRun:
-    answers = _answers(output.forwarded, output.exchanges)
-    collected = _collect(report, output.origin, output.rules, answers)
+    answers = (
+        _answers(output.forwarded, output.exchanges, output.policy_version)
+        if output.telemetry_trusted
+        else None
+    )
+    collected = _collect(report, output.origin, output.rules, answers, output.policy_version)
     outcome = _outcome(summary, answers)
     return ParsedRun(
         parser_version=PARSER_VERSION,
@@ -151,7 +160,11 @@ def _outcome(summary: PlanSummary, answers: _Answers | None) -> RunOutcome:
     return RunOutcome(RunStatus.SUCCEEDED)
 
 
-def _answers(forwarded: int | None, exchanges: tuple[Exchange, ...] | None) -> _Answers | None:
+def _answers(
+    forwarded: int | None,
+    exchanges: tuple[Exchange, ...] | None,
+    policy_version: GuardPolicyVersion,
+) -> _Answers | None:
     """得到上游回應的 (method, path)；None 是沒有依據。
 
     guard 記下轉送 0 個：沒有 telemetry 的檔案也算有依據。轉送數不明或 telemetry 不完整就無法判斷
@@ -161,15 +174,26 @@ def _answers(forwarded: int | None, exchanges: tuple[Exchange, ...] | None) -> _
         return frozenset()
     if forwarded is None or exchanges is None:
         return None
-    if not telemetry_complete(exchanges, forwarded=forwarded):
+    complete = (
+        len(exchanges) == forwarded
+        if policy_version is GuardPolicyVersion.ENCODED_PARAMS
+        else telemetry_complete(exchanges, forwarded=forwarded)
+    )
+    if not complete:
         return None
     return frozenset(
-        (exchange.method, exchange.path) for exchange in exchanges if exchange.status is not None
+        (exchange.method, canonical_path(exchange.path))
+        for exchange in exchanges
+        if exchange.status is not None
     )
 
 
 def _collect(
-    report: ZapReport, origin: Origin, rules: ScopeRules, answers: _Answers | None
+    report: ZapReport,
+    origin: Origin,
+    rules: ScopeRules,
+    answers: _Answers | None,
+    policy_version: GuardPolicyVersion,
 ) -> _Collected:
     observations: list[ObservationInput] = []
     excluded: Counter[Exclusion] = Counter()
@@ -183,7 +207,7 @@ def _collect(
             if target is None:
                 excluded[Exclusion.OUT_OF_SCOPE] += 1
                 continue
-            exclusion = _exclusion(instance, target, rules, answers)
+            exclusion = _exclusion(instance, target, rules, answers, policy_version)
             if exclusion is not None:
                 excluded[exclusion] += 1
                 continue
@@ -213,12 +237,16 @@ def _request_target(uri: str, origin: Origin) -> str | None:
 
 
 def _exclusion(
-    instance: Instance, target: str, rules: ScopeRules, answers: _Answers | None
+    instance: Instance,
+    target: str,
+    rules: ScopeRules,
+    answers: _Answers | None,
+    policy_version: GuardPolicyVersion,
 ) -> Exclusion | None:
-    if scope_reason(instance.method, target, rules) is not None:
+    if scope_reason(instance.method, target, rules, policy_version.encoding) is not None:
         return Exclusion.GUARD_DENIED
     path, _ = split_target(target)
-    if answers is not None and (instance.method, path) not in answers:
+    if answers is not None and (instance.method, canonical_path(path)) not in answers:
         return Exclusion.NOT_ANSWERED
     # 內容是目標控制的：只在沒有 telemetry 可以核對時才看（目標不能藉此隱藏自己的告警）。
     if answers is None and (
