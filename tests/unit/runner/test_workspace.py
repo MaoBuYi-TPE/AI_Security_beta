@@ -417,6 +417,20 @@ def test_unreadable_output_is_rejected(
         target.chmod(0o700)
 
 
+def test_a_file_that_cannot_be_inspected_is_rejected(
+    workspace: Workspace, dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _prepared(workspace, dirs)
+    (out / "a").write_bytes(b"x")
+
+    def broken(descriptor: int) -> os.stat_result:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "fstat", broken)
+
+    assert _rejected(workspace) is ArtifactIssue.UNREADABLE
+
+
 def test_a_file_swapped_after_the_check_is_rejected(
     workspace: Workspace, dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
