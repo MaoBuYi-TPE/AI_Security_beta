@@ -248,12 +248,15 @@ test-live-lab: lab-images test-live-runner
 # Raw evidence is encrypted by the Python harness, including packet captures; the key stays local.
 test-live-guard-paths: env docker-check images lab-images build
 	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }
-	@$(MAKE) --no-print-directory scan-net SCAN_NET=$(LIVE_SCAN_NET) SCAN_SUBNET=$(LIVE_SCAN_SUBNET) \
-		SCAN_IP_RANGE=$(LIVE_SCAN_IP_RANGE)
-	@$(MAKE) --no-print-directory lab-net LAB_NET=$(LIVE_LAB_NET) LAB_SUBNET=$(LIVE_LAB_SUBNET) \
-		LAB_IP_RANGE=$(LIVE_LAB_IP_RANGE)
 	@status=0; \
-		$(LIVE_COMPOSE) up -d --wait db \
+		live_compose_down() { $(LIVE_COMPOSE) down -v --remove-orphans; }; \
+		. tests/live/guard_paths_cleanup.sh; \
+		guard_paths_install_cleanup $(LIVE_SCAN_NET) $(LIVE_LAB_NET); \
+		$(MAKE) --no-print-directory scan-net SCAN_NET=$(LIVE_SCAN_NET) SCAN_SUBNET=$(LIVE_SCAN_SUBNET) \
+			SCAN_IP_RANGE=$(LIVE_SCAN_IP_RANGE) \
+		&& $(MAKE) --no-print-directory lab-net LAB_NET=$(LIVE_LAB_NET) LAB_SUBNET=$(LIVE_LAB_SUBNET) \
+			LAB_IP_RANGE=$(LIVE_LAB_IP_RANGE) \
+		&& $(LIVE_COMPOSE) up -d --wait db \
 		&& DB_PORT=55434 $(UV_RUN) alembic upgrade head >/dev/null \
 		&& $(LIVE_COMPOSE) up -d --wait \
 		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) T33_POLICY_PHASE=strict-1 \
@@ -267,12 +270,4 @@ test-live-guard-paths: env docker-check images lab-images build
 			$(UV_RUN) pytest -m live -p no:cacheprovider -s tests/live/test_guard_paths_live.py \
 		&& $(UV_RUN) python -m tests.live.guard_paths_support drain \
 		|| status=$$?; \
-		captures=$$(docker ps -aq --filter "name=secscan-live-t33-capture-"); \
-		[ -z "$$captures" ] || docker rm -f $$captures >/dev/null; \
-		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
-			ids=$$(docker ps -aq --filter "network=$$net"); \
-			[ -z "$$ids" ] || docker rm -f $$ids >/dev/null; \
-		done; \
-		$(LIVE_COMPOSE) down -v --remove-orphans; \
-		docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
-		exit $$status
+		exit "$$status"

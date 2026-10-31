@@ -75,7 +75,7 @@ def _run(target: Target, image: str, options: list[str], ready: str) -> Target:
     """啟動之後以輔助容器輪詢 ready 的 path 直到 200（Juice Shop 是 distroless，沒有 shell 可以跑
     docker 的 health-cmd）。
     """
-    docker("rm", "-f", target.container, check=False)
+    docker("rm", "-f", "-v", target.container, check=False)
     docker(
         "run",
         "-d",
@@ -133,7 +133,7 @@ def start_vampi(
 
 
 def stop_target(target: Target) -> None:
-    docker("rm", "-f", target.container, check=False)
+    docker("rm", "-f", "-v", target.container, check=False)
 
 
 def lab_call(

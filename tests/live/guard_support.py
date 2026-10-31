@@ -283,7 +283,7 @@ def start_receiver(
     port: int = PORT,
 ) -> Receiver:
     receiver = Receiver(name)
-    docker("rm", "-f", receiver.container, check=False)
+    docker("rm", "-f", "-v", receiver.container, check=False)
     alias_flags = [flag for alias in aliases for flag in ("--network-alias", alias)]
     ip_flags = ["--ip", ip] if ip is not None else []
     docker(
@@ -296,6 +296,8 @@ def start_receiver(
         *ip_flags,
         *alias_flags,
         "--read-only",
+        "--tmpfs",
+        "/home/mitmproxy/.mitmproxy:size=1m,mode=0700",
         "--cap-drop",
         "ALL",
         "--security-opt",
@@ -317,7 +319,7 @@ def start_receiver(
 
 
 def stop_receiver(receiver: Receiver) -> None:
-    docker("rm", "-f", receiver.container, check=False)
+    docker("rm", "-f", "-v", receiver.container, check=False)
 
 
 def reconnect(

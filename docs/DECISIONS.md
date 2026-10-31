@@ -2086,6 +2086,18 @@ Guard allow log 是判定，不等於已轉送；多重集合比較以 committed
 
 實測結果待 T33 正式執行後填入 TOOLS §7.8 與任務交付紀錄，目前不宣稱通過。未證明：一般 proxy 解碼後重組請求、其他 framework 的別名／trim、IIS／Windows 行為、既有 keep-alive／pipelining 收包缺口、body _method。實驗不得用於這些部署。T30 使用的版本與正式啟用由使用者看過證據後決定。
 
+### 21.5 審查後補強與突變檢查
+
+獨立安全審查促成以下保護，均先以失敗案例重現後修正：JSONL 損毀或讀取失敗也先核對 summary 的 run/scan 歸屬；preflight 不得略過不一致的信任狀態；所有 request 序號必須遞增，實驗版還要求完整的 1..forwarded 序列；runner 在心跳看到版本／身分漂移先封鎖再停止，清理期間摘要恢復正常也不能把用量從未知改回已知。migration 降級先取得表的排他鎖再查實驗版紀錄，避免檢查後的新交易寫入被 DROP COLUMN 抹去。Lab 重跑先原子歸檔舊情境目錄，避免覆蓋失敗樣本或混入前次報告。
+
+獨立程式碼審查也補強測試 harness：兩種政策均執行原有邊界語料、編碼越界、基礎設施、redirect 與 DNS 探針，逐筆核對 target 的 path 序列、Host、來源及代理認證遮除，並保留兩個 canary 的收包計數。結束時的正常控制請求必須先確認 canary 仍等於先前基線，才能送出並更新基線；否則晚到的越權請求可能被當成新的基線而漏報。此反例已以離線失敗測試重現並修正，實際零越權收包仍待 live 量測。
+
+清理共用函式在任何一步失敗後仍繼續後續清理；保留原測試非零退出碼，原測試成功但清理失敗也必須非零。`test-live-guard-paths` 在建立 scan/lab network 前安裝 EXIT、SIGINT、SIGTERM trap，讓部分建立失敗也進入清理。離線測試向真正的 shell 與子程序 process group 發送 SIGINT／SIGTERM，核對清理只執行一次、沒有較早失敗時回傳 130／143，並保留較早的失敗碼。receiver、ZAP site 與 capture helper 用 tmpfs 覆蓋 mitmproxy 映像宣告的 `/home/mitmproxy/.mitmproxy` volume；相關容器以 `docker rm -f -v` 刪除，compose 仍以 `down -v --remove-orphans` 清理，避免匿名 volume 遺留。
+
+本輪離線驗證共 139 passed／6.54 秒、退出碼 0；命令與涵蓋範圍見 SECURITY_AND_TESTING 的 T33 紀錄。訊號測試使用真實 process group，但 Docker 操作使用 stub／mock；這些結果不代表實際 Docker volume／network 已清乾淨，也不代表新雙政策 Lab 已通過。T33 仍待正式 live 驗收。
+
+以 `124346e` 的程式在獨立 worktree 執行 22 個語意突變，第一輪 21 個被測試捕獲、1 個存活。存活案例把「非編碼且 raw 等於 literal」改成 decoded 等於 literal：產品原本會拒絕，但測試沒有直接覆蓋 decoded 完全等於 literal 的情況。新增 22 個拒絕案例後，該突變也被捕獲；原始存活紀錄保留於 `docs/evidence/t33/`。跨路由拼接突變另保留尾斜線檢查，確認由拼接本身的反例抓出。這是有目標的安全回歸檢查，不是完整突變分數，也不能取代實際收包證據。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。

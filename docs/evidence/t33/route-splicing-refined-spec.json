@@ -1,0 +1,12 @@
+{
+  "id": "route_authorization_splicing",
+  "file": "src/secscan/grants/domain/matching.py",
+  "old": "if any(covers_request(pattern, path) for pattern in self.allowed):",
+  "new": "if self.allowed and all(\n            any(\n                len(pattern.segments) == len(path.segments)\n                and pattern.trailing_slash == path.trailing_slash\n                and (pattern.segments[index] is None or (\n                    not actual.encoded and pattern.segments[index] == actual.raw\n                ))\n                for pattern in self.allowed\n            )\n            for index, actual in enumerate(path.segments)\n        ):",
+  "tests": [
+    "tests/unit/grants/test_request_paths.py",
+    "tests/unit/guard/test_encoded_paths.py",
+    "tests/contract/test_guard_paths.py"
+  ],
+  "group": "unit"
+}

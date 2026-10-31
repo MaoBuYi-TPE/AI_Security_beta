@@ -114,6 +114,8 @@ class Capture:
                 "--network",
                 f"container:{self.target.container}",
                 "--read-only",
+                "--tmpfs",
+                "/home/mitmproxy/.mitmproxy:size=1m,mode=0700",
                 "--log-driver",
                 "none",
                 "--cap-drop",
@@ -178,7 +180,7 @@ class Capture:
         return received_requests(e for e in events if e["kind"] == "packet")
 
     def cleanup(self) -> None:
-        docker("rm", "-f", self.name, check=False)
+        docker("rm", "-f", "-v", self.name, check=False)
         if self.process is not None:
             self.process.wait(timeout=10)
             if self.process.stderr is not None:
@@ -227,7 +229,7 @@ def route_echo(kind: str) -> Iterator[Target]:
         wait_for(lambda: '"versions"' in docker("logs", name), timeout=20)
         yield target
     finally:
-        docker("rm", "-f", name, check=False)
+        docker("rm", "-f", "-v", name, check=False)
 
 
 def echo_records(target: Target) -> list[dict[str, Any]]:

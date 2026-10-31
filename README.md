@@ -308,7 +308,7 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 
 一般掃描仍使用 `strict-1`，拒絕百分比編碼 path。`encoded-params-1` 只在明確授權路由的參數段接受受控白名單，拒絕編碼分隔符、雙重編碼、控制字元及解析歧義；不改寫轉送路徑。這是鎖定 Flask／Express Lab 的實驗政策，尚未正式啟用。設計、版本限制與驗收門檻見 [T33 實作計劃](docs/T33_IMPLEMENTATION_PLAN.md) 與 [安全決策 §21](docs/DECISIONS.md)。
 
-run 查詢揭露 `guard_policy_version`，流量摘要新增 `policy_version` 與 `forwarded_encoded`；無可信證據時回 null。升級 migration 0012 前先停止認領、排空 run，再一起更新 runner、Guard、worker。有實驗版紀錄時不可降級刪去版本證據。一般 API 不提供政策選擇，普通 compose 固定 strict；專用測試入口為 `ENABLE_LIVE_LAB_TESTS=1 make test-live-guard-paths`。實測結果與尚未證明的要求以 `docs/TASKS.md` 的 T33 交付紀錄為準。
+run 查詢揭露 `guard_policy_version`，流量摘要新增 `policy_version` 與 `forwarded_encoded`。歷史 run 未記版本時 API 保留 null，只在相容解析時按 strict 處理；同身分 summary 的回報版本與轉送數可保留，但無可信逐筆證據時，已驗證的回答／認證數與 `forwarded_encoded` 回 null。strict 保留少最後一行的舊相容規則，不能把 `traffic_verified` 一概視為逐筆完整。升級 migration 0012 前先停止認領、排空 run，再一起更新 runner、Guard、worker。有實驗版紀錄時不可降級刪去版本證據。一般 API 不提供政策選擇，普通 compose 固定 strict；專用測試入口為 `ENABLE_LIVE_LAB_TESTS=1 make test-live-guard-paths`。實測結果與尚未證明的要求以 `docs/TASKS.md` 的 T33 交付紀錄為準。
 
 #### 隔離 lab 靶場（T03）
 

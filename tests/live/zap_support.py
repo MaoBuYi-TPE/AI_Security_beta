@@ -43,7 +43,7 @@ class Site:
 def start_site(name: str, *, ip: str, alias: str, port: int = SITE_PORT) -> Site:
     """port 不是 SITE_PORT 時，target 的 port 沒有人聽（guard 連不上，由 mitmproxy 回 502）。"""
     site = Site(name)
-    docker("rm", "-f", site.container, check=False)
+    docker("rm", "-f", "-v", site.container, check=False)
     docker(
         "run",
         "-d",
@@ -56,6 +56,8 @@ def start_site(name: str, *, ip: str, alias: str, port: int = SITE_PORT) -> Site
         "--network-alias",
         alias,
         "--read-only",
+        "--tmpfs",
+        "/home/mitmproxy/.mitmproxy:size=1m,mode=0700",
         "--cap-drop",
         "ALL",
         "--security-opt",
@@ -77,7 +79,7 @@ def start_site(name: str, *, ip: str, alias: str, port: int = SITE_PORT) -> Site
 
 
 def stop_site(site: Site) -> None:
-    docker("rm", "-f", site.container, check=False)
+    docker("rm", "-f", "-v", site.container, check=False)
 
 
 @dataclass(frozen=True)

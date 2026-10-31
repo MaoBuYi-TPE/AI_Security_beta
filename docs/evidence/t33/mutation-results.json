@@ -1,0 +1,282 @@
+{
+  "source_commit": "124346e132223e593410cf8ef90a222ce7d74019",
+  "results": [
+    {
+      "id": "baseline_db",
+      "exit_code": 0,
+      "seconds": 4.572
+    },
+    {
+      "id": "worker_preflight_trust_shortcut",
+      "file": "src/secscan/worker/service.py",
+      "tests": [
+        "tests/integration/test_worker.py::test_inconsistent_preflight_telemetry_is_not_measured_coverage"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.887,
+      "first_failure": "FAILED tests/integration/test_worker.py::test_inconsistent_preflight_telemetry_is_not_measured_coverage"
+    },
+    {
+      "id": "omit_version_trigger_column",
+      "file": "src/secscan/migrations/versions/v0012_guard_policy_version.py",
+      "tests": [
+        "tests/integration/test_run_provenance.py::test_policy_only_updates_cannot_bypass_the_plan_trigger"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.705,
+      "first_failure": "FAILED tests/integration/test_run_provenance.py::test_policy_only_updates_cannot_bypass_the_plan_trigger[None]"
+    },
+    {
+      "id": "omit_version_trigger_comparison",
+      "file": "src/secscan/migrations/versions/v0012_guard_policy_version.py",
+      "tests": [
+        "tests/integration/test_run_provenance.py::test_policy_only_updates_cannot_bypass_the_plan_trigger"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.726,
+      "first_failure": "FAILED tests/integration/test_run_provenance.py::test_policy_only_updates_cannot_bypass_the_plan_trigger[None]"
+    },
+    {
+      "id": "omit_downgrade_lock",
+      "file": "src/secscan/migrations/versions/v0012_guard_policy_version.py",
+      "tests": [
+        "tests/integration/test_policy_downgrade_race.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.759,
+      "first_failure": "FAILED tests/integration/test_policy_downgrade_race.py::test_downgrade_waits_for_writers_before_checking_policy_evidence"
+    },
+    {
+      "id": "ignore_runner_active_policy_drift",
+      "file": "src/secscan/runner/service.py",
+      "tests": [
+        "tests/integration/test_container_runner_guard.py::test_policy_drift_during_a_run_blocks_before_stopping"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 2.714,
+      "first_failure": "FAILED tests/integration/test_container_runner_guard.py::test_policy_drift_during_a_run_blocks_before_stopping[False-strict-1]",
+      "classification_note": "Manually checked: assertion COLLECTED != INTERRUPTED. Original classifier mistook captured application ERROR log for pytest collection/setup error."
+    },
+    {
+      "id": "baseline_unit",
+      "exit_code": 0,
+      "seconds": 2.82
+    },
+    {
+      "id": "allow_separator",
+      "file": "src/secscan/grants/domain/request_paths.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.416,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_ambiguous_syntax_has_stable_non_sensitive_detail[/a/%2f-encoded-separator]"
+    },
+    {
+      "id": "allow_percent",
+      "file": "src/secscan/grants/domain/request_paths.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.478,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_ambiguous_syntax_has_stable_non_sensitive_detail[/a/%252e-double-encoding]"
+    },
+    {
+      "id": "allow_wildcard",
+      "file": "src/secscan/grants/domain/request_paths.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.426,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_ambiguous_syntax_has_stable_non_sensitive_detail[/a/%2a-encoded-wildcard]"
+    },
+    {
+      "id": "allow_unreserved",
+      "file": "src/secscan/grants/domain/request_paths.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.412,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_ambiguous_syntax_has_stable_non_sensitive_detail[/a/%41-non-canonical]"
+    },
+    {
+      "id": "allow_control",
+      "file": "src/secscan/grants/domain/request_paths.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.373,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_ambiguous_syntax_has_stable_non_sensitive_detail[/a/%00-encoded-control]"
+    },
+    {
+      "id": "dot_plus_segment",
+      "file": "src/secscan/grants/domain/request_paths.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.396,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_ambiguous_syntax_has_stable_non_sensitive_detail[/a/..+-dot-segment]"
+    },
+    {
+      "id": "encoded_literal_decoded_match",
+      "file": "src/secscan/grants/domain/matching.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "survived",
+      "exit_code": 0,
+      "seconds": 1.704,
+      "first_failure": null
+    },
+    {
+      "id": "route_authorization_splicing",
+      "file": "src/secscan/grants/domain/matching.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.453,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_request_authorization_and_whole_route_exclusions[allowed2-excluded2-/a/name%27/-PATH_NOT_AUTHORIZED-None]"
+    },
+    {
+      "id": "ignore_exclusion_overlap",
+      "file": "src/secscan/grants/domain/matching.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.43,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_request_authorization_and_whole_route_exclusions[allowed5-excluded5-/a/b%20/c%20-None-exclusion-overlap]"
+    },
+    {
+      "id": "allow_all_encoded",
+      "file": "src/secscan/grants/domain/matching.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.641,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_request_authorization_and_whole_route_exclusions[allowed10-excluded10-/a/name%27-None-no-route-parameter]"
+    },
+    {
+      "id": "omit_hex_canonical",
+      "file": "src/secscan/grants/domain/request_paths.py",
+      "tests": [
+        "tests/unit/grants/test_request_paths.py",
+        "tests/unit/guard/test_encoded_paths.py",
+        "tests/contract/test_guard_paths.py",
+        "tests/unit/scanners/zap/test_results.py",
+        "tests/unit/scans/test_traffic.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 2.565,
+      "first_failure": "FAILED tests/unit/grants/test_request_paths.py::test_canonical_path_only_changes_hex_case"
+    },
+    {
+      "id": "default_experimental",
+      "file": "src/secscan/runner/config.py",
+      "tests": [
+        "tests/unit/runner/test_policy_version.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.492,
+      "first_failure": "FAILED tests/unit/runner/test_policy_version.py::test_policy_version_defaults_to_strict"
+    },
+    {
+      "id": "ignore_guard_memory_version",
+      "file": "src/secscan/guard/telemetry.py",
+      "tests": [
+        "tests/unit/guard/test_encoded_paths.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.347,
+      "first_failure": "FAILED tests/unit/guard/test_encoded_paths.py::test_same_run_cannot_mix_policy_versions[False]"
+    },
+    {
+      "id": "ignore_worker_summary_version",
+      "file": "src/secscan/worker/evidence.py",
+      "tests": [
+        "tests/unit/worker/test_evidence.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.226,
+      "first_failure": "FAILED tests/unit/worker/test_evidence.py::test_wrong_policy_is_not_hidden_by_zero_requests[0]"
+    },
+    {
+      "id": "trust_zero_before_consistency",
+      "file": "src/secscan/worker/evidence.py",
+      "tests": [
+        "tests/unit/worker/test_evidence.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.27,
+      "first_failure": "FAILED tests/unit/worker/test_evidence.py::test_wrong_policy_is_not_hidden_by_zero_requests[0]"
+    },
+    {
+      "id": "parser_ignores_trust",
+      "file": "src/secscan/scanners/domain/zap/results.py",
+      "tests": [
+        "tests/unit/scanners/zap/test_results.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 2.01,
+      "first_failure": "FAILED tests/unit/scanners/zap/test_results.py::test_inconsistent_evidence_cannot_become_verified_traffic[0]"
+    },
+    {
+      "id": "allow_experimental_sequence_gap",
+      "file": "src/secscan/worker/telemetry.py",
+      "tests": [
+        "tests/unit/worker/test_telemetry_reader.py"
+      ],
+      "classification": "killed",
+      "exit_code": 1,
+      "seconds": 1.223,
+      "first_failure": "FAILED tests/unit/worker/test_telemetry_reader.py::test_experimental_request_sequence_must_be_complete_and_in_order[sequences1]"
+    }
+  ]
+}

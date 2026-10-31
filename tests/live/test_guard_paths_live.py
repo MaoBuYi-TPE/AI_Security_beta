@@ -12,6 +12,7 @@ import pytest
 
 from secscan.grants.domain.request_paths import canonical_path
 from tests.guard_path_cases import PATH_CASES
+from tests.live.guard_paths_regression import boundary_probes
 from tests.live.guard_paths_support import (
     Capture,
     EvidenceStore,
@@ -425,6 +426,7 @@ def test_guard_paths_phase() -> None:
     admin = Api(admin_key())
     wait_for_zap(admin)
     drained()
+    boundary_probes(version)
     _echo_probes(version)
     for vulnerable in [True] if version == STRICT else [True, False]:
         target = start_vampi(vulnerable=vulnerable, host="lab-t33-vampi")

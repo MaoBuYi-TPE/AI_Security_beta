@@ -177,8 +177,23 @@ T33 測試矩陣（實作中，通過狀態以 TASKS 交付紀錄及 TOOLS §7.8
 | 跨元件 | telemetry 原始編碼不變；Guard/parser 同版判定；coverage 對應 literal 資料；hex canonical 配對與 auth health；舊 fixture 不改 |
 | 性質與反例 | 所有放行有同一路由授權、分段與尾斜線不變、bytes 範圍全覆蓋；非 Lab 的副檔名剝除反例明確保留 |
 | SEC-08 收包 | 固定拒絕語料 target/canary 收包為零，前後正常請求證明紀錄器活著；重複次數保留，不以集合掩蓋多送 |
+| harness 清理 | 原測試失敗碼保留；清理失敗不能回報成功；network 建立前安裝 trap；SIGINT／SIGTERM 也清理；映像匿名 volume 不遺留 |
 
-新增 T33-VA-01：VAmPI 弱點版 `/users/v1/{username}` 的 `%27` 到達靶機，ZAP SQLi 經相同政策解析入庫；安全版為負例。Juice Shop 保留搜尋 SQLi 對照，另使用真實參數路由。以上是驗收條件，不能以舊 T16 的量測替代。
+本輪 harness 審查補強（離線已驗證，正式 live 待量測）：
+
+- **晚到的 canary 收包**：兩政策的邊界測試保留 target 請求順序及重複次數，並核對兩個 canary 的計數。最後控制請求在送出前先比對既有基線；若多了一筆延遲到達的越權請求，立即失敗，不能更新基線將其吸收。離線反例確認未送出控制請求、原基線未變。
+- **退出碼與訊號**：`guard_paths_cleanup.sh` 的 Docker stub 覆蓋各清理步驟失敗及多重失敗，確認繼續清理並保留原錯誤；原測試成功時，任何清理錯誤都使整體失敗。測試實際啟動 shell 與等待中的子程序，向其 process group 發送 SIGINT／SIGTERM，確認清理恰執行一次，無較早錯誤時分別回傳 130／143。Makefile 順序檢查確認 trap 在 scan/lab network 建立前安裝；這項檢查不等同實際 Docker 建網失敗演練。
+- **匿名 volume**：receiver、ZAP site、capture helper 以 tmpfs 覆蓋 mitmproxy 映像的 `/home/mitmproxy/.mitmproxy` volume；相關容器刪除加上 `-v`，compose 保留 `down -v --remove-orphans`。receiver／site 的 mock 測試先重現缺少 tmpfs／`-v` 的失敗，再確認修正；實際容器、volume 與 network 殘留仍須於 live 結束後核對。
+
+2026-11-01 執行下列離線檢查，結果 **139 passed／6.54 秒，退出碼 0**；包含清理與訊號 28 例、late-canary 1 例、helper storage 2 例，以及 RequestPath 回歸。Docker 呼叫均為 stub／mock，未執行 Docker：
+
+```sh
+.venv/bin/python -m pytest tests/unit/test_guard_paths_cleanup.py tests/unit/test_guard_paths_regression.py tests/unit/test_live_helper_storage.py tests/unit/grants/test_request_paths.py -q
+```
+
+上述結果只證明離線斷言通過，不作為雙政策實際收包、真實 ZAP 結果或 T33 完成的證明。
+
+新增 T33-VA-01：VAmPI 弱點版 `/users/v1/{username}` 的 `%27` 到達靶機，記錄 ZAP 是否產生 SQLi 及同政策解析結果；未命中時須查明 Guard／parser／ZAP／目標原因，不能為命中放寬安全規則。安全版為負例。Juice Shop 保留搜尋 SQLi 對照，另使用真實參數路由。以上是驗收條件，不能以舊 T16 的量測替代。
 
 URL 模型分成鎖定 Flask/Werkzeug、Express 的驗收與其他解析模式的探索。`/a/admin.json/%27` 在副檔名剝除模型可能命中 excluded `/a/admin/{id}`；這是限制案例，不是所有模型安全的測試。Guard allow log 發生在 commit/forward 前，量測須比對 committed telemetry 與獨立靶機入口紀錄。原始 request-target/header/body 證據只保存受限加密檔，公開衍生摘要須先檢查秘密。完整 TCP 位元組等同性、其他代理、keep-alive/pipelining 安全矩陣與 body `_method` 未因本次 path 放寬而自動獲證明。
 

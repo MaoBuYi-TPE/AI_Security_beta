@@ -1,0 +1,21 @@
+{
+  "source_commit": "124346e132223e593410cf8ef90a222ce7d74019",
+  "added_test_sha256": "0b47070714aea2e23095bd00891d002c48c00445b88cda689c88063e422d3aaa",
+  "baseline": {
+    "passed": 200,
+    "pytest_seconds": 0.67
+  },
+  "encoded_literal_decoded_match": {
+    "initial": "survived",
+    "followup": "killed",
+    "failed": 1,
+    "passed_before_maxfail": 72,
+    "regression_cases_added": 22
+  },
+  "route_authorization_splicing_refined": {
+    "classification": "killed",
+    "failed": 1,
+    "passed_before_maxfail": 9,
+    "counterexample": "/a/b%27/c%27"
+  }
+}

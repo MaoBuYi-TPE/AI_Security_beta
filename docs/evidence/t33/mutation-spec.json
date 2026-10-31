@@ -1,0 +1,246 @@
+[
+  {
+    "id": "allow_separator",
+    "file": "src/secscan/grants/domain/request_paths.py",
+    "old": "        raise PathAmbiguity(\"encoded-separator\")",
+    "new": "        return character",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "allow_percent",
+    "file": "src/secscan/grants/domain/request_paths.py",
+    "old": "        raise PathAmbiguity(\"double-encoding\")",
+    "new": "        return character",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "allow_wildcard",
+    "file": "src/secscan/grants/domain/request_paths.py",
+    "old": "        raise PathAmbiguity(\"encoded-wildcard\")",
+    "new": "        return character",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "allow_unreserved",
+    "file": "src/secscan/grants/domain/request_paths.py",
+    "old": "        raise PathAmbiguity(\"non-canonical\")",
+    "new": "        return character",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "allow_control",
+    "file": "src/secscan/grants/domain/request_paths.py",
+    "old": "        raise PathAmbiguity(\"encoded-control\")",
+    "new": "        return character",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "dot_plus_segment",
+    "file": "src/secscan/grants/domain/request_paths.py",
+    "old": "if encoding is PathEncoding.ROUTE_PARAMETERS and set(value) <= {\".\", \" \", \"+\"}:",
+    "new": "if False:",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "encoded_literal_decoded_match",
+    "file": "src/secscan/grants/domain/matching.py",
+    "old": "expected is None or (not actual.encoded and expected == actual.raw)",
+    "new": "expected is None or expected == actual.decoded",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "route_authorization_splicing",
+    "file": "src/secscan/grants/domain/matching.py",
+    "old": "if any(covers_request(pattern, path) for pattern in self.allowed):",
+    "new": "if self.allowed and all(\n            any(\n                len(pattern.segments) == len(path.segments)\n                and (pattern.segments[index] is None or (\n                    not actual.encoded and pattern.segments[index] == actual.raw\n                ))\n                for pattern in self.allowed\n            )\n            for index, actual in enumerate(path.segments)\n        ):",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "ignore_exclusion_overlap",
+    "file": "src/secscan/grants/domain/matching.py",
+    "old": "expected is None or actual.encoded or expected.lower() == actual.raw.lower()",
+    "new": "expected is None or expected.lower() == actual.raw.lower()",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "allow_all_encoded",
+    "file": "src/secscan/grants/domain/matching.py",
+    "old": "if path.encoded:",
+    "new": "if False and path.encoded:",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "omit_hex_canonical",
+    "file": "src/secscan/grants/domain/request_paths.py",
+    "old": "return _TRIPLET.sub(lambda match: match[0].upper(), path)",
+    "new": "return path",
+    "tests": [
+      "tests/unit/grants/test_request_paths.py",
+      "tests/unit/guard/test_encoded_paths.py",
+      "tests/contract/test_guard_paths.py",
+      "tests/unit/scanners/zap/test_results.py",
+      "tests/unit/scans/test_traffic.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "default_experimental",
+    "file": "src/secscan/runner/config.py",
+    "old": "guard_policy_version: GuardPolicyVersion = GuardPolicyVersion.STRICT",
+    "new": "guard_policy_version: GuardPolicyVersion = GuardPolicyVersion.ENCODED_PARAMS",
+    "tests": [
+      "tests/unit/runner/test_policy_version.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "ignore_guard_memory_version",
+    "file": "src/secscan/guard/telemetry.py",
+    "old": "elif record.policy_version is not policy.policy_version:",
+    "new": "elif False and record.policy_version is not policy.policy_version:",
+    "tests": [
+      "tests/unit/guard/test_encoded_paths.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "ignore_worker_summary_version",
+    "file": "src/secscan/worker/evidence.py",
+    "old": "if summary.policy_version is not version:",
+    "new": "if False and summary.policy_version is not version:",
+    "tests": [
+      "tests/unit/worker/test_evidence.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "trust_zero_before_consistency",
+    "file": "src/secscan/worker/evidence.py",
+    "old": "    problem = _inconsistency(",
+    "new": "    if requests_sent == 0:\n        return TelemetryEvidence(EvidenceState.TRUSTED, summary, ())\n    problem = _inconsistency(",
+    "tests": [
+      "tests/unit/worker/test_evidence.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "parser_ignores_trust",
+    "file": "src/secscan/scanners/domain/zap/results.py",
+    "old": "if output.telemetry_trusted",
+    "new": "if True",
+    "tests": [
+      "tests/unit/scanners/zap/test_results.py"
+    ],
+    "group": "unit"
+  },
+  {
+    "id": "worker_preflight_trust_shortcut",
+    "file": "src/secscan/worker/service.py",
+    "old": "        if not evidence.trusted:\n            return\n        if lease.engine is Engine.PREFLIGHT:\n            self._queue.record_coverage(lease, {})\n            return",
+    "new": "        if lease.engine is Engine.PREFLIGHT:\n            self._queue.record_coverage(lease, {})\n            return\n        if not evidence.trusted:\n            return",
+    "tests": [
+      "tests/integration/test_worker.py::test_inconsistent_preflight_telemetry_is_not_measured_coverage"
+    ],
+    "group": "db"
+  },
+  {
+    "id": "omit_version_trigger_column",
+    "file": "src/secscan/migrations/versions/v0012_guard_policy_version.py",
+    "old": "columns += \", guard_policy_version\"",
+    "new": "columns += \"\"",
+    "tests": [
+      "tests/integration/test_run_provenance.py::test_policy_only_updates_cannot_bypass_the_plan_trigger"
+    ],
+    "group": "db"
+  },
+  {
+    "id": "omit_version_trigger_comparison",
+    "file": "src/secscan/migrations/versions/v0012_guard_policy_version.py",
+    "old": "        OR NEW.guard_policy_version IS DISTINCT FROM OLD.guard_policy_version\n",
+    "new": "",
+    "tests": [
+      "tests/integration/test_run_provenance.py::test_policy_only_updates_cannot_bypass_the_plan_trigger"
+    ],
+    "group": "db"
+  },
+  {
+    "id": "omit_downgrade_lock",
+    "file": "src/secscan/migrations/versions/v0012_guard_policy_version.py",
+    "old": "    op.execute(\"LOCK TABLE scanner_runs IN ACCESS EXCLUSIVE MODE\")\n",
+    "new": "",
+    "tests": [
+      "tests/integration/test_policy_downgrade_race.py"
+    ],
+    "group": "db"
+  },
+  {
+    "id": "ignore_runner_active_policy_drift",
+    "file": "src/secscan/runner/service.py",
+    "old": "            or summary.policy_version is not attempt.egress.policy.policy_version\n",
+    "new": "",
+    "tests": [
+      "tests/integration/test_container_runner_guard.py::test_policy_drift_during_a_run_blocks_before_stopping"
+    ],
+    "group": "db"
+  },
+  {
+    "id": "allow_experimental_sequence_gap",
+    "file": "src/secscan/worker/telemetry.py",
+    "old": "if contiguous and sequences != list(range(1, len(requests) + 1)):",
+    "new": "if False and contiguous and sequences != list(range(1, len(requests) + 1)):",
+    "tests": [
+      "tests/unit/worker/test_telemetry_reader.py"
+    ],
+    "group": "unit"
+  }
+]

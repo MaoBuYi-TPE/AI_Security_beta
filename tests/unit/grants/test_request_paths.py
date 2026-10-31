@@ -107,6 +107,33 @@ def test_encoded_braces_are_never_a_declaration_placeholder() -> None:
     assert not covers_request(parse_route("/a/x"), path)
 
 
+@pytest.mark.parametrize("character", "!$&'()+,=:@")
+@pytest.mark.parametrize("placement", ["final-literal", "literal-before-parameter"])
+def test_encoding_cannot_stand_in_for_an_equal_authorized_literal(
+    character: str, placement: str
+) -> None:
+    """突變測試的缺口：解碼值即使完全等於 literal，也沒有參數授權。"""
+    if placement == "final-literal":
+        declaration = plain = f"/a/name{character}"
+        encoded = f"/a/name%{ord(character):02X}"
+    else:
+        declaration = f"/a{character}/{{id}}"
+        plain = f"/a{character}/x"
+        encoded = f"/a%{ord(character):02X}/x"
+    rules = ScopeRules.of(_scope(paths=(declaration,)))
+    request = parse_request_path(encoded, encoding=ENCODED)
+
+    assert "/" + "/".join(segment.decoded for segment in request.segments) == plain
+    assert not covers_request(parse_route(declaration), request)
+    assert (
+        rules.classify_request(method="GET", path=request) is IneligibleReason.PATH_NOT_AUTHORIZED
+    )
+    assert (
+        rules.classify_request(method="GET", path=parse_request_path(plain, encoding=ENCODED))
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     ("allowed", "excluded", "path", "reason", "detail"),
     [
