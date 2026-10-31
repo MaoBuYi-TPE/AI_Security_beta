@@ -1,13 +1,12 @@
 """ZAP 的 live 測試的共用工具（docs/DECISIONS.md §18.10；make test-live-zap）。
 
 - 小型網站（zap_site.py）與 canary（receiver.py）只接在 live 自己的 lab 網路上。
-- zap 在 T15 才開放：live 的 API 以 SCAN_PREVIEW_ENGINES=zap 啟動（Makefile 的
-  SECSCAN_LIVE_PREVIEW_ENGINES）。zap 的 run 停在 collected（worker 還不解析），所以每個情境用新的
-  project 與 target，以 run 的狀態判斷。
+- 每個情境用新的 project 與 target，以 run 的狀態判斷。
 - runs volume 以唯讀的輔助容器讀取（manifest、報告、zap.log）；runner 不在宿主上。
 """
 
 import json
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -121,9 +120,19 @@ class Lab:
         [engine] = [engine for engine in engines if engine["engine"] == "zap"]
         return dict(engine)
 
+    def scan_status(self, scan_id: str) -> str:
+        return str(self.operator.data("GET", f"/scans/{scan_id}")["status"])
+
+    def observations(self, scan_id: str) -> list[dict[str, Any]]:
+        status, payload = self.operator.call(
+            "GET", f"/scans/{scan_id}/observations?engine=zap&limit=100"
+        )
+        assert status == 200, payload
+        return list(payload["data"])
+
     def finished_zap(self, scan_id: str, *, timeout: float = RUN_TIMEOUT) -> dict[str, Any]:
-        """等 zap 的 run 不再執行（collected 或終止）。"""
-        done = {"collected", "failed", "cancelled", "timed_out", "interrupted"}
+        """等 zap 的 run 終止（worker 解析完）。"""
+        done = {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}
 
         def check() -> dict[str, Any] | None:
             engine = self.zap(scan_id)
@@ -192,6 +201,34 @@ def run_file(run_id: str, path: str) -> bytes | None:
         f'cat "/runs/{uuid.UUID(run_id)}/{path}" 2>/dev/null || true',
     )
     return output.encode() if output else None
+
+
+def volume_file(volume: str, path: str) -> bytes | None:
+    """volume 中的檔案（唯讀掛載的輔助容器；以 bytes 讀出，不存在時是 None）。"""
+    result = subprocess.run(  # noqa: S603 - 固定的 docker 指令與測試自己組的參數
+        [  # noqa: S607
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--user",
+            "10001:10001",
+            "-v",
+            f"{volume}:/data:ro",
+            "--entrypoint",
+            "cat",
+            BUSYBOX,
+            f"/data/{path}",
+        ],
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    return result.stdout if result.returncode == 0 else None
 
 
 def manifest(run_id: str) -> dict[str, Any]:

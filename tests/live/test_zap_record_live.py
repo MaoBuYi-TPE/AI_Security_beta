@@ -13,7 +13,6 @@ zap.log，guard 的 telemetry 與決策 log、網站的收包紀錄與 API 看�
 
 import json
 import os
-import subprocess
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from tests.live.support import BUSYBOX, TELEMETRY_VOLUME, Api, admin_key, scan_containers, wait_for
+from tests.live.support import TELEMETRY_VOLUME, Api, admin_key, scan_containers, wait_for
 from tests.live.zap_support import (
     RUNS_VOLUME,
     SITE_IP,
@@ -33,6 +32,7 @@ from tests.live.zap_support import (
     requests_since,
     start_site,
     stop_site,
+    volume_file,
     wait_for_zap,
 )
 
@@ -64,34 +64,6 @@ def _destination(scenario: str) -> Path:
     return directory
 
 
-def _volume_file(volume: str, path: str) -> bytes | None:
-    """volume 中的檔案（唯讀掛載的輔助容器；以 bytes 讀出，不存在時是 None）。"""
-    result = subprocess.run(  # noqa: S603 - 固定的 docker 指令與測試自己組的參數
-        [  # noqa: S607
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--user",
-            "10001:10001",
-            "-v",
-            f"{volume}:/data:ro",
-            "--entrypoint",
-            "cat",
-            BUSYBOX,
-            f"/data/{path}",
-        ],
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-    return result.stdout if result.returncode == 0 else None
-
-
 def _run_id(scan_id: str) -> str:
     def find() -> str | None:
         names = scan_containers(scan_id, "zap")
@@ -112,7 +84,7 @@ def _record(
         "telemetry.jsonl": (TELEMETRY_VOLUME, f"{uuid.UUID(run_id)}.jsonl"),
     }
     for name, (volume, path) in copies.items():
-        content = _volume_file(volume, path)
+        content = volume_file(volume, path)
         if content is not None:
             (destination / name).write_bytes(content)
     ours = {run_id, None}
@@ -144,7 +116,12 @@ def _site(sites: list[Site], item: Lab, *, port: int = SITE_PORT) -> Site:
 
 
 def _web(
-    admin: Api, sites: list[Site], scenario: str, budget: dict[str, int], **options: Any
+    admin: Api,
+    sites: list[Site],
+    scenario: str,
+    budget: dict[str, int],
+    expected: str,
+    **options: Any,
 ) -> None:
     wait_for_zap(admin)
     item = lab(admin, kind="web", paths=None, excluded=["/admin"], methods=["GET", "HEAD"])
@@ -153,20 +130,20 @@ def _web(
     scan_id = item.scan("web_active_lab", budget=budget)
     run_id = _run_id(scan_id)
     engine = _record(scenario, item, site, scan_id, started=started, run_id=run_id)
-    assert engine["status"] == "collected", engine
+    assert engine["status"] == expected, engine
 
 
 def test_record_findings(admin: Api, sites: list[Site]) -> None:
-    _web(admin, sites, "findings", {"max_duration_seconds": 240})
+    _web(admin, sites, "findings", {"max_duration_seconds": 240}, "succeeded")
 
 
 def test_record_timeout(admin: Api, sites: list[Site]) -> None:
     # plan 的 maxDuration 是 120 - 60 = 60 秒：spider 的上限是 1 分鐘，active scan 來不及跑完。
-    _web(admin, sites, "timeout", {"max_duration_seconds": 120})
+    _web(admin, sites, "timeout", {"max_duration_seconds": 120}, "timed_out")
 
 
 def test_record_unanswered(admin: Api, sites: list[Site]) -> None:
-    _web(admin, sites, "unanswered", {"max_duration_seconds": 180}, port=SITE_PORT + 1)
+    _web(admin, sites, "unanswered", {"max_duration_seconds": 180}, "failed", port=SITE_PORT + 1)
 
 
 def test_record_clean(admin: Api, sites: list[Site]) -> None:
@@ -185,4 +162,4 @@ def test_record_clean(admin: Api, sites: list[Site]) -> None:
     scan_id = item.scan("api_active_lab", spec_id=str(uploaded["id"]), budget={"max_requests": 300})
     run_id = _run_id(scan_id)
     engine = _record("clean", item, site, scan_id, started=started, run_id=run_id)
-    assert engine["status"] == "collected", engine
+    assert engine["status"] == "succeeded", engine

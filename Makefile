@@ -50,7 +50,7 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner \
-	test-live-zap record-fixtures
+	test-live-zap record-fixtures test-contract
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -62,6 +62,10 @@ bootstrap:
 dev: env
 	APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
 		--host 127.0.0.1 --port 8000 --reload --reload-dir src
+
+# fixture 與工具輸出的 contract 測試：不連網、不碰 Docker 與 DB。
+test-contract:
+	$(UV_RUN) pytest tests/contract -q
 
 # unit/contract/integration 測試與 coverage 門檻（分支覆蓋），不做 live scan、不跑 live 測試。
 # 測試程序本身不連網、也不碰 Docker（tests/isolation.py）；整合測試用的 db-test 由這裡先啟動。

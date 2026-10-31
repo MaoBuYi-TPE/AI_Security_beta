@@ -10,6 +10,10 @@
   Env、Cmd、Labels，也不在 out/。anonymous 沒有任何認證 header。
 - 取消：先封鎖 guard 再停止容器；量測 ZAP 收到 SIGTERM 之後的行為。
 - 量測（§18.10）：拒絕的原因、2 MiB 的回應、cookie 的合併、規格的邊界：印在輸出、記在 TOOLS.md。
+- 完整的閉環（§19）：API → ZAP → worker → GET /scans/{id}/observations。觀察的 (method, path) 都是
+  網站真的收到的請求；artifact 的 hash 和 runs volume 的檔案一致；/api/echo 把 secret 寫進回應時，
+  secret 不在 out/、API 的回應中，只看得到遮罩的佔位。maxDuration 是 timed_out，觀察仍在；只有加了
+  安全 header 的端點時是零告警的 succeeded，和「未掃到端點」不同。
 """
 
 import hashlib
@@ -21,12 +25,15 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from secscan.security.secret_masking import TARGET_SECRET_MARK
 from tests.live.guard_support import Receiver, start_receiver, stop_receiver
 from tests.live.run_support import ContainerEvents, PolicyWatch, borrow, first, stopped_at
 from tests.live.support import Api, admin_key, docker, inspect, scan_containers, wait_for
 from tests.live.zap_support import (
     CANARY_IP,
+    RUNS_VOLUME,
     SITE_IP,
+    SITE_PORT,
     ZAP_VERSION,
     Lab,
     Site,
@@ -37,10 +44,13 @@ from tests.live.zap_support import (
     run_file,
     start_site,
     stop_site,
+    volume_file,
     wait_for_zap,
 )
 
 pytestmark = [pytest.mark.live, pytest.mark.enable_socket]
+
+MASK = TARGET_SECRET_MARK
 
 
 def _digest(value: str) -> str:
@@ -107,8 +117,15 @@ def test_the_runner_probe_reports_the_pinned_zap(admin: Api) -> None:
     zap = wait_for_zap(admin)
 
     assert zap["version"] == ZAP_VERSION
-    assert zap["integrated"] is False  # 預覽開關：T15 才開放
+    assert zap["integrated"] is True
+    assert zap["available"] is True
     assert zap["image"].startswith("zaproxy/zap-stable:20261016@sha256:")
+    profiles = {item["profile"]: item for item in admin.data("GET", "/scan-profiles")}
+    assert set(profiles) == {"api_active_lab", "web_active_lab"}
+    [web] = [e for e in profiles["web_active_lab"]["engines"] if e["engine"] == "zap"]
+    assert web["version"] == ZAP_VERSION
+    assert web["grant_requirements"] == ["GET /"]
+    assert len(web["definition_sha256"]) == 64
 
 
 def test_an_anonymous_web_scan_stays_inside_the_grant(
@@ -126,7 +143,8 @@ def test_an_anonymous_web_scan_stays_inside_the_grant(
     config = inspect(container)
     engine = item.finished_zap(scan_id)
 
-    assert engine["status"] == "collected", engine
+    assert engine["status"] == "succeeded", engine
+    assert item.scan_status(scan_id) == "completed"
     assert "SECSCAN_TARGET_AUTH=none" in config["Config"]["Env"]
     assert not [env for env in config["Config"]["Env"] if env.startswith("ZAP_AUTH")]
     assert config["HostConfig"]["ReadonlyRootfs"] is True
@@ -152,6 +170,30 @@ def test_an_anonymous_web_scan_stays_inside_the_grant(
     log = (run_file(run_id, "out/zap.log") or b"").decode()
     assert token not in log
     assert token not in json.dumps(report)
+    _assert_closed_loop(item, scan_id, engine, site, document, run_id)
+
+
+def _assert_closed_loop(
+    item: Lab,
+    scan_id: str,
+    engine: dict[str, Any],
+    site: Site,
+    document: dict[str, Any],
+    run_id: str,
+) -> None:
+    """結果入庫：API 查得到；每個觀察都是網站真的收到的請求；artifact 和 volume 的檔案一致。"""
+    result = engine["result"]
+    assert result["engine_version"] == ZAP_VERSION
+    assert result["traffic_verified"] is True
+    observations = item.observations(scan_id)
+    assert observations
+    assert result["observation_count"] >= len(observations)
+    received = {(r["method"], urlsplit(r["path"]).path) for r in site.records()}
+    assert {(o["method"], o["path"]) for o in observations} <= received
+    for entry in document["files"]:
+        content = volume_file(RUNS_VOLUME, f"{run_id}/out/{entry['path']}")
+        assert content is not None
+        assert hashlib.sha256(content).hexdigest() == entry["sha256"]
 
 
 SPEC: dict[str, Any] = {
@@ -168,6 +210,7 @@ SPEC: dict[str, Any] = {
         "/items": {
             "get": {"operationId": "listItems", "responses": {"200": {"description": "ok"}}}
         },
+        "/echo": {"get": {"operationId": "echo", "responses": {"200": {"description": "ok"}}}},
         "/items/{id}": {
             "parameters": [
                 {"name": "id", "in": "path", "required": True, "schema": {"type": "integer"}}
@@ -207,7 +250,8 @@ SPEC: dict[str, Any] = {
 
 
 def _api_lab(admin: Api) -> Lab:
-    return lab(admin, kind="api", paths=["/api/items", "/api/items/{id}", "/me"], methods=["GET"])
+    paths = ["/api/items", "/api/items/{id}", "/api/echo", "/me"]
+    return lab(admin, kind="api", paths=paths, methods=["GET"])
 
 
 def _upload(item: Lab, spec: dict[str, Any]) -> str:
@@ -261,7 +305,7 @@ def test_a_bearer_api_scan_sends_only_eligible_operations_to_the_target(
     proxy_token = borrow(container).token
     engine = item.finished_zap(scan_id)
 
-    assert engine["status"] == "collected", engine
+    assert engine["status"] == "succeeded", engine
     env = config["Config"]["Env"]
     assert "SECSCAN_TARGET_AUTH=header" in env
     assert "ZAP_AUTH_HEADER=Authorization" in env
@@ -283,6 +327,25 @@ def test_a_bearer_api_scan_sends_only_eligible_operations_to_the_target(
         content = (run_file(run_id, name) or b"").decode()
         assert token not in content
         assert proxy_token not in content
+    _assert_masked(item, scan_id, run_id, token)
+    allowed = {"/api/items", "/api/echo"}
+    for observation in item.observations(scan_id):
+        path = observation["path"]
+        assert path in allowed or path.startswith("/api/items/"), path
+
+
+def _assert_masked(item: Lab, scan_id: str, run_id: str, secret: str) -> None:
+    """/api/echo 把 secret 寫進回應：ZAP 帶進報告的內容被遮罩，API 看得到的只有佔位。"""
+    report = (run_file(run_id, "out/zap-report.json") or b"").decode()
+    assert secret not in report
+    assert MASK in report, "ZAP 沒有把 secret 帶進報告（遮罩沒有被驗證到）"
+    document = manifest(run_id)
+    [entry] = [e for e in document["files"] if e["path"] == "zap-report.json"]
+    print(f"[量測] 遮罩：報告 {entry['redactions']} 次")  # noqa: T201
+    assert entry["redactions"] >= 1
+    observations = item.observations(scan_id)
+    assert secret not in json.dumps(observations)
+    assert MASK in json.dumps(observations)
 
 
 @pytest.mark.parametrize(
@@ -307,9 +370,10 @@ def test_header_and_cookie_profiles_reach_only_the_target(
         auth_profile_id=profile_id,
         budget={"max_requests": 300},
     )
+    run_id = _container(scan_id).removeprefix("secscan-run-")
     engine = item.finished_zap(scan_id)
 
-    assert engine["status"] == "collected", engine
+    assert engine["status"] == "succeeded", engine
     zap_records = [r for r in site.records() if urlsplit(r["path"]).path != "/me"]
     assert zap_records
     digests = Counter(record["auth"].get(wire) for record in zap_records)
@@ -317,6 +381,72 @@ def test_header_and_cookie_profiles_reach_only_the_target(
     assert digests[_digest(secret)] == len(zap_records)
     assert canary.records() == []
     assert _hosts(requests_since(started)) == {(item.host, 3000)}
+    _assert_masked(item, scan_id, run_id, secret)
+
+
+def test_the_plan_time_limit_is_timed_out_and_keeps_the_observations(
+    admin: Api, sites: list[Site]
+) -> None:
+    """plan 的 maxDuration 是 120 - 60 = 60 秒：active scan 來不及跑完（§19.2）。"""
+    wait_for_zap(admin)
+    item = lab(admin, kind="web", paths=None, excluded=["/admin"], methods=["GET", "HEAD"])
+    _site(sites, item)
+
+    scan_id = item.scan("web_active_lab", budget={"max_duration_seconds": 120})
+    engine = item.finished_zap(scan_id)
+
+    assert (engine["status"], engine["error_code"]) == ("timed_out", "ENGINE_TIMEOUT")
+    assert engine["result"]["time_limit_reached"] is True
+    assert item.scan_status(scan_id) == "timed_out"
+    assert item.observations(scan_id)
+
+
+def test_a_hardened_api_is_a_clean_result_with_traffic(admin: Api, sites: list[Site]) -> None:
+    """零告警：guard 有轉送、目標有回應，和「未掃到端點」不同（CLAUDE.md §8）。"""
+    wait_for_zap(admin)
+    paths = ["/hardened/items", "/hardened/items/{id}"]
+    item = lab(admin, kind="api", paths=paths, methods=["GET"])
+    site = _site(sites, item)
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "hardened items", "version": "1"},
+        "servers": [{"url": "/hardened"}],
+        "paths": {
+            "/items": {"get": {"responses": {"200": {"description": "ok"}}}},
+            "/items/{id}": {
+                "parameters": [
+                    {"name": "id", "in": "path", "required": True, "schema": {"type": "integer"}}
+                ],
+                "get": {"responses": {"200": {"description": "ok"}}},
+            },
+        },
+    }
+
+    scan_id = item.scan("api_active_lab", spec_id=_upload(item, spec), budget={"max_requests": 300})
+    engine = item.finished_zap(scan_id)
+
+    assert (engine["status"], engine["error_code"]) == ("succeeded", None)
+    assert item.scan_status(scan_id) == "completed"
+    assert item.observations(scan_id) == []
+    assert engine["result"]["observation_count"] == 0
+    assert engine["result"]["traffic_verified"] is True
+    assert site.records(), "ZAP 沒有送出任何請求"
+
+
+def test_a_target_that_never_answers_is_not_a_clean_result(admin: Api, sites: list[Site]) -> None:
+    """target 的 port 沒有人聽：每個請求都由 mitmproxy 回 502，對錯誤頁的告警不是觀察（§19.4）。"""
+    wait_for_zap(admin)
+    item = lab(admin, kind="web", paths=None, methods=["GET", "HEAD"])
+    site = start_site(item.host, ip=SITE_IP, alias=item.host, port=SITE_PORT + 1)
+    sites.append(site)
+
+    scan_id = item.scan("web_active_lab", budget={"max_duration_seconds": 180})
+    engine = item.finished_zap(scan_id)
+
+    assert (engine["status"], engine["error_code"]) == ("failed", "NO_TARGET_TRAFFIC")
+    assert item.scan_status(scan_id) == "failed"
+    assert item.observations(scan_id) == []
+    assert engine["result"]["excluded"]["not_answered"] > 0
 
 
 def test_cancelling_blocks_the_guard_before_stopping_zap(admin: Api, sites: list[Site]) -> None:
@@ -395,7 +525,7 @@ def test_a_reference_heavy_spec_runs_within_the_container_limits(
     engine = item.finished_zap(scan_id)
 
     print(f"[量測] 參照炸彈（3^8）：run {engine['status']} {engine['error_code']}")  # noqa: T201
-    assert engine["status"] in {"collected", "failed"}
+    assert engine["status"] in {"succeeded", "failed", "timed_out"}
     assert canary.records() == []
     assert _hosts(requests_since(started)) <= {(item.host, 3000)}
 

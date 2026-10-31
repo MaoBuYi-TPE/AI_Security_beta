@@ -3,6 +3,7 @@
 只在 live 自己的 lab 網路上，不是真的靶機：頁面有範圍內的連結、grant 排除的 path、另一個 origin
 的連結與 2 MiB 的 JS；API 有 /api/items 與 /api/items/{id}；/me 是 preflight 的受保護端點。
 /hardened/items 與 /hardened/items/{id} 是加了安全 header 的 JSON（零告警的錄製情境）。
+/api/echo 把請求的認證 header 寫進 HTML 註解（TODO 讓 ZAP 的 10027 把註解帶進報告）：驗證遮罩。
 每個請求輸出一行 JSON（收包證據）：時間（VM 的時鐘）、method、path（含 query）、header 的名稱、
 認證 header 值的 sha256 前 12 碼（不記值）、表單 body 的參數名稱（量測 _method）。
 HTTP/1.0，每個連線一個請求。
@@ -91,6 +92,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _echo(self) -> bytes:
+        values = [self.headers[name] for name in AUTH_HEADERS if name in self.headers]
+        comment = f"<!-- TODO remove debug output: {' '.join(values)} -->"
+        return f"<!doctype html><html><body>{comment}<p>echo</p></body></html>".encode("latin-1")
+
     def _handle(self) -> None:
         form = self._form()
         self._record(form)
@@ -107,6 +113,8 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(200 if authorized else 401, body, "application/json")
         elif path == "/api/items":
             self._respond(200, ITEMS, "application/json")
+        elif path == "/api/echo":
+            self._respond(200, self._echo(), "text/html")
         elif path == "/hardened/items":
             self._respond(200, ITEMS, "application/json", HARDENED_HEADERS)
         elif path.startswith("/hardened/items/"):
