@@ -6,12 +6,16 @@
   全部刪掉。
 - 退出碼：0、1、2 收集輸出（manifest 記下退出碼與輸入的 hash），其他是 ENGINE_FAILED。
 - 時間或請求數不夠：不建立容器，BUDGET_EXHAUSTED。
+- 輸出的遮罩（§19.5）：secret 在收集之前已不在 secret 檔，值在 provision 時留在記憶體；proxy 的
+  token 與 base64 的形式也遮掉；只有 zap，preflight 的回應不動。收集的過程中持續心跳。
 每個測試用自己的資料庫（queue_database）。zap 在 T15 才開放：scan 以預覽開關建立。
 """
 
+import base64
+import hashlib
 import json
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,8 +28,9 @@ from sqlalchemy.orm import sessionmaker
 
 from secscan.runner.domain.admission import ContainerSpec, managed_run_id
 from secscan.runner.domain.policy import ContainerPolicy
+from secscan.runner.plans import ENGINE_IMAGES
 from secscan.runner.service import ContainerRunner
-from secscan.runner.workspace import Workspace
+from secscan.runner.workspace import Manifest, Workspace
 from secscan.scanners.domain.fake import FakeScript
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.scanners.domain.zap.script import SCAN_SCRIPT
@@ -34,7 +39,8 @@ from secscan.scans.domain.catalog import ScanProfile
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Scan
 from secscan.scans.domain.request import BudgetRequest, ScanRequest
-from secscan.scans.queue import ScanQueue
+from secscan.scans.queue import Heartbeat, LeaseLostError, ScanQueue
+from secscan.security.secret_masking import PROXY_TOKEN_MARK, TARGET_SECRET_MARK
 from secscan.targets.domain import TargetKind
 from tests.guard_support import ENDPOINT, GuardDouble
 from tests.integration.api_support import LAB, Seeder, World
@@ -438,3 +444,201 @@ def test_a_cancelled_zap_run_blocks_the_guard_and_removes_everything(
     assert spec.name in runtime.stopped
     assert runtime.removed == [spec.name]
     assert not (dirs[1] / str(report.run_id)).exists()
+
+
+def _reflecting(runtime: FakeContainerRuntime, dirs: tuple[Path, Path]) -> list[str]:
+    """容器把 secret 寫進輸出：目標的 secret 與 proxy 的 token，各種形式。回傳看到的 token。"""
+    tokens: list[str] = []
+
+    def write(spec: ContainerSpec) -> None:
+        labels = spec.body["Labels"]
+        assert isinstance(labels, dict)
+        run = str(managed_run_id(labels))
+        url = (dirs[1] / run / "proxy-url").read_text()
+        token = url.removeprefix("http://").split("@", 1)[0].split(":", 1)[1]
+        tokens.append(token)
+        basic = base64.b64encode(f"{run}:{token}".encode()).decode()
+        out = dirs[0] / run / "out"
+        report = {"evidence": f"Bearer {SECRET}", "otherinfo": f"token {token} basic {basic}"}
+        (out / "zap-report.json").write_text(json.dumps(report))
+        (out / "zap.log").write_text(f"sent {SECRET}\nAutomation plan succeeded!\n")
+
+    runtime.scripted[str(ZAP_IMAGE)] = ScriptedContainer(seconds=1, exit_code=0, on_start=write)
+    return tokens
+
+
+def test_the_output_is_masked_with_the_values_of_this_run(
+    make_runner: Callable[[], ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    dirs: tuple[Path, Path],
+) -> None:
+    tokens = _reflecting(runtime, dirs)
+    _api_scan(queue_seed, world, authenticated=True)
+    runner = make_runner()
+
+    runner.run_once(ZAP)  # preflight
+    report = runner.run_once(ZAP)
+
+    assert report is not None
+    assert report.run_status is R.COLLECTED
+    out = dirs[0] / str(report.run_id) / "out"
+    content = (out / "zap-report.json").read_bytes() + (out / "zap.log").read_bytes()
+    assert SECRET.encode() not in content
+    [token] = tokens
+    assert token.encode() not in content
+    basic = base64.b64encode(f"{report.run_id}:{token}".encode())
+    assert basic not in content
+    assert TARGET_SECRET_MARK.encode() in content
+    assert content.count(PROXY_TOKEN_MARK.encode()) == 2
+    # 報告仍是合法的 JSON；hash 是遮罩之後的內容。
+    assert json.loads((out / "zap-report.json").read_bytes())
+    manifest = {item["path"]: item for item in _manifest(dirs, report.run_id)["files"]}
+    assert manifest["zap.log"]["redactions"] == 1
+    assert manifest["zap-report.json"]["redactions"] == 3
+    expected = hashlib.sha256((out / "zap.log").read_bytes()).hexdigest()
+    assert manifest["zap.log"]["sha256"] == expected
+
+
+def test_an_anonymous_run_masks_the_proxy_token(
+    make_runner: Callable[[], ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    dirs: tuple[Path, Path],
+) -> None:
+    tokens = _reflecting(runtime, dirs)
+    _web_scan(queue_seed, world)
+
+    report = make_runner().run_once(ZAP)
+
+    assert report is not None
+    assert (
+        tokens[0].encode()
+        not in (dirs[0] / str(report.run_id) / "out" / "zap-report.json").read_bytes()
+    )
+
+
+def test_the_preflight_output_is_not_masked(
+    make_runner: Callable[[], ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    dirs: tuple[Path, Path],
+) -> None:
+    """原始的 HTTP 回應：長度必須維持，而且只給 worker 判斷，不對外提供。"""
+
+    def write(spec: ContainerSpec) -> None:
+        labels = spec.body["Labels"]
+        assert isinstance(labels, dict)
+        out = dirs[0] / str(managed_run_id(labels)) / "out"
+        (out / "authenticated").write_text(f"HTTP/1.1 200 OK\r\n\r\n{SECRET}")
+
+    runtime.scripted[str(ENGINE_IMAGES[ScanEngine.PREFLIGHT])] = ScriptedContainer(
+        seconds=1, exit_code=0, on_start=write
+    )
+    _watch(runtime, dirs)
+    _api_scan(queue_seed, world, authenticated=True)
+
+    report = make_runner().run_once(ZAP)
+
+    assert report is not None
+    assert SECRET.encode() in (dirs[0] / str(report.run_id) / "out" / "authenticated").read_bytes()
+
+
+class _SlowWorkspace(Workspace):
+    """收集很久（遮罩大檔）：時間過去之後回報進度，記下每一步時的心跳次數。"""
+
+    clock: FakeClock
+    beats: list[int]
+    marks: list[int]
+
+    def collect(
+        self, run_id: UUID, *, exit_code: int, inputs: Sequence[Any], **options: Any
+    ) -> Manifest:
+        self.marks.append(len(self.beats))
+        self.clock.sleep(6)
+        options["on_progress"]()
+        self.marks.append(len(self.beats))
+        self.clock.sleep(1)
+        options["on_progress"]()
+        self.marks.append(len(self.beats))
+        return super().collect(run_id, exit_code=exit_code, inputs=inputs, **options)
+
+
+def _slow_runner(
+    queue: ScanQueue,
+    runtime: FakeContainerRuntime,
+    dirs: tuple[Path, Path],
+    clock: FakeClock,
+    tmp_path: Path,
+) -> tuple[ContainerRunner, _SlowWorkspace]:
+    workspace = _SlowWorkspace(*dirs)
+    workspace.clock = clock
+    workspace.beats = []
+    workspace.marks = []
+    runner = ContainerRunner(
+        queue,
+        runtime,
+        workspace,
+        owner=OWNER,
+        policy=POLICY,
+        script=FakeScript(hold_seconds=1),
+        cipher=shared_cipher(),
+        guard=GuardDouble.create(tmp_path).channel(),
+        endpoint=ENDPOINT,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+        on_heartbeat=lambda: workspace.beats.append(1),
+    )
+    return runner, workspace
+
+
+def test_the_lease_is_extended_while_masking(
+    queue: ScanQueue,
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    dirs: tuple[Path, Path],
+    clock: FakeClock,
+    tmp_path: Path,
+) -> None:
+    _watch(runtime, dirs, seconds=0)
+    _web_scan(queue_seed, world)
+    runner, workspace = _slow_runner(queue, runtime, dirs, clock, tmp_path)
+
+    report = runner.run_once(ZAP)
+
+    assert report is not None
+    assert report.run_status is R.COLLECTED
+    # 過了心跳的間隔才心跳；1 秒之內不重複。
+    first, second, third = workspace.marks
+    assert (second - first, third - second) == (1, 0)
+
+
+def test_a_lease_lost_while_masking_stops_the_collection(
+    queue: ScanQueue,
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    dirs: tuple[Path, Path],
+    clock: FakeClock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _watch(runtime, dirs, seconds=0)
+    _web_scan(queue_seed, world)
+    real = queue.heartbeat
+
+    def lost_after_collecting(lease: Any) -> Heartbeat:
+        beat = real(lease)
+        if clock.monotonic() >= 6:
+            return Heartbeat(valid=False, cancel_requested=False)
+        return beat
+
+    monkeypatch.setattr(queue, "heartbeat", lost_after_collecting)
+    runner, _ = _slow_runner(queue, runtime, dirs, clock, tmp_path)
+
+    with pytest.raises(LeaseLostError):
+        runner.run_once(ZAP)

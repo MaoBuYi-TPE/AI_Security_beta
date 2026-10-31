@@ -18,6 +18,7 @@ from secscan.guard.config import GUARD_PORT
 from secscan.guard.domain.credentials import (
     ProxyCredentials,
     new_token,
+    proxy_secrets,
     proxy_url,
     token_digest,
 )
@@ -122,6 +123,10 @@ class RunEgress:
     def proxy_url(self) -> str:
         """寫進掃描容器的 proxy-url 檔（含 token；不可寫進 log、label 或事件）。"""
         return proxy_url(self._credentials, host=self._endpoint.address, port=self._endpoint.port)
+
+    def masking_values(self) -> tuple[str, ...]:
+        """收集輸出時要遮掉的值（docs/DECISIONS.md §19.5）。"""
+        return proxy_secrets(self._credentials)
 
     def zap_properties(self) -> SecretValue:
         """ZAP 的 -configfile：同一組 proxy 帳密與這個 run 的速率（含 token；§18.3）。"""

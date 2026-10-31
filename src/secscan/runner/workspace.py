@@ -10,6 +10,9 @@
 - 走訪逐一處理條目（目錄也計數），超過上限就停：不先把整個目錄的名稱讀進記憶體。
 - 只計算大小與 sha256，不解析內容（解析在 worker）。manifest 另外記下容器的退出碼與輸入檔的
   hash（docs/DECISIONS.md §18.1：退出碼的語意由 parser 判斷）。
+- 引擎宣告 redact_outputs 時（zap，docs/DECISIONS.md §19.5）以已知的 secret 做位元組層級的遮罩：
+  走訪驗證完才動檔案（走訪中改變目錄，os.scandir 可能重複或漏掉條目），遮罩後的內容寫到 out/ 之外的
+  暫存檔再取代原檔；manifest 記下遮罩後的 hash 與次數，所以 manifest 存在就代表遮罩已完成。
 - capability probe 的容器沒有 secret：create_secret_dir 建立空的目錄（掛載的 subpath 必須存在）；
   read_output 以同樣的方式（dir fd 加 O_NOFOLLOW、只接受一般檔案、有大小上限）讀回 out/ 的檔案。
 - 檔案系統的錯誤一律轉成 WorkspaceError 或 ArtifactRejectedError，訊息不含路徑。
@@ -21,7 +24,7 @@ import json
 import os
 import stat
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -30,11 +33,14 @@ from uuid import UUID, uuid4
 from secscan.core.identifiers import canonical_uuid
 from secscan.runner.domain.admission import SECRET_FILES
 from secscan.scanners.domain.plan import InputFile
+from secscan.security.secret_masking import SecretMasker
 
 MANIFEST_FILE = "manifest.json"
+OUTPUT_DIR = "out"
 _PRIVATE_DIR = 0o700
 _READ_ONLY_FILE = 0o400
 _CHUNK = 64 * 1024
+_MASK_CHUNK = 1024 * 1024
 _MAX_NAME_LENGTH = 255
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -82,6 +88,8 @@ class CollectedFile:
     path: str
     size: int
     sha256: str
+    # 收集時遮罩的次數（§19.5）；沒有遮罩的引擎與輸入檔是 0。
+    redactions: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,18 +218,29 @@ class Workspace:
         """容器執行中的用量檢查：條目數、深度與總大小（只 lstat，不開檔、不跟隨 symlink）。"""
         self._walk_output(run_id, _Walk(self._limits, hashing=False))
 
-    def collect(self, run_id: UUID, *, exit_code: int, inputs: Sequence[InputFile]) -> Manifest:
+    def collect(
+        self,
+        run_id: UUID,
+        *,
+        exit_code: int,
+        inputs: Sequence[InputFile],
+        masker: SecretMasker | None = None,
+        on_progress: Callable[[], None] = lambda: None,
+    ) -> Manifest:
         """走過 out/、計算 hash，寫入 manifest.json；不符合規則就拋 ArtifactRejectedError。
 
-        inputs 是 runner 寫進 in/ 的輸入檔（runner 自己的資料，從記憶體計算 hash）。
+        inputs 是 runner 寫進 in/ 的輸入檔（runner 自己的資料，從記憶體計算 hash）。有 masker 時
+        遮罩每個檔案，on_progress 在處理每一塊之後呼叫（心跳；它拋出的例外會中止收集）。
         """
         walk = _Walk(self._limits, hashing=True)
         self._walk_output(run_id, walk)
         files = tuple(sorted(walk.files, key=lambda item: item.path))
+        if masker is not None:
+            files = self._masked(run_id, files, masker, on_progress)
         manifest = Manifest(
             run_id=run_id,
             files=files,
-            total_bytes=walk.total_bytes,
+            total_bytes=sum(item.size for item in files),
             exit_code=exit_code,
             inputs=tuple(_input_entry(item) for item in sorted(inputs, key=lambda i: i.name)),
         )
@@ -230,6 +249,30 @@ class Workspace:
         except OSError as exc:
             raise WorkspaceError(f"無法寫入 manifest（{_reason(exc)}）") from None
         return manifest
+
+    def _masked(
+        self,
+        run_id: UUID,
+        files: Sequence[CollectedFile],
+        masker: SecretMasker,
+        on_progress: Callable[[], None],
+    ) -> tuple[CollectedFile, ...]:
+        masked: list[CollectedFile] = []
+        total = 0
+        try:
+            run_fd = os.open(self._runs / str(run_id), _DIRECTORY)
+            try:
+                for item in files:
+                    entry = _mask_file(run_fd, item.path, masker, self._limits, on_progress)
+                    total += entry.size
+                    if total > self._limits.max_total_bytes:
+                        raise ArtifactRejectedError(ArtifactIssue.TOTAL_TOO_LARGE)
+                    masked.append(entry)
+            finally:
+                os.close(run_fd)
+        except OSError as exc:
+            raise WorkspaceError(f"無法遮罩輸出（{_reason(exc)}）") from None
+        return tuple(masked)
 
     def read_output(self, run_id: UUID, name: str, *, max_bytes: int) -> bytes | None:
         """out/ 中的一般檔案（不跟隨 symlink）；不存在、不是一般檔案或超過上限都回 None。"""
@@ -240,7 +283,7 @@ class Workspace:
         except OSError:
             return None
         try:
-            out_fd = os.open("out", _DIRECTORY, dir_fd=run_fd)
+            out_fd = os.open(OUTPUT_DIR, _DIRECTORY, dir_fd=run_fd)
         except OSError:
             os.close(run_fd)
             return None
@@ -256,7 +299,7 @@ class Workspace:
         except OSError as exc:
             raise WorkspaceError(f"無法開啟工作目錄（{_reason(exc)}）") from None
         try:
-            out_fd = _open_directory("out", run_fd, missing=ArtifactIssue.MISSING_OUTPUT)
+            out_fd = _open_directory(OUTPUT_DIR, run_fd, missing=ArtifactIssue.MISSING_OUTPUT)
             try:
                 _walk(out_fd, "", 0, walk)
             finally:
@@ -303,12 +346,16 @@ def _write_new(path: Path, content: bytes) -> None:
     descriptor = os.open(path, _NEW_FILE, _READ_ONLY_FILE)
     try:
         os.fchmod(descriptor, _READ_ONLY_FILE)
-        view = memoryview(content)
-        while view:
-            view = view[os.write(descriptor, view) :]
+        _write_all(descriptor, content)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        view = view[os.write(descriptor, view) :]
 
 
 def _open_directory(name: str, parent_fd: int, *, missing: ArtifactIssue | None = None) -> int:
@@ -379,17 +426,8 @@ def _add_bytes(walk: _Walk, size: int, file_size: int) -> None:
 
 
 def _hash_file(name: str, dir_fd: int, relative: str, walk: _Walk) -> CollectedFile:
+    descriptor = _open_collected(name, dir_fd)
     try:
-        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
-    except OSError:
-        raise ArtifactRejectedError(_open_failure(name, dir_fd)) from None
-    try:
-        info = os.fstat(descriptor)
-        # 開檔之後再確認一次（lstat 與 open 之間可能被換掉）。
-        if not stat.S_ISREG(info.st_mode):
-            raise ArtifactRejectedError(ArtifactIssue.SPECIAL_FILE)
-        if info.st_nlink != 1:
-            raise ArtifactRejectedError(ArtifactIssue.HARDLINK)
         digest = hashlib.sha256()
         size = 0
         while chunk := os.read(descriptor, _CHUNK):
@@ -401,6 +439,95 @@ def _hash_file(name: str, dir_fd: int, relative: str, walk: _Walk) -> CollectedF
     finally:
         os.close(descriptor)
     return CollectedFile(path=relative, size=size, sha256=digest.hexdigest())
+
+
+def _open_collected(name: str, dir_fd: int) -> int:
+    """不跟隨 symlink；開檔之後再確認一次（lstat 與 open 之間可能被換掉）。"""
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except OSError:
+        raise ArtifactRejectedError(_open_failure(name, dir_fd)) from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ArtifactRejectedError(ArtifactIssue.SPECIAL_FILE)
+        if info.st_nlink != 1:
+            raise ArtifactRejectedError(ArtifactIssue.HARDLINK)
+    except OSError:
+        os.close(descriptor)
+        raise ArtifactRejectedError(ArtifactIssue.UNREADABLE) from None
+    except ArtifactRejectedError:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _mask_file(
+    run_fd: int,
+    relative: str,
+    masker: SecretMasker,
+    limits: CollectionLimits,
+    on_progress: Callable[[], None],
+) -> CollectedFile:
+    """遮罩一個檔案：內容寫到 run 目錄的暫存檔（在 out/ 之外），再取代原檔。"""
+    parent_fd, name = _parent_directory(run_fd, relative)
+    temporary = f".masking-{uuid4().hex}"
+    try:
+        source = _open_collected(name, parent_fd)
+        try:
+            entry = _write_masked(source, temporary, run_fd, masker, limits, on_progress)
+        finally:
+            os.close(source)
+        os.replace(temporary, name, src_dir_fd=run_fd, dst_dir_fd=parent_fd)
+    finally:
+        _unlink_if_present(temporary, run_fd)
+        os.close(parent_fd)
+    return CollectedFile(relative, *entry)
+
+
+def _parent_directory(run_fd: int, relative: str) -> tuple[int, str]:
+    """out/ 底下這個檔案的目錄（一層一層以 O_NOFOLLOW 開啟）與檔名。"""
+    *directories, name = f"{OUTPUT_DIR}/{relative}".split("/")
+    current = os.dup(run_fd)
+    for directory in directories:
+        try:
+            child = _open_directory(directory, current)
+        finally:
+            os.close(current)
+        current = child
+    return current, name
+
+
+def _write_masked(
+    source: int,
+    temporary: str,
+    run_fd: int,
+    masker: SecretMasker,
+    limits: CollectionLimits,
+    on_progress: Callable[[], None],
+) -> tuple[int, str, int]:
+    """回傳遮罩後的（大小, sha256, 遮罩的次數）。"""
+    target = os.open(temporary, _NEW_FILE, _READ_ONLY_FILE, dir_fd=run_fd)
+    try:
+        digest = hashlib.sha256()
+        size = redactions = 0
+        pending = b""
+        while True:
+            chunk = os.read(source, _MASK_CHUNK)
+            output, pending, count = masker.mask_chunk(pending + chunk, final=not chunk)
+            size += len(output)
+            redactions += count
+            if size > limits.max_file_bytes:
+                raise ArtifactRejectedError(ArtifactIssue.FILE_TOO_LARGE)
+            digest.update(output)
+            _write_all(target, output)
+            on_progress()
+            if not chunk:
+                break
+        os.fsync(target)
+    finally:
+        os.close(target)
+    return size, digest.hexdigest(), redactions
 
 
 def _check_name(name: str) -> None:
@@ -418,7 +545,13 @@ def _check_name(name: str) -> None:
 def _manifest_json(manifest: Manifest) -> bytes:
     document = {
         "files": [
-            {"path": item.path, "sha256": item.sha256, "size": item.size} for item in manifest.files
+            {
+                "path": item.path,
+                "redactions": item.redactions,
+                "sha256": item.sha256,
+                "size": item.size,
+            }
+            for item in manifest.files
         ],
         "run_id": str(manifest.run_id),
         "total_bytes": manifest.total_bytes,

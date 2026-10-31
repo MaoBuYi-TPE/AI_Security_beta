@@ -10,6 +10,7 @@ from secscan.guard.domain.credentials import (
     ProxyCredentials,
     new_token,
     parse_proxy_authorization,
+    proxy_secrets,
     proxy_url,
     token_digest,
     token_matches,
@@ -88,3 +89,13 @@ def test_proxy_url_carries_the_run_credentials() -> None:
     url = proxy_url(ProxyCredentials(RUN_ID, TOKEN), host=IPv4Address("10.89.8.254"), port=8080)
 
     assert url == f"http://{RUN_ID}:{TOKEN}@10.89.8.254:8080"
+
+
+def test_the_values_to_mask_include_what_the_tool_sends() -> None:
+    """工具的輸出可能出現 token，或 Proxy-Authorization 的 base64（docs/DECISIONS.md §19.5）。"""
+    credentials = ProxyCredentials(RUN_ID, TOKEN)
+
+    token, encoded = proxy_secrets(credentials)
+
+    assert token == TOKEN
+    assert _basic(str(RUN_ID), TOKEN) == f"Basic {encoded}"

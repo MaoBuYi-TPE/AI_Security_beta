@@ -47,6 +47,12 @@ def proxy_url(credentials: ProxyCredentials, *, host: IPv4Address, port: int) ->
     return f"http://{credentials.run_id}:{credentials.token}@{host}:{port}"
 
 
+def proxy_secrets(credentials: ProxyCredentials) -> tuple[str, str]:
+    """工具的輸出中要遮掉的值（docs/DECISIONS.md §19.5）：token 與 Basic 的 base64。"""
+    basic = f"{credentials.run_id}:{credentials.token}".encode("ascii")
+    return credentials.token, base64.b64encode(basic).decode("ascii")
+
+
 def parse_proxy_authorization(values: Sequence[str]) -> ProxyCredentials | None:
     """只有一個 header、格式完全正確時回傳帳密；其他情形一律 None（不說明原因）。"""
     if len(values) != 1:

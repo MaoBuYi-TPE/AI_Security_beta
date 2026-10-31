@@ -1719,12 +1719,13 @@ T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作
 | 1 | 退出碼 1，沒有報告（ZAP 啟動失敗等） | failed | `ENGINE_FAILED` | 無 |
 | 2 | 報告或 log 缺少、不合法、`@programName` 不是 ZAP、`@version` 不是鎖定的版本、超過上限；AF 的結尾摘要不存在或和退出碼矛盾（0 ⇔ succeeded，1 ⇔ failures，2 ⇔ 只有 warnings） | failed | `OUTPUT_INVALID` | 無 |
 | 3 | 退出碼 1，報告有效 | failed | `ENGINE_REPORTED_ERRORS` | 入庫（部分結果） |
-| 4 | guard 記下轉送 0 個請求（未掃到端點） | failed | `NO_TARGET_TRAFFIC` | 無 |
+| 4 | guard 記下轉送 0 個請求，或 telemetry 中沒有任何請求得到上游的回應（未掃到端點） | failed | `NO_TARGET_TRAFFIC` | 無 |
 | 5 | 退出碼 2，摘要的警告中有 plan 的 maxDuration | timed_out | `ENGINE_TIMEOUT` | 入庫 |
 | 6 | 其他（退出碼 0，或 2 只有其他警告） | succeeded | — | 入庫；0 個是乾淨的結果 |
 
 - 第 3 條排在第 4 條之前：AF 的錯誤通常就是沒有流量的原因（例如 spider 連不到），錯誤碼指向原因；轉送數照樣顯示在 `budget_usage`。
 - 警告只分兩種：`max_duration` 與 `other`；錯誤與警告只計數，不保存文字（訊息可能含 URL 或靶機的內容）。spider、passiveScan-wait、activeScan 自己的上限是 plan 的設計，不算 timed_out（它們不在摘要中）。
+- 第 4 條的「沒有上游回應」來自錄製的 `unanswered` 情境：target 的 port 沒有人聽時，guard 轉送 71 個請求、全部由 mitmproxy 回 502，AF 的 spider 只留下一個警告（退出碼 2），ZAP 對 mitmproxy 的錯誤頁回報 3 種告警（共 9 個 instance：缺 CSP、Private IP Disclosure、`Server: mitmproxy 12.2.3`）。原本的判定會是 succeeded、0 個 observation，和乾淨的結果分不開（CLAUDE.md §8：未掃到端點是不同的語意）。
 - 轉送數不明（guard 的 summary 讀不到）時不套第 4 條，結果標 `traffic_verified: false`。
 - 不在 {0, 1, 2} 的退出碼照舊是 runner 的 `ENGINE_FAILED`、不收集；runner 的牆鐘上限照舊是 `TIME_LIMIT_EXCEEDED`；guard 回報預算用盡照舊立刻停止、不收集（T16 檢討）。
 
@@ -1755,7 +1756,7 @@ T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作
 
 - 只對 zap：以引擎政策的 `redact_outputs` 開啟。preflight 存的是原始的 HTTP 回應（§16.5），遮罩會讓 Content-Length 不符，而且不對外提供。
 - **遮罩的值在 `_provision` 時建立**（解密之後），帶到收集；不第二次解密（換金鑰時可能失敗）、不寫檔、不進 log。值包括目標的 secret、送出的整個 header 值、cookie 中長度 ≥ 8 的每個值，以及 proxy 的 token 與 ZAP 送出的 `base64(run_id:token)`。
-- **形式**（`security/secret_masking.py`，純函式）：原樣、JSON 跳脫、HTML entity、百分比編碼（大小寫、`+`）、JSON 包 HTML。字元集由 `auth_profiles/domain/credentials.py` 限定（沒有 CR、LF、NUL；最長 4096）。以字面字串的 alternation 組成 regex（不會回溯爆炸），串流處理，保留最長形式的重疊。
+- **形式**（`security/secret_masking.py`，純函式）：原樣、JSON 跳脫、HTML entity、百分比編碼（大小寫、`+`）、JSON 包 HTML。字元集由 `auth_profiles/domain/credentials.py` 限定（沒有 CR、LF、NUL；最長 4096）。以 `bytes.find` 搜尋（最壞的情況也是線性時間；每個形式只有一個搜尋位置，記憶體不隨比對的次數增加；目標收得到 secret，可以在回應中放任意多的片段），由左到右、同一個位置取最長的形式；串流處理，保留最長形式的重疊，不論怎麼切塊結果都相同。
 - **收集**：先走訪完 out/，再把遮罩後的內容寫到 runner 私有的暫存檔、`os.replace` 取代；遮罩的過程中呼叫心跳。manifest 記下每個檔案的遮罩次數。替換字串是 `[REDACTED:target-secret]`、`[REDACTED:proxy-token]`（不含引號與反斜線，JSON 仍然合法）。
 - 邊界：替換讓檔案超過上限 → `ARTIFACT_REJECTED`；secret 剛好是 JSON 語法的一部分（例如 `true`）可能讓報告不合法 → `OUTPUT_INVALID`（fail closed）。
 - **worker 端**：`security/redaction.py` 新增 `redact_url`（以 `is_sensitive_key` 遮罩 query 的值與 userinfo，補 T05 的缺口）與 `redact_text`（Bearer、Basic、JWT 與 `key=value` 的樣式）；入庫前套用、之後截斷。

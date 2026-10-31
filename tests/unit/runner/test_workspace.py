@@ -282,8 +282,18 @@ def test_files_are_hashed_and_listed_outside_the_output(
     assert _mode(written) == 0o400
     assert json.loads(written.read_bytes()) == {
         "files": [
-            {"path": "nested/b.txt", "sha256": hashlib.sha256(b"hello").hexdigest(), "size": 5},
-            {"path": "report.json", "sha256": hashlib.sha256(b"{}").hexdigest(), "size": 2},
+            {
+                "path": "nested/b.txt",
+                "redactions": 0,
+                "sha256": hashlib.sha256(b"hello").hexdigest(),
+                "size": 5,
+            },
+            {
+                "path": "report.json",
+                "redactions": 0,
+                "sha256": hashlib.sha256(b"{}").hexdigest(),
+                "size": 2,
+            },
         ],
         "run_id": str(RUN),
         "total_bytes": 7,
