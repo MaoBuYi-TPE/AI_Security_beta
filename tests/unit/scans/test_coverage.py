@@ -6,7 +6,14 @@
   401、403 以外的回應（審查發現：只看送出不看回應會高估）。
 """
 
-from secscan.scans.domain.coverage import Exchange, FrozenOperation, observed_operations
+import pytest
+
+from secscan.scans.domain.coverage import (
+    Exchange,
+    FrozenOperation,
+    observed_operations,
+    telemetry_complete,
+)
 
 OPERATIONS = (
     FrozenOperation(ordinal=0, method="GET", path="/items/{id}"),
@@ -66,3 +73,12 @@ def test_rejected_credentials_are_not_authenticated_coverage() -> None:
     ]
 
     assert observed_operations(OPERATIONS, exchanges) == {0: False, 1: False, 3: True}
+
+
+@pytest.mark.parametrize(
+    ("lines", "forwarded", "complete"),
+    [(3, 3, True), (2, 3, True), (1, 3, False), (0, 71, False), (4, 3, False), (0, 0, True)],
+)
+def test_telemetry_is_complete_within_one_line(lines: int, forwarded: int, complete: bool) -> None:
+    """summary 先寫、行後寫（§16.3）：不會比轉送數多，中途失敗時最多少一行。"""
+    assert telemetry_complete(range(lines), forwarded=forwarded) is complete

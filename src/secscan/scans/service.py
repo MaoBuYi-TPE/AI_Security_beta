@@ -26,7 +26,6 @@ from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import Budget
 from secscan.grants.service import ScopeGrantService, UsableGrant
 from secscan.scans.domain.catalog import (
-    AVAILABLE_ENGINES,
     Engine,
     IncompatibleProfileError,
     InvalidScanRequestError,
@@ -47,6 +46,7 @@ from secscan.scans.domain.model import (
     ScanEvent,
     created_payload,
 )
+from secscan.scans.domain.observation import Observation
 from secscan.scans.domain.request import ScanRequest, fingerprint, resolve_budget
 from secscan.scans.progress import ScanProgress
 from secscan.scans.repository import ScanFilters, ScanRepository
@@ -63,15 +63,7 @@ ACTIVE_TARGET_CONSTRAINT = "uq_scans_active_target"
 
 
 class ScanService:
-    def __init__(
-        self,
-        session: Session,
-        *,
-        lab: LabNetwork,
-        preview_engines: frozenset[Engine] = frozenset(),
-    ) -> None:
-        # 預覽開關（docs/DECISIONS.md §18.9）：還沒開放、只給 live 測試的引擎。
-        self._available = AVAILABLE_ENGINES | preview_engines
+    def __init__(self, session: Session, *, lab: LabNetwork) -> None:
         self._scans = ScanRepository(session)
         self._progress = ScanProgress(session)
         self._targets = TargetRepository(session)
@@ -95,7 +87,7 @@ class ScanService:
         replayed = self._replay(target.project_id, idempotency_key, digest)
         if replayed is not None:
             return replayed
-        runs = _planned_runs(request, target, available=self._available)
+        runs = _planned_runs(request, target)
         # 先在取得任何鎖之前查一次忙碌與上限：註定失敗的請求不和撤銷、停用搶鎖（安全審查發現）。
         # 取得鎖之後再查一次才是準的（同時建立時另以唯一索引為準）。
         self._check_capacity(target.id, now=clock())
@@ -165,6 +157,12 @@ class ScanService:
         """sequence 大於 after_sequence 的事件，依 sequence 遞增，最多 limit 個。"""
         self._scan(principal, scan_id, Permission.PROJECT_READ)
         return self._scans.events(scan_id, after_sequence=after_sequence, limit=limit)
+
+    def observations(
+        self, principal: Principal, scan_id: UUID, *, engine: Engine | None, page: PageRequest
+    ) -> Page[Observation]:
+        self._scan(principal, scan_id, Permission.PROJECT_READ)
+        return self._scans.observations(scan_id, engine=engine, page=page)
 
     def cancel(self, principal: Principal, scan_id: UUID, *, request_id: str | None) -> Scan:
         """要求取消（docs/DECISIONS.md §13.6）：排隊中的 run 直接取消；runner 與 worker 階段的
@@ -323,16 +321,10 @@ class ScanService:
         return scan
 
 
-def _planned_runs(
-    request: ScanRequest, target: Target, *, available: frozenset[Engine]
-) -> tuple[PlannedRun, ...]:
+def _planned_runs(request: ScanRequest, target: Target) -> tuple[PlannedRun, ...]:
     """引擎與 profile 的規則：只看請求本身與 target 的種類，在取得任何鎖之前判斷。"""
     try:
-        runs = plan_runs(
-            request.engines,
-            authenticated=request.auth_profile_id is not None,
-            available=available,
-        )
+        runs = plan_runs(request.engines, authenticated=request.auth_profile_id is not None)
         check_profile(
             request.profile, target_kind=target.kind, has_spec=request.api_spec_id is not None
         )

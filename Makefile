@@ -46,11 +46,11 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 	SECSCAN_GUARD_LAB_IP=10.89.10.254 SECSCAN_GUARD_POLICIES_VOLUME=secscan_live_guard_policies \
 	SECSCAN_GUARD_STATUS_VOLUME=secscan_live_guard_status \
 	SECSCAN_GUARD_TELEMETRY_VOLUME=secscan_live_guard_telemetry
-LIVE_COMPOSE = $(LIVE_ENV) $(LIVE_EXTRA_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
+LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner \
-	test-live-zap
+	test-live-zap record-fixtures test-contract
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -60,8 +60,12 @@ bootstrap:
 # 啟動 API 開發程序：只綁 127.0.0.1，APP_ENV=dev 才開啟 API 文件。API 需要 .env 中的加密金鑰，
 # 所以先執行 make env（只補上缺少的值）。
 dev: env
-	SCAN_PREVIEW_ENGINES= APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
+	APP_ENV=dev $(UV_RUN) uvicorn --factory secscan.main:create_app \
 		--host 127.0.0.1 --port 8000 --reload --reload-dir src
+
+# fixture 與工具輸出的 contract 測試：不連網、不碰 Docker 與 DB。
+test-contract:
+	$(UV_RUN) pytest tests/contract -q
 
 # unit/contract/integration 測試與 coverage 門檻（分支覆蓋），不做 live scan、不跑 live 測試。
 # 測試程序本身不連網、也不碰 Docker（tests/isolation.py）；整合測試用的 db-test 由這裡先啟動。
@@ -181,7 +185,7 @@ lab-net:
 # 啟動 app stack（db、api、runner、worker、socket-proxy、guard）。API 只綁 127.0.0.1:$${API_PORT:-8000}。
 # 第一次使用先執行 make migrate（db 的 schema）與 create-admin-key。
 up: env docker-check scan-net lab-net images build
-	SECSCAN_LIVE_PREVIEW_ENGINES= $(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
+	$(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
 
 # 停止 app stack 與 db（資料保留在 volume）。
 down:
@@ -205,7 +209,8 @@ test-live-runner: env docker-check images build
 		$(LIVE_COMPOSE) up -d --wait db \
 		&& DB_PORT=55434 $(UV_RUN) alembic upgrade head >/dev/null \
 		&& $(LIVE_COMPOSE) up -d --wait \
-		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(UV_RUN) pytest -m live -p no:cacheprovider $(LIVE_TESTS) \
+		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(LIVE_PYTEST_ENV) $(UV_RUN) pytest -m live \
+			-p no:cacheprovider $(LIVE_TESTS) \
 		|| status=$$?; \
 		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
 			ids=$$(docker ps -aq --filter "network=$$net"); \
@@ -215,9 +220,14 @@ test-live-runner: env docker-check images build
 		docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
 		exit $$status
 
-# ZAP 的 live 測試（docs/DECISIONS.md §18.10）：同一個獨立的 secscan-live 專案與流程，API 加上只給
-# live 的預覽開關（zap 在 T15 才開放）。runner 啟動時以真的 ZAP 映像執行 capability probe；掃描的是
-# live 自己 lab 網路上的小型網站（tests/live/zap_site.py），不啟動 Juice Shop、VAmPI。約 10 分鐘（測試本身約 8 分鐘）。
+# ZAP 的 live 測試（docs/DECISIONS.md §18.10、§19）：同一個獨立的 secscan-live 專案與流程。runner
+# 啟動時以真的 ZAP 映像執行 capability probe；掃描的是 live 自己 lab 網路上的小型網站
+# （tests/live/zap_site.py），不啟動 Juice Shop、VAmPI。
 test-live-zap: LIVE_TESTS := tests/live/test_zap_live.py
-test-live-zap: LIVE_EXTRA_ENV := SECSCAN_LIVE_PREVIEW_ENGINES=zap
 test-live-zap: test-live-runner
+
+# 錄製 ZAP 的真實輸出（docs/DECISIONS.md §19.9）：同一個 live 流程，只執行錄製的情境（anonymous），
+# 輸出到 recordings/zap/<情境>/（gitignore）。人工審查之後才搬進 tests/fixtures/zap/。約 15 分鐘。
+record-fixtures: LIVE_TESTS := tests/live/test_zap_record_live.py
+record-fixtures: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/zap
+record-fixtures: test-live-runner

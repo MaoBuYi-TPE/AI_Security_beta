@@ -52,7 +52,7 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 |---|---|---|---|
 | api | default（只為了發布 127.0.0.1:8000）、control_net | 無 | internal network 上 publish 的 port 不會生效（實測） |
 | runner | control_net、docker_net | runs、run_secrets（tmpfs）兩個 named volume | 經 socket-proxy 操作 Docker；不掛 docker.sock |
-| worker | control_net | 無 | T10 只處理 fake 的 normalizing |
+| worker | control_net | runs、guard_telemetry（唯讀） | 解析收集好的輸出（T12 preflight、T15 zap） |
 | socket-proxy | docker_net | `/var/run/docker.sock`（唯讀） | 唯一接觸 Docker daemon 的服務 |
 | db | default（127.0.0.1:55432）、control_net | db_data | 保留 127.0.0.1 的 port 給 `make dev` 與 `make migrate` |
 | 掃描容器 | scan_net（`make scan-net` 建立：internal＋gateway isolated） | runs、run_secrets 的 subpath | 由 runner 建立，見 §4 |
@@ -298,12 +298,16 @@ ExecutionPlan 只能包含：
 | 輸入 | scope context、Web seed 或 API 規格 | 核准的目標/端點、template ID 清單 | 已驗證的 OpenAPI、operation allowlist、seed |
 | 目標認證 | `ZAP_AUTH_HEADER*` 環境變數（啟動時讀取，每個容器各自獨立）[S21]：plan 只有模式與 header 名稱，值由 script 從 0400 的 auth-header 檔讀出、只 export 給 ZAP（T14）；`_SITE` 以 host 子字串比對，邊界是 guard | `-sf` secret 檔：`static: - type: bearertoken` + `domains` 完全比對 host:port（T03 驗證）[S23] | `schemathesis.toml` 以 `${ENV}` 帶入 `[auth.openapi.<scheme>] bearer`（T03 驗證）[S09] |
 | 出站 | upstream proxy 設定鍵 `network.connection.httpProxy.*` 與速率 `network.ratelimit.*`，以 `-configfile`（0400 的 zap.properties）注入；值會記在 ZAP 的 log，以 `-nostdout` 讓它只留在 tmpfs（T14 實測） | `-p <檔案>` 指向 guard；經 proxy 不需本機 DNS（T03 驗證）[S23] | `proxy` 指向 guard（T03 驗證）[S07] |
-| 整合輸出 | report job 產生的 JSON；必要的訊息/統計 | `-jsonl -o` + 執行 manifest | `--report json,ndjson`；必要時加 junit [S07] |
+| 整合輸出 | report job 產生的 JSON（`traditional-json`）；AF 的結尾摘要與退出碼（T15，`DECISIONS.md` §19.2） | `-jsonl -o` + 執行 manifest | `--report json,ndjson`；必要時加 junit [S07] |
 | 必須關閉 | `-silent`（不主動對外請求、不檢查更新）[S20]；OAST | `-ni`（關閉 interactsh/OAST）、`-duc`、`-pt http` 以外的協定、code/headless/dos 模板、雲端上傳 [S23] | 未授權的 method（grant + guard 雙重限制）；自動建立帳號等行為（若該版本有） |
 | 來源鍵 | plugin/rule ID、alert instance | template ID、matcher、matched-at | check、operation、case/event ID |
 | 不能假設 | alert 很多就表示執行成功；API/Web profile 等價 | 官方模板都沒有副作用；JSONL 是空的就等於安全 | check 停用就等於不發請求；500 都是漏洞 |
 
 - **ZAP**：M0 可以用 packaged scripts 取得樣本，但正式的 Adapter 使用同一套可版本化的設定，不同時維護好幾條不相容的掃描路徑。需記錄 engine/add-on 版本、JSON schema 和 exit handling。[S02–S05]
+- **ZAP 的 parser（T15，`DECISIONS.md` §19）**：
+  - `scanners/domain/zap/`：`report.py`（嚴格解析、鎖定版本與上限）、`log.py`（AF 的結尾摘要）、`results.py`（判定、排除、遮罩與截斷），都是純函式；資料的問題走判定，不丟例外。退出碼不等於結果：0、1、2 的語意由摘要與 guard 的 telemetry 一起判斷。
+  - 報告沒有 response 的 header 與 status，排除不是目標的回應以分層判斷：不在 origin 上 → guard 一定會拒絕（和 guard 同一個函式 `scope_reason`）→ telemetry 中沒有上游回應；telemetry 不能用時改看內容是否為 guard 的拒絕訊息。
+  - secret 只在 runner 的記憶體中：zap 的輸出在收集時以已知的 secret 做位元組層級的遮罩（`security/secret_masking.py`），之後才計算 hash；worker 另外以名稱與樣式遮罩 URL 與文字。
 - **Nuclei 模板清單**：
   - 從鎖定的 nuclei-templates release，依 tag/類型產生固定的 ID 清單，並記錄 release、hash 與 ID。
   - 以類別為單位人工審查，並抽查高風險模板。
@@ -332,8 +336,8 @@ ExecutionPlan 只能包含：
 | runner_instances | id、role（runner/worker）、owner（唯一）、software_version、capabilities（引擎、映像與不可用的原因）、heartbeat_at、created_at；每個程序一列，30 秒內有心跳才算存活（T10 新增） |
 | scan_operations | scan_id、ordinal、method、path、operation_id、ineligible_reason；建立 scan 時凍結的 inventory 與 grant 的判斷，coverage 的分母（T09 新增） |
 | findings | id、target_id、fingerprint、kind、normalized_severity、owasp_2025、owasp_api_2023、mapping_source、mapping_version、triage/lifecycle、first/last_seen |
-| observations | id、finding_id（可以先為 null）、scan_id、scanner_run_id、source_rule、rule_group、位置、auth_role、evidence_ref、raw_severity、raw_confidence、parser_version |
-| artifacts | id、run_id、type、hash、storage_key、size、classification、encrypted、retention |
+| observations | id、scan_id、scanner_run_id、ordinal、source_event_id、source_index、source_rule、rule_variant、title、raw_severity、severity_label、raw_confidence、confidence_label、CWE、WASC、method、path、query、parameter 與位置、attack、evidence、other_info（遮罩並截斷）、auth_role、report_artifact_id、parser_version（T15 新增；finding_id、rule_group 由 T19 加入） |
+| artifacts | id、scanner_run_id、scan_id、kind（input/output）、path、sha256、size、redactions、classification、encrypted、storage_key（T15 新增；保留期限在 T23） |
 | reports | id、scan_id、format（json/markdown；P1 加 sarif）、status、artifact_id、lease 欄位、error；同時是 worker 的工作佇列 |
 | scan_events | scan_id、sequence（每個 scan 各自連號）、event_type、scanner_run_id、payload（只由 enum 與 id 組成）、時間；供輪詢使用（T09 已建立） |
 | audit_events | actor_key_id、project、action、object_ref、redacted_changes、時間 |
@@ -397,7 +401,10 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - scanner_runs 新增 `requests_allotted`、`requests_sent`、`requests_denied`、`traffic_seconds`（非負；有 sent 就有 allotted 且不超過它）、`preflight_result`（只有 preflight 的 run）、`coverage_recorded`；engine 加上 `preflight`，sequence 上限改成 5。
   - run_coverage：主鍵 `(scanner_run_id, ordinal)`；`(scanner_run_id, scan_id)` 引用 run、`(scan_id, ordinal)` 引用凍結的 operation；不可修改、刪除或 TRUNCATE。
 - **T13（migration `0009`）**：scanner_runs 新增 `container_removed_at`（容器確認不存在的時間；只有記下容器的 run 才有值，不早於開始的時間）與部分索引 `ix_scanner_runs_pending_containers`。trigger `scanner_runs_guard` 改寫：這一欄只能寫入一次；已終止的 run 只允許補寫它，其他欄位完全不變（`DECISIONS.md` §17.3）。
-- **其餘資料表由各功能任務以自己的 migration 加入**：findings、observations、artifacts、reports 在 M3 之後加入。
+- **T15（migration `0010`）**：
+  - scanner_runs 新增 `results_recorded`、`parser_version`、`engine_version`、`exit_code`、`observation_count`、`result_details`（JSONB ≤ 4 KiB：排除與重複的計數、判定、AF 的摘要與 add-on 的版本）；CHECK 要求一起有值；run 結束之後由 0009 的 trigger 凍結。
+  - artifacts、observations：只以複合 FK `(scanner_run_id, scan_id)` 引用 scanner_runs，不直接引用 scans（對帳先鎖 scans 再鎖 run）；不可修改、刪除或 TRUNCATE。
+- **其餘資料表由各功能任務以自己的 migration 加入**：findings、reports 在 M4、M5 加入。
 
 ## 7. ScanPlan 與執行快照
 
@@ -432,7 +439,7 @@ queued -> preparing -> running -> collecting -> normalizing
 | preparing | 認領、scope/auth/network/capability preflight 中 |
 | running | 至少一個引擎已開始；多個引擎依序執行 |
 | collecting | 收集已產出的受限 artifacts |
-| normalizing | 驗證輸出、匯入 observation、建立或關聯 finding |
+| normalizing | 驗證輸出、匯入 observation（T15）、建立或關聯 finding（T19） |
 | completed | 所有選定且適用的引擎都執行並解析完成；可以是零告警 |
 | partially_completed | 至少一個引擎有可用結果，其他引擎或覆蓋未完成 |
 | failed | 沒有可用的完整結果，且已確認是工具、設定或解析失敗 |
@@ -490,12 +497,18 @@ T09 已實作（`DECISIONS.md` §13.4）：
 - 取消：排隊中的 run 直接取消；runner 在心跳或 prepare 時看到取消才停止，之後 scan 才是 cancelled；已收集的引擎繼續解析完。
 - 目前只有 FakeRunner（`secscan-admin fake-runner`），以輪詢處理工作；真的 runner 程序與 docker-socket-proxy 在 T10。
 
+**T15 已實作**（`DECISIONS.md` §19.7、§19.8）：
+
+- `normalizing → timed_out`：引擎在自己的時間上限停止，解析之後才知道。
+- `aggregate()` 不把 preflight 算成結果引擎：掃描引擎都沒有成功時 scan 是 failed。
+- worker 認領 zap：讀 manifest、報告、log 與 telemetry，交給純函式判定，在同一個 transaction 寫入判定、artifact 與 observation；重試以存下的判定結束。解析期間每 5 秒延長 lease，不看取消與授權（解析不送流量）。
+
 **T10 已實作**（`DECISIONS.md` §14.6）：
 
 - `secscan-admin runner`：容器版的 runner。每 2 秒輪詢，只認領 capability probe 通過的引擎；每個 run 一個容器（名稱 `secscan-run-<run_id>`，重複建立會得到 409）。監看時每秒查狀態、每 5 秒心跳：要求取消 → 先轉 cancelling 再停止容器（5 秒寬限）→ cancelled；超過時間上限 → timed_out；收到 SIGTERM → 停止並刪除容器 → interrupted（`RUNNER_STOPPED`）。live 測試中取消後 5–6 秒內刪除容器。
 - 容器與 secret 在 finally 中刪除；會停止容器的結果都要確認容器已刪除才轉換。查不到容器的狀態時重試 3 次，已確認刪除容器就標成 interrupted。執行中每秒檢查 out/ 的用量，超過就停止容器。
 - lease 失效或無法確認容器已停止時，runner 停止處理並刪除 secret，但無法 fencing，run 留在 running；有容器的 run 不被既有的對帳碰觸（lease 過期不代表容器已停止），由 T13 依 label 對帳。
-- `secscan-admin worker`：只把 lease 過期的 normalizing 退回 collected，再把 fake 的 collected 標成 succeeded。
+- `secscan-admin worker`：把 lease 過期的 normalizing 退回 collected，再解析 collected 的 run（T10 只有 fake，T12 加上 preflight，T15 加上 zap）。
 - in-process 的 `fake-runner` 保留；兩者都會認領 fake，擇一執行。
 
 **T11 已實作**（`DECISIONS.md` §15.7）：
@@ -520,7 +533,7 @@ T09 已實作（`DECISIONS.md` §13.4）：
 
 ## 10. 統一發現格式與去重
 
-**Observation 包含**：
+**Observation 包含**（T15 的輸入契約在 `scans/domain/observation.py`，`DECISIONS.md` §19.3；這裡的欄位在 T19 前都以工具的原始值保存）：
 
 - 來源 engine/rule、source severity/confidence
 - CWE/CVE（可為空）

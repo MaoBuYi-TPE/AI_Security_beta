@@ -38,7 +38,7 @@ pytestmark = pytest.mark.integration
 # T10 的 scanner_runs 容器 4 與 runner_instances 5（test_runner_schema.py）；
 # T12 的用量 2 與 preflight 的結果 1（test_budget_schema.py）；
 # T13 的容器確認刪除 1（test_container_cleanup_schema.py）。
-EXPECTED_CHECK_COUNT = 96
+EXPECTED_CHECK_COUNT = 118
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "

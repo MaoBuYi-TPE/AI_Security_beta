@@ -21,12 +21,16 @@ import logging
 import math
 import time
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
-from secscan.auth_profiles.domain.credentials import SecretValue, header_line
+from secscan.auth_profiles.domain.credentials import (
+    SecretValue,
+    header_line,
+    masking_values,
+)
 from secscan.auth_profiles.domain.model import StoredSecret
 from secscan.runner.domain.admission import (
     AUTH_HEADER_FILE,
@@ -58,6 +62,7 @@ from secscan.scans.queue import (
     ScanQueue,
 )
 from secscan.security.secret_cipher import SecretCipher, SecretUnreadableError
+from secscan.security.secret_masking import PROXY_TOKEN_MARK, TARGET_SECRET_MARK, SecretMasker
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +138,9 @@ class _Attempt:
     started_at: float | None = None
     # 呼叫過 create：之後即使回錯誤，容器也可能已經建立、甚至已經啟動（例如 client 逾時）。
     create_called: bool = False
+    # 收集輸出時要遮掉的目標 secret（§19.5）：只留在記憶體。secret 檔在收集之前就刪掉了，不第二次
+    # 解密（換金鑰時可能失敗）。
+    secrets: tuple[str, ...] = field(default=(), repr=False)
 
 
 class _SecretUnavailableError(Exception):
@@ -236,7 +244,7 @@ class ContainerRunner:
         )
         if unconfirmed and not removed:
             raise RuntimeUnavailableError("無法確認容器已停止：run 留給對帳")
-        return self._conclude(attempt.lease, outcome, plan)
+        return self._conclude(attempt, outcome, plan)
 
     # --- 啟動 ---------------------------------------------------------------------------------
 
@@ -255,9 +263,7 @@ class ContainerRunner:
         if isinstance(admitted, _Outcome):
             return admitted
         attempt.egress = admitted
-        outcome = self._provision(attempt.lease, admitted, secret, plan) or self._confirm(
-            attempt.lease
-        )
+        outcome = self._provision(attempt, admitted, secret, plan) or self._confirm(attempt.lease)
         if outcome is not None:
             return outcome
         try:
@@ -315,15 +321,17 @@ class ContainerRunner:
         return None
 
     def _provision(
-        self, lease: Lease, egress: RunEgress, secret: StoredSecret | None, plan: ExecutionPlan
+        self, attempt: _Attempt, egress: RunEgress, secret: StoredSecret | None, plan: ExecutionPlan
     ) -> _Outcome | None:
         """secret 檔（proxy-url、target-auth）、輸入檔，最後是 guard 的 policy。"""
+        lease = attempt.lease
         try:
             files = {PROXY_FILE: egress.proxy_url, **secret_files(plan, egress)}
             if secret is not None:
                 value = SecretValue(self._reveal(secret))
                 files[SECRET_FILE] = value.value
                 files[AUTH_HEADER_FILE] = header_line(secret.credential, value).value
+                attempt.secrets = masking_values(secret.credential, value)
             self._workspace.write_secrets(lease.run_id, files)
             self._workspace.prepare(lease.run_id, plan.inputs)
         except _SecretUnavailableError:
@@ -532,16 +540,20 @@ class ContainerRunner:
             return unknown
         return RunUsage(summary.forwarded, summary.denied_total, seconds)
 
-    def _conclude(self, lease: Lease, outcome: _Outcome, plan: ExecutionPlan) -> RunReport:
+    def _conclude(self, attempt: _Attempt, outcome: _Outcome, plan: ExecutionPlan) -> RunReport:
+        lease = attempt.lease
         if outcome.ending in (_Ending.NOT_STARTED, _Ending.REVOKED):
             return self._fail(lease, outcome.error_code or RunErrorCode.RUNTIME_UNAVAILABLE)
         if outcome.ending is _Ending.EXITED:
-            return self._exited(lease, outcome.state, plan)
+            return self._exited(attempt, outcome.state, plan)
         status, error_code = _STOPPED_ENDINGS[outcome.ending]
         return self._advance(lease, status, error_code)
 
-    def _exited(self, lease: Lease, state: ContainerState | None, plan: ExecutionPlan) -> RunReport:
+    def _exited(
+        self, attempt: _Attempt, state: ContainerState | None, plan: ExecutionPlan
+    ) -> RunReport:
         """退出碼在引擎的收集清單中（zap 的 AF 有警告是 2，§18.1）才收集；語意由 parser 判斷。"""
+        lease = attempt.lease
         if state is None or state.exit_code is None:
             return self._fail(lease, RunErrorCode.RUNTIME_UNAVAILABLE)
         if state.oom_killed:
@@ -549,11 +561,15 @@ class ContainerRunner:
         if state.exit_code not in self._engine_policies[plan.engine].collect_exit_codes:
             return self._fail(lease, RunErrorCode.ENGINE_FAILED)
         self._queue.advance(lease, RunStatus.COLLECTING)
-        if not self._queue.heartbeat(lease).valid:
-            raise LeaseLostError("lease 已過期：不收集，交給對帳處理")
-        self._on_heartbeat()
+        self._beat_collecting(lease)
         try:
-            self._workspace.collect(lease.run_id, exit_code=state.exit_code, inputs=plan.inputs)
+            self._workspace.collect(
+                lease.run_id,
+                exit_code=state.exit_code,
+                inputs=plan.inputs,
+                masker=self._masker(attempt, plan),
+                on_progress=self._collecting_progress(lease),
+            )
         except ArtifactRejectedError as exc:
             logger.warning("輸出被拒絕：run %s，%s", lease.run_id, exc.issue.value)
             return self._fail(lease, RunErrorCode.ARTIFACT_REJECTED)
@@ -561,6 +577,36 @@ class ContainerRunner:
             logger.error("無法收集輸出：run %s，%s", lease.run_id, exc)
             return self._fail(lease, RunErrorCode.WORKSPACE_UNAVAILABLE)
         return self._advance(lease, RunStatus.COLLECTED)
+
+    def _masker(self, attempt: _Attempt, plan: ExecutionPlan) -> SecretMasker | None:
+        """引擎宣告 redact_outputs 時，以這個 run 的 secret 遮罩輸出（§19.5）。"""
+        if not self._engine_policies[plan.engine].redact_outputs:
+            return None
+        egress = attempt.egress
+        return SecretMasker.of(
+            {
+                TARGET_SECRET_MARK: attempt.secrets,
+                PROXY_TOKEN_MARK: egress.masking_values() if egress is not None else (),
+            }
+        )
+
+    def _beat_collecting(self, lease: Lease) -> None:
+        if not self._queue.heartbeat(lease).valid:
+            raise LeaseLostError("lease 已過期：不收集，交給對帳處理")
+        self._on_heartbeat()
+
+    def _collecting_progress(self, lease: Lease) -> Callable[[], None]:
+        """遮罩大檔可能超過 lease 的長度：處理的過程中依心跳的間隔延長 lease。"""
+        last_beat = self._monotonic()
+
+        def progress() -> None:
+            nonlocal last_beat
+            now = self._monotonic()
+            if now - last_beat >= HEARTBEAT_INTERVAL.total_seconds():
+                last_beat = now
+                self._beat_collecting(lease)
+
+        return progress
 
     def _fail(self, lease: Lease, error_code: RunErrorCode) -> RunReport:
         return self._advance(lease, RunStatus.FAILED, error_code)

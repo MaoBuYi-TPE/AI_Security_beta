@@ -26,3 +26,28 @@ def require_text(value: str, *, field: str, max_length: int) -> None:
         raise ValueError(
             f"{field} 不可包含控制字元或不可見的格式字元（例如換行、tab、bidi 控制字元）"
         )
+
+
+REPLACEMENT = "�"
+# 多行文字保留換行與 tab；其他控制字元、格式字元（bidi、零寬）與孤立的 surrogate 都換掉。
+_KEPT = frozenset("\n\t")
+_REPLACED_CATEGORIES = frozenset({"Cc", "Cf", "Cs"})
+
+
+def display_text(value: str, *, max_length: int) -> tuple[str, bool]:
+    """不可信的多行文字（工具的輸出，docs/DECISIONS.md §19.3）改成能保存、顯示的形式。
+
+    PostgreSQL 的 text 不接受 NUL、UTF-8 不能編碼孤立的 surrogate：不換掉會讓寫入失敗。換行統一成
+    \\n；其他控制字元、格式字元以 U+FFFD 取代（看得出原本有東西）。不轉換 HTML 的跳脫。回傳
+    （文字, 是否因超過 max_length 個字元而截斷）。
+    """
+    unified = value.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = "".join(
+        character
+        if character in _KEPT or unicodedata.category(character) not in _REPLACED_CATEGORIES
+        else REPLACEMENT
+        for character in unified
+    )
+    if len(cleaned) > max_length:
+        return cleaned[:max_length], True
+    return cleaned, False

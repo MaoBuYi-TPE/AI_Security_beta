@@ -18,6 +18,7 @@ from secscan.grants.schemas import BudgetIn, BudgetOut
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Scan, ScanEvent, ScannerRun
+from secscan.scans.domain.observation import Observation, ParameterLocation, RunResult
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.domain.request import BudgetRequest, ScanRequest
 from secscan.scans.domain.usage import budget_usage, coverage_measured, preflight_status
@@ -76,6 +77,42 @@ class AuthBindingOut(BaseModel):
     preflight: PreflightResult | None
 
 
+class RunResultOut(BaseModel):
+    """解析的結果：工具的版本與退出碼、入庫與排除的數量（docs/DECISIONS.md §19.6）。
+
+    excluded 是工具回報、但不是目標的回應或不在範圍內的告警；traffic_verified 是 false 時，沒有
+    guard 的 telemetry 可以核對。problem 是輸出不能用的原因（穩定的代碼）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    parser_version: str
+    engine_version: str | None
+    exit_code: int | None
+    observation_count: int
+    excluded: dict[str, int]
+    duplicates: int
+    truncated_fields: int
+    engine_errors: int
+    engine_warnings: int
+    time_limit_reached: bool
+    traffic_verified: bool
+    problem: str | None
+    components: dict[str, str]
+
+    @classmethod
+    def of(cls, result: RunResult) -> Self:
+        return cls.model_validate(
+            {
+                **result.details,
+                "parser_version": result.parser_version,
+                "engine_version": result.engine_version,
+                "exit_code": result.exit_code,
+                "observation_count": result.observation_count,
+            }
+        )
+
+
 class EngineRunOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -85,6 +122,8 @@ class EngineRunOut(BaseModel):
     error_code: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    # 解析過才有值（fake、preflight 與還沒解析的 run 是 null）。
+    result: RunResultOut | None
 
     @classmethod
     def of(cls, run: ScannerRun) -> Self:
@@ -95,6 +134,48 @@ class EngineRunOut(BaseModel):
             error_code=run.error_code.value if run.error_code is not None else None,
             started_at=run.started_at,
             finished_at=run.finished_at,
+            result=RunResultOut.of(run.result) if run.result is not None else None,
+        )
+
+
+class ObservationOut(BaseModel):
+    """工具的單次觀察（遮罩、截斷之後）：不是 finding，等級與信心是工具的原始值。
+
+    attack、evidence、other_info 是目標回應的不可信內容，顯示時要編碼。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    scan_id: UUID
+    scanner_run_id: UUID
+    engine: Engine
+    ordinal: int
+    source_rule: str
+    rule_variant: str | None
+    title: str
+    raw_severity: str
+    severity_label: str
+    raw_confidence: str
+    confidence_label: str
+    cwe_id: int | None
+    wasc_id: int | None
+    method: str
+    path: str
+    query: str | None
+    parameter: str | None
+    parameter_location: ParameterLocation
+    attack: str | None
+    evidence: str | None
+    other_info: str | None
+    auth_role: str
+    parser_version: str
+    created_at: datetime
+
+    @classmethod
+    def of(cls, observation: Observation) -> Self:
+        return cls(
+            **{name: getattr(observation, name) for name in cls.model_fields},
         )
 
 

@@ -8,7 +8,7 @@
 （ARCHITECTURE.md §9）：過期的 lease 不能延長，也不會被別人認領，只由對帳處理。
 """
 
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -34,6 +34,7 @@ from secscan.scans.domain.lifecycle import (
     ScanStatus,
 )
 from secscan.scans.domain.model import CONTAINER_NAME_PREFIX, Lease
+from secscan.scans.domain.observation import ArtifactRecord, ParsedRun
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.gate import RunGate
 from secscan.scans.leases import LeaseLostError, holds
@@ -46,7 +47,13 @@ from secscan.scans.progress import (
     ScanProgress,
     now,
 )
-from secscan.scans.run_records import CoverageInputs, RunRecords, RunUsage, SpecInputs
+from secscan.scans.run_records import (
+    CoverageInputs,
+    ResultContext,
+    RunRecords,
+    RunUsage,
+    SpecInputs,
+)
 from secscan.targets.domain import LabNetwork, Origin
 
 __all__ = [
@@ -60,6 +67,7 @@ __all__ = [
     "PendingContainer",
     "Progress",
     "QueueOperations",
+    "ResultContext",
     "RunReport",
     "RunUsage",
     "ScanQueue",
@@ -457,6 +465,24 @@ class ScanQueue:
     def bound_preflight(self, lease: Lease) -> Preflight | None:
         with self._sessions.begin() as session:
             return RunRecords(session).bound_preflight(lease)
+
+    def result_context(self, lease: Lease) -> ResultContext:
+        with self._sessions.begin() as session:
+            return RunRecords(session).result_context(lease)
+
+    def record_results(
+        self,
+        lease: Lease,
+        parsed: ParsedRun,
+        artifacts: Sequence[ArtifactRecord],
+        *,
+        exit_code: int | None,
+        report_path: str | None = None,
+    ) -> None:
+        with self._sessions.begin() as session:
+            RunRecords(session).record_results(
+                lease, parsed, artifacts, exit_code=exit_code, report_path=report_path
+            )
 
     def prepare(self, lease: Lease) -> Progress:
         with self._sessions.begin() as session:

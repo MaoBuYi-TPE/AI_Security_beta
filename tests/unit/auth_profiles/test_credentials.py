@@ -17,6 +17,7 @@ from secscan.auth_profiles.domain.credentials import (
     SecretValue,
     check_secret,
     header_line,
+    masking_values,
 )
 from secscan.auth_profiles.domain.errors import InvalidAuthProfileError
 
@@ -430,3 +431,34 @@ def test_header_line_refuses_line_breaks_even_if_stored_unchecked(secret: str) -
     """縱深防禦（審查建議）：解密出來的值不論怎麼存進去，都不能變成第二行 header。"""
     with pytest.raises(InvalidAuthProfileError):
         header_line(API_KEY, SecretValue(secret))
+
+
+# --- 輸出中要遮掉的值（docs/DECISIONS.md §19.5） --------------------------------------------
+
+
+def test_a_bearer_secret_masks_the_token_and_the_header_value() -> None:
+    values = masking_values(Credential(AuthType.BEARER), SecretValue("abc.def"))
+
+    assert values == ("abc.def", "Bearer abc.def")
+
+
+def test_an_api_key_header_masks_only_the_value() -> None:
+    credential = Credential(AuthType.API_KEY_HEADER, "X-Api-Key")
+
+    assert masking_values(credential, SecretValue("k-123")) == ("k-123",)
+
+
+def test_a_cookie_masks_the_string_and_every_long_value() -> None:
+    secret = SecretValue('session=abcd1234; csrf="efgh5678"; lang=en')
+
+    assert masking_values(Credential(AuthType.COOKIE), secret) == (
+        secret.value,
+        "abcd1234",
+        "efgh5678",
+    )
+
+
+def test_masking_values_reject_a_line_break() -> None:
+    """和 header_line 一樣：不論值怎麼存進去，都不能當成一般的值處理。"""
+    with pytest.raises(InvalidAuthProfileError):
+        masking_values(Credential(AuthType.BEARER), SecretValue("a\nb"))

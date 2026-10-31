@@ -403,7 +403,6 @@ def test_viewers_cannot_create_scans(db_session: Session, world: ScanWorld) -> N
 @pytest.mark.parametrize(
     ("engines", "code"),
     [
-        ((Engine.ZAP,), ErrorCode.ENGINE_UNSUPPORTED),
         ((Engine.NUCLEI,), ErrorCode.ENGINE_UNSUPPORTED),
         ((Engine.SCHEMATHESIS,), ErrorCode.ENGINE_UNSUPPORTED),
         ((Engine.FAKE, Engine.FAKE), ErrorCode.INVALID_REQUEST),
@@ -424,7 +423,9 @@ def test_engine_rules_come_before_the_gate(db_session: Session, world: ScanWorld
         world.team.admin, world.grant.id, reason="停止", now=NOW, request_id=None
     )
 
-    error = app_error(lambda: create_scan(db_session, world, world.request(engines=(Engine.ZAP,))))
+    error = app_error(
+        lambda: create_scan(db_session, world, world.request(engines=(Engine.NUCLEI,)))
+    )
 
     assert error.code is ErrorCode.ENGINE_UNSUPPORTED
 

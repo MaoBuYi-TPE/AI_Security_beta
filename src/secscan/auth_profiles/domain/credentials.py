@@ -21,6 +21,7 @@ from secscan.security.api_key_tokens import contains_platform_key
 MAX_SECRET_LENGTH = 4096
 HEADER_NAME_MAX_LENGTH = 64
 MAX_COOKIES = 32
+MIN_MASKED_COOKIE_VALUE = 8
 
 # RFC 6750 §2.1：b64token = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="
 _B64TOKEN = re.compile(r"[A-Za-z0-9\-._~+/]+=*")
@@ -129,6 +130,22 @@ def header_line(credential: Credential, secret: SecretValue) -> SecretValue:
         raise InvalidAuthProfileError("secret 不可有換行或 NUL")
     prefix = "Bearer " if credential.type is AuthType.BEARER else ""
     return SecretValue(f"{credential.wire_header}: {prefix}{secret.value}")
+
+
+def masking_values(credential: Credential, secret: SecretValue) -> tuple[str, ...]:
+    """工具的輸出中要遮掉的值（docs/DECISIONS.md §19.5）：secret、加了前綴的 header 值，以及
+    cookie 中夠長的每個值（短的值會把一般的文字遮掉，整串 cookie 另外列出）。
+    """
+    wire_value = header_line(credential, secret).value.partition(": ")[2]
+    values = [secret.value]
+    if wire_value != secret.value:
+        values.append(wire_value)
+    if credential.type is AuthType.COOKIE:
+        pairs = (
+            pair.partition("=")[2].strip('"') for pair in secret.value.split(_COOKIE_SEPARATOR)
+        )
+        values += [value for value in pairs if len(value) >= MIN_MASKED_COOKIE_VALUE]
+    return tuple(values)
 
 
 def check_secret(credential: Credential, secret: SecretValue) -> None:

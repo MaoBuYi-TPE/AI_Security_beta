@@ -67,8 +67,8 @@ def test_without_a_runner_nothing_is_available(client: TestClient, world: World)
     body = client.get("/api/v1/scanners", headers=world.viewer_a.headers).json()
 
     engines = _engines(body)
-    assert engines["zap"] == {
-        "engine": "zap",
+    assert engines["nuclei"] == {
+        "engine": "nuclei",
         "integrated": False,
         "available": False,
         "image": None,
@@ -76,6 +76,8 @@ def test_without_a_runner_nothing_is_available(client: TestClient, world: World)
         "unavailable_reason": "NOT_INTEGRATED",
         "version": None,
     }
+    assert engines["zap"]["integrated"] is True
+    assert engines["zap"]["unavailable_reason"] == "RUNNER_UNAVAILABLE"
     assert engines["fake"]["unavailable_reason"] == "RUNNER_UNAVAILABLE"
     assert body["data"]["runner"] == {"alive": False, "last_heartbeat_at": None}
     assert body["data"]["worker"] == {"alive": False, "last_heartbeat_at": None}

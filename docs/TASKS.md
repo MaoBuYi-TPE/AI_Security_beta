@@ -1178,7 +1178,7 @@
         - 刪除沒有呼叫者的 `addons` 與 `REPORT_FILE`；manifest 的退出碼與輸入改成必填。
         - 文件：capability 只記版本、§18.4 的負向前瞻、manifest 的內容、`BUDGET_EXHAUSTED` 也涵蓋 grant 快到期、probe 的目錄留在 runs volume。
       - 沒有修正、記入 `DECISIONS.md` §18：
-        - grant 快到期仍是 `BUDGET_EXHAUSTED`（新的錯誤碼要改 DB 的 CHECK，T14 不加 migration；訊息與 API_CONTRACT 已寫明）。
+        - grant 快到期仍是 `BUDGET_EXHAUSTED`（訊息與 API_CONTRACT 已寫明）。T15 更正：這裡原本寫「新的錯誤碼要改 DB 的 CHECK」是錯的，DB 只檢查錯誤碼的格式（`DECISIONS.md` §13.4、§19.1），不必 migration。
         - probe 的 `in/`、`out/` 留在 runs volume（保留期限在 M5／T23）。
         - probe 與掃描容器同在 scan_net（不能關閉互通：掃描容器要連到 guard）。
         - 其他 4 處以同樣方式解析 JSON 的程式讀的是平台自己寫的資料（guard 的 policy 與 telemetry、manifest、解密後的密文），不是工具輸出，不在 T14 修改。
@@ -1199,8 +1199,92 @@
         - worker 解析時的心跳。
       - **T16**：Juice Shop 與 VAmPI；path 中 `%` 的覆蓋缺口；cookie 與 session cookie 的合併（決定 §16.6 的 `auth` 旗標）；`_method`；時間型規則與預算；token 失效。
       - **之後**：runs volume 的保留期限（含 probe 的目錄，M5／T23）；多個掃描容器時 scan_net 的互通（M4）。
-- [ ] T15 實作版本化的 ZAP JSON Parser 與觀察輸入契約。
+- [x] T15 實作版本化的 ZAP JSON Parser 與觀察輸入契約。
   - DoD：clean、findings、malformed、timeout、exit 各種 fixture 都有測試；非零退出不一律當成 crash。
+  - 交付（2026-10-31，done）：
+    - 使用者的決定：
+      - 結果入庫並提供查詢：T15 建立 observations 與 artifacts，run 的結果存成 `scanner_runs` 的欄位（所以新的資料表是兩張）。
+      - ZAP 在 maxDuration 自行停止 → run `timed_out`（`ENGINE_TIMEOUT`），observation 照常入庫。
+      - `aggregate()` 不把 preflight 算成結果引擎；M2 撤銷授權的 live 斷言改成 `failed`。
+    - 範圍：
+      - **觀察輸入契約**（`scans/domain/observation.py`）：與引擎無關，M4 的 Nuclei 輸出同一個契約。
+      - **ZAP 的 parser**（`scanners/domain/zap/`，純函式，不丟例外）：
+        - `report.py`：嚴格的 JSON（拒絕重複的 key、NaN、浮點數）、鎖定的版本、欄位的型別、大小與數量的上限。
+        - `log.py`：只以整行比對 AF 的結尾摘要。
+        - `results.py`：退出碼、摘要與 telemetry 的判定表，分層排除不是目標的回應，先遮罩、後截斷，識別不含 ZAP 每次都不同的 instance id。
+      - **遮罩**：
+        - runner 在收集時以這個 run 的 secret 與 proxy token 做位元組層級的遮罩（`security/secret_masking.py`，只對 zap）：兩階段、暫存檔在 out/ 之外、hash 是遮罩之後的內容、過程中持續心跳。
+        - worker 以名稱與樣式遮罩 URL 與文字（`redact_url`、`redact_text`，補 T05 的缺口）。
+      - **入庫**（migration `0010`）：`artifacts`、`observations`（append-only，只以複合 FK 引用 `scanner_runs`）與 run 的結果欄位；判定、artifact 與 observation 在同一個 transaction 寫入，只能一次，重試以存下的判定結束。
+      - **worker**：認領 zap，嚴格讀 manifest（含退出碼），解析期間延長 lease、寫 fleet 的心跳，不看取消與授權。
+      - **狀態機**：`normalizing → timed_out`；`aggregate(runs, cancel_requested=, checks=)`。
+      - **API**：`GET /scans/{id}/observations`、`engines[].result`、`GET /scan-profiles`；`POST /scans` 接受 zap；移除 T14 的預覽開關。
+      - **錯誤碼**：`OUTPUT_INVALID`、`ENGINE_REPORTED_ERRORS`、`NO_TARGET_TRAFFIC`、`ENGINE_TIMEOUT`（DB 只檢查格式，不必 migration）。
+      - **工具**：`make record-fixtures`、`make test-contract`。
+      - 設計決定與取捨見 `DECISIONS.md` §19，量測見 `TOOLS.md` §7.6。
+    - 實作時和計畫不同的地方：
+      - 遮罩不用 regex，改用 `bytes.find`：目標收得到 secret，可以放任意多的片段，最壞的情況要線性時間。
+      - `NO_TARGET_TRAFFIC` 多了「沒有任何請求得到上游回應」：錄製的 `unanswered` 情境顯示，target 的 port 沒有人聽時 guard 轉送 71 個請求、全部是 mitmproxy 的 502，AF 只有一個警告，原本的判定會是零告警的成功。
+      - guard 拒絕訊息的排除只在沒有 telemetry 時使用（安全審查）：內容是目標控制的，不能讓目標隱藏自己的告警。
+      - 等級的名稱（`severity_label`、`confidence_label`）由 parser 寫入 DB：`scans` 不能 import `scanners`。
+      - 報告的 evidence 是原始的 HTML，不是規劃時以為的跳脫形式（以真實輸出為準）。
+    - 檔案：
+      - 程式：
+        - 新增：`scans/domain/observation.py`、`scanners/domain/zap/report.py`、`log.py`、`results.py`、`scanners/domain/profiles.py`、`security/secret_masking.py`、`worker/zap.py`、`migrations/versions/v0010_observations.py`
+        - 修改：`scans/`（`domain/lifecycle.py`、`domain/catalog.py`、`domain/coverage.py`、`domain/model.py`、`progress.py`、`run_records.py`、`queue.py`、`models.py`、`repository.py`、`schemas.py`、`router.py`、`service.py`）、`scanners/`（`router.py`、`service.py`、`schemas.py`、`domain/instances.py`、`domain/zap/script.py`）、`worker/`（`service.py`、`artifacts.py`、`loop.py`）、`runner/`（`service.py`、`workspace.py`、`egress.py`、`domain/policy.py`）、`guard/`（`domain/requests.py`、`domain/credentials.py`、`addon.py`）、`security/redaction.py`、`auth_profiles/domain/credentials.py`、`core/text.py`、`core/config.py`、`main.py`、`migrations/metadata.py`
+        - 刪除：`scans/dependencies.py`
+      - 部署：`compose.yaml`、`Makefile`（移除預覽開關，加上 `record-fixtures`、`test-contract`）、`.gitignore`（`recordings/`）
+      - 測試：
+        - fixture：`tests/fixtures/zap/<情境>/`（clean、findings、timeout、unanswered、unreachable、engine-error）
+        - contract：`tests/contract/test_zap_fixtures.py`；`test_fixture_manifest.py` 也檢查 `.log`
+        - unit：`tests/unit/scanners/zap/test_report.py`、`test_log.py`、`test_results.py`、`tests/unit/scanners/test_profiles.py`、`tests/unit/scans/test_observation.py`、`tests/unit/security/test_secret_masking.py`、`test_evidence_redaction.py`、`tests/unit/runner/test_workspace_masking.py`、`test_workspace_read.py`（由 `test_workspace.py` 分出）
+        - integration：`test_worker_zap.py`、`test_observations_api.py`、`test_observations_schema.py`、`test_scan_profiles_api.py`、`test_zap_scans_api.py`（由 `test_zap_preview_api.py` 改寫）
+        - live：`tests/live/test_zap_record_live.py`、`test_zap_live.py`、`zap_site.py`（加固的端點與 `/api/echo`；`receiver.py` 不動）
+      - 文件：`DECISIONS.md` §13.4、§15、§18.9、§19、`API_CONTRACT.md`、`ARCHITECTURE.md` §2、§5、§6、§8、§10、`SECURITY_AND_TESTING.md` §4、`TOOLS.md` §7.6、`SOURCES.md`、`README.md`、`START_HERE.md`、`CLAUDE.md`
+    - DoD 對照：
+      - **clean**：真實的零告警輸出 → `succeeded`、0 個觀察（unit、contract、integration、live）。
+      - **findings**：真實的報告 → 11 個觀察、欄位與 artifact（同上）；只有 passive 的告警，active scan 的命中在 T16。
+      - **malformed**：由真實報告衍生的每一種壞掉的輸出都是 `OUTPUT_INVALID` 與問題代碼，不丟例外；任意的 bytes 與 JSON 以 Hypothesis 驗證。
+      - **timeout**：真實的 maxDuration 輸出（退出碼 2）→ `timed_out`、觀察保留（unit 到 live）。
+      - **exit**：判定表的每一列，含退出碼 1 有報告與沒有報告；非零退出不一律當成 crash。
+      - **cancel（CLAUDE.md §12）**：取消的容器不收集；解析中要求取消，解析照常完成、scan 是 cancelled。
+    - 實際執行的測試（2026-10-31）：
+      - `make test`：5101 passed、1 skipped（5 分 58 秒），coverage 99.87%（新的 domain、遮罩、狀態機的模組 branch 都是 100%）。
+      - `make lint`、`make typecheck`、`make test-contract`、pre-commit：通過。
+      - `ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`：11 passed（11 分 15 秒；審查的修正之前另一次也是 11 passed）。
+      - `ENABLE_LIVE_LAB_TESTS=1 make test-live-runner`：42 passed（5 分 41 秒）。兩者跑完都確認沒有殘留的容器、volume、網路。
+      - `make record-fixtures`：4 passed（6 分 18 秒），錄製的輸出人工審查之後搬進 fixture。
+      - 突變檢查（獨立的 git worktree）：49 個全部被測試擋下。第一輪有 12 個整合測試的突變其實是環境錯誤（worktree 沒有 `.env`）被腳本算成擋下，修正腳本（只有真的 `failed` 才算）之後重跑才算數。
+      - 大型報告的量測：8 MiB 解析 1.31 秒、峰值 RSS 106 MiB，worker 的 `mem_limit` 不必改。
+    - 沒有依 TDD 的地方（如實記錄）：
+      - `redact_url`、`redact_text`：先寫測試，但沒有先執行看它失敗就實作。
+      - 量測、fixture 與 live 的錄製先於 parser，是計畫的安排；`tests/live/` 的修改以實際執行驗證，沒有 RED 的步驟。
+      - 移除預覽開關是機械式的刪除，先改程式、再修測試。
+    - 審查：
+      - security-reviewer：0 CRITICAL、0 HIGH、5 MEDIUM、3 LOW。
+        - 修正：目標以拒絕文字隱藏告警、URL 參數值的數量沒有上限、全空白的檔名、告警標題沒有遮罩。
+        - 接受並記入 `DECISIONS.md` §19.12：惡意目標把 secret 轉成其他編碼、log 夾帶摘要文字、超過上限時整份 `OUTPUT_INVALID`、secret 含引號可能破壞 JSON。這些都是看得見的失敗，或列舉不完的編碼。
+        - 沒有修正：API 回應沒有 `X-Content-Type-Options: nosniff`（縱深防禦；全域安全 header 已在 `DECISIONS.md` §9 排進 T23，T15 不提前）。
+      - code-reviewer：APPROVE（0 CRITICAL、0 HIGH、3 LOW，3 個都修正）：遮罩字串被再次比對（我修安全審查時引入的回歸）、暫存檔刪不掉時的 fd 洩漏、殘缺的 telemetry 被判成沒有流量（coverage 有同一個空洞，一起修正）。
+    - 限制：
+      - 小型網站沒有弱點：還沒有 active scan 真的命中的告警，也還沒有量到 guard 的 403 被告警。分層排除的第 2、3 層以真實的 502 與單元測試驗證。
+      - 同一個 path 有上游回應、也有動態的拒絕時，對 guard 回應的告警會入庫。
+      - ZAP 報告的 URI 和送出的 target 是否逐字相同，要以真實的命中確認（不符時真的結果會被排除，計數揭露在 `excluded`）。
+      - 精確遮罩只認得已知的 secret 與列舉的形式；靶機自己發的 token 只靠樣式遮罩。
+      - 收集中途中斷時 out/ 可能還有沒遮罩的檔案（沒有 manifest，worker 不會讀；保留期限在 T23）。
+      - guard 回報預算用盡時照舊立刻停止、不收集（`BUDGET_EXHAUSTED`），已經掃到的結果不保留。
+      - `tests/integration/test_scan_service.py` 在 main 就是 810 行（這次多 1 行），超過 800 行的上限，沒有在 T15 拆分。
+      - T11 的證據缺口（同一條連線上多個請求的收包證據）仍在。
+    - 給後續任務：
+      - **T16**：
+        - 以 Juice Shop、VAmPI 的真實命中確認 URI 與 telemetry 的對應、`excluded` 的計數、report 的大小與 8 MiB 的上限。
+        - 量測 guard 的 403 是否被告警；若有，為拒絕回應加上安全 header。
+        - 確認 AF 的訊息是否帶得出目標的內容（log 夾帶摘要的可行性）。
+        - 檢討 guard 回報預算用盡時是否收集輸出（目前不收集，結果不保留）。
+        - T14 交接的項目：path 中 `%` 的覆蓋缺口、cookie 的合併、`_method`、時間型規則與預算、token 失效。
+      - **T19**：在 observations 加上 rule group、fingerprint 與 finding；以 `raw_severity` 與 `severity_label` 正規化。
+      - **M4（Nuclei）**：輸出 `ObservationInput`；`aggregate()` 的 `checks` 不必改；`/scan-profiles` 加上模板的定義。
+      - **T21／T23**：報告要編碼 evidence、attack、other_info（目標的不可信內容）；artifact 的下載、原始證據加密、runs volume 的保留期限。
 - [ ] T16 執行 ZAP 真實 e2e 與失敗情境。
   - DoD：
     - Juice Shop 與 VAmPI 的已知正例/負例、Token 失效、工具超時、取消，都有真實證據。

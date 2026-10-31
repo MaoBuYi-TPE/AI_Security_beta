@@ -240,3 +240,57 @@ web 31 條、api 13 條、排除 22 條。probe 以鎖定的映像執行兩份�
 - 以 maxDuration 結束時的退出碼：測試只斷言是 0 或 2，沒有記下實際值。
 - `_method`：小型網站的表單沒有這個欄位。
 - HTTPS。
+
+### 7.6 T15：輸出的量測（2026-10-31）
+
+**離線（`--network none`，掃描容器的強化旗標，鎖定的映像）**：
+
+| 情境 | 退出碼 | 報告 | log 的結尾 |
+|---|---|---|---|
+| `maxDuration: 20`，45 秒的 `delay` job | 2（34 秒結束） | 有，`site` 是空的 | `Automation plan warnings:`、tab 加 `Plan stopped after reaching maximum duration of 20 second(s)`；進度中另有 `Job delay interrupted` |
+| spider 連不到 host | 1（14 秒） | 有，`site` 是空的 | `Automation plan failures:`、tab 加 `Job spider failed to access URL … check that it is valid : …`（訊息含 URL） |
+| 錯誤加上警告（未知的 job 參數） | 1 | 有 | failures 在前、warnings 在後，各一次 |
+| 沒有錯誤與警告 | 0 | 有 | `Automation plan succeeded!` |
+| ZAP 不認得的啟動參數 | 1（12 秒） | 沒有 | `Unsupported option …` 與 usage，沒有摘要 |
+| `-Xmx100000g` | 137（2 秒） | 沒有 | JVM 被 kill：不在收集的退出碼中 |
+
+- plan 的 `maxDuration` 到期時**中斷執行中的 job**，不是等 job 結束；第二個 `delay` 沒有執行，`alwaysRun` 的 report 照樣寫出。
+- 摘要一定在 log 的最後。`ExtensionAutomation` 的順序是 failures、warnings；訊息本身可以有換行，所以不能假設每一行都以 tab 開頭。
+
+**live（`make record-fixtures`：live lab 網路上的小型網站，anonymous；4 個情境 6 分 18 秒）**：
+
+| 情境 | 設定 | 退出碼 | 摘要 | 告警／instance | 請求／回應 |
+|---|---|---|---|---|---|
+| findings | web，240 秒 | 0 | succeeded | 4／11 | 272／272 |
+| clean | api，加了安全 header 的 JSON 端點，300 個請求 | 0 | succeeded | 0／0 | 13／13 |
+| timeout | web，120 秒（maxDuration 60 秒） | 2 | maxDuration | 4／11 | 117／117 |
+| unanswered | web，target 的 port 沒有人聽 | 2 | `Job spider error accessing URL … status code returned : 502 expected 200` | 3／9 | 71／0 |
+
+- **報告的形狀**：`site` 只有 target；零告警時 `site` 有一項、`alerts` 是空的；連不到 host 時 `site` 是空的。`riskcode`、`confidence`、`cweid`、`wascid`、`pluginid` 都是字串，`systemic` 是布林。`desc` 與 evidence 是原始的 HTML（`<p>`、`<form …>`），不是跳脫的形式。
+- **URI 和 telemetry**：findings 的每個 instance 的 (method, path) 都在 telemetry 中（path 不含 query）；根是 `http://host:3000/`。T03 的 Juice Shop 報告有沒有結尾斜線的 `http://juice-shop:3000`。
+- **mitmproxy 自己的回應會被告警**：unanswered 的 3 種告警都是對 502 錯誤頁的：缺 CSP（10038）、Private IP Disclosure（2，evidence 是靶機的 IP `10.89.10.210`）、`Server: mitmproxy 12.2.3`（10036）。不排除的話，它們會成為目標的「觀察」，而且 run 看起來是成功的（`DECISIONS.md` §19.2 第 4 條、§19.4 第 3 層）。
+- **`/admin` 的 guard 拒絕沒有出現**：ZAP 的 context 已排除（T14 的 scope），guard 只拒絕 14 個 407；所以 guard 的 403 被告警的情況還沒量到（§19.4 的第 4 層目前只有單元測試，T16 以真實靶機量測）。
+
+**解析的成本**（以真實的 instance 複製，不進 repo；M1 Pro）：
+
+| 報告 | instance | 解析 | Python 的峰值 | 程序的峰值 RSS |
+|---|---|---|---|---|
+| 1 MiB | 1,632 | 0.16 秒 | 2.9 MiB | 30 MiB |
+| 4 MiB | 6,594 | 0.64 秒 | 11.3 MiB | 55 MiB |
+| 8 MiB | 13,209 | 1.31 秒 | 21.9 MiB | 106 MiB |
+
+8 MiB 在 worker 的 `mem_limit`（256m）之內；上限維持 8 MiB，T16 以真實的大報告重新確認。
+
+**T14 還沒量測的項目**：以 maxDuration 結束時的退出碼是 2（上表）。
+
+**完整的閉環（`make test-live-zap`，開放 zap、移除預覽開關之後；審查的修正之前與之後各跑一次，都是 11 passed，11 分 12 秒、11 分 15 秒，跑完沒有殘留的容器、volume、網路）**：
+
+- web、anonymous：guard 放行 272 個，拒絕的只有 407 GET 14 個；run `succeeded`、scan `completed`；每個觀察的 (method, path) 都是網站真的收到的請求；manifest 的 hash 等於 runs volume 中遮罩之後的檔案。
+- api、bearer：放行 16 個，拒絕 407 GET 78、`PATH_AMBIGUOUS` GET 136、`PATH_NOT_AUTHORIZED` GET 14 個。
+- **遮罩**：`/api/echo` 把認證 header 寫進 HTML 註解，ZAP 的 Suspicious Comments（10027）把註解帶進報告。bearer、`api_key_header`、cookie 三種都是報告中遮罩 2 次：out/ 的報告與 log、`GET /observations` 的回應都沒有 secret 的原文，看得到 `[REDACTED:target-secret]`。worker 能解析遮罩之後的報告（0400、runner 的 uid）。
+- maxDuration（web，120 秒）：run `timed_out`（`ENGINE_TIMEOUT`）、scan `timed_out`，觀察保留。
+- 零告警（加了安全 header 的端點）：run `succeeded`、0 個觀察、guard 有轉送、網站有收到請求。
+- 目標沒有回應（port 沒有人聽）：run `failed`（`NO_TARGET_TRAFFIC`），0 個觀察，`excluded.not_answered` 大於 0。
+- 取消：封鎖之後被拒 2 個，kill 到 die 2.05 秒。參照炸彈：`succeeded`。
+
+M2 的 `make test-live-runner`：42 passed（5 分 41 秒），撤銷授權的 scan 是 `failed`（`DECISIONS.md` §19.8）。

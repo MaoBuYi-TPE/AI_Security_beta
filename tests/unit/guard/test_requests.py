@@ -26,6 +26,7 @@ from secscan.guard.domain.requests import (
     canonical_authority,
     request_reason,
     run_state_reason,
+    scope_reason,
 )
 from secscan.targets.domain import parse_ipv4, parse_origin
 
@@ -421,3 +422,41 @@ def test_a_passing_request_is_always_inside_the_grant(
     assert "{" not in path
     assert "#" not in view.target
     assert POLICY.rules.classify(method=method, path=path) is None
+
+
+# --- scope_reason：只看 method 與 target（docs/DECISIONS.md §19.4） ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "target", "expected"),
+    [
+        ("GET", "/api/items", None),
+        ("GET", "/api/items/7?x=1", None),
+        ("GET", "/api/items/%00", Reason.PATH_AMBIGUOUS),
+        ("GET", "/api/items/{id}", Reason.PATH_AMBIGUOUS),
+        ("GET", "/api/items#fragment", Reason.PATH_AMBIGUOUS),
+        ("GET", "/api/items/caf\u00e9", Reason.PATH_AMBIGUOUS),
+        ("G T", "/api/items", Reason.PATH_AMBIGUOUS),
+        ("GET", "/api/admin", Reason.PATH_EXCLUDED),
+        ("DELETE", "/api/items", Reason.METHOD_NOT_AUTHORIZED),
+        ("GET", "/other", Reason.PATH_NOT_AUTHORIZED),
+        ("GET", "/api/items?_method=DELETE", Reason.OVERRIDE_HEADER),
+        ("GET", "/api/items?%5Fmethod=DELETE", Reason.OVERRIDE_HEADER),
+    ],
+)
+def test_scope_reason_needs_only_the_method_and_the_target(
+    method: str, target: str, expected: Reason | None
+) -> None:
+    assert scope_reason(method, target, _compiled().rules) is expected
+
+
+@given(
+    st.sampled_from(["GET", "POST", "PUT", "DELETE", "TRACE", "G T"]),
+    st.text(alphabet="/abcitems%{}#?&=_.;", min_size=1, max_size=24),
+)
+def test_scope_reason_agrees_with_the_full_check(method: str, target: str) -> None:
+    """header 與 authority 都正常的請求：兩者的結果相同（parser 與 guard 用同一套規則）。"""
+    compiled = _compiled()
+    view = _view(method=method, target=target)
+
+    assert scope_reason(method, target, compiled.rules) is request_reason(view, compiled)

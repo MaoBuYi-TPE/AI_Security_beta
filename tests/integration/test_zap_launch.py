@@ -27,7 +27,6 @@ pytestmark = pytest.mark.integration
 
 OWNER = "runner-zap-launch"
 ZAP = frozenset({ScanEngine.ZAP})
-PREVIEW = frozenset({ScanEngine.ZAP})
 SPEC = json.dumps(
     {
         "openapi": "3.0.3",
@@ -90,7 +89,7 @@ def test_an_api_run_gets_the_stored_document_and_the_eligible_operations(
     )
     spec = queue_seed.spec(world.operator_a, target, content=SPEC)
     request = _request(target, grant.id, spec.id, ScanProfile.API_ACTIVE_LAB)
-    queue_seed.create_scan(world.operator_a, request, preview=PREVIEW)
+    queue_seed.create_scan(world.operator_a, request)
 
     _, launch = _launched(queue)
 
@@ -110,7 +109,7 @@ def test_a_web_run_has_no_spec(queue: ScanQueue, queue_seed: Seeder, world: Worl
         world.admin, queue_seed.grant(world.operator_a, target, paths=("/",))
     )
     request = _request(target, grant.id, None, ScanProfile.WEB_ACTIVE_LAB)
-    queue_seed.create_scan(world.operator_a, request, preview=PREVIEW)
+    queue_seed.create_scan(world.operator_a, request)
 
     _, launch = _launched(queue)
 

@@ -1,10 +1,10 @@
 """應用程式設定：從環境變數與 .env 載入，建立後不可修改。"""
 
 from ipaddress import IPv4Network
-from typing import Annotated, Literal, Self
+from typing import Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from secscan.core.network import lab_cidr_problem
 
@@ -32,9 +32,6 @@ MAX_TCP_PORT = 65535
 # 靶場網段（docs/DECISIONS.md §10.1）：預設是 lab_net（make lab-net）。規則在 core/network.py，
 # egress guard 也用同一個函式檢查。
 DEFAULT_LAB_CIDR = IPv4Network("10.89.7.0/24")
-# 預覽開關可以開啟的引擎（docs/DECISIONS.md §18.9）：只有 zap，T15 開放 zap 時移除這個開關。
-# core 不 import scans 的引擎列舉，這裡以字面值列出。
-PREVIEWABLE_ENGINES = frozenset({"zap"})
 
 
 class Settings(BaseSettings):
@@ -80,9 +77,6 @@ class Settings(BaseSettings):
     lab_only: bool = True
     lab_cidr: IPv4Network = DEFAULT_LAB_CIDR
 
-    # 還沒對操作者開放、只給 live 測試的引擎（環境變數 SCAN_PREVIEW_ENGINES，逗號分隔；預設空）。
-    scan_preview_engines: Annotated[tuple[str, ...], NoDecode] = ()
-
     @property
     def docs_enabled(self) -> bool:
         """API 文件端點只在開發環境開啟（docs/API_CONTRACT.md §2）。"""
@@ -95,19 +89,6 @@ class Settings(BaseSettings):
         if problem is not None:
             raise ValueError(problem)
         return value
-
-    @field_validator("scan_preview_engines", mode="before")
-    @classmethod
-    def _only_previewable_engines(cls, value: object) -> tuple[str, ...]:
-        names = value
-        if isinstance(value, str):
-            names = tuple(part.strip() for part in value.split(","))
-        if not isinstance(names, tuple):
-            raise TypeError("SCAN_PREVIEW_ENGINES 必須是逗號分隔的引擎名稱")
-        selected = tuple(name for name in names if name)
-        if len(set(selected)) != len(selected) or not set(selected) <= PREVIEWABLE_ENGINES:
-            raise ValueError("SCAN_PREVIEW_ENGINES 只能是空的或 zap（docs/DECISIONS.md §18.9）")
-        return selected
 
     @model_validator(mode="after")
     def _require_lab_only(self) -> Self:

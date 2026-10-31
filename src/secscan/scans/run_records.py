@@ -1,26 +1,38 @@
-"""run 的用量、preflight 的結果與 coverage（docs/DECISIONS.md §16.4 至 §16.6）。
+"""run 的用量、preflight 的結果、coverage 與解析的結果（docs/DECISIONS.md §16.4 至 §16.6、§19.6）。
 
 runner 與 worker 在 run 結束之前（終止的 run 不能再改）以持有的 lease 寫入；寫入都經 fencing，
 lease 失效時拋 LeaseLostError。剩下的預算在 prepare 時由之前的 run 的用量算出。
 在呼叫端的 transaction 中執行（ScanQueue 每個操作一個短 transaction）。
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, func, insert, select, update
 from sqlalchemy.orm import Session
 
 from secscan.auth_profiles.domain.preflight import Preflight
 from secscan.auth_profiles.repository import AuthProfileRepository
+from secscan.grants.domain.matching import ScopeRules
+from secscan.grants.repository import ScopeGrantRepository
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import FrozenOperation
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.domain.model import EventType, Lease
+from secscan.scans.domain.observation import (
+    ArtifactKind,
+    ArtifactRecord,
+    ParsedRun,
+    RunOutcome,
+    outcome_from_details,
+    result_details,
+)
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.leases import LeaseLostError, holds
 from secscan.scans.models import (
+    ArtifactModel,
+    ObservationModel,
     RunCoverageModel,
     ScanEventModel,
     ScanModel,
@@ -29,6 +41,7 @@ from secscan.scans.models import (
 )
 from secscan.scans.progress import now
 from secscan.specs.repository import ApiSpecRepository
+from secscan.targets.domain import Origin, parse_origin
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +76,19 @@ class CoverageInputs:
     operations: tuple[FrozenOperation, ...]
     # 已經記錄過（worker 在轉成 succeeded 之前中斷、退回 collected 之後重試）。
     recorded: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ResultContext:
+    """判定輸出需要的：target、grant 的範圍與 guard 記下的轉送數（None 是不明）。
+
+    stored 是已經存下的判定：解析寫入之後、run 結束之前中斷，重試時不再解析（§19.6）。
+    """
+
+    origin: Origin
+    rules: ScopeRules
+    requests_sent: int | None
+    stored: RunOutcome | None
 
 
 class RunRecords:
@@ -225,6 +251,123 @@ class RunRecords:
                     for ordinal, authenticated in sorted(observed.items())
                 ],
             )
+
+    # --- 解析的結果 ---------------------------------------------------------------------------
+
+    def result_context(self, lease: Lease) -> ResultContext:
+        row = self._session.execute(
+            select(
+                ScanModel.target_origin,
+                ScanModel.scope_grant_id,
+                ScannerRunModel.requests_sent,
+                ScannerRunModel.result_details,
+            )
+            .join(ScanModel, ScanModel.id == ScannerRunModel.scan_id)
+            .where(ScannerRunModel.id == lease.run_id)
+        ).one()
+        grant = ScopeGrantRepository(self._session).get(row.scope_grant_id)
+        if grant is None:
+            raise ValueError("scan 引用的 grant 不存在")
+        details = row.result_details
+        return ResultContext(
+            origin=parse_origin(row.target_origin),
+            rules=ScopeRules.of(grant.scope),
+            requests_sent=row.requests_sent,
+            stored=outcome_from_details(details) if details is not None else None,
+        )
+
+    def record_results(
+        self,
+        lease: Lease,
+        parsed: ParsedRun,
+        artifacts: Sequence[ArtifactRecord],
+        *,
+        exit_code: int | None,
+        report_path: str | None = None,
+    ) -> None:
+        """判定、artifact 與 observation 在同一個 transaction 寫入（只能一次）。"""
+        self._fenced_update(
+            lease,
+            {
+                "results_recorded": True,
+                "parser_version": parsed.parser_version,
+                "engine_version": parsed.engine_version,
+                "exit_code": exit_code,
+                "observation_count": len(parsed.observations),
+                "result_details": result_details(parsed),
+            },
+            ScannerRunModel.results_recorded.is_(False),
+            problem="lease 已過期、不屬於這個 worker，或已經記錄過結果",
+        )
+        report_id = self._insert_artifacts(lease, artifacts, report_path)
+        if parsed.observations:
+            self._insert_observations(lease, parsed, report_id)
+
+    def _insert_artifacts(
+        self, lease: Lease, artifacts: Sequence[ArtifactRecord], report_path: str | None
+    ) -> UUID | None:
+        rows = [(uuid4(), artifact) for artifact in artifacts]
+        if rows:
+            self._session.execute(
+                insert(ArtifactModel),
+                [
+                    {
+                        "id": artifact_id,
+                        "scanner_run_id": lease.run_id,
+                        "scan_id": lease.scan_id,
+                        "kind": artifact.kind.value,
+                        "path": artifact.path,
+                        "sha256": artifact.sha256,
+                        "size": artifact.size,
+                        "redactions": artifact.redactions,
+                        "classification": artifact.classification.value,
+                        "storage_key": artifact.storage_key(lease.run_id),
+                    }
+                    for artifact_id, artifact in rows
+                ],
+            )
+        for artifact_id, artifact in rows:
+            if artifact.kind is ArtifactKind.OUTPUT and artifact.path == report_path:
+                return artifact_id
+        return None
+
+    def _insert_observations(self, lease: Lease, parsed: ParsedRun, report_id: UUID | None) -> None:
+        auth_role = self._session.execute(
+            select(ScanModel.auth_role).where(ScanModel.id == lease.scan_id)
+        ).scalar_one()
+        self._session.execute(
+            insert(ObservationModel),
+            [
+                {
+                    "scanner_run_id": lease.run_id,
+                    "scan_id": lease.scan_id,
+                    "ordinal": ordinal,
+                    "source_event_id": item.source_event_id,
+                    "source_index": item.source_index,
+                    "source_rule": item.source_rule,
+                    "rule_variant": item.rule_variant,
+                    "title": item.title,
+                    "raw_severity": item.raw_severity,
+                    "severity_label": item.severity_label,
+                    "raw_confidence": item.raw_confidence,
+                    "confidence_label": item.confidence_label,
+                    "cwe_id": item.cwe_id,
+                    "wasc_id": item.wasc_id,
+                    "method": item.method,
+                    "path": item.path,
+                    "query": item.query,
+                    "parameter": item.parameter,
+                    "parameter_location": item.parameter_location.value,
+                    "attack": item.attack,
+                    "evidence": item.evidence,
+                    "other_info": item.other_info,
+                    "auth_role": auth_role,
+                    "report_artifact_id": report_id,
+                    "parser_version": parsed.parser_version,
+                }
+                for ordinal, item in enumerate(parsed.observations, 1)
+            ],
+        )
 
     def _fenced_update(
         self,

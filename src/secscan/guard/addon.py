@@ -28,6 +28,7 @@ from secscan.guard.domain.credentials import (
 )
 from secscan.guard.domain.policy import CompiledPolicy, Policy, PolicyError
 from secscan.guard.domain.requests import (
+    DENY_MESSAGE,
     DENY_STATUS,
     GUARD_HEADER,
     Reason,
@@ -57,7 +58,7 @@ DENIAL_KEY = "secscan.guard.denial"
 PENDING_KEY = "secscan.guard.pending"
 FORWARDED_KEY = "secscan.guard.forwarded"
 _PROXY_HEADER_PREFIX = "proxy-"
-_KILLED = "blocked by secscan egress guard"
+_KILLED = DENY_MESSAGE
 
 Resolver = Callable[[str], Awaitable[tuple[str, ...]]]
 
@@ -227,7 +228,7 @@ class GuardAddon:
         self._kill(flow, "websocket_start")
 
     def response(self, flow: Flow) -> None:
-        """靶機的回應不能冒充 guard：M3 的 parser 依 X-Secscan-Guard 排除 guard 的回應。"""
+        """靶機的回應不能冒充 guard：preflight 依 X-Secscan-Guard 判斷被 guard 拒絕。"""
         try:
             headers = getattr(flow.response, "headers", None)
             if DENIAL_KEY not in flow.metadata and headers is not None and GUARD_HEADER in headers:
@@ -418,7 +419,7 @@ class GuardAddon:
             }
             if reason is Reason.PROXY_AUTH_REQUIRED:
                 headers["Proxy-Authenticate"] = PROXY_AUTHENTICATE
-            body = f"blocked by secscan egress guard: {reason.value}\n".encode("ascii")
+            body = f"{DENY_MESSAGE}: {reason.value}\n".encode("ascii")
             flow.response = self._make_response(DENY_STATUS[reason], body, headers)
         except Exception as exc:  # noqa: BLE001 - 連回應都建立不了：中止這個 flow
             self._log.hook_failed("deny", exc)

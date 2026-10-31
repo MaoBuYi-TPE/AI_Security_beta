@@ -5,6 +5,8 @@
   （migration 的 trigger）。
 - scanner_runs：佇列的單位；lease 的欄位只在持有 lease 的狀態有值。
 - scan_events、scan_operations：append-only。
+- artifacts、observations（docs/DECISIONS.md §19.6）：append-only；只以複合 FK 引用 scanner_runs，
+  不直接引用 scans（對帳先鎖 scans 再鎖 run，worker 持有 run 的鎖時檢查 scans 的 FK 可能死鎖）。
 """
 
 from collections.abc import Iterable
@@ -50,6 +52,21 @@ from secscan.scans.domain.model import (
     MAX_EVENT_PAYLOAD_BYTES,
     EventType,
 )
+from secscan.scans.domain.observation import (
+    ARTIFACT_PATH_MAX_LENGTH,
+    MAX_DETAILS_BYTES,
+    OBSERVATION_METHODS,
+    PARAMETER_MAX_LENGTH,
+    POSITION_MAX_LENGTH,
+    RAW_LEVEL_MAX_LENGTH,
+    RULE_MAX_LENGTH,
+    TEXT_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
+    VERSION_MAX_LENGTH,
+    ArtifactClassification,
+    ArtifactKind,
+    ParameterLocation,
+)
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.domain.request import IDEMPOTENCY_KEY_MAX_LENGTH, IDEMPOTENCY_KEY_MIN_LENGTH
 from secscan.specs.domain.openapi import MAX_OPERATIONS, OPERATION_ID_MAX_LENGTH, OPERATION_METHODS
@@ -66,6 +83,7 @@ SHA256_BYTES = 32
 CONTAINER_NAME_MAX_LENGTH = 64
 IMAGE_REF_MAX_LENGTH = 255
 PREFLIGHT_RESULT_MAX_LENGTH = 32
+ARTIFACT_STORAGE_KEY_MAX_LENGTH = 2500
 # repo:tag@sha256:<64 hex>（完整的文法在 scanners.domain.plan；DB 是最後一道防線）。
 IMAGE_REF_PATTERN = (
     "^[a-z0-9][a-z0-9._/:-]{0,180}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}@sha256:[0-9a-f]{64}$"
@@ -94,6 +112,9 @@ _EVENT_TYPES = _in_list(event.value for event in EventType)
 _REASONS = _in_list(reason.value for reason in IneligibleReason)
 _PREFLIGHT_RESULTS = _in_list(result.value for result in PreflightResult)
 _METHODS = _in_list(method.upper() for method in OPERATION_METHODS)
+_OBSERVATION_METHODS = _in_list(sorted(OBSERVATION_METHODS))
+_PARAMETER_LOCATIONS = _in_list(location.value for location in ParameterLocation)
+_SHA256_HEX = "^[0-9a-f]{64}$"
 
 
 class ScanModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -323,6 +344,24 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             f"AND preflight_result IN ({_PREFLIGHT_RESULTS}))",
             name="preflight_result_valid",
         ),
+        # 解析的結果（docs/DECISIONS.md §19.6）：寫入時一起有值；版本與退出碼可能是未知的。
+        CheckConstraint(
+            "results_recorded = (parser_version IS NOT NULL) "
+            "AND results_recorded = (observation_count IS NOT NULL) "
+            "AND results_recorded = (result_details IS NOT NULL) "
+            "AND (results_recorded OR (engine_version IS NULL AND exit_code IS NULL))",
+            name="results_consistent",
+        ),
+        CheckConstraint(
+            "(observation_count IS NULL OR observation_count >= 0) "
+            "AND (exit_code IS NULL OR exit_code BETWEEN 0 AND 255)",
+            name="result_counts_valid",
+        ),
+        CheckConstraint(
+            "result_details IS NULL OR (jsonb_typeof(result_details) = 'object' "
+            f"AND octet_length(result_details::text) <= {MAX_DETAILS_BYTES})",
+            name="result_details_valid",
+        ),
     )
 
     scan_id: Mapped[UUID] = mapped_column(ForeignKey("scans.id", ondelete="RESTRICT"))
@@ -344,6 +383,12 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     traffic_seconds: Mapped[int | None]
     preflight_result: Mapped[str | None] = mapped_column(String(PREFLIGHT_RESULT_MAX_LENGTH))
     coverage_recorded: Mapped[bool] = mapped_column(server_default=text("false"))
+    results_recorded: Mapped[bool] = mapped_column(server_default=text("false"))
+    parser_version: Mapped[str | None] = mapped_column(String(VERSION_MAX_LENGTH))
+    engine_version: Mapped[str | None] = mapped_column(String(VERSION_MAX_LENGTH))
+    exit_code: Mapped[int | None]
+    observation_count: Mapped[int | None]
+    result_details: Mapped[JsonObject | None] = mapped_column(JSONB)
 
 
 class ScanEventModel(Base):
@@ -430,3 +475,114 @@ class RunCoverageModel(Base):
     ordinal: Mapped[int] = mapped_column(autoincrement=False)
     authenticated: Mapped[bool]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class ArtifactModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
+    """一個 run 的輸入與輸出檔（manifest 的內容）；不可修改或刪除。內容在 runs volume。"""
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["scanner_run_id", "scan_id"],
+            ["scanner_runs.id", "scanner_runs.scan_id"],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("scanner_run_id", "kind", "path"),
+        # observations 以 (report_artifact_id, scanner_run_id) 引用：報告一定屬於同一個 run。
+        UniqueConstraint("id", "scanner_run_id"),
+        Index("ix_artifacts_scan_id", "scan_id"),
+        CheckConstraint(
+            f"(kind = '{ArtifactKind.OUTPUT.value}' "
+            f"AND classification = '{ArtifactClassification.MASKED.value}') "
+            f"OR (kind = '{ArtifactKind.INPUT.value}' "
+            f"AND classification = '{ArtifactClassification.INPUT.value}')",
+            name="classification_matches_kind",
+        ),
+        CheckConstraint(f"sha256 ~ '{_SHA256_HEX}'", name="sha256_valid"),
+        CheckConstraint("size >= 0 AND redactions >= 0", name="counts_not_negative"),
+        CheckConstraint("char_length(btrim(path)) > 0", name="path_not_blank"),
+        CheckConstraint("char_length(btrim(storage_key)) > 0", name="storage_key_not_blank"),
+    )
+
+    scanner_run_id: Mapped[UUID]
+    scan_id: Mapped[UUID]
+    kind: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    path: Mapped[str] = mapped_column(String(ARTIFACT_PATH_MAX_LENGTH))
+    sha256: Mapped[str] = mapped_column(String(SHA256_BYTES * 2))
+    size: Mapped[int] = mapped_column(BigInteger)
+    redactions: Mapped[int]
+    classification: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    encrypted: Mapped[bool] = mapped_column(server_default=text("false"))
+    storage_key: Mapped[str] = mapped_column(String(ARTIFACT_STORAGE_KEY_MAX_LENGTH))
+
+
+class ObservationModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
+    """工具的一個單次觀察（CLAUDE.md §10；docs/DECISIONS.md §19.6）；不可修改或刪除。
+
+    文字都已遮罩、截斷。等級與信心是工具的原始值，正規化在 T19。
+    """
+
+    __tablename__ = "observations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["scanner_run_id", "scan_id"],
+            ["scanner_runs.id", "scanner_runs.scan_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["report_artifact_id", "scanner_run_id"],
+            ["artifacts.id", "artifacts.scanner_run_id"],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("scanner_run_id", "source_event_id"),
+        UniqueConstraint("scanner_run_id", "ordinal"),
+        # 查詢：依 scan、引擎的順序與入庫的順序列出。
+        Index(
+            "ix_observations_scan_id_scanner_run_id_ordinal", "scan_id", "scanner_run_id", "ordinal"
+        ),
+        CheckConstraint("ordinal >= 1", name="ordinal_valid"),
+        CheckConstraint("source_index >= 0", name="source_index_valid"),
+        CheckConstraint(f"source_event_id ~ '{_SHA256_HEX}'", name="source_event_id_valid"),
+        CheckConstraint("char_length(btrim(source_rule)) > 0", name="source_rule_not_blank"),
+        CheckConstraint("char_length(btrim(title)) > 0", name="title_not_blank"),
+        CheckConstraint("char_length(btrim(raw_severity)) > 0", name="raw_severity_not_blank"),
+        CheckConstraint("char_length(btrim(raw_confidence)) > 0", name="raw_confidence_not_blank"),
+        CheckConstraint("cwe_id IS NULL OR cwe_id > 0", name="cwe_positive"),
+        CheckConstraint("wasc_id IS NULL OR wasc_id > 0", name="wasc_positive"),
+        CheckConstraint(f"method IN ({_OBSERVATION_METHODS})", name="method_valid"),
+        CheckConstraint("left(path, 1) = '/'", name="path_valid"),
+        CheckConstraint(
+            f"parameter_location IN ({_PARAMETER_LOCATIONS})", name="parameter_location_valid"
+        ),
+        CheckConstraint(
+            rf"auth_role ~ '^[a-z][a-z0-9_]{{0,{ROLE_LABEL_MAX_LENGTH - 1}}}$'",
+            name="auth_role_valid",
+        ),
+        CheckConstraint("char_length(btrim(parser_version)) > 0", name="parser_version_not_blank"),
+    )
+
+    scanner_run_id: Mapped[UUID]
+    scan_id: Mapped[UUID]
+    ordinal: Mapped[int] = mapped_column(autoincrement=False)
+    source_event_id: Mapped[str] = mapped_column(String(SHA256_BYTES * 2))
+    source_index: Mapped[int]
+    source_rule: Mapped[str] = mapped_column(String(RULE_MAX_LENGTH))
+    rule_variant: Mapped[str | None] = mapped_column(String(RULE_MAX_LENGTH))
+    title: Mapped[str] = mapped_column(String(TITLE_MAX_LENGTH))
+    raw_severity: Mapped[str] = mapped_column(String(RAW_LEVEL_MAX_LENGTH))
+    severity_label: Mapped[str] = mapped_column(String(RAW_LEVEL_MAX_LENGTH))
+    raw_confidence: Mapped[str] = mapped_column(String(RAW_LEVEL_MAX_LENGTH))
+    confidence_label: Mapped[str] = mapped_column(String(RAW_LEVEL_MAX_LENGTH))
+    cwe_id: Mapped[int | None]
+    wasc_id: Mapped[int | None]
+    method: Mapped[str] = mapped_column(String(METHOD_MAX_LENGTH))
+    path: Mapped[str] = mapped_column(String(POSITION_MAX_LENGTH))
+    query: Mapped[str | None] = mapped_column(String(POSITION_MAX_LENGTH))
+    parameter: Mapped[str | None] = mapped_column(String(PARAMETER_MAX_LENGTH))
+    parameter_location: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    attack: Mapped[str | None] = mapped_column(String(TEXT_MAX_LENGTH))
+    evidence: Mapped[str | None] = mapped_column(String(TEXT_MAX_LENGTH))
+    other_info: Mapped[str | None] = mapped_column(String(TEXT_MAX_LENGTH))
+    auth_role: Mapped[str] = mapped_column(String(ROLE_LABEL_MAX_LENGTH))
+    report_artifact_id: Mapped[UUID | None]
+    parser_version: Mapped[str] = mapped_column(String(VERSION_MAX_LENGTH))

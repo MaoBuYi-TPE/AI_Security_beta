@@ -10,6 +10,9 @@
 authority 逐字比對（parser differential，SEC-05）：mitmproxy 解出的 host、port、scheme，以及唯一的
 Host header，都必須和 policy 的 canonical origin 相同；大寫、結尾的點、IP 的其他寫法都不放行。
 path 不做正規化：會讓伺服器解讀成別的 path 的寫法（`%`、`;`、`//`、`.`、`..`、反斜線）一律拒絕。
+
+scope_reason 是其中只看 method 與 target 的部分：T15 的 parser 以同一套規則判斷告警的請求是不是
+guard 一定會拒絕的（docs/DECISIONS.md §19.4）。
 """
 
 import re
@@ -19,7 +22,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from urllib.parse import unquote_plus
 
-from secscan.grants.domain.matching import IneligibleReason
+from secscan.grants.domain.matching import IneligibleReason, ScopeRules
 from secscan.grants.domain.scope import path_problem
 from secscan.guard.domain.policy import CompiledPolicy, Policy, PolicyState
 from secscan.targets.domain import DEFAULT_HTTP_PORT, HTTP_SCHEME, Origin
@@ -53,8 +56,11 @@ class Reason(StrEnum):
 
 PROXY_AUTH_STATUS = 407
 FORBIDDEN_STATUS = 403
-# guard 拒絕時回應的 header（值是原因）；M3 的 parser 與 preflight 的判斷依此排除 guard 的回應。
+# guard 拒絕時回應的 header（值是原因）；preflight 的判斷依此排除 guard 的回應（ZAP 的報告沒有
+# header，parser 的做法見 docs/DECISIONS.md §19.4）。
 GUARD_HEADER = "X-Secscan-Guard"
+# guard 拒絕的回應 body 的開頭（addon 與 parser 共用）。
+DENY_MESSAGE = "blocked by secscan egress guard"
 DENY_STATUS: Mapping[Reason, int] = MappingProxyType(
     {
         reason: PROXY_AUTH_STATUS if reason is Reason.PROXY_AUTH_REQUIRED else FORBIDDEN_STATUS
@@ -143,6 +149,15 @@ def request_reason(view: RequestView, compiled: CompiledPolicy) -> Reason | None
     )
 
 
+def scope_reason(method: str, target: str, rules: ScopeRules) -> Reason | None:
+    """request_reason 中只看 method 與 target 的規則（不看 header 與 authority）。"""
+    return (
+        _target_shape_reason(method, target)
+        or _method_key_reason(target)
+        or _path_reason(method, target, rules)
+    )
+
+
 def canonical_authority(origin: Origin) -> str:
     """寫回上游請求的 Host：port 80 時省略。"""
     if origin.port == DEFAULT_HTTP_PORT:
@@ -166,7 +181,11 @@ def _shape_reason(view: RequestView) -> Reason | None:
         return Reason.UPGRADE_DENIED
     if view.scheme != HTTP_SCHEME:
         return Reason.SCHEME_DENIED
-    if not (_visible_ascii(view.method) and _visible_ascii(view.target)) or "#" in view.target:
+    return _target_shape_reason(view.method, view.target)
+
+
+def _target_shape_reason(method: str, target: str) -> Reason | None:
+    if not (_visible_ascii(method) and _visible_ascii(target)) or "#" in target:
         return Reason.PATH_AMBIGUOUS
     return None
 
@@ -174,7 +193,11 @@ def _shape_reason(view: RequestView) -> Reason | None:
 def _override_reason(view: RequestView) -> Reason | None:
     if view.has(OVERRIDE_HEADERS):
         return Reason.OVERRIDE_HEADER
-    _, query = split_target(view.target)
+    return _method_key_reason(view.target)
+
+
+def _method_key_reason(target: str) -> Reason | None:
+    _, query = split_target(target)
     for piece in _QUERY_SEPARATORS.split(query):
         key = _fully_unquoted(piece.partition("=")[0])
         if key.strip().lower() == _METHOD_OVERRIDE_KEY:
@@ -198,11 +221,15 @@ def _authority_reason(view: RequestView, origin: Origin) -> Reason | None:
 
 
 def _scope_reason(view: RequestView, compiled: CompiledPolicy) -> Reason | None:
-    path, _ = split_target(view.target)
+    return _path_reason(view.method, view.target, compiled.rules)
+
+
+def _path_reason(method: str, target: str, rules: ScopeRules) -> Reason | None:
+    path, _ = split_target(target)
     # 字面的 {x} 會被 parse_route 當成佔位（涵蓋任何一段），所以請求中不接受大括號。
     if path_problem(path) is not None or "{" in path or "}" in path:
         return Reason.PATH_AMBIGUOUS
-    ineligible = compiled.rules.classify(method=view.method, path=path)
+    ineligible = rules.classify(method=method, path=path)
     return None if ineligible is None else _SCOPE_REASONS[ineligible]
 
 

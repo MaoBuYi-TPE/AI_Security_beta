@@ -113,6 +113,8 @@ class EnginePolicy:
     collect_exit_codes: frozenset[int] = frozenset({0})
     # 輸入檔的內容規則（名稱 → 規則）；沒有列出的只檢查名稱與大小。
     input_rules: Mapping[str, InputRule] = field(default_factory=lambda: MappingProxyType({}))
+    # 收集時以這個 run 的 secret 遮罩輸出（§19.5）。preflight 不遮：它的輸出是原始的 HTTP 回應。
+    redact_outputs: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +214,7 @@ ENGINE_POLICIES: Mapping[Engine, EnginePolicy] = MappingProxyType(
             # 容器內的 tmpfs（ZAP 的 home 與 JVM 的暫存），不是宿主的暫存目錄。
             scratch=MappingProxyType({"/tmp": "rw,noexec,nosuid,nodev,size=768m,mode=1777"}),  # noqa: S108
             collect_exit_codes=frozenset({0, 1, 2}),
+            redact_outputs=True,
         ),
         Engine.PREFLIGHT: EnginePolicy(
             images=frozenset({_BUSYBOX}),

@@ -14,8 +14,8 @@ from secscan.scanners.domain.instances import (
     capabilities_json,
     engine_statuses,
 )
+from secscan.scanners.domain.profiles import ProfileView, profile_views
 from secscan.scanners.repository import InstanceState, RunnerInstanceRepository
-from secscan.scans.domain.catalog import Engine
 
 
 class Fleet:
@@ -68,12 +68,16 @@ class ScannerCatalog:
     def __init__(self, session: Session) -> None:
         self._instances = RunnerInstanceRepository(session)
 
-    def describe(self, *, preview: frozenset[Engine] = frozenset()) -> ScannerOverview:
+    def profiles(self) -> tuple[ProfileView, ...]:
+        """現在可以用的 profile（docs/DECISIONS.md §19.10）：依最近存活的 runner 回報的能力。"""
+        return profile_views(self.describe().engines)
+
+    def describe(self) -> ScannerOverview:
         runner = self._instances.latest(InstanceRole.RUNNER, alive_within=ALIVE_WITHIN)
         worker = self._instances.latest(InstanceRole.WORKER, alive_within=ALIVE_WITHIN)
         live = runner.capabilities if runner is not None and runner.alive else None
         return ScannerOverview(
-            engines=engine_statuses(live, preview=preview),
+            engines=engine_statuses(live),
             runner=_status(runner),
             worker=_status(worker),
         )

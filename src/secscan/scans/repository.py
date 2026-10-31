@@ -32,8 +32,10 @@ from secscan.scans.domain.model import (
     ScannerRun,
     VersionRef,
 )
+from secscan.scans.domain.observation import Observation, ParameterLocation, RunResult
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.models import (
+    ObservationModel,
     RunCoverageModel,
     ScanEventModel,
     ScanModel,
@@ -218,6 +220,31 @@ class ScanRepository:
             for model in models
         )
 
+    def observations(
+        self, scan_id: UUID, *, engine: Engine | None, page: PageRequest
+    ) -> Page[Observation]:
+        """依 run 的順序與入庫的順序；只有遮罩後的欄位。"""
+        conditions = [ObservationModel.scan_id == scan_id]
+        if engine is not None:
+            conditions.append(ScannerRunModel.engine == engine.value)
+        joined = select(ObservationModel, ScannerRunModel.engine).join(
+            ScannerRunModel, ScannerRunModel.id == ObservationModel.scanner_run_id
+        )
+        total = self._session.scalar(
+            select(func.count()).select_from(joined.where(*conditions).subquery())
+        )
+        rows = self._session.execute(
+            joined.where(*conditions)
+            .order_by(ScannerRunModel.sequence, ObservationModel.ordinal)
+            .offset(page.offset)
+            .limit(page.limit)
+        ).all()
+        return Page(
+            items=tuple(_observation(model, engine_name) for model, engine_name in rows),
+            total=total or 0,
+            request=page,
+        )
+
     def _load(self, statement: Select[ScanModel, int, int]) -> tuple[Scan, ...]:
         rows = self._session.execute(statement.execution_options(populate_existing=True)).all()
         scan_ids = [row[0].id for row in rows]
@@ -385,6 +412,53 @@ def _run(model: ScannerRunModel) -> ScannerRun:
             PreflightResult(model.preflight_result) if model.preflight_result is not None else None
         ),
         coverage_recorded=model.coverage_recorded,
+        result=_result(model),
+    )
+
+
+def _result(model: ScannerRunModel) -> RunResult | None:
+    if (
+        model.parser_version is None
+        or model.observation_count is None
+        or model.result_details is None
+    ):
+        return None
+    return RunResult(
+        parser_version=model.parser_version,
+        engine_version=model.engine_version,
+        exit_code=model.exit_code,
+        observation_count=model.observation_count,
+        details=model.result_details,
+    )
+
+
+def _observation(model: ObservationModel, engine: str) -> Observation:
+    return Observation(
+        id=model.id,
+        scan_id=model.scan_id,
+        scanner_run_id=model.scanner_run_id,
+        engine=Engine(engine),
+        ordinal=model.ordinal,
+        source_rule=model.source_rule,
+        rule_variant=model.rule_variant,
+        title=model.title,
+        raw_severity=model.raw_severity,
+        severity_label=model.severity_label,
+        raw_confidence=model.raw_confidence,
+        confidence_label=model.confidence_label,
+        cwe_id=model.cwe_id,
+        wasc_id=model.wasc_id,
+        method=model.method,
+        path=model.path,
+        query=model.query,
+        parameter=model.parameter,
+        parameter_location=ParameterLocation(model.parameter_location),
+        attack=model.attack,
+        evidence=model.evidence,
+        other_info=model.other_info,
+        auth_role=model.auth_role,
+        parser_version=model.parser_version,
+        created_at=model.created_at,
     )
 
 

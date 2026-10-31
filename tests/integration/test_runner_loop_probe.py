@@ -163,7 +163,7 @@ def _web_zap_scan(seed: Seeder, world: World) -> None:
         engines=(ScanEngine.ZAP,),
         budget=BudgetRequest(),
     )
-    seed.create_scan(world.operator_a, request, preview=frozenset({ScanEngine.ZAP}))
+    seed.create_scan(world.operator_a, request)
 
 
 def test_fake_runs_are_claimed_while_zap_is_being_probed(

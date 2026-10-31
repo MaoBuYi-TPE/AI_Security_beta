@@ -32,11 +32,16 @@ class WorkerLoop:
         self._fleet.prune()
         reports: list[RunReport] = []
         while not self._stop_requested():
-            self._fleet.beat(Capabilities(engines=()))
-            batch = self._worker.drain(limit=1 if once else None, on_report=on_report)
+            self._beat()
+            batch = self._worker.drain(
+                limit=1 if once else None, on_report=on_report, on_heartbeat=self._beat
+            )
             reports.extend(batch)
             if once:
                 break
             if not batch:
                 self._sleep(self._poll_seconds)
         return reports
+
+    def _beat(self) -> None:
+        self._fleet.beat(Capabilities(engines=()))

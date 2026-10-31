@@ -801,7 +801,7 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
 | collecting | collected、failed、cancelling、interrupted |
 | cancelling | cancelled、interrupted |
 | collected | normalizing（worker 認領） |
-| normalizing | succeeded、failed、collected（lease 過期：解析可以重試） |
+| normalizing | succeeded、failed、timed_out（T15：引擎在自己的時間上限停止）、collected（lease 過期：解析可以重試） |
 | succeeded、failed、timed_out、cancelled、interrupted | 終止，不能再轉換 |
 
 - failed、timed_out、interrupted 必須有錯誤碼，其他狀態不能有。
@@ -819,6 +819,7 @@ T09 不發出任何流量：fake 引擎與 FakeRunner 都不連任何位址，�
   6. 有 run 在 normalizing → normalizing。
   7. 其他（有引擎已經結束、其餘還在排隊）→ running。
 - 全部終止：有 interrupted → interrupted；否則要求過取消 → cancelled；有 timed_out → timed_out；全部 succeeded → completed；有 succeeded → partially_completed；其他 → failed。
+- **T15 修改（§19.8）**：preflight 不算結果引擎。全部終止時，timed_out、completed、partially_completed 只看掃描引擎；掃描引擎全部 succeeded 而 preflight 沒有成功是 partially_completed；掃描引擎都沒有成功是 failed（原本 preflight 成功、zap 失敗是 partially_completed）。interrupted 仍看所有的 run。
 
 順序的理由：interrupted 排在最前面，因為它無法證明工作已正常停止。要求過取消、但 runner 沒有確認就遺失（lease 過期）時，也不能說是 cancelled：確認之後才是 cancelled（CLAUDE.md §8；審查發現，原本是 cancelled）。要求取消之後，解析中的引擎仍會解析完，結果保留，但 scan 是 cancelled（使用者要求停止，結果不完整）。以 Hypothesis 檢查：結果和 runs 的排列順序無關；全部終止時一定是終止狀態，否則一定不是；要求過取消、還有沒終止的 run 時一定是 cancelling；cancelling 與 cancelled 一定有取消的要求（和 DB 的 `ck_scans_cancel_matches_status` 一致）；全部終止而且有 interrupted 時一定是 interrupted。
 
@@ -1257,7 +1258,7 @@ T11 不從產品路徑送出任何掃描流量：live 測試用自己的 live la
 - `error`：記錄。
 - redirect 不改寫、也不另外分類：工具跟隨 redirect 送出的下一個請求，照上面的順序重新檢查（SEC-03）。
 
-拒絕的回應：403，附 `X-Secscan-Guard: <原因>` 與一行純文字。M3 的 parser 依這個 header 排除 guard 的回應。
+拒絕的回應：403，附 `X-Secscan-Guard: <原因>` 與一行純文字。M3 的 parser 依這個 header 排除 guard 的回應（T15 修改：ZAP 允許的報告範本沒有 header，改成 §19.4 的分層判斷；preflight 仍依這個 header 判斷）。
 
 ### 15.6 網路與位址
 
@@ -1324,7 +1325,7 @@ main | cli → migrations → health | runner | worker → scanners → scans �
 不在 T11 範圍：
 - T12：policy schema 2（預算：速率、burst、總請求數、跨引擎共用；額外的 origin 與跨 origin 的認證 header 規則）；telemetry 與計數（以 `boot_id` 銜接重啟）；preflight 的實際執行；ZAP 的 reactive 407 讓請求數加倍，計數時要考慮。
 - T13：grant 撤銷或 target 停用時停止執行中的 scan（SEC-01 的後半）；有容器的 run 的對帳與孤兒容器（含 runner 被 kill 之後留下的 policy，reconciler 沿用 `runner/guard.py` 封鎖）；`/health/ready`。
-- M3：工具的 proxy 設定格式；HTTPS（CA、上游憑證驗證）；parser 依 `X-Secscan-Guard` 排除 guard 的回應。
+- M3：工具的 proxy 設定格式；HTTPS（CA、上游憑證驗證）；排除 guard 的回應（T15 的做法見 §19.4）。
 
 ## 16. T12 補充決定：共享預算、telemetry 與認證 preflight 的執行路徑（2026-10-29）
 
@@ -1646,7 +1647,7 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 - 非阻塞：runner 的迴圈每圈前進一步（建立、查狀態、讀結果、刪除），probe 期間照常認領 fake 與 preflight；容器有牆鐘上限（180 秒）。成功以 digest 快取（同一個程序不再執行）；失敗以 10 分鐘的退避重試。runner 停止時刪除執行中的 probe 容器。每次 probe（成功、失敗或沒有啟動）的 `in/`、`out/` 和掃描的 run 一樣留在 runs volume（保留期限在 M5／T23）；退避讓失敗時每 10 分鐘最多多一個目錄。
 - capability 只記版本（JSONB ≤ 4096 bytes）：必要 add-on 的版本由 probe 核對、不另外保存（每個 run 的版本與 add-on 在 T15 的 artifacts 資料表）；`GET /scanners` 加上 `version`。新的能力代碼：`ENGINE_PROBE_PENDING`（還沒驗證完）、`ENGINE_PROBE_FAILED`（容器失敗、逾時或輸出讀不到）、`ENGINE_INCOMPATIBLE`（版本、add-on 或規則不符）。API 與 runner 同時更新（§15.8）。
 
-### 18.9 預覽開關（T15 移除）
+### 18.9 預覽開關（T15 已移除，§19.10）
 
 - API 的 `SCAN_PREVIEW_ENGINES`：預設是空的、只接受 `zap`、啟動時記一筆 WARNING。開啟時 `POST /scans` 接受 zap，`GET /scanners` 的 zap 以 runner 回報的 probe 結果判斷是否可用（`integrated` 仍是 false：`integrated=false` 而 `available=true` 只會出現在這個開關）。
 - 只有 live 的 compose（`make test-live-zap`）設定它。開關打開時建立的 zap scan 會停在 collected（worker 還不解析），所以只在拆除的 live 環境使用。compose 以 live 專用的 `SECSCAN_LIVE_PREVIEW_ENGINES` 插值，`make up` 明確清空它、`make dev` 明確清空 `SCAN_PREVIEW_ENGINES`（環境變數優先於 `.env`）：`.env` 中留著 zap 也不會讓一般的 stack 接受 zap（T14 的審查 L4）。
@@ -1684,6 +1685,145 @@ T14 讓 runner 以強化的單次容器執行 ZAP：伺服器產生 Automation F
 - `ZAP_AUTH_HEADER_SITE` 是子字串比對；預覽開關存在於 T14 與 T15 之間。
 - probe 容器與掃描容器可能同時在 scan_net 上（probe 期間照常認領）。scan_net 不能關閉容器之間的互通（掃描容器要連到 guard）；probe 沒有 secret，ZAP 的 `-cmd` 也不開埠。M4 之後同時有多個掃描容器時再檢討（T14 的審查 I3）。
 - 不在 T14：parser、觀察、退出碼的語意、排除 guard 的回應、遮罩（T15）；Juice Shop、VAmPI、預算的調整、token 失效（T16）；HTTPS、AJAX spider、queued scan 的時間上限、多個 runner；T11 的證據缺口（同一條連線上多個請求的收包證據）仍記為未實作。
+
+## 19. T15 補充決定：ZAP 的 parser、觀察輸入契約、輸出的遮罩與結果入庫（2026-10-31）
+
+T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作者開放 zap（T14 的預覽開關移除）。以下是規劃文件沒有寫到、實作前才定下的細節，以及推翻既有文件的地方。
+
+使用者的決定（2026-10-31）：
+1. **結果入庫並提供查詢**：T15 建立 observations 與 artifacts，run 的結果入庫；新增 `GET /scans/{scan_id}/observations`，`GET /scans/{id}` 的每個引擎顯示結果。T19 再在 observation 上加 rule group、fingerprint 與 finding。run 的結果比照 `preflight_result` 存成 `scanner_runs` 的欄位（run 結束時由既有的 trigger 凍結），新的資料表是兩張。
+2. **ZAP 在 plan 的 maxDuration 自行停止 → run `timed_out`（`ENGINE_TIMEOUT`）**，observation 照常入庫，scan 依既有的規則是 `timed_out`。
+3. **`aggregate()` 不把 preflight 算成結果引擎**：掃描引擎都沒有成功時 scan 是 failed（原本 preflight 成功、zap 失敗是 partially_completed）。
+
+依據（鎖定的映像離線實測，`--network none`、掃描容器的強化旗標；`TOOLS.md` §7.6）：
+- plan 的 `maxDuration` 到期時**中斷執行中的 job**（`Job delay interrupted`），`alwaysRun` 的 report 照樣寫出，退出碼 2。log 的結尾是 `Automation plan warnings:`，下一行是 tab 加 `Plan stopped after reaching maximum duration of 20 second(s)`；進度中也有同一句（沒有 tab）。
+- spider 連不到 host：退出碼 1，報告照樣寫出（`site` 是空的），結尾是 `Automation plan failures:` 與 tab 開頭的訊息（訊息含 URL）。錯誤加上警告：先 failures、後 warnings，退出碼 1。沒有錯誤與警告：`Automation plan succeeded!`，退出碼 0。摘要一定在 log 的最後。
+- ZAP 不認得的啟動參數（JVM 之後才檢查）：印出 usage、退出碼 1、**沒有報告**。`-Xmx` 大到無法配置時 JVM 被 kill（137，不在收集的退出碼中，照舊是 runner 的 `ENGINE_FAILED`）。
+- `traditional-json` 的報告沒有 response 的 header 與 status（`-plus` 含注入的 secret，T14 已禁止）：DECISIONS §15 的「parser 依 `X-Secscan-Guard` 排除 guard 的回應」做不到，改成 §19.4 的分層判斷。
+
+### 19.1 推翻或修改既有文件的地方
+
+| 原本 | 改成 | 理由 |
+|---|---|---|
+| §13.11、T19：observation 在 M4 | T15 建 observations（不含 finding、rule group），T19 加 fingerprint、rule group、finding | 使用者決定 1 |
+| §15（拒絕的回應與 M3 的交接）、`guard/addon.py`：parser 依 `X-Secscan-Guard` 排除 guard 的回應 | 分層判斷（§19.4） | 允許的報告範本沒有 header |
+| §13.4、ARCHITECTURE §8：normalizing 只能 succeeded、failed、collected | 加上 normalizing → timed_out（必須有錯誤碼） | 使用者決定 2 |
+| §13.4 的彙總：每個 run 都算結果 | preflight 不算結果引擎（§19.8） | 使用者決定 3 |
+| §14.5、`runner/workspace.py`：runner 只計算 hash，不讀內容 | zap 的輸出由 runner 在收集時以已知的 secret 做位元組層級的遮罩，再計算 hash；仍不解析 | secret 只在 runner 的記憶體中；worker 不該拿到 secret 或金鑰 |
+| `API_CONTRACT.md`：`GET /scan-profiles` 是「同專案」 | 已授權的 key（同 `GET /scanners`） | profile 不屬於任何 project |
+| `TASKS.md` T14 的交接：「新的錯誤碼要改 DB 的 CHECK」 | DB 只檢查錯誤碼的格式（§13.4、§17.7），不必 migration | T14 的文件錯誤 |
+
+### 19.2 退出碼與結果的語意（`scanners/domain/zap/results.py`，純函式，依序判斷）
+
+| # | 條件 | run | 錯誤碼 | observation |
+|---|---|---|---|---|
+| 1 | 退出碼 1，沒有報告（ZAP 啟動失敗等） | failed | `ENGINE_FAILED` | 無 |
+| 2 | 報告或 log 缺少、不合法、`@programName` 不是 ZAP、`@version` 不是鎖定的版本、超過上限；AF 的結尾摘要不存在或和退出碼矛盾（0 ⇔ succeeded，1 ⇔ failures，2 ⇔ 只有 warnings） | failed | `OUTPUT_INVALID` | 無 |
+| 3 | 退出碼 1，報告有效 | failed | `ENGINE_REPORTED_ERRORS` | 入庫（部分結果） |
+| 4 | guard 記下轉送 0 個請求，或 telemetry 中沒有任何請求得到上游的回應（未掃到端點） | failed | `NO_TARGET_TRAFFIC` | 無 |
+| 5 | 退出碼 2，摘要的警告中有 plan 的 maxDuration | timed_out | `ENGINE_TIMEOUT` | 入庫 |
+| 6 | 其他（退出碼 0，或 2 只有其他警告） | succeeded | — | 入庫；0 個是乾淨的結果 |
+
+- 第 3 條排在第 4 條之前：AF 的錯誤通常就是沒有流量的原因（例如 spider 連不到），錯誤碼指向原因；轉送數照樣顯示在 `budget_usage`。
+- 警告只分兩種：`max_duration` 與 `other`；錯誤與警告只計數，不保存文字（訊息可能含 URL 或靶機的內容）。spider、passiveScan-wait、activeScan 自己的上限是 plan 的設計，不算 timed_out（它們不在摘要中）。
+- 第 4 條的「沒有上游回應」來自錄製的 `unanswered` 情境：target 的 port 沒有人聽時，guard 轉送 71 個請求、全部由 mitmproxy 回 502，AF 的 spider 只留下一個警告（退出碼 2），ZAP 對 mitmproxy 的錯誤頁回報 3 種告警（共 9 個 instance：缺 CSP、Private IP Disclosure、`Server: mitmproxy 12.2.3`）。原本的判定會是 succeeded、0 個 observation，和乾淨的結果分不開（CLAUDE.md §8：未掃到端點是不同的語意）。
+- 轉送數不明（guard 的 summary 讀不到）時不套第 4 條，結果標 `traffic_verified: false`。
+- 不在 {0, 1, 2} 的退出碼照舊是 runner 的 `ENGINE_FAILED`、不收集；runner 的牆鐘上限照舊是 `TIME_LIMIT_EXCEEDED`；guard 回報預算用盡照舊立刻停止、不收集（T16 檢討）。
+
+### 19.3 觀察輸入契約與 ZAP 的 parser
+
+- **契約**（`scans/domain/observation.py`，純 domain、與引擎無關；分層是 `worker → scanners → scans`，parser 與 worker 都能 import）：`ObservationInput`（識別、規則、工具自己的等級與名稱、位置、遮罩並截斷的文字）、`ArtifactRecord`、`RunOutcome`（狀態與錯誤碼）、`ParsedRun`（parser 與 engine 的版本、observation、排除與重複的計數、警告的種類、`traffic_verified`、判定）。等級的名稱由 parser 寫入（`scans` 不能 import `scanners`）。M4 的 Nuclei parser 輸出同一個契約。
+- **識別**：`source_event_id` 是遮罩之後的 (alertRef, method, uri, param, attack, evidence, otherinfo) 的 sha256，不含 ZAP 的 instance `id`（每次執行都不同）；重複的只留第一個，計數 `duplicate`。`ordinal` 是入庫的順序，`source_index` 是在報告中的位置。
+- **ZAP 的 parser**（`scanners/domain/zap/report.py`、`log.py`、`results.py`）：
+  - `PARSER_VERSION = "zap-traditional-json/1"`；只接受 `@programName == "ZAP"`、`@version` 等於鎖定的版本。
+  - JSON 嚴格解析：拒絕重複的 key、NaN 與 Infinity、浮點數；接住 `ValueError`（超長的整數）與 `RecursionError`；巢狀深度有上限。
+  - 欄位的型別要正確：數值都是字串、`riskcode` 0–3、`confidence` 0–4、`pluginid` 是數字、`alertRef` 是 `數字(-數字)?`、method 是 HTTP method。缺少必要的 key 整份 `OUTPUT_INVALID`；未知的 key 忽略（範本更新多出的欄位）。
+  - 上限：報告 8 MiB（量測：解析 1.3 秒、程序的峰值 RSS 約 106 MiB，worker 的 `mem_limit` 256m 不必改；`TOOLS.md` §7.6）、16 個 site、1,024 個 alert、20,000 個 instance，每個字串的長度（截斷並計數）。
+  - 根的 URI 沒有結尾的 `/`（`http://host:3000`），視為 `/`。
+  - 文字以 `core/text.py` 的 `display_text` 把 NUL、孤立的 surrogate、bidi 與其他控制字元換掉之後才入庫（PostgreSQL 的 text 不接受 NUL，否則 worker 反覆崩潰）。文字保留 ZAP 寫出的原文，不轉換（實測 evidence 是原始的 HTML，例如 `<form action="/login" …>`）；API 以 JSON 字串輸出，報告（T21）負責編碼。
+  - `desc`、`solution`、`reference` 是規則固定的說明（含 HTML），不存。
+  - `log.py` 只以整行比對 AF 的結尾摘要（實測的文字）。
+
+### 19.4 排除 guard 的回應（分層，不排除真的結果）
+
+1. instance 的 URI 不是 target 的 origin → `out_of_scope`。
+2. **重算 guard 的靜態規則**：`guard/domain/requests.py` 的 `request_reason` 中與請求本身有關的部分抽成純函式 `scope_reason`，guard 改呼叫它（行為不變，guard 的測試照舊）。parser 以同一個函式判斷 instance：guard 一定會拒絕的 → `guard_denied`。涵蓋 `PATH_AMBIGUOUS`（T14 的 api 情境 163 個中有 136 個）、範圍外的 path 與 method。
+3. telemetry 完整時，(method, path) 沒有任何得到上游回應的轉送 → `not_answered`：涵蓋 guard 的拒絕與 mitmproxy 自己產生的回應（502 等）。
+4. telemetry 讀不到（guard 6 小時後刪除、格式不符）時少了第 3 層，改看 evidence 或 other info 是否含 guard 的拒絕訊息 → `guard_response`，結果標 `traffic_verified: false`。有 telemetry 時不看內容：內容是目標控制的，目標放進這段文字不能讓自己的告警消失（T15 的安全審查；誤丟真的結果比多一筆雜訊糟）。
+- 剩下的情況：同一個 path 有上游回應、也有動態的拒絕（`RATE_LIMITED`、預算用盡）：對 guard 回應的告警會入庫（evidence 看得到拒絕的文字）。T16 量測；若 guard 的 403 被告警，再為拒絕回應加上安全 header。
+
+### 19.5 遮罩（runner 在收集時；只對 zap）
+
+- 只對 zap：以引擎政策的 `redact_outputs` 開啟。preflight 存的是原始的 HTTP 回應（§16.5），遮罩會讓 Content-Length 不符，而且不對外提供。
+- **遮罩的值在 `_provision` 時建立**（解密之後），帶到收集；不第二次解密（換金鑰時可能失敗）、不寫檔、不進 log。值包括目標的 secret、送出的整個 header 值、cookie 中長度 ≥ 8 的每個值，以及 proxy 的 token 與 ZAP 送出的 `base64(run_id:token)`。
+- **形式**（`security/secret_masking.py`，純函式）：原樣、JSON 跳脫、HTML entity、百分比編碼（大小寫、`+`）、JSON 包 HTML。字元集由 `auth_profiles/domain/credentials.py` 限定（沒有 CR、LF、NUL；最長 4096）。以 `bytes.find` 搜尋（最壞的情況也是線性時間；每個形式只有一個搜尋位置，記憶體不隨比對的次數增加；目標收得到 secret，可以在回應中放任意多的片段），由左到右、同一個位置取最長的形式；串流處理，保留最長形式的重疊，不論怎麼切塊結果都相同。
+- **收集**：先走訪完 out/，再把遮罩後的內容寫到 runner 私有的暫存檔、`os.replace` 取代；遮罩的過程中呼叫心跳。manifest 記下每個檔案的遮罩次數。替換字串是 `[REDACTED:target-secret]`、`[REDACTED:proxy-token]`（不含引號與反斜線，JSON 仍然合法）。
+- 邊界：替換讓檔案超過上限 → `ARTIFACT_REJECTED`；secret 剛好是 JSON 語法的一部分（例如 `true`）可能讓報告不合法 → `OUTPUT_INVALID`（fail closed）。
+- **worker 端**：`security/redaction.py` 新增 `redact_url`（以 `is_sensitive_key` 遮罩 query 的值與 userinfo，補 T05 的缺口）與 `redact_text`（Bearer、Basic、JWT 與 `key=value` 的樣式）；入庫前套用、之後截斷。URL 中敏感參數的值也在 evidence 等文字中遮掉：值來自目標控制的 URL，最多 32 個，超過就整個欄位遮掉（T15 的安全審查：原本組成一個 regex，數量沒有上限）。
+
+### 19.6 資料表（migration `0010`；都在 scans 模組）
+
+- 結果要和 lease 的 fencing 在同一個 transaction 寫入（§16.6 的 coverage 的模式），所以放在 scans。
+- **只以複合 FK `(scanner_run_id, scan_id) → scanner_runs(id, scan_id)` 引用**（同 `run_coverage`），不直接 FK 到 `scans`：對帳先鎖 scans 再鎖 run，worker 持有 run 的鎖時檢查 scans 的 FK 可能死鎖。
+- `scanner_runs` 新增：`results_recorded`、`parser_version`、`engine_version`、`exit_code`、`observation_count`、`result_details`（JSONB ≤ 4 KiB：排除與重複的計數、AF 的摘要、警告的種類、add-on 的版本、`traffic_verified`、判定）。CHECK：`results_recorded = (parser_version IS NOT NULL)`、計數 ≥ 0、退出碼 0–255。run 結束之後由既有的 trigger 凍結。
+- add-on 的版本：映像以 digest 鎖定、`-silent` 不更新 add-on，run 的 add-on 就是 probe 對這個 digest 核對過的 `REQUIRED_ADDONS`。
+- `artifacts`：每個 run 的輸入與輸出檔（manifest 的 `inputs` 與 `files`）：kind、path、sha256、size、遮罩次數、classification（output 是 masked）、`encrypted`（false）、storage key（runs volume 中的相對路徑）。唯一 `(scanner_run_id, kind, path)`。保留期限與下載在 T23／M5。
+- `observations`：契約的欄位、`auth_role`（來自 scan；ZAP 對 target 的每個請求都帶認證 header，§18.2）、報告的 artifact、parser 的版本。唯一 `(scanner_run_id, source_event_id)`、`(scanner_run_id, ordinal)`。`finding_id`、`rule_group` 由 T19 加入。
+- 兩張表都以 `scan_records_guard()` 拒絕 UPDATE、DELETE、TRUNCATE。
+- 寫入：fenced update 設定 `results_recorded` 與判定，同一個 transaction 插入兩張表；重試時看到已記錄，直接以存下的判定結束，不再解析。
+
+### 19.7 worker
+
+- 認領 zap；`service.py` 依引擎分派，ZAP 在 `worker/zap.py`。
+- manifest 嚴格解析（含退出碼）。
+- **心跳**：解析期間每 5 秒延長 lease（失效 → 留給對帳），同時寫 fleet 的心跳。不看取消：沒有 normalizing → cancelled，要求取消時解析照常完成，scan 由彙總成為 cancelled（§13.4）。
+- 資料的問題一律走判定（§19.2），不丟例外；只有程式錯誤走既有的重試（§17.6）。
+
+### 19.8 狀態機與彙總
+
+- normalizing → timed_out（必須有錯誤碼）。
+- `aggregate(runs, *, cancel_requested, checks=())`：`checks` 是 preflight 的狀態，呼叫端依引擎分開傳入。全部終止時：有 interrupted（含 preflight）→ interrupted；要求過取消 → cancelled；掃描引擎有 timed_out → timed_out；掃描引擎全部 succeeded：preflight 也都 succeeded → completed，否則 partially_completed；掃描引擎有 succeeded → partially_completed；其他 → failed。進行中的規則不變（看所有 run）。
+- M2 的撤銷授權 live 測試（preflight 成功、zap 前被撤銷）改成 failed。
+
+### 19.9 fixture 與錄製
+
+- `make record-fixtures`（需要 `ENABLE_LIVE_LAB_TESTS=1`）：同一個 live 流程，只執行 anonymous 的錄製情境（沒有目標的 secret 可以寫進輸出），輸出到 gitignore 的 `recordings/zap/`；人工審查之後才搬進 `tests/fixtures/zap/<情境>/`（`report.json`、`zap.log`、`telemetry.jsonl`，manifest 記下退出碼、情境、映像、版本與錄製日期）。錄製的情境：`findings`、`clean`、`timeout`、`unanswered`。
+- 離線的情境（`--network none`，手動錄製）：`unreachable`（連不到 host，退出碼 1、有報告）、`engine-error`（ZAP 啟動失敗，退出碼 1、沒有報告）。
+- 真實的命中（active scan 的告警）要到 T16：小型網站沒有弱點，T15 的 `findings` 只有 passive 的告警。
+- 壞掉的輸出在測試中由真實報告的位元組衍生，不存成檔案。
+
+### 19.10 API、開放 zap、移除預覽開關
+
+- `GET /scans/{scan_id}/observations`：同專案（viewer 以上），其他 project 與不存在的一樣 404；page／limit（上限 100），可依引擎篩選；只有遮罩後的欄位，附 ZAP 自己的等級名稱。正規化的 severity 在 T19。
+- `GET /scans/{id}` 的每個引擎加上 `result`（沒有解析過是 null）。
+- `GET /scan-profiles`：已授權的 key；每個 profile 的 target 種類、是否需要規格，以及可用的引擎（版本、規則數、規則定義的 sha256）。
+- zap 開放（可和自動加入的 preflight 一起，不能和 fake 一起）；建立時不看 probe 的當下狀態：zap 不可用時照常排隊，runner 在 probe 通過之後才認領。
+- 移除 T14 的預覽開關（§18.9）：API 的設定、dependency、compose 與 Makefile 的插值。
+
+### 19.11 錯誤碼
+
+| 代碼 | 情況 |
+|---|---|
+| `OUTPUT_INVALID`（新） | 報告或 log 缺少、不合法、版本不支援、超過上限、摘要和退出碼矛盾 |
+| `ENGINE_REPORTED_ERRORS`（新） | AF 回報錯誤（退出碼 1），報告有效；部分結果入庫 |
+| `NO_TARGET_TRAFFIC`（新） | guard 沒有轉送任何請求 |
+| `ENGINE_TIMEOUT`（新） | ZAP 在 plan 的 maxDuration 停止（timed_out） |
+| `ENGINE_FAILED`（既有） | 也用於：退出碼 1 而且沒有報告 |
+
+### 19.12 殘餘風險與不在 T15 範圍
+
+- 同一個 path 有上游回應、也有動態的拒絕時，對 guard 回應的告警會入庫（T16 量測）。
+- 惡意的目標收得到 secret：把它轉成任意的形式（base64、hex、倒寫）再放進回應，遮罩認不出來，同專案看得到觀察的人解得回來。編碼列舉不完，平台保證的是工具與 proxy 自然寫出的形式。
+- log 是工具的輸出，訊息可以有換行：夾帶摘要的文字會讓判定變成 `OUTPUT_INVALID`（整個 run 沒有 observation）或多一個 `max_duration`（timed_out）。都是看得見的失敗，不會把錯誤變成成功（摘要和退出碼矛盾就是 `OUTPUT_INVALID`）；T16 確認實際的訊息是否帶得出目標的內容。
+- secret 含 `"` 或 `\` 而且剛好和報告的語法相鄰時，位元組層級的遮罩可能讓 JSON 不合法 → `OUTPUT_INVALID`（fail closed）。
+- 精確遮罩只認得已知的 secret 與列舉的形式；靶機自己發的 token（例如 Juice Shop 的 JWT）只靠樣式遮罩。
+- evidence、attack、other info 是靶機的不可信內容：API 只以 JSON 字串輸出，報告（T21）必須編碼。
+- 退出碼 1 的部分結果入庫：run 是 failed，observation 仍查得到。
+- 報告超過上限是 `OUTPUT_INVALID`：大型靶機的上限在 T16 以真實報告重新確認。
+- telemetry 少了最後一行時，該 path 的 observation 可能被排除（計數揭露）。
+- ZAP 報告的 URI 和實際送出的 target 是否逐字相同：T15 的真實報告都相同，但小型網站沒有 active scan 的命中。若 ZAP 以未編碼的形式寫出 attack 的 query（空白、非 ASCII），第 2 層會把真的結果排除（計數揭露）；T16 以 Juice Shop、VAmPI 的真實命中確認。
+- 收集中途中斷時（run 留在 collecting，由對帳標成 interrupted），out/ 可能還有沒遮罩的檔案：沒有 manifest，worker 不會讀；runs volume 的保留期限在 T23。
+- 不在 T15：Juice Shop、VAmPI 的 e2e 與預算調整、token 失效、path 中 `%` 的覆蓋缺口、cookie 的合併、`_method`（T16）；rule group、正規化的 severity、fingerprint、finding（T19）；報告與 artifact 的下載、原始證據加密、runs volume 的保留期限（T21／T23）；HTTPS、AJAX spider、多個 runner；T11 的同一條連線證據缺口仍記為未實作。
 
 ## 來源
 

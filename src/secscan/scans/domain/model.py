@@ -19,6 +19,7 @@ from secscan.scans.domain.lifecycle import (
     RunStatus,
     ScanStatus,
 )
+from secscan.scans.domain.observation import RunResult
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.targets.domain import Origin
 
@@ -77,6 +78,8 @@ class ScannerRun:
     traffic_seconds: int | None = None
     preflight_result: PreflightResult | None = None
     coverage_recorded: bool = False
+    # 解析的結果（docs/DECISIONS.md §19.6）；沒有解析過是 None。
+    result: RunResult | None = None
 
     def __post_init__(self) -> None:
         if (self.status in ERROR_REQUIRED_RUN_STATUSES) != (self.error_code is not None):
