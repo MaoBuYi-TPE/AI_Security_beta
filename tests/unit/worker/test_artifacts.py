@@ -8,11 +8,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
-from secscan.worker.artifacts import ArtifactReader
+from secscan.worker.artifacts import ArtifactReader, ManifestFile, RunManifest
 
 RUN = UUID(int=7)
 
@@ -104,3 +104,78 @@ def test_deeply_nested_manifests_are_none(tmp_path: Path) -> None:
     (tmp_path / str(RUN) / "manifest.json").write_bytes(b"[" * 100_000 + b"]" * 100_000)
 
     assert ArtifactReader(tmp_path).read(RUN, "a.http", max_bytes=10) is None
+
+
+# --- manifest（docs/DECISIONS.md §19.7）------------------------------------------------------
+
+
+def _write_manifest(runs: Path, content: bytes) -> UUID:
+    run_id = uuid4()
+    (runs / str(run_id)).mkdir()
+    (runs / str(run_id) / "manifest.json").write_bytes(content)
+    return run_id
+
+
+def _manifest_document(**changes: object) -> bytes:
+    document: dict[str, object] = {
+        "exit_code": 2,
+        "files": [{"path": "a.json", "size": 1, "sha256": "ab" * 32, "redactions": 3}],
+        "inputs": [{"path": "plan.yaml", "size": 2, "sha256": "cd" * 32}],
+        "run_id": "ignored",
+        "total_bytes": 1,
+    }
+    return json.dumps({**document, **changes}).encode()
+
+
+def test_the_manifest_is_read_with_the_exit_code(tmp_path: Path) -> None:
+    run_id = _write_manifest(tmp_path, _manifest_document())
+
+    manifest = ArtifactReader(tmp_path).manifest(run_id)
+
+    assert manifest == RunManifest(
+        exit_code=2,
+        files=(ManifestFile("a.json", 1, "ab" * 32, 3),),
+        inputs=(ManifestFile("plan.yaml", 2, "cd" * 32),),
+    )
+    assert manifest is not None
+    assert manifest.lists("a.json")
+    assert not manifest.lists("plan.yaml")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"{",
+        b"[]",
+        b"\xff",
+        b'{"exit_code": ' + b"1" * 5000 + b"}",
+        _manifest_document(exit_code=None),
+        _manifest_document(exit_code=True),
+        _manifest_document(exit_code=256),
+        _manifest_document(exit_code=-1),
+        _manifest_document(files=None),
+        _manifest_document(inputs=None),
+        _manifest_document(files=["x"]),
+        _manifest_document(files=[{"path": "", "size": 1, "sha256": "ab" * 32}]),
+        _manifest_document(files=[{"path": "a", "size": -1, "sha256": "ab" * 32}]),
+        _manifest_document(files=[{"path": "a", "size": True, "sha256": "ab" * 32}]),
+        _manifest_document(files=[{"path": "a", "size": 1, "sha256": "zz"}]),
+        _manifest_document(files=[{"path": "a", "size": 1, "sha256": "ab" * 32, "redactions": -1}]),
+        _manifest_document(files=[{"path": 1, "size": 1, "sha256": "ab" * 32}]),
+    ],
+    ids=lambda raw: repr(raw[:24]),
+)
+def test_a_malformed_manifest_is_unusable(tmp_path: Path, raw: bytes) -> None:
+    assert ArtifactReader(tmp_path).manifest(_write_manifest(tmp_path, raw)) is None
+
+
+def test_a_missing_run_has_no_manifest(tmp_path: Path) -> None:
+    assert ArtifactReader(tmp_path).manifest(uuid4()) is None
+
+
+def test_a_huge_integer_in_the_manifest_does_not_stop_a_read(tmp_path: Path) -> None:
+    """read 也經過同一個解析：超長的整數是 ValueError，不是 JSONDecodeError（順手修正）。"""
+    document = b'{"files": [{"path": "a", "size": ' + b"1" * 5000 + b"}]}"
+    run_id = _write_manifest(tmp_path, document)
+
+    assert ArtifactReader(tmp_path).read(run_id, "a", max_bytes=10) is None

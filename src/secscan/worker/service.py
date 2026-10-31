@@ -1,4 +1,4 @@
-"""worker（docs/DECISIONS.md §14.6、§16.5）：解析收集好的輸出。
+"""worker（docs/DECISIONS.md §14.6、§16.5、§19.7）：解析收集好的輸出。
 
 先把 lease 過期的 normalizing 退回 collected（解析不送流量，可以重試；最多 3 次，§17.6），再認領
 collected 的 run。單一 run 的非預期例外只記類別、繼續處理其他 run；DB 的錯誤讓程序結束。
@@ -9,10 +9,14 @@ collected 的 run。單一 run 的非預期例外只記類別、繼續處理其�
   完整的 telemetry → 對應到 operation；轉送數不明或 telemetry 不完整 → 不標記（沒有量測依據）。
   preflight 是平台的健檢探測，它的請求不算 coverage（已量測、涵蓋 0 個）。已經記錄過就跳過：
   寫入之後、轉成 succeeded 之前中斷，退回 collected 之後重試仍能完成。
-M3 起依引擎呼叫 parser（輸出一律當成不可信的資料）。
+- zap（worker/zap.py）：讀輸出、判定（scanners.domain.zap.results）、結果入庫。輸出一律是不可信的
+  資料，資料的問題都走判定；已經寫入判定就不再解析。
+解析期間依心跳的間隔延長 lease（失效就留給對帳）並寫 fleet 的心跳。不看取消與授權：解析不送流量，
+要求取消時解析照常完成，scan 由彙總成為 cancelled。
 """
 
 import logging
+import time
 import traceback
 from collections.abc import Callable
 from pathlib import Path
@@ -29,12 +33,14 @@ from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import observed_operations
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.domain.model import Lease
+from secscan.scans.domain.observation import RunOutcome
 from secscan.scans.domain.preflight import PreflightResult
-from secscan.scans.queue import LeaseLostError, RunReport, ScanQueue
+from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, RunReport, ScanQueue
 from secscan.worker.artifacts import ArtifactReader
 from secscan.worker.telemetry import TelemetryReader
+from secscan.worker.zap import ZapParser
 
-ENGINES = frozenset({Engine.FAKE, Engine.PREFLIGHT})
+ENGINES = frozenset({Engine.FAKE, Engine.PREFLIGHT, Engine.ZAP})
 
 logger = logging.getLogger(__name__)
 
@@ -48,18 +54,22 @@ class Worker:
         artifacts: ArtifactReader | None = None,
         telemetry: TelemetryReader | None = None,
         engines: frozenset[Engine] = ENGINES,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._queue = queue
         self._owner = owner
         self._artifacts = artifacts
         self._telemetry = telemetry
         self._engines = engines
+        self._monotonic = monotonic
+        self._zap = ZapParser(queue, artifacts, telemetry)
 
     def drain(
         self,
         *,
         limit: int | None = None,
         on_report: Callable[[RunReport], None] | None = None,
+        on_heartbeat: Callable[[], None] = lambda: None,
     ) -> list[RunReport]:
         """對帳之後處理所有等待解析的 run（或 limit 個）。"""
         self._queue.reconcile_expired_parsing(self._engines)
@@ -69,7 +79,7 @@ class Worker:
             if lease is None:
                 break
             try:
-                report = self._normalize(lease)
+                report = self._normalize(lease, self._keepalive(lease, on_heartbeat))
             except LeaseLostError:
                 # 解析太久或被對帳退回：這個 run 留給對帳，繼續處理其他的（審查發現：原本整個
                 # worker 結束，重啟後又認領同一個 run）。
@@ -92,11 +102,33 @@ class Worker:
                 on_report(report)
         return reports
 
-    def _normalize(self, lease: Lease) -> RunReport:
+    def _normalize(self, lease: Lease, keepalive: Callable[[], None]) -> RunReport:
+        outcome = RunOutcome(RunStatus.SUCCEEDED)
         if lease.engine is Engine.PREFLIGHT:
             self._queue.record_preflight(lease, self._preflight(lease))
+        elif lease.engine is Engine.ZAP:
+            outcome = self._zap.parse(lease, keepalive)
+        keepalive()
         self._coverage(lease)
-        return RunReport.of(lease, self._queue.advance(lease, RunStatus.SUCCEEDED))
+        keepalive()
+        progress = self._queue.advance(lease, outcome.status, error_code=outcome.error_code)
+        return RunReport.of(lease, progress)
+
+    def _keepalive(self, lease: Lease, on_heartbeat: Callable[[], None]) -> Callable[[], None]:
+        """步驟之間呼叫：過了心跳的間隔就延長 lease。只看 lease 是否有效（§19.7）。"""
+        last_beat = self._monotonic()
+
+        def keepalive() -> None:
+            nonlocal last_beat
+            moment = self._monotonic()
+            if moment - last_beat < HEARTBEAT_INTERVAL.total_seconds():
+                return
+            last_beat = moment
+            if not self._queue.heartbeat(lease).valid:
+                raise LeaseLostError("lease 已過期：不再解析，交給對帳處理")
+            on_heartbeat()
+
+        return keepalive
 
     def _preflight(self, lease: Lease) -> PreflightResult:
         definition = self._queue.bound_preflight(lease)

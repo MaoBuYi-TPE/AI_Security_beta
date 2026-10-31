@@ -34,6 +34,10 @@ from secscan.scanners.domain.zap.report import (
 from secscan.scans.domain.coverage import Exchange
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.observation import (
+    PARAMETER_MAX_LENGTH,
+    POSITION_MAX_LENGTH,
+    TEXT_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
     Exclusion,
     ObservationInput,
     ParameterLocation,
@@ -45,9 +49,6 @@ from secscan.security.redaction import redact_text, redact_url, sensitive_query_
 from secscan.targets.domain import DEFAULT_HTTP_PORT, Origin
 
 PARSER_VERSION = "zap-traditional-json/1"
-MAX_TITLE_LENGTH = 512
-MAX_POSITION_LENGTH = 2048
-MAX_TEXT_LENGTH = 4096
 _NO_ERRORS = 0
 _ENGINE_ERRORS = 1
 _ENGINE_WARNINGS = 2
@@ -233,13 +234,13 @@ def _observation(
         alert.alert_ref, instance.method, position, parameter, attack, evidence, other_info
     )
     fields = (
-        display_text(alert.name, max_length=MAX_TITLE_LENGTH),
-        display_text(path, max_length=MAX_POSITION_LENGTH),
-        display_text(query, max_length=MAX_POSITION_LENGTH),
-        display_text(parameter, max_length=MAX_TITLE_LENGTH),
-        display_text(attack, max_length=MAX_TEXT_LENGTH),
-        display_text(evidence, max_length=MAX_TEXT_LENGTH),
-        display_text(other_info, max_length=MAX_TEXT_LENGTH),
+        display_text(alert.name, max_length=TITLE_MAX_LENGTH),
+        display_text(path, max_length=POSITION_MAX_LENGTH),
+        display_text(query, max_length=POSITION_MAX_LENGTH),
+        display_text(parameter, max_length=PARAMETER_MAX_LENGTH),
+        display_text(attack, max_length=TEXT_MAX_LENGTH),
+        display_text(evidence, max_length=TEXT_MAX_LENGTH),
+        display_text(other_info, max_length=TEXT_MAX_LENGTH),
     )
     title, shown_path, shown_query, shown_parameter, shown_attack, shown_evidence, shown_other = (
         text for text, _ in fields

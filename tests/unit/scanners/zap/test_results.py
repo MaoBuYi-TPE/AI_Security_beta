@@ -21,15 +21,20 @@ from secscan.guard.domain.telemetry import ForwardedRequest, UpstreamResponse, d
 from secscan.scanners.domain.zap.policy import REQUIRED_ADDONS, ZAP_VERSION
 from secscan.scanners.domain.zap.report import MAX_REPORT_BYTES
 from secscan.scanners.domain.zap.results import (
-    MAX_POSITION_LENGTH,
-    MAX_TEXT_LENGTH,
     PARSER_VERSION,
     ZapOutput,
     interpret,
 )
 from secscan.scans.domain.coverage import Exchange
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
-from secscan.scans.domain.observation import Exclusion, ParameterLocation, ParsedRun, RunOutcome
+from secscan.scans.domain.observation import (
+    POSITION_MAX_LENGTH,
+    TEXT_MAX_LENGTH,
+    Exclusion,
+    ParameterLocation,
+    ParsedRun,
+    RunOutcome,
+)
 from secscan.security.redaction import REDACTED
 from secscan.targets.domain import parse_origin
 
@@ -568,26 +573,26 @@ def test_text_that_cannot_be_stored_is_replaced() -> None:
 
 
 def test_long_text_is_truncated_and_counted() -> None:
-    parsed = _one(evidence="x" * (MAX_TEXT_LENGTH + 1), otherinfo="y" * (MAX_TEXT_LENGTH + 1))
+    parsed = _one(evidence="x" * (TEXT_MAX_LENGTH + 1), otherinfo="y" * (TEXT_MAX_LENGTH + 1))
 
     observation = parsed.observations[0]
-    assert observation.evidence == "x" * MAX_TEXT_LENGTH
+    assert observation.evidence == "x" * TEXT_MAX_LENGTH
     assert parsed.truncated_fields == 2
 
 
 def test_a_long_position_is_truncated_and_counted() -> None:
     origin = _target("findings")
-    parsed = _one(uri=f"{origin}/search?q={'z' * MAX_POSITION_LENGTH}")
+    parsed = _one(uri=f"{origin}/search?q={'z' * POSITION_MAX_LENGTH}")
 
     query = parsed.observations[0].query
     assert query is not None
-    assert len(query) == MAX_POSITION_LENGTH
+    assert len(query) == POSITION_MAX_LENGTH
     assert parsed.truncated_fields == 1
 
 
 def test_a_secret_across_the_truncation_point_leaves_nothing() -> None:
     """先遮罩、後截斷：跨過截斷位置的值不會留下一段。"""
-    filler = "x" * (MAX_TEXT_LENGTH - 4)
+    filler = "x" * (TEXT_MAX_LENGTH - 4)
     observation = _one(evidence=f"{filler} password=hunter2").observations[0]
 
     assert observation.evidence is not None

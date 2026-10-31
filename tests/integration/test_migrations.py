@@ -31,6 +31,8 @@ APP_TABLES = {
     "scan_operations",
     "runner_instances",
     "run_coverage",
+    "artifacts",
+    "observations",
 }
 TRIGGER_FUNCTIONS = (
     "audit_events_reject_mutation",

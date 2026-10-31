@@ -16,15 +16,13 @@ from enum import StrEnum
 from typing import NoReturn
 
 from secscan.scanners.domain.zap.policy import ZAP_VERSION
+from secscan.scans.domain.observation import OBSERVATION_METHODS
 
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 MAX_SITES = 16
 MAX_ALERTS = 1024
 MAX_INSTANCES = 20_000
 _PROGRAM = "ZAP"
-_METHODS = frozenset(
-    {"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "TRACE", "CONNECT"}
-)
 _RISK_CODES = frozenset("0123")
 _CONFIDENCES = frozenset("01234")
 _ID = re.compile(r"-?[0-9]{1,9}")
@@ -148,7 +146,7 @@ def _alert(alert: dict[str, object]) -> Alert:
 def _instance(instance: dict[str, object]) -> Instance:
     uri = _text(instance, "uri")
     method = _text(instance, "method")
-    if not uri or method not in _METHODS:
+    if not uri or method not in OBSERVATION_METHODS:
         raise _RejectedError(ReportProblem.SHAPE)
     return Instance(
         uri=uri,

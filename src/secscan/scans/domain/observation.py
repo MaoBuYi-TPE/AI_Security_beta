@@ -11,17 +11,42 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
+from uuid import UUID
 
 from secscan.core.json_types import JsonObject, JsonValue
 from secscan.scans.domain.lifecycle import ERROR_REQUIRED_RUN_STATUSES, RunErrorCode, RunStatus
 
 MAX_DETAILS_BYTES = 4096
+TITLE_MAX_LENGTH = 512
+PARAMETER_MAX_LENGTH = 512
+POSITION_MAX_LENGTH = 2048
+TEXT_MAX_LENGTH = 4096
+RULE_MAX_LENGTH = 64
+RAW_LEVEL_MAX_LENGTH = 32
+VERSION_MAX_LENGTH = 64
+ARTIFACT_PATH_MAX_LENGTH = 2048
+# 工具回報的請求可能是 grant 以外的 method：比 OpenAPI 的清單多 CONNECT。
+OBSERVATION_METHODS = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "TRACE", "CONNECT"}
+)
 _OUTCOME_STATUSES = frozenset({RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.TIMED_OUT})
 
 
 class ParameterLocation(StrEnum):
     QUERY = "query"
     UNKNOWN = "unknown"
+
+
+class ArtifactKind(StrEnum):
+    INPUT = "input"
+    OUTPUT = "output"
+
+
+class ArtifactClassification(StrEnum):
+    """INPUT：runner 產生的輸入。MASKED：工具的輸出，已遮罩、仍是目標的不可信內容（§19.6）。"""
+
+    INPUT = "input"
+    MASKED = "masked"
 
 
 class Exclusion(StrEnum):
@@ -43,6 +68,28 @@ class RunOutcome:
             raise ValueError(f"{self.status.value} 不是解析的判定")
         if (self.status in ERROR_REQUIRED_RUN_STATUSES) != (self.error_code is not None):
             raise ValueError(f"{self.status.value} 的錯誤碼不符合規則")
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRecord:
+    """manifest 的一個檔案（hash 是遮罩之後的內容）。path 是 in/ 或 out/ 底下的相對路徑。"""
+
+    kind: ArtifactKind
+    path: str
+    sha256: str
+    size: int
+    redactions: int = 0
+
+    @property
+    def classification(self) -> ArtifactClassification:
+        if self.kind is ArtifactKind.INPUT:
+            return ArtifactClassification.INPUT
+        return ArtifactClassification.MASKED
+
+    def storage_key(self, run_id: UUID) -> str:
+        """runs volume 中的相對路徑。"""
+        directory = "in" if self.kind is ArtifactKind.INPUT else "out"
+        return f"{run_id}/{directory}/{self.path}"
 
 
 @dataclass(frozen=True, slots=True)
