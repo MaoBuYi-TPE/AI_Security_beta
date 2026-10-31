@@ -7,6 +7,9 @@
   report（alwaysRun：時間到了仍會寫出）。
 - maxDuration（秒）取剩下的時間、請求數除以速率、grant 的期限中最小的，再保留 JVM 啟動與報告的
   時間：預算用完之前 ZAP 自己停止。太短就不執行（PlanWindowTooSmallError）。
+- 只有 plan 的 maxDuration 限制時間：spider、passiveScan-wait、activeScan 自己的上限一律是 0（AF 的
+  「不限」）。T16 量測：job 在自己的上限停止時 AF 回報成功，被截斷的掃描看起來是完整的；plan 的
+  maxDuration 到期是警告（timed_out），截斷看得見（DECISIONS §20.5）。
 - 認證：ZapAuth 一定要明確指定（ANONYMOUS 或 header 名稱）；plan 只有模式與 header 名稱，值由
   script 從 0400 的檔案讀出。
 - AF 會代換 ${環境變數}：plan 中任何字串含 ${ 都拒絕。
@@ -39,6 +42,8 @@ from secscan.targets.domain import Origin
 # JVM 啟動（離線實測約 15 秒）、報告與收集的保留時間；plan 至少要能跑這麼久。
 RESERVED_SECONDS = 60
 MIN_PLAN_SECONDS = 60
+# job 自己的時間上限：AF 的 0 是不限（只由 plan 的 maxDuration 限制）。
+UNLIMITED = 0
 # 起始值（T16 依量測調整）：記憶體含 tmpfs，JVM 的 heap 在 script 中固定。
 ZAP_MEMORY_BYTES = 3 * 1024 * 1024 * 1024
 ZAP_NANO_CPUS = 2_000_000_000
@@ -139,9 +144,8 @@ def af_plan(
     *, profile: ScanProfile, origin: Origin, scope: Scope, seconds: int, spec: ToolSpec | None
 ) -> JsonObject:
     rules = ScopeRules.of(scope)
-    minutes = max(1, seconds // 60)
     if profile is ScanProfile.WEB_ACTIVE_LAB:
-        discovery = _spider(origin, scope, rules, minutes, spec)
+        discovery = _spider(origin, scope, rules, spec)
     else:
         discovery = _openapi(origin, spec)
     paths = context_paths(origin, scope)
@@ -165,8 +169,8 @@ def af_plan(
         "jobs": [
             {"type": "passiveScan-config", "parameters": {"scanOnlyInScope": True}},
             discovery,
-            {"type": "passiveScan-wait", "parameters": {"maxDuration": max(1, minutes // 10)}},
-            _active_scan(profile, scope, minutes),
+            {"type": "passiveScan-wait", "parameters": {"maxDuration": UNLIMITED}},
+            _active_scan(profile, scope),
             {
                 "type": "report",
                 "alwaysRun": True,
@@ -196,9 +200,7 @@ def reject_variables(value: JsonValue) -> None:
             reject_variables(child)
 
 
-def _spider(
-    origin: Origin, scope: Scope, rules: ScopeRules, minutes: int, spec: ToolSpec | None
-) -> JsonObject:
+def _spider(origin: Origin, scope: Scope, rules: ScopeRules, spec: ToolSpec | None) -> JsonObject:
     if spec is not None:
         raise ZapPlanError("web_active_lab 不接受規格")
     if not _allowed(rules, WEB_SEED_PATH):
@@ -208,7 +210,7 @@ def _spider(
         "parameters": {
             "context": CONTEXT,
             "url": f"{origin}{WEB_SEED_PATH}",
-            "maxDuration": max(1, minutes // 4),
+            "maxDuration": UNLIMITED,
             "maxDepth": 5,
             "threadCount": 1,
             "postForm": HttpMethod.POST in scope.methods,
@@ -235,13 +237,13 @@ def _openapi(origin: Origin, spec: ToolSpec | None) -> JsonObject:
     }
 
 
-def _active_scan(profile: ScanProfile, scope: Scope, minutes: int) -> JsonObject:
+def _active_scan(profile: ScanProfile, scope: Scope) -> JsonObject:
     return {
         "type": "activeScan",
         "parameters": {
             "context": CONTEXT,
-            "maxRuleDurationInMins": max(1, minutes // 4),
-            "maxScanDurationInMins": minutes,
+            "maxRuleDurationInMins": UNLIMITED,
+            "maxScanDurationInMins": UNLIMITED,
             "threadPerHost": 1,
             "addQueryParam": False,
             "handleAntiCSRFTokens": True,

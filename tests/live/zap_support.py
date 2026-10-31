@@ -148,14 +148,18 @@ def lab(
     paths: list[str] | None,
     excluded: list[str] | None = None,
     methods: list[str] | None = None,
+    host: str | None = None,
+    ip: str = SITE_IP,
+    port: int = SITE_PORT,
 ) -> Lab:
+    """host 省略時是新的小型網站的名稱；T16 的靶機傳入自己的 host、IP 與 port（lab_support.py）。"""
     project = admin.data("POST", "/projects", {"name": f"zap-{uuid.uuid4().hex[:8]}"})
     issued = admin.data(
         "POST", f"/projects/{project['id']}/keys", {"name": "op", "role": "operator"}
     )
     operator = Api(issued["key"])
-    host = f"lab-zap-{uuid.uuid4().hex[:6]}"
-    origin = f"http://{host}:{SITE_PORT}"
+    host = host or f"lab-zap-{uuid.uuid4().hex[:6]}"
+    origin = f"http://{host}:{port}"
     target = operator.data(
         "POST",
         f"/projects/{project['id']}/targets",
@@ -166,7 +170,7 @@ def lab(
         f"/targets/{target['id']}/scope-grants",
         {
             "allowed_origins": [origin],
-            "allowed_ips": [SITE_IP],
+            "allowed_ips": [ip],
             "allowed_paths": paths or [],
             "allow_all_paths": paths is None,
             "excluded_paths": excluded or [],

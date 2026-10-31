@@ -49,8 +49,8 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
-	lab-net lab-up lab-down lab-verify build images ensure-net scan-net up down test-live-runner \
-	test-live-zap record-fixtures test-contract
+	lab-net lab-up lab-down lab-verify lab-images build images ensure-net scan-net up down \
+	test-live-runner test-live-zap record-fixtures test-contract test-live-lab
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -155,6 +155,10 @@ lab-verify:
 lab-down:
 	$(COMPOSE) -f $(LAB_FILE) --profile juice-shop --profile vampi down --remove-orphans
 
+# 以 digest pull compose.lab.yaml 鎖定的靶機映像（Juice Shop、VAmPI）；不啟動任何容器。
+lab-images: docker-check
+	$(COMPOSE) -f $(LAB_FILE) --profile juice-shop --profile vampi pull --quiet
+
 # 建立 secscan 的應用程式映像（api、runner、worker 共用）與 egress guard 的映像。
 build: docker-check
 	$(COMPOSE) -f $(DB_FILE) --profile app build api guard
@@ -210,7 +214,7 @@ test-live-runner: env docker-check images build
 		&& DB_PORT=55434 $(UV_RUN) alembic upgrade head >/dev/null \
 		&& $(LIVE_COMPOSE) up -d --wait \
 		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(LIVE_PYTEST_ENV) $(UV_RUN) pytest -m live \
-			-p no:cacheprovider $(LIVE_TESTS) \
+			-p no:cacheprovider $(LIVE_PYTEST_ARGS) $(LIVE_TESTS) \
 		|| status=$$?; \
 		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
 			ids=$$(docker ps -aq --filter "network=$$net"); \
@@ -231,3 +235,11 @@ test-live-zap: test-live-runner
 record-fixtures: LIVE_TESTS := tests/live/test_zap_record_live.py
 record-fixtures: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/zap
 record-fixtures: test-live-runner
+
+# T16（docs/DECISIONS.md §20）：同一個 live 流程，以真的 ZAP 掃描 Juice Shop 與 VAmPI（弱點版與安全版），
+# 加上 token 失效、工具超時與取消。靶機由測試在 live 自己的 lab 網路上逐一啟動（一次一個：記憶體）。
+# 量測印在輸出（-s），輸出錄製到 recordings/lab/<情境>/（gitignore）。約 27 分鐘。
+test-live-lab: LIVE_TESTS := tests/live/test_lab_zap_live.py
+test-live-lab: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/lab
+test-live-lab: LIVE_PYTEST_ARGS := -s
+test-live-lab: lab-images test-live-runner

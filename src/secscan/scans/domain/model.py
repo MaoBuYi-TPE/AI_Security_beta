@@ -80,6 +80,9 @@ class ScannerRun:
     coverage_recorded: bool = False
     # 解析的結果（docs/DECISIONS.md §19.6）；沒有解析過是 None。
     result: RunResult | None = None
+    # 實際執行的 ExecutionPlan 與 zap 的 profile 定義（§20.2）：runner 建立容器之前寫入。
+    plan_hash: str | None = None
+    profile_definition_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (self.status in ERROR_REQUIRED_RUN_STATUSES) != (self.error_code is not None):

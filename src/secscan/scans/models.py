@@ -362,6 +362,17 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             f"AND octet_length(result_details::text) <= {MAX_DETAILS_BYTES})",
             name="result_details_valid",
         ),
+        # 實際執行的內容（docs/DECISIONS.md §20.2）：runner 在建立容器之前寫入一次。
+        CheckConstraint(
+            f"plan_hash IS NULL OR (plan_hash ~ '{_SHA256_HEX}' AND container_name IS NOT NULL)",
+            name="plan_hash_valid",
+        ),
+        CheckConstraint(
+            "profile_definition_sha256 IS NULL "
+            f"OR (profile_definition_sha256 ~ '{_SHA256_HEX}' AND engine = '{Engine.ZAP.value}' "
+            "AND plan_hash IS NOT NULL)",
+            name="profile_definition_valid",
+        ),
     )
 
     scan_id: Mapped[UUID] = mapped_column(ForeignKey("scans.id", ondelete="RESTRICT"))
@@ -389,6 +400,8 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     exit_code: Mapped[int | None]
     observation_count: Mapped[int | None]
     result_details: Mapped[JsonObject | None] = mapped_column(JSONB)
+    plan_hash: Mapped[str | None] = mapped_column(String(SHA256_BYTES * 2))
+    profile_definition_sha256: Mapped[str | None] = mapped_column(String(SHA256_BYTES * 2))
 
 
 class ScanEventModel(Base):

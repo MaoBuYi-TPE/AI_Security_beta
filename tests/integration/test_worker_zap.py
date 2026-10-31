@@ -2,6 +2,7 @@
 
 每份 fixture 得到預期的 run、scan、observation 與 artifact；壞掉的輸出是判定，不是崩潰；寫入之後、
 run 結束之前中斷時，重試以存下的判定結束；解析中要求取消不影響結果；解析期間延長 lease。
+guard 的 summary 與 telemetry 的明細寫進 result_details.guard_traffic（§20.3、§20.4）。
 每個測試用自己的資料庫（queue_database）。
 """
 
@@ -18,7 +19,16 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
-from secscan.guard.domain.telemetry import telemetry_file_name
+from secscan.guard.domain.telemetry import (
+    ForwardedRequest,
+    RunSummary,
+    UpstreamResponse,
+    encode_line,
+    encode_summary,
+    summary_file_name,
+    telemetry_file_name,
+)
+from secscan.runner.plans import ENGINE_IMAGES
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.plan import InputFile
 from secscan.scanners.domain.zap.policy import REQUIRED_ADDONS, ZAP_IMAGE, ZAP_VERSION
@@ -84,8 +94,9 @@ def dirs(tmp_path: Path) -> Dirs:
     return created
 
 
-def _scan(seed: Seeder, world: World, origin: str) -> UUID:
+def _scan(seed: Seeder, world: World, origin: str, *, authenticated: bool = False) -> UUID:
     target = seed.target(world.operator_a, world.project_a.id, origin, kind=TargetKind.WEB)
+    profile = seed.auth_profile(world.operator_a, target) if authenticated else None
     grant = seed.approve(
         world.admin,
         seed.grant(
@@ -101,7 +112,7 @@ def _scan(seed: Seeder, world: World, origin: str) -> UUID:
         target_id=target.id,
         scope_grant_id=grant.id,
         api_spec_id=None,
-        auth_profile_id=None,
+        auth_profile_id=profile.id if profile is not None else None,
         profile=ScanProfile.WEB_ACTIVE_LAB,
         engines=(ScanEngine.ZAP,),
         budget=BudgetRequest(),
@@ -119,10 +130,18 @@ def _collected(
     origin: str | None = None,
     exit_code: int | None = None,
     change: Callable[[Path], None] = lambda out: None,
+    denied: dict[str, int] | None = None,
+    telemetry: bytes | None = None,
+    authenticated: bool = False,
 ) -> Lease:
-    """一個 zap 的 run 收集好這份 fixture 的輸出（runner 的 workspace 寫的 manifest）。"""
+    """一個 zap 的 run 收集好這份 fixture 的輸出（runner 的 workspace 寫的 manifest）。
+
+    有 telemetry 的 fixture 另外寫 guard 的 summary（轉送數與 denied 的各原因）。
+    """
     log = _entry(scenario, "zap.log")
-    _scan(seed, world, origin or log["target"])
+    _scan(seed, world, origin or log["target"], authenticated=authenticated)
+    if authenticated:
+        _collect_preflight(queue)
     lease = queue.claim("runner-1", ZAP)
     assert lease is not None
     queue.prepare_launch(lease, image_ref=str(ZAP_IMAGE))
@@ -135,16 +154,55 @@ def _collected(
         shutil.copyfile(source / "report.json", out / "zap-report.json")
     change(out)
     sent = 0
-    if (source / "telemetry.jsonl").exists():
-        lines = (source / "telemetry.jsonl").read_bytes()
-        (dirs.telemetry / telemetry_file_name(lease.run_id)).write_bytes(lines)
-        sent = sum(1 for line in lines.splitlines() if b'"e":"request"' in line.replace(b" ", b""))
+    if telemetry is None and (source / "telemetry.jsonl").exists():
+        telemetry = (source / "telemetry.jsonl").read_bytes()
+    if telemetry is not None:
+        (dirs.telemetry / telemetry_file_name(lease.run_id)).write_bytes(telemetry)
+        sent = _requests(telemetry)
+        _summary(dirs, lease, forwarded=sent, denied=denied or {})
     queue.record_usage(lease, RunUsage(requests_sent=sent, requests_denied=0, traffic_seconds=1))
     queue.advance(lease, RunStatus.COLLECTING)
     code = exit_code if exit_code is not None else log["exit_code"]
     workspace.collect(lease.run_id, exit_code=code, inputs=(PLAN,))
     queue.advance(lease, RunStatus.COLLECTED)
     return lease
+
+
+def _collect_preflight(queue: ScanQueue) -> None:
+    """綁定 auth profile 的 scan 先跑 preflight：收集之後才輪到 zap（輸出由 worker 判斷）。"""
+    lease = queue.claim("runner-1", frozenset({ScanEngine.PREFLIGHT}))
+    assert lease is not None
+    queue.prepare_launch(lease, image_ref=str(ENGINE_IMAGES[ScanEngine.PREFLIGHT]))
+    queue.record_usage(lease, RunUsage(requests_sent=0, requests_denied=0, traffic_seconds=0))
+    queue.advance(lease, RunStatus.COLLECTING)
+    queue.advance(lease, RunStatus.COLLECTED)
+
+
+def _telemetry(statuses: list[tuple[str, int]]) -> bytes:
+    lines = b""
+    for sequence, (path, status) in enumerate(statuses, 1):
+        request = ForwardedRequest(sequence, float(sequence), "GET", path, authenticated=True)
+        lines += encode_line(request) + encode_line(
+            UpstreamResponse(sequence, sequence + 0.5, status)
+        )
+    return lines
+
+
+def _requests(lines: bytes) -> int:
+    return sum(1 for line in lines.splitlines() if b'"e":"request"' in line.replace(b" ", b""))
+
+
+def _summary(dirs: Dirs, lease: Lease, *, forwarded: int, denied: dict[str, int]) -> None:
+    summary = RunSummary(
+        run_id=lease.run_id,
+        scan_id=lease.scan_id,
+        boot_id=UUID(int=1),
+        forwarded=forwarded,
+        denied=denied,
+        first_at=1_700_000_000.0,
+        last_at=1_700_000_100.0,
+    )
+    (dirs.telemetry / summary_file_name(lease.run_id)).write_bytes(encode_summary(summary))
 
 
 def _worker(queue: ScanQueue, dirs: Dirs, **options: Any) -> Worker:
@@ -416,6 +474,100 @@ def test_missing_telemetry_keeps_the_observations_unverified(
     assert run.status == "succeeded"
     assert run.result_details["traffic_verified"] is False
     assert run.observation_count == 11
+
+
+# --- guard 的流量明細（§20.3、§20.4） ------------------------------------------------------
+
+
+def test_the_guard_traffic_outlives_the_telemetry(
+    queue: ScanQueue, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    """telemetry 6 小時後刪除：轉送、各原因的拒絕與回應數留在 result_details。"""
+    denied = {"PATH_EXCLUDED": 3, "METHOD_NOT_AUTHORIZED": 1}
+    lease = _collected(queue, queue_seed, world, dirs, "findings", denied=denied)
+
+    _worker(queue, dirs).drain()
+
+    traffic = _run(queue_seed, lease.run_id).result_details["guard_traffic"]
+    sent = _requests((FIXTURES / "findings" / "telemetry.jsonl").read_bytes())
+    assert traffic["forwarded"] == sent
+    assert traffic["denied"] == {"METHOD_NOT_AUTHORIZED": 1, "PATH_EXCLUDED": 3}
+    assert traffic["exhausted"] is False
+    assert (traffic["first_at"], traffic["last_at"]) == (
+        "2023-11-14T22:13:20+00:00",
+        "2023-11-14T22:15:00+00:00",
+    )
+    assert 0 < traffic["answered"] <= sent
+    assert traffic["auth"] == {
+        "accepted": 0,
+        "rejected": 0,
+        "regressed": 0,
+        "probe_rejected": 0,
+        "lost": False,
+    }
+
+
+def test_without_a_guard_summary_there_is_no_traffic_record(
+    queue: ScanQueue, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    lease = _collected(queue, queue_seed, world, dirs, "findings")
+    (dirs.telemetry / summary_file_name(lease.run_id)).unlink()
+
+    _worker(queue, dirs).drain()
+
+    run = _run(queue_seed, lease.run_id)
+    assert run.status == "succeeded"
+    assert run.result_details["guard_traffic"] is None
+
+
+def test_a_summary_of_another_scan_is_not_used(
+    queue: ScanQueue, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    """summary 的 scan_id 要和 lease 相同（T16 的審查）：不同就當成沒有 guard 的紀錄。"""
+    lease = _collected(queue, queue_seed, world, dirs, "findings")
+    summary = RunSummary(run_id=lease.run_id, scan_id=UUID(int=7), boot_id=UUID(int=1), forwarded=1)
+    (dirs.telemetry / summary_file_name(lease.run_id)).write_bytes(encode_summary(summary))
+
+    _worker(queue, dirs).drain()
+
+    run = _run(queue_seed, lease.run_id)
+    assert run.status == "succeeded"
+    assert run.result_details["guard_traffic"] is None
+
+
+def test_a_credential_lost_during_the_scan_is_recorded(
+    queue: ScanQueue, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    """帶認證的請求先被接受、之後被拒絕（token 過期）：auth.lost（§20.4）。公開端點仍回 200。"""
+    statuses = [("/me", 200), ("/orders", 200), ("/public", 200)]
+    statuses += [("/me", 401), ("/orders", 401), ("/public", 200)]
+    lease = _collected(queue, queue_seed, world, dirs, "findings", telemetry=_telemetry(statuses))
+
+    _worker(queue, dirs).drain()
+
+    traffic = _run(queue_seed, lease.run_id).result_details["guard_traffic"]
+    assert traffic["auth"] == {
+        "accepted": 4,
+        "rejected": 2,
+        "regressed": 2,
+        "probe_rejected": 0,
+        "lost": True,
+    }
+
+
+def test_a_rejected_preflight_endpoint_is_a_lost_credential(
+    queue: ScanQueue, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    """profile 的 preflight 是 GET /me：掃描中帶憑證打它被拒絕，就是憑證已失效（沒有退化也算）。"""
+    lines = _telemetry([("/public", 200), ("/me", 401), ("/orders", 401)])
+    lease = _collected(
+        queue, queue_seed, world, dirs, "findings", telemetry=lines, authenticated=True
+    )
+
+    _worker(queue, dirs).drain()
+
+    auth = _run(queue_seed, lease.run_id).result_details["guard_traffic"]["auth"]
+    assert (auth["regressed"], auth["probe_rejected"], auth["lost"]) == (0, 1, True)
 
 
 # --- 寫入與重試 ---------------------------------------------------------------------------

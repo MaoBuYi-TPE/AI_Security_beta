@@ -3,7 +3,8 @@
 - summary（`<run_id>.summary.json`）：轉送與拒絕的計數、是否用盡預算；guard 原子寫入。
 - `<run_id>.jsonl`：每個轉送的請求一行（method、不含 query 的 path、是否帶認證 header），回應一行
   （status）。拒絕的請求只計數，不逐行記（數量不受預算限制）。
-兩者都是 guard 寫的，讀的一方仍嚴格解析（key 完全相符、型別、canonical），訊息不含內容。
+兩者都是 guard 寫的，讀的一方仍嚴格解析（key 完全相符、型別、canonical、時間與計數的範圍），訊息
+不含內容。
 """
 
 import json
@@ -14,6 +15,8 @@ from uuid import UUID
 import pytest
 
 from secscan.guard.domain.telemetry import (
+    MAX_COUNT,
+    MAX_EPOCH_SECONDS,
     MAX_TELEMETRY_LINE_BYTES,
     ForwardedRequest,
     RunSummary,
@@ -74,6 +77,13 @@ def _summary(**overrides: Any) -> bytes:
         _summary(denied=[]),
         _summary(first_at="x"),
         _summary(first_at=-1.0),
+        # 讀的一方把時間轉成 UTC 的日期、把計數寫進 4 KiB 的 result_details（T16 的審查）。
+        _summary(first_at=MAX_EPOCH_SECONDS + 1.0),
+        _summary(last_at=1e18),
+        _summary(forwarded=MAX_COUNT + 1),
+        _summary(denied={"PATH_EXCLUDED": MAX_COUNT + 1}),
+        _summary(first_at=1.0).replace(b"1.0", b"1e999"),
+        _summary(forwarded=1).replace(b'"forwarded": 1', b'"forwarded": ' + b"9" * 5_000),
         b"{",
         b" " * 70_000,
     ],

@@ -413,6 +413,8 @@ def _run(model: ScannerRunModel) -> ScannerRun:
         ),
         coverage_recorded=model.coverage_recorded,
         result=_result(model),
+        plan_hash=model.plan_hash,
+        profile_definition_sha256=model.profile_definition_sha256,
     )
 
 

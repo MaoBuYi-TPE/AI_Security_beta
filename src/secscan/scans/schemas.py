@@ -21,12 +21,22 @@ from secscan.scans.domain.model import Scan, ScanEvent, ScannerRun
 from secscan.scans.domain.observation import Observation, ParameterLocation, RunResult
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.domain.request import BudgetRequest, ScanRequest
-from secscan.scans.domain.usage import budget_usage, coverage_measured, preflight_status
+from secscan.scans.domain.usage import (
+    authentication_health_unknown,
+    authentication_lost,
+    budget_usage,
+    coverage_measured,
+    preflight_status,
+)
 
 # coverage 沒有量測依據、或認證沒有被證明有效時的原因（contract §8）。
 TELEMETRY_UNAVAILABLE = "TRAFFIC_TELEMETRY_UNAVAILABLE"
 NO_API_SPEC = "NO_API_SPEC"
 AUTHENTICATION_NOT_VERIFIED = "AUTHENTICATION_NOT_VERIFIED"
+# 憑證在掃描中途失效（docs/DECISIONS.md §20.4）：之後的結果不是以這個身分取得的。
+AUTHENTICATION_LOST = "AUTHENTICATION_LOST"
+# guard 的紀錄看不出憑證是否整段有效（沒有紀錄、telemetry 不完整、T16 之前的結果）。
+AUTHENTICATION_HEALTH_UNKNOWN = "AUTHENTICATION_HEALTH_UNKNOWN"
 
 
 class ScanCreate(BaseModel):
@@ -77,11 +87,41 @@ class AuthBindingOut(BaseModel):
     preflight: PreflightResult | None
 
 
+class AuthHealthOut(BaseModel):
+    """帶認證 header 的請求：被接受與被拒絕（401、403）的數量；regressed 是接受過、最後被拒絕的
+    operation 數；probe_rejected 是 preflight 的端點被拒絕的次數；lost 是判定憑證失效
+    （docs/DECISIONS.md §20.4）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    accepted: int
+    rejected: int
+    regressed: int
+    probe_rejected: int
+    lost: bool
+
+
+class GuardTrafficOut(BaseModel):
+    """guard 記下的流量明細（§20.3）：telemetry 不能核對時 answered 與 auth 是 null。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    forwarded: int
+    denied: dict[str, int]
+    exhausted: bool
+    first_at: datetime | None
+    last_at: datetime | None
+    answered: int | None
+    auth: AuthHealthOut | None
+
+
 class RunResultOut(BaseModel):
     """解析的結果：工具的版本與退出碼、入庫與排除的數量（docs/DECISIONS.md §19.6）。
 
     excluded 是工具回報、但不是目標的回應或不在範圍內的告警；traffic_verified 是 false 時，沒有
-    guard 的 telemetry 可以核對。problem 是輸出不能用的原因（穩定的代碼）。
+    guard 的 telemetry 可以核對。problem 是輸出不能用的原因（穩定的代碼）。guard_traffic 是 guard
+    的流量明細（T16 之前的結果，或 guard 沒有這個 run 的紀錄時是 null）。
     """
 
     model_config = ConfigDict(frozen=True)
@@ -99,6 +139,7 @@ class RunResultOut(BaseModel):
     traffic_verified: bool
     problem: str | None
     components: dict[str, str]
+    guard_traffic: GuardTrafficOut | None = None
 
     @classmethod
     def of(cls, result: RunResult) -> Self:
@@ -122,6 +163,10 @@ class EngineRunOut(BaseModel):
     error_code: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    # 實際執行的 ExecutionPlan（映像、參數、輸入檔、上限）與 zap 的 profile 定義的 sha256
+    # （§20.2）；沒有建立容器的 run 是 null。
+    plan_hash: str | None
+    profile_definition_sha256: str | None
     # 解析過才有值（fake、preflight 與還沒解析的 run 是 null）。
     result: RunResultOut | None
 
@@ -134,6 +179,8 @@ class EngineRunOut(BaseModel):
             error_code=run.error_code.value if run.error_code is not None else None,
             started_at=run.started_at,
             finished_at=run.finished_at,
+            plan_hash=run.plan_hash,
+            profile_definition_sha256=run.profile_definition_sha256,
             result=RunResultOut.of(run.result) if run.result is not None else None,
         )
 
@@ -301,10 +348,16 @@ def _coverage(scan: Scan) -> CoverageOut:
     verified = preflight_status(scan.runs) is PreflightResult.PASSED
     if scan.auth is not None and not verified:
         limitations.append(AUTHENTICATION_NOT_VERIFIED)
+    lost = scan.auth is not None and authentication_lost(scan.runs)
+    if lost:
+        limitations.append(AUTHENTICATION_LOST)
+    elif scan.auth is not None and authentication_health_unknown(scan.runs):
+        limitations.append(AUTHENTICATION_HEALTH_UNKNOWN)
     observed = authenticated = None
     if coverage is not None and measured:
         observed = coverage.observed_operations
-        if scan.auth is not None:
+        # 失效之後的 token 打到公開端點仍是 200，會被算成已認證：不給這個數字（§20.4）。
+        if scan.auth is not None and not lost:
             authenticated = coverage.authenticated_operations if verified else 0
     return CoverageOut(
         eligible_operations=coverage.eligible_operations if coverage is not None else None,

@@ -4,6 +4,7 @@
   不明，轉送數就是 None（不以 0 冒充）。
 - preflight：preflight run 的結果；還沒結束是 None（pending）；結束了卻沒有結果是 not_executed。
 - coverage_measured：有規格，至少一個容器 run，而且每個容器 run 的 telemetry 都已對應到 operation。
+- authentication_lost：解析過的 run 的 guard 流量判定憑證失效（§20.4）；形狀不符不判定。
 """
 
 from datetime import UTC, datetime
@@ -12,12 +13,16 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from secscan.core.json_types import JsonValue
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.model import Coverage, ScannerRun
+from secscan.scans.domain.observation import RunResult
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.domain.usage import (
     BudgetUsage,
+    authentication_health_unknown,
+    authentication_lost,
     budget_usage,
     coverage_measured,
     preflight_status,
@@ -169,3 +174,37 @@ def test_coverage_counts_stay_ordered(observed: int, authenticated: int) -> None
             observed_operations=observed,
             authenticated_operations=authenticated,
         )
+
+
+def _traffic(guard_traffic: JsonValue) -> ScannerRun:
+    result = RunResult("p/1", None, 0, 0, {"guard_traffic": guard_traffic})
+    return _run(engine=Engine.ZAP, result=result)
+
+
+def test_a_lost_credential_is_found_in_any_run() -> None:
+    lost = _traffic({"auth": {"lost": True}})
+
+    assert authentication_lost([_run(), _traffic({"auth": {"lost": False}}), lost])
+
+
+@pytest.mark.parametrize(
+    "guard_traffic",
+    [None, [], {"auth": None}, {"auth": []}, {"auth": {}}, {"auth": {"lost": "true"}}],
+)
+def test_details_without_a_lost_flag_are_not_a_loss(guard_traffic: JsonValue) -> None:
+    assert not authentication_lost([_traffic(guard_traffic)])
+
+
+def test_runs_without_results_are_not_a_loss() -> None:
+    assert not authentication_lost([_run()])
+
+
+@pytest.mark.parametrize(
+    "guard_traffic", [None, [], {"auth": None}, {"auth": []}, {"forwarded": 3}]
+)
+def test_results_without_auth_counts_are_unknown(guard_traffic: JsonValue) -> None:
+    assert authentication_health_unknown([_run(), _traffic(guard_traffic)])
+
+
+def test_results_with_auth_counts_are_known() -> None:
+    assert not authentication_health_unknown([_run(), _traffic({"auth": {"lost": False}})])

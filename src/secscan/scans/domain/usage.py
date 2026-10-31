@@ -6,11 +6,14 @@
 - preflight_status：preflight run 的結果；還沒結束是 None；結束了卻沒有結果是 not_executed。
 - coverage_measured：有規格、所有 run 都結束、至少一個容器 run，而且每個容器 run 的 telemetry 都已
   對應到 operation。
+- authentication_lost：解析時由 guard 的 telemetry 判定憑證在掃描中途失效（§20.4）；
+  authentication_health_unknown：有解析過的 run 沒有認證的計數。
 """
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from secscan.core.json_types import JsonObject
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import TERMINAL_RUN_STATUSES
 from secscan.scans.domain.model import ScannerRun
@@ -51,6 +54,33 @@ def preflight_status(runs: Sequence[ScannerRun]) -> PreflightResult | None:
     if preflight.status in TERMINAL_RUN_STATUSES:
         return PreflightResult.NOT_EXECUTED
     return None
+
+
+def authentication_lost(runs: Iterable[ScannerRun]) -> bool:
+    """任何一個解析過的 run 的 guard 流量判定憑證在掃描中途失效（§20.4）。
+
+    result_details 是 worker 自己寫入的；T16 之前的結果沒有 guard_traffic，不判定失效。
+    """
+    return any(auth.get("lost") is True for auth in _auth_records(runs) if auth is not None)
+
+
+def authentication_health_unknown(runs: Iterable[ScannerRun]) -> bool:
+    """有解析過的 run 沒有認證的計數（guard 沒有紀錄、telemetry 不完整、T16 之前的結果）：看不出
+    憑證是否整段有效（§20.4）。
+    """
+    return any(auth is None for auth in _auth_records(runs))
+
+
+def _auth_records(runs: Iterable[ScannerRun]) -> list[JsonObject | None]:
+    """每個解析過的 run 的 guard_traffic.auth（形狀不符是 None）。"""
+    records: list[JsonObject | None] = []
+    for run in runs:
+        if run.result is None:
+            continue
+        traffic = run.result.details.get("guard_traffic")
+        auth = traffic.get("auth") if isinstance(traffic, dict) else None
+        records.append(auth if isinstance(auth, dict) else None)
+    return records
 
 
 def coverage_measured(runs: Iterable[ScannerRun], *, has_spec: bool) -> bool:

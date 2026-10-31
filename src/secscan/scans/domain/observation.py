@@ -9,7 +9,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
@@ -17,6 +17,7 @@ from uuid import UUID
 from secscan.core.json_types import JsonObject, JsonValue
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import ERROR_REQUIRED_RUN_STATUSES, RunErrorCode, RunStatus
+from secscan.scans.domain.traffic import GuardTraffic
 
 MAX_DETAILS_BYTES = 4096
 TITLE_MAX_LENGTH = 512
@@ -183,6 +184,8 @@ class ParsedRun:
     # 輸出不能用的原因（穩定的代碼，不含輸出的內容）。
     problem: str | None = None
     components: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    # guard 記下的流量明細（§20.3）：worker 讀 guard 的 summary 與 telemetry 後加上。
+    traffic: GuardTraffic | None = None
 
 
 def event_id(*fields: str) -> str:
@@ -210,7 +213,37 @@ def result_details(parsed: ParsedRun) -> JsonObject:
         "traffic_verified": parsed.traffic_verified,
         "problem": parsed.problem,
         "components": components,
+        "guard_traffic": _traffic_details(parsed.traffic),
     }
+
+
+def _traffic_details(traffic: GuardTraffic | None) -> JsonValue:
+    if traffic is None:
+        return None
+    health = traffic.auth
+    auth: JsonValue = None
+    if health is not None:
+        auth = {
+            "accepted": health.accepted,
+            "rejected": health.rejected,
+            "regressed": health.regressed,
+            "probe_rejected": health.probe_rejected,
+            "lost": health.lost,
+        }
+    denied: JsonObject = dict(traffic.denied)
+    return {
+        "forwarded": traffic.forwarded,
+        "denied": denied,
+        "exhausted": traffic.exhausted,
+        "first_at": _utc(traffic.first_at),
+        "last_at": _utc(traffic.last_at),
+        "answered": traffic.answered,
+        "auth": auth,
+    }
+
+
+def _utc(epoch: float | None) -> str | None:
+    return None if epoch is None else datetime.fromtimestamp(epoch, UTC).isoformat()
 
 
 def outcome_from_details(details: Mapping[str, JsonValue]) -> RunOutcome:
