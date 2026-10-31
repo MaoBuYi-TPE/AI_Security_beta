@@ -104,6 +104,8 @@
 | S98 | [zaproxy — zap.sh](https://github.com/zaproxy/zaproxy/blob/main/zap/src/main/dist/zap.sh)、[Dockerfile-stable](https://github.com/zaproxy/zaproxy/blob/main/docker/Dockerfile-stable) | `zap.sh` 只認 cgroup v1 的記憶體上限、接受 `-Xmx…` 參數；映像以 zap(1000) 執行、`HOME=/home/zap/`、宣告 HEALTHCHECK。T14（§18.2） |
 | S99 | [ZAP — OpenAPI Automation Framework Support](https://www.zaproxy.org/docs/desktop/addons/openapi-support/automation/)、[OpenAPI Support](https://www.zaproxy.org/docs/desktop/addons/openapi-support/) | openapi job 的 `apiFile`、`targetUrl`；context 排除的端點不匯入；匯入時跟隨 redirect。T14（§18.4、§18.6） |
 | S100 | [ZAP — Spider AF job](https://www.zaproxy.org/docs/desktop/addons/spider/automation/)、[activeScan AF job](https://www.zaproxy.org/docs/desktop/addons/automation-framework/job-ascan/) | spider 的 `postForm`、`parseRobotsTxt`、`threadCount`；activeScan 的 `policyDefinition`（`defaultThreshold`、`rules`）、`threadPerHost`。T14（§18.4） |
+| S101 | [zap-extensions — reports add-on 的 traditional-json 範本](https://github.com/zaproxy/zap-extensions/tree/main/addOns/reports/src/main/zapHomeFiles/reports/traditional-json) | 欄位與型別（鎖定 reports 0.46.0）：T15 以鎖定映像的真實輸出為準（`TOOLS.md` §7.6）；`-plus` 含請求的 header，不使用 |
+| S102 | [zap-extensions — ExtensionAutomation.java、automation 的 Messages.properties](https://github.com/zaproxy/zap-extensions/tree/main/addOns/automation) | AF 的退出碼與結尾摘要的文字（鎖定 automation 0.61.0）：T15 以離線量測確認（`TOOLS.md` §7.6） |
 
 ## 需要在 M0–M2 實際確認的事項
 

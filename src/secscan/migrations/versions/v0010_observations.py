@@ -109,13 +109,13 @@ def _create_artifacts() -> None:
         sa.Column("scanner_run_id", sa.Uuid(), nullable=False),
         sa.Column("scan_id", sa.Uuid(), nullable=False),
         sa.Column("kind", sa.String(32), nullable=False),
-        sa.Column("path", sa.String(2048), nullable=False),
+        sa.Column("path", sa.String(2400), nullable=False),
         sa.Column("sha256", sa.String(64), nullable=False),
         sa.Column("size", sa.BigInteger(), nullable=False),
         sa.Column("redactions", sa.Integer(), nullable=False),
         sa.Column("classification", sa.String(32), nullable=False),
         sa.Column("encrypted", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-        sa.Column("storage_key", sa.String(2200), nullable=False),
+        sa.Column("storage_key", sa.String(2500), nullable=False),
         _timestamps(),
         sa.CheckConstraint(
             "(kind = 'output' AND classification = 'masked') "

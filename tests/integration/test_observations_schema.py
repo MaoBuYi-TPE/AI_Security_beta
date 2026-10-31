@@ -160,6 +160,13 @@ def test_invalid_artifacts_are_rejected(
     assert (error.sqlstate, error.diag.constraint_name) == (state, constraint)
 
 
+def test_the_deepest_path_the_runner_accepts_can_be_stored(session: Session, runs: Runs) -> None:
+    """收集的上限：深度 8、每層 255 個字元（CollectionLimits、_MAX_NAME_LENGTH）。"""
+    path = "/".join(["a" * 255] * 9)
+
+    _inserted(session, INSERT_ARTIFACT, _artifact(runs, path=path))
+
+
 def test_an_artifact_is_listed_once(session: Session, runs: Runs) -> None:
     _inserted(session, INSERT_ARTIFACT, _artifact(runs))
 

@@ -155,12 +155,21 @@ T14 已涵蓋（`DECISIONS.md` §18；新的 domain 模組 line 與 branch cover
   - **會改 method 的規則**（20018、40045、40048）只在 grant 允許 POST 時執行。
   - **範圍外的排除**：結尾有換行的 URL 也擋得下。
   - **probe 執行中超過用量上限就停止**；報告中超長的整數是失敗、不是例外。
-  - **預覽開關只以 live 專用的變數插值**，`make up`、`make dev` 明確清空。
-- **API 的設定**：`SCAN_PREVIEW_ENGINES` 只接受空的或 zap；zap 的 web profile 需要 grant 允許 GET /（只檢查 zap）；`GET /scanners` 的版本、三個新的能力代碼、預覽開關下 zap 的狀態。
+- **API 的設定**：zap 的 web profile 需要 grant 允許 GET /（只檢查 zap）；`GET /scanners` 的版本與三個新的能力代碼。
+
+T15 已涵蓋：
+- **狀態機**：`normalizing → timed_out` 要有錯誤碼；`aggregate()` 的 `checks`（preflight 的每種組合，Hypothesis 另外檢查順序無關、終止與否）。
+- **遮罩（SEC-14）**：`secret_masking` 每種形式（原樣、JSON、HTML、百分比編碼的大小寫與 `+`、JSON 包 HTML）；不論怎麼切塊結果都相同（Hypothesis）、最長的形式優先、近似比對是線性時間、值不在 repr。`redact_url`、`redact_text`：帳密、敏感參數、header、cookie、JSON 欄位，重複套用結果不變、線性時間。`display_text`：NUL、孤立的 surrogate、bidi、控制字元換掉，輸出一定存得進 PostgreSQL（Hypothesis）。
+- **收集（SEC-18）**：兩階段、暫存檔在 out/ 之外、hash 是遮罩後的內容、跨塊邊界的 secret、變大超過上限被拒絕、走訪之後被換成 symlink、hardlink 或目錄被換掉都被拒絕、寫入失敗的訊息沒有路徑、沒有留下暫存檔。
+- **parser（SEC-17）**：真實的報告都接受；由真實報告衍生的每一種壞掉的輸出都是問題代碼、不丟例外（截斷、空檔、非 UTF-8、重複的 key、NaN、浮點數、超長的整數、過深的巢狀、超過上限、缺少或型別錯誤的欄位、其他版本）；任意的 bytes 與 JSON 只會得到判定（Hypothesis）。
+- **判定**：退出碼與 AF 摘要的每種組合、沒有報告的退出碼 1、報告列出但讀不到、log 缺少；重複的事件；欄位的截斷在遮罩之後；識別不含 ZAP 每次都不同的 instance id。
+- **排除**：四層各自的計數、telemetry 缺少時少一層、有上游回應就算目標的回應（不看 status）。`scope_reason` 和 guard 的完整判斷一致（Hypothesis）。
 
 ### 4.2 Contract / Parser
 
 每個鎖定版本保存遮罩後真實輸出 fixture：正常無告警、存在告警、非零退出但有有效 findings、格式截斷、未知欄位、缺必要欄位、空檔、重複事件、Unicode、超大單行/總量、timeout 後部分 artifact。版本不支援時明確 error，不默默漏掉資料。
+
+T15 的 ZAP fixture（`tests/fixtures/zap/<情境>/`，真實輸出，`make record-fixtures` 錄製、人工審查之後搬入；離線的情境在 `--network none` 錄製）：`clean`（零告警）、`findings`、`timeout`（plan 的 maxDuration，退出碼 2）、`unanswered`（目標沒有回應，mitmproxy 的 502 被告警）、`unreachable`（連不到 host，退出碼 1、有報告）、`engine-error`（ZAP 啟動失敗，退出碼 1、沒有報告）。壞掉的輸出在測試中由真實報告的位元組衍生，不存成檔案。`tests/contract/test_zap_fixtures.py` 固定每份輸出判讀的結果（`make test-contract`）。
 
 T07 加入上傳用的規格 fixture `tests/fixtures/openapi/vampi-openapi3.yml`：T03 輸入的 VAmPI 規格，只把登入回應 example 中的範例 JWT 遮罩成 `REDACTED_JWT`。manifest 的 `openapi_fixtures` 記下遮罩前後的 sha256，contract 測試檢查兩者與防洩密規則。
 
@@ -187,7 +196,7 @@ T05 已涵蓋 project 層的權限：
 - 遮罩以固定 seed 的隨機輸入檢查 idempotent，並檢查惡意輸入下仍是線性時間。
 - 以突變檢查確認上述測試有鑑別力（`TASKS.md` T05）。
 
-SEC-16 要求的 finding、artifact 跨專案測試，隨這些資源在 M3–M5 加入，尚未完成；scan 已在 T09 涵蓋（見下）。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
+SEC-16 要求的 finding、artifact 跨專案測試，隨這些資源在 M4–M5 加入，尚未完成；scan 已在 T09、observation 已在 T15 涵蓋（見下）。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
 
 T08 已涵蓋認證設定：
 - **secret 不外流（SEC-14 的平台這一側）**：以 canary 確認 secret 不出現在任何回應（含 4xx）與 header、DEBUG 等級的所有日誌、audit、DB 的明文；422 只說明欄位與原因，expected_json 的 key 也不回顯。FastAPI 內建的 telemetry 已關閉；查詢的路由拿不到加密元件。
@@ -244,11 +253,11 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-01**：「建立或開始掃描被拒」已在 T09 實作並測試：建立 scan 時以 gate 拒絕，排隊中的 scan 在 runner 啟動前（prepare）重新判斷、不通過就 failed。「已執行者停止新出站」在 T13 完成（見下方 T13 與 §4.4）。
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
-- **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；工具輸出的 parser（JSONL、XML、Markdown）在 M3 之後。
+- **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；Nuclei 的 JSONL、Schemathesis 的輸出與報告的 Markdown 在 M4 之後。
 - **SEC-14**：T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；工具的輸出、證據與報告中的 token（以已知的 secret 值精確遮罩）在 M3 之後，不標成完成。
 - **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。模板的 allowlist 在 M4（Nuclei）加入。
-- **SEC-18**：T10 只涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；artifact 的 storage key、下載與 worker 的解析在 M3、M5。
+- **SEC-18**：T10 涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；T15 涵蓋遮罩的兩階段與 worker 只讀 manifest 列出的檔案；artifact 的下載在 M5。
 - **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
 - **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method`（`DECISIONS.md` §15.10 的取捨；T14 的小型網站沒有這個欄位，T16 以真的靶機量測）。path 中的 `%`：T14 的 live 量測中，ZAP 對 path 參數的攻擊有 83% 以 `PATH_AMBIGUOUS` 被拒（`TOOLS.md` §7.5），維持 fail closed，覆蓋的缺口在 T16 量化。
 - **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約。T13 補上執行中的停止：grant 撤銷或到期、target 停用、建立者的 key 撤銷時，runner 在下一次心跳先封鎖 guard、再停止容器。
@@ -282,7 +291,13 @@ T14 已涵蓋（真的 DB 佇列、記憶體中的容器 runtime 模擬 ZAP 的�
 - **runner 的加固**：沒有 plan 的引擎（nuclei）不會拿到其他引擎的 plan、不記下容器與映像。
 - **佇列**：zap 的 api run 在 prepare 時拿到上傳時正規化的文件、base path 與凍結為 eligible 的 operation；web run 與其他引擎沒有規格。
 - **迴圈與 probe**：probe 期間 fake 照常認領、zap 是 `ENGINE_PROBE_PENDING`，runner 停止時刪除執行中的 probe 容器；zap 的 run 等 probe 通過之後才執行，能力記下版本。
-- **API**：沒有預覽開關時 zap 是 422 `ENGINE_UNSUPPORTED`；開啟時接受 zap 的 api scan；zap 的 web profile 而 grant 沒有 `GET /` 是 422 `PROFILE_INCOMPATIBLE`，fake 不受這個規則影響。
+- **API**：T15 起接受 zap 的 scan（nuclei 仍是 422 `ENGINE_UNSUPPORTED`）；zap 的 web profile 而 grant 沒有 `GET /` 是 422 `PROFILE_INCOMPATIBLE`，fake 不受這個規則影響。
+
+T15 已涵蓋（真的 DB）：
+- **schema**：artifacts、observations 的每個 CHECK、唯一約束與複合 FK（不能跨 scan 引用、報告屬於同一個 run）；沒有直接 FK 到 scans；不可修改、刪除或 TRUNCATE；run 的結果欄位一致，run 結束之後被 trigger 凍結。
+- **worker**（`tests/integration/test_worker_zap.py`，真實的輸出經 runner 的收集）：每份 fixture 的 run、scan、observation 與 artifact；壞掉的輸出是判定、不是崩潰（NUL 與孤立的 surrogate 不再讓 worker 反覆失敗）；寫入是原子的，第二次寫入與失效的 lease 被拒絕；寫入之後中斷時重試以存下的判定結束，輸出已刪除也一樣；解析中要求取消、授權撤回不中斷解析；解析期間延長 lease，失效時留給對帳。
+- **runner**：secret 在收集之前已不在 secret 檔，仍以 provision 時的值遮罩；proxy 的 token 與 base64 的形式；preflight 的輸出不遮罩；收集的過程中持續心跳，lease 失效時中止。
+- **API（SEC-16）**：`GET /scans/{id}/observations` 的欄位、順序、分頁、limit 的上限、引擎篩選；其他 project 與不存在的一樣 404；`GET /scans/{id}` 的 `result`；`GET /scan-profiles` 只列可用的 profile 與引擎。
 
 ### 4.4 Live E2E
 
@@ -303,7 +318,7 @@ T11 已涵蓋（`tests/live/test_guard_live.py`；live 自己的 lab 網路 10.8
 - 尚未涵蓋：同一條 keep-alive 連線上交錯的放行與拒絕、pipelining 與 header 值中夾帶的請求（接收端與探針每個請求一條新連線）；目前只有單元測試，記為證據缺口（`DECISIONS.md` §15.10）。
 - fake scan：執行中有這個 run 的 policy、容器內有 0400 的 proxy-url，結束之後都刪除。
 
-T14 已涵蓋（`make test-live-zap`，`tests/live/test_zap_live.py`；live 自己 lab 網路上的小型網站 `zap_site.py` 與 canary；API 以只給 live 的預覽開關啟動；量測的數字在 `TOOLS.md` §7.5）：
+T14 已涵蓋（`make test-live-zap`，`tests/live/test_zap_live.py`；live 自己 lab 網路上的小型網站 `zap_site.py` 與 canary；T14 時 API 以只給 live 的預覽開關啟動，T15 移除；量測的數字在 `TOOLS.md` §7.5）：
 - capability probe：runner 啟動時以真的 ZAP 映像、掃描相同的強化設定執行；`GET /scanners` 顯示 2.17.0；probe 容器已刪除。
 - web、anonymous（SEC-02、SEC-05）：
   - 網站只收到 GET 與 HEAD，沒有 `/admin`，沒有任何認證 header；canary 沒有連線，guard 只看到 target。

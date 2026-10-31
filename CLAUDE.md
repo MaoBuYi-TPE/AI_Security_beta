@@ -132,9 +132,9 @@
 - 指令（`docs/START_HERE.md` §7；建立前不得宣稱可執行）：
   - M0：make bootstrap、make dev、make test、make lint、make typecheck（T02 已建立）；make lab-up、make lab-down（T03 已建立）
   - M1：make env、make db-up、make test-db-up、make db-down、make migrate（T04 已建立；make test 會先啟動 db-test，需要 OrbStack）；uv run secscan-admin create-admin-key（T05 已建立，建立初始管理 key）；uv run secscan-admin rotate-secret-keys（T08 已建立，加密金鑰換版）；uv run secscan-admin fake-runner（T09 已建立，處理排隊中的 fake run，不連任何位址）
-  - M2：make build、make images、make scan-net、make up、make down（T10 已建立，app stack：api、runner、worker、socket-proxy；T11 加上 egress guard，make build 也建立 guard 映像）；make lab-net（T11 已建立，lab_net 改由它建立，make lab-up 與 make up 都會先執行）；uv run secscan-admin runner／worker（T10 已建立，容器版的 runner 與 worker）；make test-live-runner（T10 已建立，需要 ENABLE_LIVE_LAB_TESTS=1；T11 起在 live 自己的 lab 網路上啟動接收端，不啟動 Juice Shop、VAmPI；T12 加上預算、憑證去向與 preflight 的端到端；T13 加上 runner 中斷後的對帳與撤銷 grant 的端到端）；make test-live-zap（T14 已建立，需要 ENABLE_LIVE_LAB_TESTS=1：同一個 live 專案加上只給 live 的預覽開關，以真的 ZAP 掃描 live lab 網路上的小型網站，約 10 分鐘（測試本身約 8 分鐘））
-  - M1–M2：make test-contract
-  - M3 起：make test-live-lab、make record-fixtures；M5 起：make bench
+  - M2：make build、make images、make scan-net、make up、make down（T10 已建立，app stack：api、runner、worker、socket-proxy；T11 加上 egress guard，make build 也建立 guard 映像）；make lab-net（T11 已建立，lab_net 改由它建立，make lab-up 與 make up 都會先執行）；uv run secscan-admin runner／worker（T10 已建立，容器版的 runner 與 worker）；make test-live-runner（T10 已建立，需要 ENABLE_LIVE_LAB_TESTS=1；T11 起在 live 自己的 lab 網路上啟動接收端，不啟動 Juice Shop、VAmPI；T12 加上預算、憑證去向與 preflight 的端到端；T13 加上 runner 中斷後的對帳與撤銷 grant 的端到端）；make test-live-zap（T14 已建立，需要 ENABLE_LIVE_LAB_TESTS=1：同一個 live 專案，以真的 ZAP 掃描 live lab 網路上的小型網站；T15 起走完 API → ZAP → worker → 查詢的閉環，約 13 分鐘）
+  - M3：make test-contract（T15 已建立：fixture 與 parser 的契約，不連網、不碰 Docker 與 DB）；make record-fixtures（T15 已建立，需要 ENABLE_LIVE_LAB_TESTS=1：錄製到 gitignore 的 recordings/zap/，人工審查之後才搬進 tests/fixtures/zap/）
+  - M3 起：make test-live-lab；M5 起：make bench
 - Live 指令必須檢查 LAB_ONLY、有效 grant、網路隔離及 `ENABLE_LIVE_LAB_TESTS=1`。
 
 ## 14. 每次交付

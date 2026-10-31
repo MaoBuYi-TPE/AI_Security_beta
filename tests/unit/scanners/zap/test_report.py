@@ -214,6 +214,8 @@ def test_a_missing_required_key_rejects_the_report(
         ({"alertRef": "10202-x"}, _alert),
         ({"alertRef": "10202-1-2"}, _alert),
         ({"name": ""}, _alert),
+        # 全空白的標題存不進 DB（title_not_blank）：要走判定，不能讓 worker 崩潰
+        ({"name": " \t\n"}, _alert),
         ({"name": 1}, _alert),
         ({"riskcode": "4"}, _alert),
         ({"riskcode": 2}, _alert),

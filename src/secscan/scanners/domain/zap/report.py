@@ -129,7 +129,7 @@ def _alert(alert: dict[str, object]) -> Alert:
     name = _text(alert, "name")
     risk = _text(alert, "riskcode")
     confidence = _text(alert, "confidence")
-    if not name or risk not in _RISK_CODES or confidence not in _CONFIDENCES:
+    if not name.strip() or risk not in _RISK_CODES or confidence not in _CONFIDENCES:
         raise _RejectedError(ReportProblem.SHAPE)
     return Alert(
         plugin_id=_matching(alert, "pluginid", _ID),

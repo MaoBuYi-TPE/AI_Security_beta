@@ -102,14 +102,14 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | uv run secscan-admin rotate-secret-keys | M1（T08 已建立） | 以 `SECRET_ENCRYPTION_KEYS` 的第一個金鑰重新加密所有的 secret；有任何一份解不開就全部回滾（`API_CONTRACT.md` §16.6） |
 | uv run secscan-admin fake-runner [--outcome succeed\|fail] [--hold-seconds N] [--once] | M1（T09 已建立） | 對帳 lease 過期的 fake run，再處理排隊中的 fake run；不連任何位址，結果標為 fixture（`API_CONTRACT.md` §17.5） |
 | uv run secscan-admin runner [--once] [--outcome succeed\|fail] [--hold-seconds N] | M2（T10 已建立） | 容器版的 runner：經 socket-proxy 啟動強化的單次容器（T10 只有 fake），收集輸出；SIGTERM 時停止並刪除容器（`API_CONTRACT.md` §18.1） |
-| uv run secscan-admin worker [--once] | M2（T10 已建立） | 對帳過期的解析，再處理 collected 的 run（T10 只有 fake，不讀檔；`API_CONTRACT.md` §18.2） |
+| uv run secscan-admin worker [--once] | M2（T10 已建立） | 對帳過期的解析，再處理 collected 的 run（fake、preflight，T15 加上 zap；`API_CONTRACT.md` §18.2） |
 | make build／make images | M2（T10 已建立） | 建立 secscan 與 egress guard（T11）的映像／以 digest pull 核准的掃描器映像與 socket-proxy（runner 不 pull） |
 | make up／make down | M2（T10 已建立） | 啟動／停止 app stack（db、api、runner、worker、socket-proxy；T11 加上 guard），並建立 internal＋isolated 的 scan_net 與 lab_net；API 只綁 127.0.0.1:`API_PORT`（預設 8000） |
 | make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，一律拆除；T11 起在 live 自己的 lab 網路上啟動接收端與探針（SEC-02～SEC-10、取消與故障），T12 加上預算與 preflight，T13 加上 runner 中斷後的對帳與撤銷 grant；不啟動 Juice Shop、VAmPI |
-| make test-live-zap | M3（T14 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，API 加上只給 live 的預覽開關（`SECSCAN_LIVE_PREVIEW_ENGINES=zap` 插值成 API 的 `SCAN_PREVIEW_ENGINES`）；runner 以真的 ZAP 映像執行 capability probe，掃描 live lab 網路上的小型網站（`tests/live/zap_site.py`），以網站、canary 與 guard 的紀錄驗證範圍、認證與取消；不啟動 Juice Shop、VAmPI（約 10 分鐘（測試本身約 8 分鐘），`make images` 會 pull 約 1.2 GB 的 ZAP 映像） |
-| make test-contract | M1–M2 | 對固定 fixture 測 API/Parser 契約 |
+| make test-live-zap | M3（T14 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，以真的 ZAP 掃描 live lab 網路上的小型網站，走完 API → ZAP → worker → 查詢的閉環（T15）；約 13 分鐘 |
+| make test-contract | M3（T15 已建立） | 對固定 fixture 測 Parser 契約與 fixture 的完整性（不連網、不碰 Docker 與 DB） |
 | make test-live-lab | M3 起 | 需要 `ENABLE_LIVE_LAB_TESTS=1`、LAB_ONLY、有效 grant，並通過隔離檢查才執行 |
-| make record-fixtures | M3 起 | 只在 lab 重新錄製工具輸出 fixture，並產生差異供人工審查 |
+| make record-fixtures | M3（T15 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：只在 live lab 網路重新錄製 ZAP 的輸出到 `recordings/zap/`（gitignore），人工審查之後才搬進 `tests/fixtures/zap/`；約 8 分鐘 |
 | make bench | M5 起 | 透過自己的 API 執行實驗，結果輸出到 benchmarks/results/ |
 
 不得建立一個表面上回 exit 0、實際上沒有驗證的 target，只為了讓命令「看起來都有」。測試不能用時，要明確失敗，或列出有理由的 skip。

@@ -285,17 +285,22 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **`GET /health/ready`**：只檢查 DB 與 schema；runner、worker、guard 的狀態看 `GET /api/v1/scanners`。
 - 設計見 `docs/DECISIONS.md` §17；錯誤碼見 `docs/API_CONTRACT.md` §17.2。
 
-#### ZAP 的執行（T14）
+#### ZAP 的執行（T14、T15）
 
-runner 已經能以強化的單次容器執行 ZAP，但 **zap 在 T15（parser）才對操作者開放**：在那之前 `POST /api/v1/scans` 指定 `zap` 回 422 `ENGINE_UNSUPPORTED`。
+`POST /api/v1/scans` 指定 `zap` 時（T15 開放），runner 以強化的單次容器執行 ZAP，worker 解析輸出、結果入庫，以 `GET /api/v1/scans/{id}/observations` 查詢。
 
 - **映像**：`make images` 以 digest pull `zaproxy/zap-stable` 2.17.0（約 1.2 GB）。
 - **capability probe**：runner 啟動之後以和掃描相同的設定實際執行一次 ZAP（約 15 秒，不送任何請求），確認版本、必要的 add-on 與規則白名單；`GET /api/v1/scanners` 的 zap 顯示 `version`。probe 期間 fake 照常處理。
 - **plan**：由伺服器產生，ZAP 以 `-silent` 執行。`web_active_lab` 從 `/` 開始 spider（grant 必須允許 `GET /`），`api_active_lab` 只匯入 grant 範圍內的 operation；active scan 只跑審查過的規則（`docs/TOOLS.md` §7），grant 不允許 POST 時，會把請求改成 POST 的規則也不執行。
 - **認證**：以 `ZAP_AUTH_HEADER*` 環境變數交給 ZAP（bearer、`api_key_header`、cookie 都是一個 header），值不在 plan、Docker 的設定或 log 中；沒有 auth profile 的 scan 是 anonymous。
-- **輸出**：`runs/<run_id>/out/` 的 `zap-report.json` 與 `zap.log`；manifest 記下 ZAP 的退出碼與輸入的 hash。解析在 T15。
-- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 10 分鐘（測試本身約 8 分鐘）；只掃 live lab 網路上的小型網站）。
-- 設計見 `docs/DECISIONS.md` §18；量測與規則的審查見 `docs/TOOLS.md` §7。
+- **輸出**：`runs/<run_id>/out/` 的 `zap-report.json` 與 `zap.log`（已遮罩這個 run 的 secret 與 proxy 的 token）；manifest 記下 ZAP 的退出碼、輸入的 hash 與遮罩的次數。
+- **結果（T15）**：
+  - 退出碼不等於結果：`GET /api/v1/scans/{id}` 的 `engines[].status`、`error_code` 與 `result` 分得出成功（0 個觀察就是乾淨的結果）、ZAP 回報錯誤（`ENGINE_REPORTED_ERRORS`，部分結果保留）、未掃到端點（`NO_TARGET_TRAFFIC`）、輸出不能用（`OUTPUT_INVALID`）與時間到（`ENGINE_TIMEOUT`，觀察保留）。
+  - 不是目標的回應（guard 的拒絕、proxy 的錯誤頁）與不在範圍內的告警不會入庫，只計數在 `result.excluded`。
+  - 觀察是工具的單次回報，等級是工具的原始值；正規化、去重與 finding 在 T19。
+  - `GET /api/v1/scan-profiles` 列出現在可以用的 profile 與規則定義的 hash。
+- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 13 分鐘；只掃 live lab 網路上的小型網站）。
+- 設計見 `docs/DECISIONS.md` §18、§19；量測與規則的審查見 `docs/TOOLS.md` §7。
 
 #### 隔離 lab 靶場（T03）
 
