@@ -294,3 +294,29 @@ web 31 條、api 13 條、排除 22 條。probe 以鎖定的映像執行兩份�
 - 取消：封鎖之後被拒 2 個，kill 到 die 2.05 秒。參照炸彈：`succeeded`。
 
 M2 的 `make test-live-runner`：42 passed（5 分 41 秒），撤銷授權的 scan 是 `failed`（`DECISIONS.md` §19.8）。
+
+### 7.7 T16：Juice Shop 與 VAmPI 的真實掃描（`make test-live-lab`，2026-10-31）
+
+靶機：`bkimminich/juice-shop:v20.3.0`、`erev0s/vampi`（`compose.lab.yaml` 的 digest），由測試在 live 自己的 lab 網路上以固定 IP 逐一啟動（一次一個）。VAmPI 的 grant 是規格中除了 `/createdb` 以外的 path、method 只有 GET 與 POST；Juice Shop 是 `allow_all_paths`、GET 與 HEAD。速率 2 req/s，預算省略時用 grant 的上限（5,000 次、1,500 秒）。
+
+**第二輪（job 的上限是 0；8 passed，26 分 15 秒；跑完沒有殘留的容器、volume、網路）**：
+
+| 情境 | 秒 | 轉送／回應 | guard 拒絕 | 407 | 觀察 | 報告 | ZAP／靶機的記憶體峰值 |
+|---|---|---|---|---|---|---|---|
+| VAmPI 弱點版，bearer | 312 | 425／425 | `PATH_AMBIGUOUS` 232、`PATH_NOT_AUTHORIZED` 26 | 139 | 11 | 10,785 B | 632／115 MiB |
+| VAmPI，預算 180 秒 | 139（`timed_out`） | 204／204 | `PATH_AMBIGUOUS` 60 | 40 | 11 | 11,115 B | 683／112 MiB |
+| VAmPI 安全版，bearer | 310 | 425／425 | 同弱點版 | 139 | 10 | 10,554 B | 653／114 MiB |
+| VAmPI，token 90 秒 | 307 | 425／425 | `PATH_AMBIGUOUS` 204、`PATH_NOT_AUTHORIZED` 26 | 125 | 11 | 10,785 B | 722／115 MiB |
+| Juice Shop，anonymous | 193 | 256／253 | 0 | 110 | 9 | 15,157 B | 846／144 MiB |
+| Juice Shop，bearer | 204 | 256／253 | 0 | 110 | 9 | 15,157 B | 916／159 MiB |
+| Juice Shop 的 REST 搜尋 | 51 | 59／59 | `PATH_NOT_AUTHORIZED` 6 | 4 | 2 | 5,860 B | 654／162 MiB |
+
+- 取消（VAmPI，ZAP 送出流量之後）：取消後 9 秒 `cancelled`，容器刪除，之後 guard 沒有再為它放行。
+- 第一輪（job 有自己的上限）的不同：預算 150 秒（plan 90 秒）的 VAmPI 只轉送 107 個就 `succeeded`：activeScan 在自己的 1 分鐘上限停止（log 是 `Job activeScan finished, time taken: 00:01:00`、`Automation plan succeeded!`，沒有警告）。ZAP 的記憶體峰值最高 1,265 MiB（Juice Shop、bearer）。
+- **觀察**：VAmPI 只有 passive 的 3 種（`Server` 版本 10036、缺 `X-Content-Type-Options` 10021、Authentication Request Identified 10111），弱點版與安全版相同；Juice Shop 的 web profile 只有 passive 的 3 種（缺 CSP 10038、CORS 10098、Modern Web Application 10109）；REST 搜尋命中 **SQL Injection（40018）**：`GET /rest/products/search?q=apple'`，ZAP 的等級 High、信心 Low，evidence 是 `HTTP/1.1 500 Internal Server Error`。
+- **path 參數的覆蓋缺口**：VAmPI 的 path 參數的攻擊都是百分比編碼（例如 `/users/v1/name1%27`、`/books/v1/%22`），guard 以 `PATH_AMBIGUOUS` 拒絕：每次 232 個（`/users/v1/…` 106、`/books/v1/…` 126），佔 guard 判斷的請求（不含 407）的 34%。
+- **對照實驗**（不經平台）：同一個映像、第一輪的 plan.yaml 與規格，ZAP 與 VAmPI 只接一個 internal 的網路，沒有 guard 與速率限制：弱點版 34 秒內命中 `40018`（High，`GET /users/v1/%27`，參數 `username`），安全版沒有。
+- **Juice Shop 的 spider**：traditional spider 13 秒找到 51 個 URL，都是靜態資源、`/ftp`、`/robots.txt`、`/sitemap.xml` 等；REST 與 API 都由前端的 JS 呼叫，走不到。`/ftp` 回目錄列表（`listing directory /ftp`），Directory Browsing 沒有告警。
+- **Juice Shop 的認證**：`/rest/user/whoami` 只看 cookie（帶 bearer 也回 `{"user":{}}`）；`/api/Cards`、`/api/Addresss`、`/rest/basket/1`、`/api/Users` 以 Authorization 驗證（匿名 401）。
+- **VAmPI 的 token**：`tokentimetolive` 過期之後 `/me`、`POST /books/v1`、`GET /books/v1/{title}` 回 401，`/books/v1`、`/users/v1` 照樣 200。資料庫要先 `GET /createdb`（清空重建，grant 排除它）。
+- **速率**：實際約 1.5 req/s（2 req/s 的上限，ZAP 單執行緒）；沒有任何 run 用盡預算。

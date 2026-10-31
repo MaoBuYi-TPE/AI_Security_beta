@@ -134,7 +134,7 @@ T12 已涵蓋（guard 的程式 line 與 branch coverage 100%；`DECISIONS.md` �
 
 T14 已涵蓋（`DECISIONS.md` §18；新的 domain 模組 line 與 branch coverage 100%）：
 - **ZAP 的 AF plan**：web 與 api 的 job 順序；spider 從 / 開始、一個執行緒、`postForm` 只在 grant 允許 POST 時打開、robots 與 sitemap 只在範圍內時讀取、Git／DS_Store／SVN 關閉；api 以只含 eligible operation 的文件匯入、`targetUrl` 是 target 的 origin 加 base path；activeScan 的 `defaultThreshold` 是 off、只有白名單的規則（web 與 api 各一份；排除的 16 個類別代表逐一確認不在任何一份）；report 只能是 `traditional-json` 而且 `alwaysRun`；任何字串含 `${` 就拒絕（AF 的變數代換）；以 PyYAML（YAML 1.1）解析的結果和 JSON 相同。
-- **時間與預算**：maxDuration 取剩下的時間、請求數除以速率、grant 的期限中最小的，再減保留的 60 秒；不到下限就不執行；job 的上限至少 1 分鐘（0 是不限）。Hypothesis：任何預算下都不超過任何一個上限。
+- **時間與預算**：maxDuration 取剩下的時間、請求數除以速率、grant 的期限中最小的，再減保留的 60 秒；不到下限就不執行；job 的上限至少 1 分鐘（0 是不限）（T16 改成 job 的上限一律是 0，只由 plan 的 maxDuration 限制，`DECISIONS.md` §20.5）。Hypothesis：任何預算下都不超過任何一個上限。
 - **grant → context 的 regex**：literal、佔位、`allow_all_paths`、排除不分大小寫與結尾的斜線但不涵蓋底下的 path、預設 port 的寫法；模擬 AF 把 url 加成 `url.*` 的 include 之後仍不擴大範圍（負向前瞻的排除）；Hypothesis 以 Python 的 re 和 guard 的 `covers()` 對照。
 - **zap.properties**：proxy 的帳密與速率逐行核對；token 不是 43 個 base64url 字元（含換行、`=`、反斜線）、速率或 port 超出範圍都拒絕；repr 不顯示 token。
 - **probe 的判斷**：退出 0、版本相同、必要的 add-on 是審查過的版本（同一個 add-on 取最大的檔案）才相容；退出 2 是不相容（未知的規則 ID），其他是失敗；報告或清單讀不到、格式不符、超過 64 KiB 都是失敗；不認得的行略過。
@@ -358,6 +358,28 @@ T15 已涵蓋（`make test-live-zap`；數字在 `TOOLS.md` §7.6）：
 - 遮罩（SEC-14）：bearer、`api_key_header`、cookie 三種認證，靶機把 secret 寫進回應、ZAP 帶進報告，out/ 與 API 都看不到原文，看得到佔位。
 - 語意：maxDuration 是 `timed_out`、觀察保留；零告警是 `succeeded`；目標沒有回應是 `NO_TARGET_TRAFFIC`，ZAP 對 mitmproxy 錯誤頁的告警不入庫。
 - 尚未涵蓋：active scan 真的命中的告警（小型網站沒有弱點）、guard 的 403 被告警的情況，都在 T16 以 Juice Shop、VAmPI 量測。
+
+T16 已涵蓋（`make test-live-lab`，`tests/live/test_lab_zap_live.py`；Juice Shop v20.3.0 與 VAmPI 由測試在 live 自己的 lab 網路上逐一啟動；數字在 `TOOLS.md` §7.7 與 `DECISIONS.md` §20.6）：
+- 每個 run：`plan_hash` 與和 `/scan-profiles` 相同的 profile 定義、`result.guard_traffic`；guard 只看到 target 的 host 與 port；每個觀察的 (method, path) 都是 guard 為這個 run 轉送過的請求；報告在 8 MiB 以內。
+- 正例：Juice Shop 的 REST 搜尋（操作者上傳的規格）命中 SQL Injection（`q`）。VAmPI 的 SQLi 的探測被 guard 以 `PATH_AMBIGUOUS` 拒絕（平台的漏報，以斷言固定證據）。負例：VAmPI 安全版沒有 active scan 規則的告警。
+- token 失效：90 秒的 VAmPI token → `guard_traffic.auth.lost`、coverage 的 `AUTHENTICATION_LOST`、`authenticated_operations` 是 null。preflight 不被 200 騙過（Juice Shop 的 whoami，第一輪的量測）。
+- 工具超時：plan 的 maxDuration → `timed_out`（`ENGINE_TIMEOUT`）、觀察入庫。取消：`cancelled`、沒有殘留的容器、之後 guard 不再為它轉送。
+
+T16 的小型案例表（ground truth 的初稿；完整的 12＋12、6＋6 在 T30。來源 `SOURCES.md` S103、S104；「平台結果」是第二輪的 live 量測）：
+
+| case_id | target | method／path | auth role | 類別 | 預期 | ZAP 能否偵測 | 平台結果 | 確認方式 |
+|---|---|---|---|---|---|---|---|---|
+| T16-JS-01 | Juice Shop | GET `/rest/products/search?q=` | anonymous | security：SQLi（Database Schema） | 正例 | 主動（40018） | **命中**（High、信心 Low） | `q=apple'` 回 500（SQLite 的語法錯誤） |
+| T16-JS-02 | Juice Shop | GET `/` 等頁面 | anonymous | security：缺 CSP | 正例（設定） | 被動（10038） | 命中 | 回應沒有 `Content-Security-Policy` |
+| T16-JS-03 | Juice Shop | GET 靜態資源 | anonymous | security：CORS `*` | 正例（設定） | 被動（10098） | 命中 | 回應有 `Access-Control-Allow-Origin: *` |
+| T16-JS-04 | Juice Shop | GET `/ftp` | anonymous | security：目錄列表（Confidential Document） | 正例 | 主動（0） | **漏報** | 回 200、標題 `listing directory /ftp`；ZAP 有請求，Directory Browsing 沒有告警 |
+| T16-JS-05 | Juice Shop | 前端路由的 XSS（DOM、Reflected） | anonymous | security：XSS | 正例 | 需要瀏覽器（AJAX spider） | 不在範圍 | traditional spider 走不到 |
+| T16-VA-01 | VAmPI 弱點版 | GET `/users/v1/{username}` | anonymous | security：SQLi | 正例 | 主動（40018） | **漏報**（guard 的 `PATH_AMBIGUOUS`） | 對照實驗（不經 guard）命中；`name1'` 回 500（`sqlite3.OperationalError`） |
+| T16-VA-02 | VAmPI 安全版 | GET `/users/v1/{username}` | anonymous | security：SQLi | 負例 | — | 沒有告警 | 對照實驗也沒有；`name1'` 回 404 `User not found`（ORM 查詢） |
+| T16-VA-03 | VAmPI（兩版） | 所有回應 | standard_user | security：缺 `X-Content-Type-Options`、`Server` 版本 | 正例（設定，兩版都有） | 被動（10021、10036） | 命中 | 回應的 header |
+| T16-VA-04 | VAmPI 弱點版 | GET `/books/v1/{book_title}` | standard_user | security：BOLA | 正例 | 不在 ZAP 能力範圍 | 不在範圍 | 以另一個使用者的 token 讀別人的書 |
+| T16-VA-05 | VAmPI 弱點版 | POST `/users/v1/register`（`admin`） | anonymous | security：mass assignment | 正例 | 不在 ZAP 能力範圍 | 不在範圍 | 註冊之後 `/me` 的 `admin` 是 true |
+| T16-VA-06 | VAmPI 弱點版 | GET `/users/v1/_debug` | anonymous | security：過度資料暴露 | 正例 | 不在 ZAP 能力範圍（白名單沒有） | 不在範圍 | 回應含所有使用者的密碼 |
 
 ### 4.5 故障注入
 

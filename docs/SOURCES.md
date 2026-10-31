@@ -1,6 +1,6 @@
 # 一手技術來源
 
-查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25；S79–S82 為 2026-10-26；S83–S86 為 2026-10-27；S87–S93 為 2026-10-28。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
+查核日期：S01–S19 為 2026-10-15；S20–S31 為 2026-10-16；S32–S36 為 2026-10-17；S37–S40 為 2026-10-18；S41–S58 為 2026-10-19；S59–S68 為 2026-10-24；S69–S78 為 2026-10-25；S79–S82 為 2026-10-26；S83–S86 為 2026-10-27；S87–S93 為 2026-10-28；S103–S104 為 2026-10-31。以下是選型與設計的參考，不代表已在本專題環境驗證過相容性或效能。官方 stable 文件可能會變動；實作時需同時記錄已安裝的版本、CLI help 與 Parser fixture。
 
 | ID | 文件與網址 | 本計畫引用的要點 |
 |---|---|---|
@@ -106,6 +106,8 @@
 | S100 | [ZAP — Spider AF job](https://www.zaproxy.org/docs/desktop/addons/spider/automation/)、[activeScan AF job](https://www.zaproxy.org/docs/desktop/addons/automation-framework/job-ascan/) | spider 的 `postForm`、`parseRobotsTxt`、`threadCount`；activeScan 的 `policyDefinition`（`defaultThreshold`、`rules`）、`threadPerHost`。T14（§18.4） |
 | S101 | [zap-extensions — reports add-on 的 traditional-json 範本](https://github.com/zaproxy/zap-extensions/tree/main/addOns/reports/src/main/zapHomeFiles/reports/traditional-json) | 欄位與型別（鎖定 reports 0.46.0）：T15 以鎖定映像的真實輸出為準（`TOOLS.md` §7.6）；`-plus` 含請求的 header，不使用 |
 | S102 | [zap-extensions — ExtensionAutomation.java、automation 的 Messages.properties](https://github.com/zaproxy/zap-extensions/tree/main/addOns/automation) | AF 的退出碼與結尾摘要的文字（鎖定 automation 0.61.0）：T15 以離線量測確認（`TOOLS.md` §7.6） |
+| S103 | [VAmPI — README 的 List of Vulnerabilities 與原始碼](https://github.com/erev0s/VAmPI)（以鎖定映像 `erev0s/vampi@sha256:0a5a224b…` 內的 `/vampi/README.md`、`models/user_model.py`、`api_views/` 為準） | 弱點清單：SQLi、未授權改密碼、BOLA、mass assignment、debug 端點的過度資料暴露、使用者與密碼列舉、RegexDOS、缺速率限制、JWT 弱簽章金鑰。`vulnerable=1` 時 `get_user` 以字串組 SQL（`/users/v1/{username}`），`0` 時用 ORM；`tokentimetolive` 預設 60 秒，過期時受保護的端點回 401；資料庫要先 `GET /createdb`（會清空重建）。T16 的正例／負例（`SECURITY_AND_TESTING.md` §4） |
+| S104 | [OWASP Juice Shop — challenges.yml](https://github.com/juice-shop/juice-shop/blob/master/data/static/challenges.yml)（以鎖定映像 `bkimminich/juice-shop:v20.3.0@sha256:cea5a4af…` 內的 `/juice-shop/data/static/challenges.yml` 為準） | 116 個 challenge 的 key、名稱與類別，例如 Confidential Document（`/ftp` 的目錄列表）、Error Handling、Exposed Metrics、Database Schema 與 Login Admin（SQLi）、Reflected／DOM XSS（前端路由，traditional spider 不一定走得到）。JWT 的期限是 6 小時。T16 的正例（`SECURITY_AND_TESTING.md` §4） |
 
 ## 需要在 M0–M2 實際確認的事項
 
