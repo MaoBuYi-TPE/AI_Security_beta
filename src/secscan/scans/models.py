@@ -570,7 +570,9 @@ class ObservationModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     rule_variant: Mapped[str | None] = mapped_column(String(RULE_MAX_LENGTH))
     title: Mapped[str] = mapped_column(String(TITLE_MAX_LENGTH))
     raw_severity: Mapped[str] = mapped_column(String(RAW_LEVEL_MAX_LENGTH))
+    severity_label: Mapped[str] = mapped_column(String(RAW_LEVEL_MAX_LENGTH))
     raw_confidence: Mapped[str] = mapped_column(String(RAW_LEVEL_MAX_LENGTH))
+    confidence_label: Mapped[str] = mapped_column(String(RAW_LEVEL_MAX_LENGTH))
     cwe_id: Mapped[int | None]
     wasc_id: Mapped[int | None]
     method: Mapped[str] = mapped_column(String(METHOD_MAX_LENGTH))

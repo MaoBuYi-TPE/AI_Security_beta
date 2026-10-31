@@ -8,7 +8,7 @@
 - 時間或請求數不夠：不建立容器，BUDGET_EXHAUSTED。
 - 輸出的遮罩（§19.5）：secret 在收集之前已不在 secret 檔，值在 provision 時留在記憶體；proxy 的
   token 與 base64 的形式也遮掉；只有 zap，preflight 的回應不動。收集的過程中持續心跳。
-每個測試用自己的資料庫（queue_database）。zap 在 T15 才開放：scan 以預覽開關建立。
+每個測試用自己的資料庫（queue_database）。
 """
 
 import base64
@@ -51,7 +51,6 @@ pytestmark = pytest.mark.integration
 
 OWNER = "runner-zap-1"
 ZAP = frozenset({ScanEngine.ZAP, ScanEngine.PREFLIGHT})
-PREVIEW = frozenset({ScanEngine.ZAP})
 POLICY = ContainerPolicy(
     scan_network="secscan_scan_net",
     runs_volume="secscan_runs",
@@ -189,7 +188,7 @@ def _api_scan(seed: Seeder, world: World, *, authenticated: bool = False, **budg
         engines=(ScanEngine.ZAP,),
         budget=BudgetRequest(**budget),
     )
-    return seed.create_scan(world.operator_a, request, preview=PREVIEW)
+    return seed.create_scan(world.operator_a, request)
 
 
 def _web_scan(seed: Seeder, world: World) -> Scan:
@@ -204,7 +203,7 @@ def _web_scan(seed: Seeder, world: World) -> Scan:
         engines=(ScanEngine.ZAP,),
         budget=BudgetRequest(),
     )
-    return seed.create_scan(world.operator_a, request, preview=PREVIEW)
+    return seed.create_scan(world.operator_a, request)
 
 
 def _row(seed: Seeder, run_id: UUID) -> Any:

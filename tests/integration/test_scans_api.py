@@ -264,7 +264,7 @@ def test_schema_errors_come_before_the_key(
 def test_an_engine_without_an_adapter_is_a_422(
     api_client: TestClient, world: World, scannable: Scannable
 ) -> None:
-    response = _create(api_client, world.operator_a, scannable, engines=["zap"])
+    response = _create(api_client, world.operator_a, scannable, engines=["nuclei"])
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "ENGINE_UNSUPPORTED"

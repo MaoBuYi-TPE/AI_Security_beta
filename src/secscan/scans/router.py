@@ -18,7 +18,7 @@ from secscan.core.db import DbSession
 from secscan.core.envelope import MAX_PAGE_LIMIT, Envelope, ok
 from secscan.core.errors import AppError, ErrorCode
 from secscan.core.request_id import request_id_of
-from secscan.scans.dependencies import PreviewEngines
+from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import ScanStatus
 from secscan.scans.domain.model import Scan
 from secscan.scans.domain.request import (
@@ -28,7 +28,7 @@ from secscan.scans.domain.request import (
     parse_idempotency_key,
 )
 from secscan.scans.repository import ScanFilters
-from secscan.scans.schemas import ScanCreate, ScanEventOut, ScanOut
+from secscan.scans.schemas import ObservationOut, ScanCreate, ScanEventOut, ScanOut
 from secscan.scans.service import ScanService
 from secscan.targets.dependencies import CurrentLab
 
@@ -73,13 +73,12 @@ def create_scan(
     principal: CurrentPrincipal,
     session: DbSession,
     lab: CurrentLab,
-    preview: PreviewEngines,
     request: Request,
     response: Response,
 ) -> Envelope[ScanOut]:
     """建立 scan（operator、admin）：scan 與每個引擎的 run 在同一個 transaction 寫入（queued）。"""
     key = _idempotency_key(request)
-    scan = ScanService(session, lab=lab, preview_engines=preview).create(
+    scan = ScanService(session, lab=lab).create(
         principal,
         body.to_request(),
         idempotency_key=key,
@@ -140,6 +139,22 @@ def list_events(
         principal, scan_id, after_sequence=after_sequence, limit=limit
     )
     return ok([ScanEventOut.of(event) for event in events])
+
+
+@router.get("/scans/{scan_id}/observations")
+def list_observations(
+    scan_id: UUID,
+    principal: CurrentPrincipal,
+    session: DbSession,
+    lab: CurrentLab,
+    page: PageQuery,
+    engine: Annotated[Engine | None, Query(description="只列這個引擎的觀察")] = None,
+) -> Envelope[list[ObservationOut]]:
+    """工具的單次觀察（遮罩、截斷之後），依引擎的順序與入庫的順序。其他 project 的 scan 回 404。"""
+    observations = ScanService(session, lab=lab).observations(
+        principal, scan_id, engine=engine, page=page
+    )
+    return ok_page(observations, ObservationOut.of)
 
 
 @router.post(

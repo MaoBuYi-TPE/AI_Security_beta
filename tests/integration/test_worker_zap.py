@@ -46,7 +46,6 @@ pytestmark = pytest.mark.integration
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "zap"
 MANIFEST = json.loads((FIXTURES.parent / "manifest.json").read_text(encoding="utf-8"))
 ZAP = frozenset({ScanEngine.ZAP})
-PREVIEW = ZAP
 PLAN = InputFile("plan.yaml", b'{"jobs": []}')
 SUCCEEDED_LOG = b"Job report finished\nAutomation plan succeeded!\n"
 
@@ -107,7 +106,7 @@ def _scan(seed: Seeder, world: World, origin: str) -> UUID:
         engines=(ScanEngine.ZAP,),
         budget=BudgetRequest(),
     )
-    return seed.create_scan(world.operator_a, request, preview=PREVIEW).id
+    return seed.create_scan(world.operator_a, request).id
 
 
 def _collected(

@@ -9,11 +9,13 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
 from secscan.core.json_types import JsonObject, JsonValue
+from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.lifecycle import ERROR_REQUIRED_RUN_STATUSES, RunErrorCode, RunStatus
 
 MAX_DETAILS_BYTES = 4096
@@ -101,8 +103,11 @@ class ObservationInput:
     source_rule: str
     rule_variant: str | None
     title: str
+    # 工具自己的值與名稱（例如 ZAP 的 "2"、"Medium"）；正規化在 T19。
     raw_severity: str
+    severity_label: str
     raw_confidence: str
+    confidence_label: str
     cwe_id: int | None
     wasc_id: int | None
     method: str
@@ -113,6 +118,48 @@ class ObservationInput:
     attack: str | None
     evidence: str | None
     other_info: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Observation:
+    """已入庫的觀察（GET /scans/{id}/observations）。engine 來自 run。"""
+
+    id: UUID
+    scan_id: UUID
+    scanner_run_id: UUID
+    engine: Engine
+    ordinal: int
+    source_rule: str
+    rule_variant: str | None
+    title: str
+    raw_severity: str
+    severity_label: str
+    raw_confidence: str
+    confidence_label: str
+    cwe_id: int | None
+    wasc_id: int | None
+    method: str
+    path: str
+    query: str | None
+    parameter: str | None
+    parameter_location: ParameterLocation
+    attack: str | None
+    evidence: str | None
+    other_info: str | None
+    auth_role: str
+    parser_version: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    """已入庫的解析結果（GET /scans/{id} 的 engines[].result）。details 是 result_details。"""
+
+    parser_version: str
+    engine_version: str | None
+    exit_code: int | None
+    observation_count: int
+    details: Mapping[str, JsonValue]
 
 
 @dataclass(frozen=True, slots=True)

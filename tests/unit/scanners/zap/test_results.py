@@ -166,7 +166,8 @@ def test_findings_become_observations() -> None:
     assert first.source_rule == "10202"
     assert first.rule_variant == "10202"
     assert first.title == "Absence of Anti-CSRF Tokens"
-    assert (first.raw_severity, first.raw_confidence) == ("2", "1")
+    assert (first.raw_severity, first.severity_label) == ("2", "Medium")
+    assert (first.raw_confidence, first.confidence_label) == ("1", "Low")
     assert (first.cwe_id, first.wasc_id) == (352, 9)
     assert (first.method, first.path, first.query) == ("GET", "/", None)
     assert first.evidence == '<form action="/login" method="post">'

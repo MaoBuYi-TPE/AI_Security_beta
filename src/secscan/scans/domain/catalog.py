@@ -1,7 +1,8 @@
 """引擎與 scan profile 的規則（docs/DECISIONS.md §13.1、§13.3）。
 
-只能從伺服器的 allowlist 選擇（contract §7）。真的 Adapter 整合之前只開放 fake：DB 不會出現
-「zap 成功、其實沒跑 ZAP」的紀錄（CLAUDE.md §3：Mock 不等於 Adapter 完成）。
+只能從伺服器的 allowlist 選擇（contract §7）。真的 Adapter 整合之前不開放：DB 不會出現
+「nuclei 成功、其實沒跑 Nuclei」的紀錄（CLAUDE.md §3：Mock 不等於 Adapter 完成）。zap 在 parser 完成
+之後開放（T15）；建立時不看 probe 的當下狀態，probe 通過之前 run 照常排隊。
 """
 
 from collections.abc import Collection, Mapping, Sequence
@@ -36,11 +37,10 @@ ENGINE_ORDER: tuple[Engine, ...] = (
 SELECTABLE_ENGINES: tuple[Engine, ...] = tuple(
     engine for engine in ENGINE_ORDER if engine is not Engine.PREFLIGHT
 )
-AVAILABLE_ENGINES: frozenset[Engine] = frozenset({Engine.FAKE})
+AVAILABLE_ENGINES: frozenset[Engine] = frozenset({Engine.FAKE, Engine.ZAP})
 _UNAVAILABLE_REASONS: Mapping[Engine, str] = MappingProxyType(
     {
         Engine.PREFLIGHT: "preflight 不能指定：綁定 auth profile 時由平台自動加入",
-        Engine.ZAP: "zap 在 M3 的 parser（T15）完成之後才能使用",
         Engine.NUCLEI: "nuclei 的 Adapter 在 M4（T18）整合之後才能使用",
         Engine.SCHEMATHESIS: "schemathesis 是 P1，M6 整合之後才能使用",
     }

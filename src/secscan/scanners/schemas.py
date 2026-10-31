@@ -1,11 +1,13 @@
-"""GET /scanners 的回應（docs/API_CONTRACT.md §2）。"""
+"""GET /scanners 與 GET /scan-profiles 的回應（docs/API_CONTRACT.md §2）。"""
 
 from pydantic import BaseModel, ConfigDict
 
 from secscan.core.api import UtcDatetime
 from secscan.scanners.domain.instances import EngineStatus
+from secscan.scanners.domain.profiles import ProfileEngine, ProfileView
 from secscan.scanners.service import ProcessStatus, ScannerOverview
 from secscan.scans.domain.catalog import Engine, ScanProfile
+from secscan.targets.domain import TargetKind
 
 
 class EngineOut(BaseModel):
@@ -57,4 +59,44 @@ class ScannersOut(BaseModel):
             engines=[EngineOut.of(status) for status in overview.engines],
             runner=ProcessOut.of(overview.runner),
             worker=ProcessOut.of(overview.worker),
+        )
+
+
+class ProfileEngineOut(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    engine: Engine
+    version: str | None
+    image: str | None
+    rule_count: int | None
+    definition_sha256: str | None
+    grant_requirements: list[str]
+
+    @classmethod
+    def of(cls, engine: ProfileEngine) -> "ProfileEngineOut":
+        return cls(
+            engine=engine.engine,
+            version=engine.version,
+            image=engine.image,
+            rule_count=engine.rule_count,
+            definition_sha256=engine.definition_sha256,
+            grant_requirements=list(engine.grant_requirements),
+        )
+
+
+class ScanProfileOut(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    profile: ScanProfile
+    target_kinds: list[TargetKind]
+    requires_spec: bool
+    engines: list[ProfileEngineOut]
+
+    @classmethod
+    def of(cls, view: ProfileView) -> "ScanProfileOut":
+        return cls(
+            profile=view.profile,
+            target_kinds=list(view.target_kinds),
+            requires_spec=view.requires_spec,
+            engines=[ProfileEngineOut.of(engine) for engine in view.engines],
         )

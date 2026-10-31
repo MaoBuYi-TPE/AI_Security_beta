@@ -28,18 +28,16 @@ ZAP, NUCLEI, SCHEMATHESIS, FAKE = Engine.ZAP, Engine.NUCLEI, Engine.SCHEMATHESIS
 API_LAB, WEB_LAB = ScanProfile.API_ACTIVE_LAB, ScanProfile.WEB_ACTIVE_LAB
 
 
-def test_only_the_fake_engine_is_available_until_adapters_are_integrated() -> None:
-    """使用者的決定（2026-10-26）：真的 Adapter 整合之前，DB 不會出現它們的 run。"""
-    assert frozenset({FAKE}) == AVAILABLE_ENGINES
+def test_only_integrated_engines_are_available() -> None:
+    """使用者的決定（2026-10-26）：真的 Adapter 整合之前，DB 不會出現它們的 run（zap 在 T15）。"""
+    assert frozenset({FAKE, ZAP}) == AVAILABLE_ENGINES
 
 
 def test_fake_alone_is_planned_as_the_first_run() -> None:
     assert plan_runs([FAKE]) == (PlannedRun(engine=FAKE, sequence=1),)
 
 
-@pytest.mark.parametrize(
-    ("engine", "milestone"), [(ZAP, "T15"), (NUCLEI, "T18"), (SCHEMATHESIS, "M6")]
-)
+@pytest.mark.parametrize(("engine", "milestone"), [(NUCLEI, "T18"), (SCHEMATHESIS, "M6")])
 def test_engines_without_an_adapter_are_unsupported(engine: Engine, milestone: str) -> None:
     with pytest.raises(UnsupportedEngineError, match=milestone) as caught:
         plan_runs([engine])

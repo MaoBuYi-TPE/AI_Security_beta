@@ -1,23 +1,35 @@
-"""GET /scanners（docs/API_CONTRACT.md §2、docs/DECISIONS.md §14.7）。只做呼叫 service。"""
+"""GET /scanners、GET /scan-profiles（docs/API_CONTRACT.md §2、docs/DECISIONS.md §14.7、§19.10）。
+
+只做呼叫 service。
+"""
 
 from fastapi import APIRouter
 
 from secscan.api_keys.dependencies import CurrentPrincipal
 from secscan.core.db import DbSession
 from secscan.core.envelope import Envelope, ok
-from secscan.scanners.schemas import ScannersOut
+from secscan.scanners.schemas import ScannersOut, ScanProfileOut
 from secscan.scanners.service import ScannerCatalog
-from secscan.scans.dependencies import PreviewEngines
 
 router = APIRouter(prefix="/scanners", tags=["scanners"])
+profiles_router = APIRouter(prefix="/scan-profiles", tags=["scanners"])
 
 
 @router.get("")
-def list_scanners(
-    _principal: CurrentPrincipal, session: DbSession, preview: PreviewEngines
-) -> Envelope[ScannersOut]:
+def list_scanners(_principal: CurrentPrincipal, session: DbSession) -> Envelope[ScannersOut]:
     """各引擎是否已整合、是否可用（依最近存活的 runner 回報的能力），以及 runner、worker 是否存活。
 
     任何有效的平台 key 都可以讀：內容不分 project，也不含秘密或路徑。
     """
-    return ok(ScannersOut.of(ScannerCatalog(session).describe(preview=preview)))
+    return ok(ScannersOut.of(ScannerCatalog(session).describe()))
+
+
+@profiles_router.get("")
+def list_scan_profiles(
+    _principal: CurrentPrincipal, session: DbSession
+) -> Envelope[list[ScanProfileOut]]:
+    """現在可以用的 scan profile 與它們的引擎；沒有可用的引擎時是空的。
+
+    任何有效的平台 key 都可以讀：profile 不屬於任何 project。
+    """
+    return ok([ScanProfileOut.of(view) for view in ScannerCatalog(session).profiles()])

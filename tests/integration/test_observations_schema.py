@@ -38,11 +38,12 @@ INSERT_ARTIFACT = (
 )
 INSERT_OBSERVATION = (
     "INSERT INTO observations (scanner_run_id, scan_id, ordinal, source_event_id, source_index, "
-    "source_rule, rule_variant, title, raw_severity, raw_confidence, cwe_id, wasc_id, method, "
-    "path, query, parameter, parameter_location, attack, evidence, other_info, auth_role, "
-    "report_artifact_id, parser_version) VALUES (:run, :scan, :ordinal, :event, :index, :rule, "
-    ":variant, :title, :severity, :confidence, :cwe, :wasc, :method, :path, :query, :parameter, "
-    ":location, :attack, :evidence, :other, :role, :artifact, :parser) RETURNING id"
+    "source_rule, rule_variant, title, raw_severity, severity_label, raw_confidence, "
+    "confidence_label, cwe_id, wasc_id, method, path, query, parameter, parameter_location, "
+    "attack, evidence, other_info, auth_role, report_artifact_id, parser_version) VALUES (:run, "
+    ":scan, :ordinal, :event, :index, :rule, :variant, :title, :severity, 'Medium', :confidence, "
+    "'High', :cwe, :wasc, :method, :path, :query, :parameter, :location, :attack, :evidence, "
+    ":other, :role, :artifact, :parser) RETURNING id"
 )
 
 

@@ -436,13 +436,7 @@ def _recipe(target: str) -> str:
     return lines[index + 1]
 
 
-def test_the_preview_switch_reaches_only_the_live_stack() -> None:
-    """審查 L4（docs/DECISIONS.md §18.9）：compose 只以 live 專用的變數插值；make up 與 make dev
-    明確清空（環境變數優先於 .env），.env 中留著 zap 也不會讓一般的 stack 接受 zap。
-    """
-    api = SERVICES["api"]["environment"]
-
-    assert api["SCAN_PREVIEW_ENGINES"] == "${SECSCAN_LIVE_PREVIEW_ENGINES:-}"
-    assert _recipe("up").lstrip().startswith("SECSCAN_LIVE_PREVIEW_ENGINES= ")
-    assert _recipe("dev").lstrip().startswith("SCAN_PREVIEW_ENGINES= ")
-    assert "test-live-zap: LIVE_EXTRA_ENV := SECSCAN_LIVE_PREVIEW_ENGINES=zap" in MAKEFILE
+def test_the_preview_switch_is_gone() -> None:
+    """T15 開放 zap 時移除（docs/DECISIONS.md §19.10）：部署的設定不留下這個開關。"""
+    assert "PREVIEW_ENGINES" not in (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    assert "PREVIEW_ENGINES" not in MAKEFILE

@@ -52,6 +52,9 @@ PARSER_VERSION = "zap-traditional-json/1"
 _NO_ERRORS = 0
 _ENGINE_ERRORS = 1
 _ENGINE_WARNINGS = 2
+# ZAP 自己的等級名稱（riskcode、confidence；org.parosproxy.paros.core.scanner.Alert）。
+_RISK_LABELS = ("Informational", "Low", "Medium", "High")
+_CONFIDENCE_LABELS = ("False Positive", "Low", "Medium", "High", "User Confirmed")
 _REPORT_UNREADABLE = "report_unreadable"
 _LOG_UNREADABLE = "log_unreadable"
 _SUMMARY_MISSING = "summary_missing"
@@ -253,7 +256,9 @@ def _observation(
             rule_variant=alert.alert_ref,
             title=title,
             raw_severity=alert.risk,
+            severity_label=_RISK_LABELS[int(alert.risk)],
             raw_confidence=alert.confidence,
+            confidence_label=_CONFIDENCE_LABELS[int(alert.confidence)],
             cwe_id=alert.cwe_id,
             wasc_id=alert.wasc_id,
             method=instance.method,

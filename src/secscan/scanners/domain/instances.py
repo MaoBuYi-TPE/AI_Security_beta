@@ -135,32 +135,25 @@ class EngineStatus:
     version: str | None = None
 
 
-def engine_statuses(
-    runner: Capabilities | None, *, preview: frozenset[Engine] = frozenset()
-) -> tuple[EngineStatus, ...]:
+def engine_statuses(runner: Capabilities | None) -> tuple[EngineStatus, ...]:
     """runner 是最近一個存活的 runner 回報的能力（沒有存活的 runner 時是 None）。
 
-    只列出請求可以指定的引擎：preflight 是內部的（docs/DECISIONS.md §16.5）。preview 是預覽開關
-    開啟的引擎（§18.9）：仍不是 integrated，但可不可用依 runner 回報的 probe 判斷。
+    只列出請求可以指定的引擎：preflight 是內部的（docs/DECISIONS.md §16.5）。
     """
     reported = {item.engine: item for item in runner.engines} if runner is not None else {}
-    return tuple(
-        _status(engine, reported.get(engine), preview=engine in preview)
-        for engine in SELECTABLE_ENGINES
-    )
+    return tuple(_status(engine, reported.get(engine)) for engine in SELECTABLE_ENGINES)
 
 
-def _status(engine: Engine, capability: EngineCapability | None, *, preview: bool) -> EngineStatus:
-    integrated = engine in AVAILABLE_ENGINES
+def _status(engine: Engine, capability: EngineCapability | None) -> EngineStatus:
     version = capability.version if capability is not None else None
-    if not (integrated or preview):
+    if engine not in AVAILABLE_ENGINES:
         return EngineStatus(engine, False, False, None, (), NOT_INTEGRATED, version)
     profiles = tuple(ScanProfile)
     if capability is None:
-        return EngineStatus(engine, integrated, False, None, profiles, RUNNER_UNAVAILABLE)
+        return EngineStatus(engine, True, False, None, profiles, RUNNER_UNAVAILABLE)
     reason = capability.issue.value if capability.issue is not None else None
     return EngineStatus(
-        engine, integrated, capability.available, capability.image, profiles, reason, version
+        engine, True, capability.available, capability.image, profiles, reason, version
     )
 
 
