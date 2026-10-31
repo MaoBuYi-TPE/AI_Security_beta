@@ -249,7 +249,8 @@ engine = create_db_engine(Settings())
 with engine.connect() as connection:
     if len(sys.argv) > 1:
         rows = connection.execute(text(
-            "SELECT id::text, engine, status, guard_policy_version FROM scanner_runs "
+            "SELECT id::text, engine, status, guard_policy_version, preflight_result, "
+            "coverage_recorded, requests_sent FROM scanner_runs "
             "WHERE scan_id = CAST(:scan AS uuid) ORDER BY sequence"), {"scan": sys.argv[1]})
         print(json.dumps([dict(row) for row in rows.mappings()]))
     else:
@@ -259,6 +260,46 @@ with engine.connect() as connection:
         print(json.dumps({"pending": count.scalar_one()}))
 engine.dispose()
 """
+
+
+_SNAPSHOT_QUERY = """
+import json, sys
+from sqlalchemy import text
+from secscan.core.config import Settings
+from secscan.core.db import create_db_engine
+engine = create_db_engine(Settings())
+with engine.connect() as connection:
+    connection.execute(text("SET TRANSACTION READ ONLY"))
+    bindings = {"scan": sys.argv[1]}
+    scan = connection.execute(text(
+        "SELECT s.id::text AS scan_id, s.api_spec_id::text, s.auth_profile_id::text, "
+        "s.auth_profile_version, a.preflight_method, a.preflight_path "
+        "FROM scans s LEFT JOIN auth_profile_versions a "
+        "ON a.profile_id=s.auth_profile_id AND a.version=s.auth_profile_version "
+        "WHERE s.id=CAST(:scan AS uuid)"), bindings).mappings().one()
+    operations = connection.execute(text(
+        "SELECT ordinal, method, path, ineligible_reason FROM scan_operations "
+        "WHERE scan_id=CAST(:scan AS uuid) ORDER BY ordinal"), bindings).mappings()
+    print(json.dumps({**dict(scan), "operations": [dict(row) for row in operations]}))
+engine.dispose()
+"""
+
+
+def frozen_scan_snapshot(scan_id: str) -> dict[str, Any]:
+    """Read only frozen operation/auth metadata; never select credentials or secret columns."""
+    return dict(
+        json.loads(
+            docker(
+                "exec",
+                container("runner"),
+                "python",
+                "-I",
+                "-c",
+                _SNAPSHOT_QUERY,
+                str(uuid.UUID(scan_id)),
+            )
+        )
+    )
 
 
 def scan_runs(scan_id: str) -> list[dict[str, Any]]:

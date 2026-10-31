@@ -12,6 +12,7 @@ import pytest
 
 from secscan.grants.domain.request_paths import canonical_path
 from tests.guard_path_cases import PATH_CASES
+from tests.guard_path_coverage import coverage_from_evidence, decisions_for_run
 from tests.live.guard_paths_regression import boundary_probes
 from tests.live.guard_paths_support import (
     Capture,
@@ -19,6 +20,7 @@ from tests.live.guard_paths_support import (
     drained,
     echo_records,
     environment,
+    frozen_scan_snapshot,
     route_echo,
     scan_runs,
 )
@@ -245,20 +247,29 @@ def _measure(version: str, label: str, item: Lab, target: Target, **options: Any
         observations = _all_observations(item, scan_id)
         decisions = requests_since(started)
         runs = scan_runs(scan_id)
+        frozen = frozen_scan_snapshot(scan_id)
+        store.write("frozen-scan.json", frozen)
         store.write("scan.json", {"scan": scan, "observations": observations, "runs": runs})
         store.write("guard-decisions.jsonl", decisions)
         store.write("target-requests.log", records)
         forwarded: list[dict[str, Any]] = []
         zap_forwarded: list[dict[str, Any]] = []
+        telemetry_by_run: dict[str, list[dict[str, Any]]] = {}
         for run in runs:
             raw, summary, entries = _telemetry(run["id"])
             sent = [e for e in entries if e["e"] == "request"]
-            assert summary["policy_version"] == version == run["guard_policy_version"]
-            assert summary["forwarded"] == len(sent)
-            forwarded.extend(sent)
             prefix = "" if run["engine"] == "zap" else "preflight-"
             store.write(prefix + "telemetry.jsonl", raw)
             store.write(prefix + "summary.json", summary)
+            selected_decisions = [d for d in decisions if d.get("run_id") == run["id"]]
+            store.write(prefix + "run-decisions.jsonl", selected_decisions)
+            decisions_for_run(decisions, run["id"], version)
+            assert summary["run_id"] == run["id"]
+            assert summary["scan_id"] == scan_id
+            assert summary["policy_version"] == version == run["guard_policy_version"]
+            assert summary["forwarded"] == len(sent) == run["requests_sent"]
+            forwarded.extend(sent)
+            telemetry_by_run[run["id"]] = entries
             if run["engine"] == "zap":
                 zap_forwarded = sent
         run_id = zap_container.removeprefix("secscan-run-")
@@ -295,6 +306,8 @@ def _measure(version: str, label: str, item: Lab, target: Target, **options: Any
             ),
         }
         store.write("analysis.json", analysis)
+        coverage_analysis = coverage_from_evidence(frozen, runs, telemetry_by_run, version=version)
+        store.write("coverage-analysis.json", coverage_analysis)
         # Only aggregate values are printed; paths and secret material stay encrypted.
         print(  # noqa: T201
             f"T33 {version} {label}: sent={len(forwarded)} received={len(records)} "
@@ -307,7 +320,20 @@ def _measure(version: str, label: str, item: Lab, target: Target, **options: Any
         assert engine["result"]["traffic_verified"] is True
         assert engine["result"]["guard_traffic"]["policy_version"] == version
         assert engine["result"]["guard_traffic"]["forwarded_encoded"] == encoded_count
-        assert scan["coverage"]["observed_operations"] is not None
+        assert frozen["scan_id"] == scan_id
+        assert frozen["api_spec_id"] == scan["api_spec"]["id"]
+        assert (frozen["auth_profile_id"] is not None) == (scan["auth"] is not None)
+        if scan["auth"] is not None:
+            assert frozen["auth_profile_id"] == scan["auth"]["profile_id"]
+            assert frozen["auth_profile_version"] == scan["auth"]["version"]
+            assert coverage_analysis["preflight"] == scan["auth"]["preflight"]
+        for field, expected in coverage_analysis["coverage"].items():
+            assert scan["coverage"][field] == expected, field
+        assert (
+            engine["result"]["guard_traffic"]["answered"]
+            == coverage_analysis["answered_by_run"][run_id]
+        )
+        assert engine["result"]["guard_traffic"]["auth"] == coverage_analysis["auth_by_run"][run_id]
         sent_keys = {(r["method"], canonical_path(r["path"])) for r in zap_forwarded}
         assert all((o["method"], canonical_path(o["path"])) in sent_keys for o in observations)
         if version == STRICT:
