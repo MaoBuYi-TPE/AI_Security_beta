@@ -1749,9 +1749,8 @@ T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作
 1. instance 的 URI 不是 target 的 origin → `out_of_scope`。
 2. **重算 guard 的靜態規則**：`guard/domain/requests.py` 的 `request_reason` 中與請求本身有關的部分抽成純函式 `scope_reason`，guard 改呼叫它（行為不變，guard 的測試照舊）。parser 以同一個函式判斷 instance：guard 一定會拒絕的 → `guard_denied`。涵蓋 `PATH_AMBIGUOUS`（T14 的 api 情境 163 個中有 136 個）、範圍外的 path 與 method。
 3. telemetry 完整時，(method, path) 沒有任何得到上游回應的轉送 → `not_answered`：涵蓋 guard 的拒絕與 mitmproxy 自己產生的回應（502 等）。
-4. evidence 或 other info 含 guard 的拒絕訊息 → `guard_response`。
-5. telemetry 讀不到（guard 6 小時後刪除、格式不符）→ 只套 1、2、4，結果標 `traffic_verified: false`。
-- 剩下的情況：同一個 path 有上游回應、也有動態的拒絕（`RATE_LIMITED`、預算用盡）。T16 量測；若 guard 的 403 被告警，再為拒絕回應加上安全 header。
+4. telemetry 讀不到（guard 6 小時後刪除、格式不符）時少了第 3 層，改看 evidence 或 other info 是否含 guard 的拒絕訊息 → `guard_response`，結果標 `traffic_verified: false`。有 telemetry 時不看內容：內容是目標控制的，目標放進這段文字不能讓自己的告警消失（T15 的安全審查；誤丟真的結果比多一筆雜訊糟）。
+- 剩下的情況：同一個 path 有上游回應、也有動態的拒絕（`RATE_LIMITED`、預算用盡）：對 guard 回應的告警會入庫（evidence 看得到拒絕的文字）。T16 量測；若 guard 的 403 被告警，再為拒絕回應加上安全 header。
 
 ### 19.5 遮罩（runner 在收集時；只對 zap）
 
@@ -1760,7 +1759,7 @@ T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作
 - **形式**（`security/secret_masking.py`，純函式）：原樣、JSON 跳脫、HTML entity、百分比編碼（大小寫、`+`）、JSON 包 HTML。字元集由 `auth_profiles/domain/credentials.py` 限定（沒有 CR、LF、NUL；最長 4096）。以 `bytes.find` 搜尋（最壞的情況也是線性時間；每個形式只有一個搜尋位置，記憶體不隨比對的次數增加；目標收得到 secret，可以在回應中放任意多的片段），由左到右、同一個位置取最長的形式；串流處理，保留最長形式的重疊，不論怎麼切塊結果都相同。
 - **收集**：先走訪完 out/，再把遮罩後的內容寫到 runner 私有的暫存檔、`os.replace` 取代；遮罩的過程中呼叫心跳。manifest 記下每個檔案的遮罩次數。替換字串是 `[REDACTED:target-secret]`、`[REDACTED:proxy-token]`（不含引號與反斜線，JSON 仍然合法）。
 - 邊界：替換讓檔案超過上限 → `ARTIFACT_REJECTED`；secret 剛好是 JSON 語法的一部分（例如 `true`）可能讓報告不合法 → `OUTPUT_INVALID`（fail closed）。
-- **worker 端**：`security/redaction.py` 新增 `redact_url`（以 `is_sensitive_key` 遮罩 query 的值與 userinfo，補 T05 的缺口）與 `redact_text`（Bearer、Basic、JWT 與 `key=value` 的樣式）；入庫前套用、之後截斷。
+- **worker 端**：`security/redaction.py` 新增 `redact_url`（以 `is_sensitive_key` 遮罩 query 的值與 userinfo，補 T05 的缺口）與 `redact_text`（Bearer、Basic、JWT 與 `key=value` 的樣式）；入庫前套用、之後截斷。URL 中敏感參數的值也在 evidence 等文字中遮掉：值來自目標控制的 URL，最多 32 個，超過就整個欄位遮掉（T15 的安全審查：原本組成一個 regex，數量沒有上限）。
 
 ### 19.6 資料表（migration `0010`；都在 scans 模組）
 
@@ -1812,7 +1811,10 @@ T15 讓 worker 解析 ZAP 的輸出、結果入庫並能查詢，然後對操作
 
 ### 19.12 殘餘風險與不在 T15 範圍
 
-- 同一個 path 有上游回應、也有動態的拒絕時，對 guard 回應的告警仍可能入庫（T16 量測）。
+- 同一個 path 有上游回應、也有動態的拒絕時，對 guard 回應的告警會入庫（T16 量測）。
+- 惡意的目標收得到 secret：把它轉成任意的形式（base64、hex、倒寫）再放進回應，遮罩認不出來，同專案看得到觀察的人解得回來。編碼列舉不完，平台保證的是工具與 proxy 自然寫出的形式。
+- log 是工具的輸出，訊息可以有換行：夾帶摘要的文字會讓判定變成 `OUTPUT_INVALID`（整個 run 沒有 observation）或多一個 `max_duration`（timed_out）。都是看得見的失敗，不會把錯誤變成成功（摘要和退出碼矛盾就是 `OUTPUT_INVALID`）；T16 確認實際的訊息是否帶得出目標的內容。
+- secret 含 `"` 或 `\` 而且剛好和報告的語法相鄰時，位元組層級的遮罩可能讓 JSON 不合法 → `OUTPUT_INVALID`（fail closed）。
 - 精確遮罩只認得已知的 secret 與列舉的形式；靶機自己發的 token（例如 Juice Shop 的 JWT）只靠樣式遮罩。
 - evidence、attack、other info 是靶機的不可信內容：API 只以 JSON 字串輸出，報告（T21）必須編碼。
 - 退出碼 1 的部分結果入庫：run 是 failed，observation 仍查得到。

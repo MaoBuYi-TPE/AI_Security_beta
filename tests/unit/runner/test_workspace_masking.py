@@ -8,6 +8,7 @@ import json
 import os
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -303,6 +304,42 @@ def test_an_error_from_the_progress_callback_leaves_no_temporary_file(
         workspace.collect(RUN, exit_code=0, inputs=(), masker=MASKER, on_progress=lost)
 
     assert _files(out.parent) == {"in", "out"}
+
+
+def test_a_failed_cleanup_still_closes_the_directory(
+    workspace: Workspace, dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """暫存檔刪不掉（EIO）時，out/ 的目錄 fd 也要關閉（審查發現）。"""
+    out = _prepared(workspace, dirs)
+    (out / "zap.log").write_bytes(SECRET.encode())
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open, real_close, real_unlink = os.open, os.close, os.unlink
+
+    def tracked_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if path == "out":
+            opened.append(descriptor)
+        return descriptor
+
+    def tracked_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    def broken_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if str(path).startswith(".masking-"):
+            raise OSError(5, "Input/output error")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "close", tracked_close)
+    monkeypatch.setattr(os, "unlink", broken_unlink)
+
+    with pytest.raises(WorkspaceError):
+        workspace.collect(RUN, exit_code=0, inputs=(), masker=MASKER)
+
+    assert opened
+    assert set(opened) <= set(closed)
 
 
 def test_a_failed_write_is_a_workspace_error_without_paths(

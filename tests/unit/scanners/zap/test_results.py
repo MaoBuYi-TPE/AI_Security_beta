@@ -425,11 +425,24 @@ def test_the_query_does_not_count_when_matching_the_answers() -> None:
 
 
 @pytest.mark.parametrize("field", ["evidence", "otherinfo"])
-def test_a_response_of_the_guard_is_excluded(field: str) -> None:
-    parsed = _one(**{field: f"{DENY_MESSAGE}: RATE_LIMITED"})
+def test_a_response_of_the_guard_is_excluded_without_telemetry(field: str) -> None:
+    output = replace(_recorded("findings"), forwarded=None, exchanges=None)
+
+    def change(document: dict[str, Any]) -> None:
+        _only(document).update({field: f"{DENY_MESSAGE}: RATE_LIMITED"})
+
+    parsed = interpret(_changed(output, change))
 
     assert parsed.observations == ()
     assert _excluded(parsed, Exclusion.GUARD_RESPONSE) == 1
+
+
+def test_a_target_cannot_hide_a_finding_behind_the_deny_message() -> None:
+    """有 telemetry 時以上游的回應為準：內容是目標控制的，放進拒絕的文字不能讓告警消失。"""
+    parsed = _one(evidence=f"{DENY_MESSAGE}: RATE_LIMITED")
+
+    assert len(parsed.observations) == 1
+    assert _excluded(parsed, Exclusion.GUARD_RESPONSE) == 0
 
 
 def test_without_telemetry_only_the_answers_cannot_be_checked() -> None:
@@ -451,6 +464,24 @@ def test_telemetry_with_more_lines_than_forwarded_cannot_be_trusted() -> None:
 
     parsed = interpret(replace(recorded, forwarded=1))
 
+    assert parsed.traffic_verified is False
+    assert len(parsed.observations) == 11
+
+
+def test_telemetry_may_lack_the_last_line() -> None:
+    recorded = _recorded("findings")
+    assert recorded.exchanges is not None
+
+    parsed = interpret(replace(recorded, forwarded=len(recorded.exchanges) + 1))
+
+    assert parsed.traffic_verified is True
+
+
+def test_telemetry_with_too_few_lines_is_not_a_target_without_answers() -> None:
+    """檔案是空的或殘缺（寫入失敗）不等於沒有流量：不能判成 NO_TARGET_TRAFFIC（審查發現）。"""
+    parsed = interpret(replace(_recorded("findings"), forwarded=71, exchanges=()))
+
+    assert parsed.outcome == SUCCEEDED
     assert parsed.traffic_verified is False
     assert len(parsed.observations) == 11
 
@@ -565,6 +596,14 @@ def test_secret_patterns_in_the_text_are_masked() -> None:
 
     assert observation.evidence == f"Authorization: {REDACTED}"
     assert observation.attack == f"password={REDACTED}"
+
+
+def test_the_title_is_masked_too() -> None:
+    def change(document: dict[str, Any]) -> None:
+        _only(document)
+        document["site"][0]["alerts"][0]["name"] = "Leak of Bearer abc.def"
+
+    assert _findings(change).observations[0].title == f"Leak of {REDACTED}"
 
 
 def test_text_that_cannot_be_stored_is_replaced() -> None:

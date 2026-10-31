@@ -435,6 +435,15 @@ def test_a_file_swapped_after_the_check_is_rejected(
     assert _rejected(workspace) is ArtifactIssue.SPECIAL_FILE
 
 
+@pytest.mark.parametrize("name", [" ", "   ", "\u3000"])
+def test_blank_names_are_refused_by_the_check(name: str) -> None:
+    """全空白的檔名存不進 artifacts（path_not_blank）：在收集時就拒絕，worker 不會寫入失敗。"""
+    with pytest.raises(ArtifactRejectedError) as caught:
+        _check_name(name)
+
+    assert caught.value.issue is ArtifactIssue.NAME_NOT_ALLOWED
+
+
 def test_names_that_cannot_be_utf8_are_refused_by_the_check() -> None:
     """macOS 的檔案系統不接受非 UTF-8 的檔名（上一個測試在這裡會 skip）：直接檢查判斷的函式。"""
     with pytest.raises(ArtifactRejectedError) as caught:

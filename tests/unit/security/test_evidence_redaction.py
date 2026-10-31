@@ -9,7 +9,13 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from secscan.security.redaction import REDACTED, redact_text, redact_url
+from secscan.security.redaction import (
+    MAX_VALUES,
+    REDACTED,
+    redact_text,
+    redact_url,
+    sensitive_query_values,
+)
 
 JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJsYWIifQ.c2lnbmF0dXJl"
 LINEAR_TIME_BUDGET_SECONDS = 1.0
@@ -68,6 +74,35 @@ def test_redact_text_masks_the_given_values() -> None:
 
 def test_redact_text_ignores_values_too_short_to_be_secrets() -> None:
     assert redact_text("a 1 b", values=("1", "")) == "a 1 b"
+
+
+def test_too_many_values_mask_the_whole_text() -> None:
+    """值來自目標控制的 URL：數量有上限，超過就整段遮掉（fail closed），不組出巨大的比對。"""
+    values = tuple(f"value-{index}" for index in range(MAX_VALUES + 1))
+
+    assert redact_text("nothing to see", values=values) == REDACTED
+    assert redact_text("value-1 here", values=values[:MAX_VALUES]) == f"{REDACTED} here"
+
+
+def test_many_values_stay_linear() -> None:
+    values = tuple(f"value-{index}" for index in range(MAX_VALUES))
+    text = "x" * 4096
+    url = "http://lab/?" + "&".join(f"token=aaaa{index}" for index in range(100_000))
+
+    started = time.perf_counter()
+    for _ in range(100):
+        redact_text(text, values=values)
+    sensitive_query_values(url)
+
+    assert time.perf_counter() - started < LINEAR_TIME_BUDGET_SECONDS
+
+
+def test_a_value_cannot_match_inside_the_mask() -> None:
+    """值是目標控制的：一次替換，遮罩字串本身不再被比對，重複套用結果不變（審查發現）。"""
+    masked = redact_text("x abcd1234 y", values=("abcd1234", "REDA"))
+
+    assert masked == f"x {REDACTED} y"
+    assert redact_text(masked) == masked
 
 
 def test_redaction_does_not_truncate() -> None:

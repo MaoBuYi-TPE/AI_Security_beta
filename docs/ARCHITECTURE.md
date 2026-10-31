@@ -306,7 +306,7 @@ ExecutionPlan 只能包含：
 - **ZAP**：M0 可以用 packaged scripts 取得樣本，但正式的 Adapter 使用同一套可版本化的設定，不同時維護好幾條不相容的掃描路徑。需記錄 engine/add-on 版本、JSON schema 和 exit handling。[S02–S05]
 - **ZAP 的 parser（T15，`DECISIONS.md` §19）**：
   - `scanners/domain/zap/`：`report.py`（嚴格解析、鎖定版本與上限）、`log.py`（AF 的結尾摘要）、`results.py`（判定、排除、遮罩與截斷），都是純函式；資料的問題走判定，不丟例外。退出碼不等於結果：0、1、2 的語意由摘要與 guard 的 telemetry 一起判斷。
-  - 報告沒有 response 的 header 與 status，排除不是目標的回應以分層判斷：不在 origin 上 → guard 一定會拒絕（和 guard 同一個函式 `scope_reason`）→ telemetry 中沒有上游回應 → 內容是 guard 的拒絕訊息。
+  - 報告沒有 response 的 header 與 status，排除不是目標的回應以分層判斷：不在 origin 上 → guard 一定會拒絕（和 guard 同一個函式 `scope_reason`）→ telemetry 中沒有上游回應；telemetry 不能用時改看內容是否為 guard 的拒絕訊息。
   - secret 只在 runner 的記憶體中：zap 的輸出在收集時以已知的 secret 做位元組層級的遮罩（`security/secret_masking.py`），之後才計算 hash；worker 另外以名稱與樣式遮罩 URL 與文字。
 - **Nuclei 模板清單**：
   - 從鎖定的 nuclei-templates release，依 tag/類型產生固定的 ID 清單，並記錄 release、hash 與 ID。

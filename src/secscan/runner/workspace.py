@@ -480,8 +480,10 @@ def _mask_file(
             os.close(source)
         os.replace(temporary, name, src_dir_fd=run_fd, dst_dir_fd=parent_fd)
     finally:
-        _unlink_if_present(temporary, run_fd)
-        os.close(parent_fd)
+        try:
+            _unlink_if_present(temporary, run_fd)
+        finally:
+            os.close(parent_fd)
     return CollectedFile(relative, *entry)
 
 
@@ -531,13 +533,17 @@ def _write_masked(
 
 
 def _check_name(name: str) -> None:
-    """檔名寫進 manifest（JSON）：必須是 UTF-8、沒有控制與格式字元，長度有上限。"""
+    """檔名寫進 manifest（JSON）與 artifacts：必須是 UTF-8、不是全空白、沒有控制與格式字元，長度
+    有上限。
+    """
     try:
         name.encode("utf-8")
     except UnicodeEncodeError:
         raise ArtifactRejectedError(ArtifactIssue.NAME_NOT_ALLOWED) from None
-    if len(name) > _MAX_NAME_LENGTH or any(
-        unicodedata.category(character) in _FORBIDDEN_CATEGORIES for character in name
+    if (
+        not name.strip()
+        or len(name) > _MAX_NAME_LENGTH
+        or any(unicodedata.category(character) in _FORBIDDEN_CATEGORIES for character in name)
     ):
         raise ArtifactRejectedError(ArtifactIssue.NAME_NOT_ALLOWED)
 

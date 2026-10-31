@@ -30,7 +30,7 @@ from secscan.scanners.domain.preflight import (
     evaluate,
 )
 from secscan.scans.domain.catalog import Engine
-from secscan.scans.domain.coverage import observed_operations
+from secscan.scans.domain.coverage import observed_operations, telemetry_complete
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.observation import RunOutcome
@@ -150,8 +150,7 @@ class Worker:
         if inputs.requests_sent is None or self._telemetry is None:
             return
         exchanges = self._telemetry.exchanges(lease.run_id)
-        # summary 先寫、行後寫：中途失敗時行數可能比轉送數少一個，但不會更多（§16.3）。
-        if exchanges is None or len(exchanges) > inputs.requests_sent:
+        if exchanges is None or not telemetry_complete(exchanges, forwarded=inputs.requests_sent):
             return
         self._queue.record_coverage(lease, observed_operations(inputs.operations, exchanges))
 

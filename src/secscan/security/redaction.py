@@ -139,8 +139,10 @@ def _mask(text: str) -> str:
 
 # --- 工具輸出（docs/DECISIONS.md §19.5）---------------------------------------------------
 
-# 呼叫端給的值（例如 URL 中敏感參數的值）短於這個長度就不遮：太短的值會把一般文字遮掉。
+# 呼叫端給的值（例如 URL 中敏感參數的值）短於這個長度就不遮：太短的值會把一般文字遮掉。值來自
+# 目標控制的 URL，數量有上限：超過就整段遮掉（fail closed），不必逐一比對。
 MIN_VALUE_LENGTH = 4
+MAX_VALUES = 32
 _NAME = r"[A-Za-z0-9_.\-\[\]]"
 # 名稱前面不可緊接名稱的字元：比對只從名稱的開頭開始，維持線性時間。值不含 <、>：遮罩後的
 # 「名稱=<REDACTED>」不會再被比對，重複套用結果不變。
@@ -185,10 +187,12 @@ def redact_text(text: str, *, values: Collection[str] = ()) -> str:
 
 def _literal(text: str, values: Collection[str]) -> str:
     usable = sorted({value for value in values if len(value) >= MIN_VALUE_LENGTH}, key=len)
+    if len(usable) > MAX_VALUES:
+        return REDACTED
     if not usable:
         return text
-    pattern = re.compile("|".join(re.escape(value) for value in reversed(usable)))
-    return pattern.sub(REDACTED, text)
+    # 一次替換（長的優先）：遮罩字串本身不再被比對，值的數量有上限。
+    return re.sub("|".join(re.escape(value) for value in reversed(usable)), REDACTED, text)
 
 
 def _without_userinfo(base: str) -> str:

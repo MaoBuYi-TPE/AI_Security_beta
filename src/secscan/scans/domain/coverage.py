@@ -8,7 +8,7 @@ operation：method 相同，operation 的 route 以 §11.6 的規則（不寬鬆
   憑證本身是否有效另由 preflight 判斷（API 只在 preflight 通過時揭露）。
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sized
 from dataclasses import dataclass
 
 from secscan.grants.domain.matching import Route, covers, parse_route
@@ -33,6 +33,13 @@ class Exchange:
     path: str
     authenticated: bool
     status: int | None
+
+
+def telemetry_complete(exchanges: Sized, *, forwarded: int) -> bool:
+    """telemetry 有沒有記下 guard 轉送的請求：summary 先寫、行後寫（§16.3），行數不會比轉送數多，
+    中途失敗時最多少一行。少更多是檔案殘缺，不是沒有流量。
+    """
+    return forwarded - 1 <= len(exchanges) <= forwarded
 
 
 def observed_operations(

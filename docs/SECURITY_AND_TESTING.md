@@ -160,10 +160,10 @@ T14 已涵蓋（`DECISIONS.md` §18；新的 domain 模組 line 與 branch cover
 T15 已涵蓋：
 - **狀態機**：`normalizing → timed_out` 要有錯誤碼；`aggregate()` 的 `checks`（preflight 的每種組合，Hypothesis 另外檢查順序無關、終止與否）。
 - **遮罩（SEC-14）**：`secret_masking` 每種形式（原樣、JSON、HTML、百分比編碼的大小寫與 `+`、JSON 包 HTML）；不論怎麼切塊結果都相同（Hypothesis）、最長的形式優先、近似比對是線性時間、值不在 repr。`redact_url`、`redact_text`：帳密、敏感參數、header、cookie、JSON 欄位，重複套用結果不變、線性時間。`display_text`：NUL、孤立的 surrogate、bidi、控制字元換掉，輸出一定存得進 PostgreSQL（Hypothesis）。
-- **收集（SEC-18）**：兩階段、暫存檔在 out/ 之外、hash 是遮罩後的內容、跨塊邊界的 secret、變大超過上限被拒絕、走訪之後被換成 symlink、hardlink 或目錄被換掉都被拒絕、寫入失敗的訊息沒有路徑、沒有留下暫存檔。
+- **收集（SEC-18）**：全空白的檔名被拒絕；兩階段、暫存檔在 out/ 之外、hash 是遮罩後的內容、跨塊邊界的 secret、變大超過上限被拒絕、走訪之後被換成 symlink、hardlink 或目錄被換掉都被拒絕、寫入失敗的訊息沒有路徑、沒有留下暫存檔。
 - **parser（SEC-17）**：真實的報告都接受；由真實報告衍生的每一種壞掉的輸出都是問題代碼、不丟例外（截斷、空檔、非 UTF-8、重複的 key、NaN、浮點數、超長的整數、過深的巢狀、超過上限、缺少或型別錯誤的欄位、其他版本）；任意的 bytes 與 JSON 只會得到判定（Hypothesis）。
 - **判定**：退出碼與 AF 摘要的每種組合、沒有報告的退出碼 1、報告列出但讀不到、log 缺少；重複的事件；欄位的截斷在遮罩之後；識別不含 ZAP 每次都不同的 instance id。
-- **排除**：四層各自的計數、telemetry 缺少時少一層、有上游回應就算目標的回應（不看 status）。`scope_reason` 和 guard 的完整判斷一致（Hypothesis）。
+- **排除**：每一層各自的計數、telemetry 缺少時改看拒絕訊息、有 telemetry 時目標放進拒絕的文字不能隱藏告警、有上游回應就算目標的回應（不看 status）。`scope_reason` 和 guard 的完整判斷一致（Hypothesis）。
 
 ### 4.2 Contract / Parser
 

@@ -9,8 +9,8 @@
 6. 其他 → succeeded；沒有觀察就是乾淨的結果。
 
 ZAP 的報告沒有 response 的 header 與 status（允許的範本只有這一個），分層排除不是目標的回應：
-不在 origin 上 → guard 一定會拒絕（和 guard 同一套規則）→ telemetry 中沒有上游回應 → 內容是 guard
-的拒絕訊息。telemetry 不能用時少了第三層，結果標 traffic_verified=False。
+不在 origin 上 → guard 一定會拒絕（和 guard 同一套規則）→ telemetry 中沒有上游回應。telemetry 不能用
+時少了第三層，改以內容是否為 guard 的拒絕訊息判斷，結果標 traffic_verified=False。
 
 文字先遮罩、後截斷；識別（source_event_id）在遮罩之後計算，不含 ZAP 每次都不同的 instance id。
 """
@@ -31,7 +31,7 @@ from secscan.scanners.domain.zap.report import (
     ZapReport,
     parse_report,
 )
-from secscan.scans.domain.coverage import Exchange
+from secscan.scans.domain.coverage import Exchange, telemetry_complete
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.observation import (
     PARAMETER_MAX_LENGTH,
@@ -154,12 +154,14 @@ def _outcome(summary: PlanSummary, answers: _Answers | None) -> RunOutcome:
 def _answers(forwarded: int | None, exchanges: tuple[Exchange, ...] | None) -> _Answers | None:
     """得到上游回應的 (method, path)；None 是沒有依據。
 
-    guard 記下轉送 0 個：沒有 telemetry 的檔案也算有依據。summary 先寫、行後寫，行數不可能比轉送數
-    多（§16.3）；轉送數不明就無法判斷 telemetry 完整（和 coverage 相同的條件）。
+    guard 記下轉送 0 個：沒有 telemetry 的檔案也算有依據。轉送數不明或 telemetry 不完整就無法判斷
+    （和 coverage 相同的條件）：殘缺的檔案不等於沒有流量。
     """
     if forwarded == 0:
         return frozenset()
-    if forwarded is None or exchanges is None or len(exchanges) > forwarded:
+    if forwarded is None or exchanges is None:
+        return None
+    if not telemetry_complete(exchanges, forwarded=forwarded):
         return None
     return frozenset(
         (exchange.method, exchange.path) for exchange in exchanges if exchange.status is not None
@@ -218,7 +220,10 @@ def _exclusion(
     path, _ = split_target(target)
     if answers is not None and (instance.method, path) not in answers:
         return Exclusion.NOT_ANSWERED
-    if DENY_MESSAGE in instance.evidence or DENY_MESSAGE in instance.other_info:
+    # 內容是目標控制的：只在沒有 telemetry 可以核對時才看（目標不能藉此隱藏自己的告警）。
+    if answers is None and (
+        DENY_MESSAGE in instance.evidence or DENY_MESSAGE in instance.other_info
+    ):
         return Exclusion.GUARD_RESPONSE
     return None
 
@@ -237,7 +242,7 @@ def _observation(
         alert.alert_ref, instance.method, position, parameter, attack, evidence, other_info
     )
     fields = (
-        display_text(alert.name, max_length=TITLE_MAX_LENGTH),
+        display_text(redact_text(alert.name), max_length=TITLE_MAX_LENGTH),
         display_text(path, max_length=POSITION_MAX_LENGTH),
         display_text(query, max_length=POSITION_MAX_LENGTH),
         display_text(parameter, max_length=PARAMETER_MAX_LENGTH),
