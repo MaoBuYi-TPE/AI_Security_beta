@@ -5,13 +5,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, NoReturn
 
 from cryptography.fernet import Fernet
 
@@ -82,6 +83,65 @@ class EvidenceStore:
         self.write("evidence-manifest.json", entries)
 
 
+def docker_evidence(store: EvidenceStore, label: str, *arguments: str) -> dict[str, Any]:
+    """Retain command failures as encrypted evidence instead of printing sensitive diagnostics."""
+    metadata: dict[str, Any] = {"arguments": arguments, "returncode": None, "error": None}
+    stdout = stderr = b""
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed Lab diagnostic commands
+            ["docker", *arguments],  # noqa: S607
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        stdout, stderr = result.stdout, result.stderr
+        metadata["returncode"] = result.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = exc.stdout or b"", exc.stderr or b""
+        metadata["error"] = "TimeoutExpired"
+    except OSError as exc:
+        metadata["error"] = type(exc).__name__
+    store.write(label + ".stdout.log", stdout)
+    store.write(label + ".stderr.log", stderr)
+    store.write(label + ".result.json", metadata)
+    return metadata
+
+
+def container_diagnostics(
+    store: EvidenceStore,
+    label: str,
+    name: str,
+    started: float,
+) -> dict[str, Any]:
+    inspection = docker_evidence(store, label + "-inspect", "inspect", name)
+    logs = docker_evidence(
+        store,
+        label + "-logs",
+        "logs",
+        "--timestamps",
+        "--since",
+        str(int(started)),
+        "--tail",
+        "10000",
+        name,
+    )
+    events = docker_evidence(
+        store,
+        label + "-events",
+        "events",
+        "--since",
+        str(int(started)),
+        "--until",
+        str(time.time()),
+        "--filter",
+        f"container={name}",
+        "--format",
+        "{{json .}}",
+    )
+
+    return {"inspect": inspection, "logs": logs, "events": events}
+
+
 class Capture:
     def __init__(self, target: Target, store: EvidenceStore) -> None:
         self.target, self.store = target, store
@@ -89,6 +149,9 @@ class Capture:
         self.path = store.directory / "packets.jsonl.fernet"
         self.process: subprocess.Popen[bytes] | None = None
         self.output: BinaryIO | None = None
+        self.started = time.time()
+        self._diagnosed = False
+        self._communication_failed = False
 
     def start(self) -> "Capture":
         try:
@@ -107,7 +170,7 @@ class Capture:
             [  # noqa: S607
                 "docker",
                 "run",
-                "--rm",
+                # Retain the exited container until diagnostics are saved, then cleanup removes it.
                 "-i",
                 "--name",
                 self.name,
@@ -157,6 +220,7 @@ class Capture:
             + b"\n"
         )
         self.process.stdin.close()
+        self.process.stdin = None  # communicate() must not flush the already closed input pipe.
         wait_for(lambda: self.path.stat().st_size > 0, timeout=20)
         assert self.events()[0] == {"kind": "ready"}
         return self
@@ -165,28 +229,73 @@ class Capture:
         cipher = Fernet(self.store.key)
         return [json.loads(cipher.decrypt(line)) for line in self.path.read_bytes().splitlines()]
 
+    def _settle(self) -> None:
+        if self._diagnosed or self.process is None:
+            return
+        if self.process.poll() is None:
+            docker_evidence(self.store, "capture-stop", "stop", "--time", "3", self.name)
+        stderr = b""
+        try:
+            _, stderr = self.process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._communication_failed = True
+            docker_evidence(self.store, "capture-kill", "kill", self.name)
+            with suppress(ProcessLookupError):
+                self.process.kill()
+            _, stderr = self.process.communicate(timeout=10)
+        self.store.write("capture-stderr.log", stderr or b"")
+        self.store.write(
+            "capture-exit.json",
+            {
+                "returncode": self.process.returncode,
+                "communication_timed_out": self._communication_failed,
+            },
+        )
+        if self.output is not None:
+            self.output.close()
+        # Unlike --rm, retaining the helper lets inspect preserve its real exit/OOM state.
+        container_diagnostics(self.store, "capture", self.name, self.started)
+        self._diagnosed = True
+
+    def _fail(self, reason: str) -> NoReturn:
+        self.store.write("capture-validation.json", {"valid": False, "reason": reason})
+        raise EvidenceError(reason)
+
     def finish(self) -> list[dict[str, Any]]:
         assert self.process is not None
         assert self.output is not None
-        docker("stop", "--time", "3", self.name)
-        self.process.wait(timeout=10)
-        self.output.close()
-        events = self.events()
-        if any(e["kind"] == "error" for e in events) or events[-1]["kind"] != "complete":
-            raise EvidenceError("capture failed or did not finish")
+        self._settle()
+        if self.process.returncode != 0 or self._communication_failed:
+            self._fail("capture process exited unsuccessfully; see encrypted diagnostics")
+        try:
+            events = self.events()
+        except Exception:  # noqa: BLE001 - malformed ciphertext must not become partial success
+            self._fail("capture evidence unreadable; see encrypted diagnostics")
+        if (
+            not events
+            or any(e["kind"] == "error" for e in events)
+            or events[-1]["kind"] != "complete"
+        ):
+            self._fail("capture failed or did not finish")
         complete = events[-1]
         if complete["dropped"] or complete["limit_reached"]:
-            raise EvidenceError("capture dropped packets or exceeded a limit")
-        return received_requests(e for e in events if e["kind"] == "packet")
+            self._fail("capture dropped packets or exceeded a limit")
+        try:
+            records = received_requests(e for e in events if e["kind"] == "packet")
+        except EvidenceError as exc:
+            self._fail(str(exc))
+        self.store.write("capture-validation.json", {"valid": True, "requests": len(records)})
+        return records
 
     def cleanup(self) -> None:
-        docker("rm", "-f", "-v", self.name, check=False)
-        if self.process is not None:
-            self.process.wait(timeout=10)
-            if self.process.stderr is not None:
+        try:
+            self._settle()
+        finally:
+            docker_evidence(self.store, "capture-remove", "rm", "-f", "-v", self.name)
+            if self.process is not None and self.process.stderr is not None:
                 self.process.stderr.close()
-        if self.output is not None:
-            self.output.close()
+            if self.output is not None:
+                self.output.close()
 
 
 @contextmanager

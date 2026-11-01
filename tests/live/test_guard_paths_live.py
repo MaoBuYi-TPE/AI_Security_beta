@@ -5,6 +5,8 @@ import json
 import os
 import time
 from collections import Counter
+from collections.abc import Callable
+from functools import partial
 from typing import Any
 from urllib.parse import unquote
 
@@ -13,10 +15,12 @@ import pytest
 from secscan.grants.domain.request_paths import canonical_path
 from tests.guard_path_cases import PATH_CASES
 from tests.guard_path_coverage import coverage_from_evidence, decisions_for_run
+from tests.guard_path_evidence import EvidenceError
 from tests.live.guard_paths_regression import boundary_probes
 from tests.live.guard_paths_support import (
     Capture,
     EvidenceStore,
+    container_diagnostics,
     drained,
     echo_records,
     environment,
@@ -228,12 +232,90 @@ def _telemetry(run_id: str) -> tuple[bytes, dict[str, Any], list[dict[str, Any]]
     return raw, json.loads(summary), [json.loads(line) for line in raw.splitlines()]
 
 
+def _save_measurement_inputs(
+    store: EvidenceStore,
+    item: Lab,
+    target: Target,
+    scan_id: str,
+    zap_container: str | None,
+    started: float,
+) -> dict[str, Any]:
+    """Collect all independent sources before any capture/telemetry assertion can abort a run."""
+    errors: list[dict[str, str]] = []
+    available: dict[str, bool] = {}
+
+    def save(name: str, read: Callable[[], Any], *, required: bool = True) -> Any:
+        try:
+            value = read()
+            available[name] = value is not None
+            if value is not None:
+                store.write(name, value)
+            elif required:
+                raise EvidenceError("required evidence artifact missing")
+            return value
+        except Exception as exc:  # noqa: BLE001 - retain remaining diagnostics after one source fails
+            available[name] = False
+            errors.append({"artifact": name, "type": type(exc).__name__, "message": str(exc)})
+            return None
+
+    scan = save("scan-api.json", lambda: item.operator.data("GET", f"/scans/{scan_id}"))
+    observations = save("observations.json", lambda: _all_observations(item, scan_id))
+    runs = save("runs.json", lambda: scan_runs(scan_id))
+    frozen = save("frozen-scan.json", lambda: frozen_scan_snapshot(scan_id))
+    decisions = save("guard-decisions.jsonl", lambda: requests_since(started))
+    store.write("scan.json", {"scan": scan, "observations": observations, "runs": runs})
+    telemetry: dict[str, dict[str, Any]] = {}
+    for run in runs or []:
+        prefix = "" if run["engine"] == "zap" else "preflight-"
+        run_id = run["id"]
+        telemetry[run_id] = {
+            "raw": save(
+                prefix + "telemetry.jsonl",
+                partial(volume_file, TELEMETRY_VOLUME, run_id + ".jsonl"),
+            ),
+            "summary": save(
+                prefix + "summary.json",
+                partial(volume_file, TELEMETRY_VOLUME, run_id + ".summary.json"),
+            ),
+        }
+        if run["engine"] == "zap" and zap_container is None:
+            zap_container = "secscan-run-" + run_id
+    if zap_container is not None:
+        run_id = zap_container.removeprefix("secscan-run-")
+        for name, source in (
+            ("report.json", "out/zap-report.json"),
+            ("zap.log", "out/zap.log"),
+            ("manifest.json", "manifest.json"),
+        ):
+            save(name, partial(volume_file, RUNS_VOLUME, f"{run_id}/{source}"), required=False)
+    save(
+        "target-diagnostics",
+        lambda: container_diagnostics(store, "target", target.container, started),
+        required=False,
+    )
+    store.write("collection-errors.json", errors)
+    store.write("collection-index.json", available)
+    return {
+        "scan": scan,
+        "observations": observations,
+        "runs": runs,
+        "frozen": frozen,
+        "decisions": decisions,
+        "telemetry": telemetry,
+        "errors": errors,
+    }
+
+
 def _measure(version: str, label: str, item: Lab, target: Target, **options: Any) -> None:
     store = EvidenceStore.open(version, label)
     store.write("environment.json", environment(target))
-    capture = Capture(target, store).start()
+    capture = Capture(target, store)
     started = time.time()
+    scan_id: str | None = None
+    zap_container: str | None = None
+    saved: dict[str, Any] | None = None
     try:
+        capture.start()
         scan_id = item.scan("api_active_lab", **options)
         zap_container = _zap_container(scan_id)
         scanner_image = inspect(zap_container)
@@ -242,25 +324,22 @@ def _measure(version: str, label: str, item: Lab, target: Target, **options: Any
             {"image_id": scanner_image["Image"], "image": scanner_image["Config"]["Image"]},
         )
         engine = item.finished_zap(scan_id, timeout=1800)
+        saved = _save_measurement_inputs(store, item, target, scan_id, zap_container, started)
         records = capture.finish()
-        scan = item.operator.data("GET", f"/scans/{scan_id}")
-        observations = _all_observations(item, scan_id)
-        decisions = requests_since(started)
-        runs = scan_runs(scan_id)
-        frozen = frozen_scan_snapshot(scan_id)
-        store.write("frozen-scan.json", frozen)
-        store.write("scan.json", {"scan": scan, "observations": observations, "runs": runs})
-        store.write("guard-decisions.jsonl", decisions)
         store.write("target-requests.log", records)
+        if saved["errors"]:
+            raise EvidenceError("measurement evidence incomplete; see encrypted collection errors")
+        scan, observations, decisions = saved["scan"], saved["observations"], saved["decisions"]
+        runs, frozen = saved["runs"], saved["frozen"]
         forwarded: list[dict[str, Any]] = []
         zap_forwarded: list[dict[str, Any]] = []
         telemetry_by_run: dict[str, list[dict[str, Any]]] = {}
         for run in runs:
-            raw, summary, entries = _telemetry(run["id"])
+            raw = saved["telemetry"][run["id"]]["raw"]
+            summary = json.loads(saved["telemetry"][run["id"]]["summary"])
+            entries = [json.loads(line) for line in raw.splitlines()]
             sent = [e for e in entries if e["e"] == "request"]
             prefix = "" if run["engine"] == "zap" else "preflight-"
-            store.write(prefix + "telemetry.jsonl", raw)
-            store.write(prefix + "summary.json", summary)
             selected_decisions = [d for d in decisions if d.get("run_id") == run["id"]]
             store.write(prefix + "run-decisions.jsonl", selected_decisions)
             decisions_for_run(decisions, run["id"], version)
@@ -273,17 +352,6 @@ def _measure(version: str, label: str, item: Lab, target: Target, **options: Any
             if run["engine"] == "zap":
                 zap_forwarded = sent
         run_id = zap_container.removeprefix("secscan-run-")
-        for name, source in (
-            ("report.json", "out/zap-report.json"),
-            ("zap.log", "out/zap.log"),
-            ("manifest.json", "manifest.json"),
-        ):
-            content = volume_file(RUNS_VOLUME, f"{run_id}/{source}")
-            if content is not None:
-                store.write(name, content)
-        store.write("scan.json", {"scan": scan, "observations": observations, "runs": runs})
-        store.write("guard-decisions.jsonl", decisions)
-        store.write("target-requests.log", records)
         missing, extra = (
             _counter(forwarded) - _counter(records),
             _counter(records) - _counter(forwarded),
@@ -353,8 +421,17 @@ def _measure(version: str, label: str, item: Lab, target: Target, **options: Any
                 assert not denied
                 assert any(r["path"] == "/users/v1/name1%27" for r in records)
     finally:
-        capture.cleanup()
-        store.seal()
+        try:
+            if saved is None:
+                if scan_id is not None:
+                    _save_measurement_inputs(store, item, target, scan_id, zap_container, started)
+                else:
+                    container_diagnostics(store, "target", target.container, started)
+        finally:
+            try:
+                capture.cleanup()
+            finally:
+                store.seal()
 
 
 JUICE_PATHS = ["/rest/products/{id}/reviews", "/api/Products/{id}"]
