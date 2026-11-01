@@ -59,9 +59,14 @@ def _decorate(mode: Mode, request: Request, response: Response) -> Response:
     if mode == "secure":
         extra = [(name, value) for name, value in SECURITY_HEADERS if name.lower() not in present]
     elif "access-control-allow-origin" not in present:
-        # 弱點版：對每個回應加 CORS 萬用字元（案例 FX-06）。
+        # 弱點版：反射 Origin 並允許帶憑證（可利用的 CORS；案例 FX-06，ZAP 10098 與 nuclei
+        # cors-misconfig 都會命中——M4 的「同一問題多來源」）。
         origin = request.header("origin") or "*"
-        extra = [("Access-Control-Allow-Origin", origin), ("Vary", "Origin")]
+        extra = [
+            ("Access-Control-Allow-Origin", origin),
+            ("Access-Control-Allow-Credentials", "true"),
+            ("Vary", "Origin"),
+        ]
     if not extra:
         return response
     return dataclasses.replace(response, headers=response.headers + tuple(extra))
