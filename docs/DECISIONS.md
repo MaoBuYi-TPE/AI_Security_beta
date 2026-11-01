@@ -2005,13 +2005,13 @@ T16 讓平台以真的 ZAP 掃描兩個標準靶機（OWASP Juice Shop v20.3.0�
 
 ### 21.4 保留的紀錄
 
-- 本機分支 `feat/t33-guard-encoded-params`（沒有推送）：
+- 分支 `feat/t33-guard-encoded-params`（2026-11-01 推送到 origin 備份；未開 PR、未合併）：
   - `9536ce8`：設計與驗收界線的文件。
   - `124346e`：版本化的 policy、path 的核心與 lab harness。
   - `d996fc1`、`e107911`：測試與證據的補強。
   - `41e1901`：暫緩時尚未提交的修改的快照（Juice Shop 崩潰的診斷），未完成、未驗證。
 - 本機的錄製（gitignore，以 Fernet 加密，金鑰是同一個目錄的 `.evidence.key`）：`recordings/guard-paths-attempt-1/`、`recordings/guard-paths-diagnostic/`。
-- 分支與錄製都只在這台電腦上，刪除之後就無法還原。
+- 分支已在 origin 備份；錄製只在這台電腦上（gitignore），刪除之後無法還原。
 
 ### 21.5 恢復之前要處理或決定的事
 
