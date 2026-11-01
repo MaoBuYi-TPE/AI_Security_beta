@@ -64,6 +64,9 @@ allowed-confusables = ["，", "：", "；", "（", "）", "！", "？", "／"]
 # 需要 stdout 輸出（T201）與在隔離 lab_net 綁 0.0.0.0（S104）。不納入 mypy。
 # N802/N815：BaseHTTPRequestHandler 要求 do_GET 等固定命名。
 "spikes/**/*.py" = ["T201", "S104", "N802", "N815"]
+# T17 的凍結清單產生器（src/ 之外的開發工具）：以固定參數陣列 subprocess 執行 docker（S603/S607，
+# 不用 shell=True）並印進度（T201）。只放行這個檔案，不是整個 tools/。不納入 mypy、coverage、import-linter。
+"tools/freeze_nuclei_templates.py" = ["S603", "S607", "T201"]
 
 [tool.mypy]
 python_version = "3.12"

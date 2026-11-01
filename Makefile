@@ -50,7 +50,8 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	lab-net lab-up lab-down lab-verify lab-images build images ensure-net scan-net up down \
-	test-live-runner test-live-zap record-fixtures test-contract test-live-lab
+	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
+	nuclei-templates nuclei-templates-check
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -167,6 +168,16 @@ build: docker-check
 images: docker-check
 	@for image in $(SCANNER_IMAGES); do docker pull --quiet "$$image" >/dev/null || exit 1; done
 	$(COMPOSE) -f $(DB_FILE) --profile app pull --quiet socket-proxy
+
+# 產生 T17 凍結的 Nuclei 模板清單（docs/DECISIONS.md §23）：驗證鎖定 archive 的 sha256、乾淨解壓、
+# 在鎖定映像裡離線跑 nuclei -tl，寫出 src/secscan/scanners/domain/nuclei/templates.lock.txt。
+# 不連任何目標、不出網；映像不在本機時以 digest 拉取。產生後把 lock sha256 填回 policy.py 與 manifest。
+nuclei-templates: docker-check
+	$(UV_RUN) python tools/freeze_nuclei_templates.py
+
+# 只驗證凍結清單能從鎖定來源逐位元組重現（不覆寫；和 tests/live/test_nuclei_templates_live.py 同一條檢查）。
+nuclei-templates-check: docker-check
+	$(UV_RUN) python tools/freeze_nuclei_templates.py --check
 
 # 建立或檢查一個 internal＋gateway isolated 的網路（NET、SUBNET、IP_RANGE 由呼叫端給定）。
 # 已存在時只檢查：舊的網路沒有 ip-range 時會失敗，刪除後重建（README）。

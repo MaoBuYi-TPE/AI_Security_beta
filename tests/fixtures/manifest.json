@@ -32,7 +32,16 @@
   "nuclei_templates": {
     "release": "v10.5.0",
     "commit": "f8b8b8dcd70d93826c3767e1829ef8243af9f03b",
-    "archive_sha256": "80fbabceca095fac40afecc7f023748df22b9576b9ff10a4422bd2fbf81f9a41"
+    "archive_sha256": "80fbabceca095fac40afecc7f023748df22b9576b9ff10a4422bd2fbf81f9a41",
+    "frozen_list": {
+      "path": "src/secscan/scanners/domain/nuclei/templates.lock.txt",
+      "lock_sha256": "1d97a25695a25bd5130a37beb5fb1e78988eed541456ed4be702171f1ecefc81",
+      "definition_sha256": "504ac80c34da54738903d4937d770cc618d4514f53b2d05cd7ed1579ac061469",
+      "template_count": 42,
+      "selected_categories": ["exposures", "miscellaneous", "misconfiguration", "technologies", "vulnerabilities"],
+      "added_by": "T17",
+      "note": "精選、對準 lab 的 HTTP 模板白名單（以 nuclei -tl -pt http -ni 列舉、以類別人工審查）；產生器 tools/freeze_nuclei_templates.py，清單 src/secscan/scanners/domain/nuclei/templates.lock.txt"
+    }
   },
   "fixtures": [
     {
