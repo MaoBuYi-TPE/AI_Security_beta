@@ -52,7 +52,7 @@
 | technologies | 9 | tech-detect、fingerprinthub、favicon、waf-detect、flask-detect、werkzeug-debugger-detect、angular-detect、express-default-page、graphql-detect | 多為 GET；**waf-detect 送 POST /（帶 `<script>` 測試字串）、graphql-detect 送 POST 到多個候選 path（introspection）**，需 grant 允許 POST |
 | vulnerabilities/generic | 6 | cors-misconfig、crlf-injection-generic、error-based-sql-injection、xss-uri-reflected、open-redirect-generic、generic-env | 主動探測（`ACTIVE_PROBE_TEMPLATE_IDS`），和 ZAP active scan 同類、只對已核准 grant 的 lab 執行；strict-1 下帶 % 的 path 探測多被 `PATH_AMBIGUOUS` 擋（xss-uri-reflected 全擋、open-redirect 82/94 擋） |
 
-- 內容閘門與移除：`-pt http` 擋不住多協定模板，因此產生時以 `selection.template_violations` 讀全文把關；初版的 `cookies-without-httponly`／`-secure`、`directory-listing`（含 `javascript:`／`flow:`）與 `host-header-injection`（改 Host，guard 一律 `ORIGIN_MISMATCH`）在審查後移除。
+- 內容閘門與移除：`-pt http` 擋不住多協定模板，因此產生時以 `selection.template_violations` 讀全文把關；初版移除 `cookies-without-httponly`／`-secure`（含 `javascript:`）、`directory-listing`（含 `flow:` 與 `fuzz` tag）與 `host-header-injection`（改 Host，guard 一律 `ORIGIN_MISMATCH`）。
 - 多來源（M4）：Nuclei 與 ZAP 疊同一問題（SQLi/XSS/CRLF/open-redirect/CORS）目前是**候選假設**；strict-1 的 guard 會擋掉多數帶 % 的 path 探測，實際可達性與重疊待 T18 量測後如實記載（見 `DECISIONS.md` §23.4）。
 - 重現性：`make nuclei-templates-check`（或 `ENABLE_LIVE_LAB_TESTS=1` 下的 `tests/live/test_nuclei_templates_live.py`）重跑列舉並與已提交的 lock 逐位元組比對。
 - 範圍限制：只收對準 lab 的通用＋技術棧模板，不含本 lab 不存在的特定產品模板；最終類別簽核由使用者確認（效度威脅，見 `DECISIONS.md` §23.4）。
