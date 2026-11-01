@@ -418,6 +418,46 @@ T09 已涵蓋（fake 引擎，沒有容器）：兩個 consumer 同時認領；l
 
 crAPI、DVWA 是替代擴充，不增加必要工作量 [S17]。fixture app 只放在 lab_net，只為測試服務，不是在開發產品前端。
 
+#### 5.1.1 T30 fixture app 的案例表（strict-1）
+
+自製的 fixture app 在 `tests/live/fixture_app/`（弱點版 insecure＝正例、修補版 secure＝負例，以啟動參數切換；跑在 guard 映像上）。事實來源是 `cases.py`，與這張表、OpenAPI 規格（`tests/fixtures/openapi/fixture-app-openapi3.yml`）三者對齊；不連網的程式測試 `tests/contract/test_fixture_cases.py` 逐案例驗證弱點版呈現、修補版修正。「平台結果」是 2026-11-01 的 live 量測（`make test-live-fixture`；數字見 `docs/TOOLS.md` §7.8）。strict-1 的 guard 只擋 path 中的百分比編碼，被擋下的案例標為「平台阻擋」，不計入掃描器漏報（`DECISIONS.md` §21.5、§22）。holdout 的案例在規則凍結前不使用（§5.2）。
+
+安全案例（12 個正例＋12 個修補負例）：
+
+| case_id | method／path | auth | 類別（OWASP） | ZAP 能否偵測 | 平台結果 | 人工確認方式 | 修補差異 | holdout |
+|---|---|---|---|---|---|---|---|---|
+| T30-FX-01 | GET `/search` | anonymous | SQLi（query 參數 q，A03:2025） | 主動（40018） | **命中**（40018×3） | q=apple' 回 500（sqlite OperationalError） | 參數化查詢，q 當資料 |  |
+| T30-FX-02 | GET `/greet` | anonymous | 反射型 XSS（query 參數 name，A03:2025） | 主動（40012/40014） | **命中**（40012） | name=`<b>x</b>` 原樣反射（未轉義） | 以 html.escape 轉義 |  |
+| T30-FX-03 | POST `/login` | anonymous | SQLi（表單 user/pass，A03:2025） | 主動（40018） | **命中**（40018） | `admin'--` 註解掉密碼條件即登入 | 參數化查詢，壞值回 401 |  |
+| T30-FX-04 | GET `/search` | anonymous | 錯誤訊息／堆疊洩漏（A05:2025） | 被動（90022）/人工 | 漏報（無 90022；以 40018 間接命中） | 500 回應 body 含 OperationalError | 錯誤只回一般訊息 | ✓ |
+| T30-FX-05 | GET `/` | anonymous | 缺安全 header／CSP（A05:2025） | 被動（10038、10021） | **命中**（10038、10021、10020） | 回應缺 CSP 與 X-Content-Type-Options | 每個回應補 SECURITY_HEADERS |  |
+| T30-FX-06 | GET `/api/users` | anonymous | CORS 萬用字元（A05:2025） | 被動（10098） | **命中**（10098） | 回應含 `Access-Control-Allow-Origin: *` | 不輸出萬用 CORS |  |
+| T30-FX-07 | POST `/login` | anonymous | Cookie 缺 HttpOnly/Secure（A05:2025） | 被動（10010/10011） | 漏報（spider 未提交登入表單取得 Set-Cookie） | Set-Cookie 缺 HttpOnly、Secure | 補 HttpOnly; Secure; SameSite |  |
+| T30-FX-08 | GET `/go` | anonymous | 開放轉址（query 參數 next，A01:2025） | 主動（20019） | **命中**（20019 External Redirect） | next=外部 URL 回 302 指向外部 | next 僅允許白名單相對路徑 |  |
+| T30-FX-09 | GET `/backup.sql` | anonymous | 敏感檔案暴露（A05:2025） | 主動/人工 | 漏報（無檔案暴露告警，同 Juice Shop /ftp） | 回 200、body 含帳密 | 回 404 | ✓ |
+| T30-FX-10 | GET `/api/orders/{id}` | standard_user | BOLA／IDOR（API1:2023） | 不在 ZAP 能力範圍 | 不在範圍（GET 已轉送；人工確認） | 以 alice 的 token 讀 bob 的 order（1002）回 200 | 只允許讀自己的 order，否則 404 |  |
+| T30-FX-11 | POST `/api/users` | anonymous | Mass assignment（API3:2023） | 不在 ZAP 能力範圍 | 不在範圍（人工確認） | 註冊帶 is_admin=true 後 is_admin 為真 | 白名單欄位，is_admin 一律 0 |  |
+| T30-FX-12 | GET `/api/users` | anonymous | 過度資料暴露（API3:2023） | 不在 ZAP 能力範圍 | 不在範圍（人工確認） | 回應含 password／secret_note | 只回 id、username、email |  ✓ |
+
+contract/robustness 案例（6 個正例＋6 個修補負例；獨立標記，不加入 security TP/FP；由 `test_fixture_cases.py` 與人工確認，不以 ZAP 評）：
+
+| case_id | method／path | 檢查 | 弱點版 | 修補版（修補差異） | holdout |
+|---|---|---|---|---|---|
+| T30-FX-C1 | GET `/api/orders/{id}` | 壞輸入狀態碼（非整數 id） | 回 500 | 回 400 |  |
+| T30-FX-C2 | POST `/api/users` | 缺必填欄位 | 回 500 | 回 400 |  |
+| T30-FX-C3 | GET `/api/users/{id}` | 回應不符宣告 schema | 多出 password、id 為字串 | 符合 OpenAPI schema | ✓ |
+| T30-FX-C4 | POST `/api/users` | 型別混淆（body 為陣列） | 回 500 | 回 400 |  |
+| T30-FX-C5 | PUT `/api/orders/{id}` | 未文件化 method | 回 500 | 回 405 |  |
+| T30-FX-C6 | POST `/api/users` | 格式錯誤的 JSON | 回 500 | 回 400 | ✓ |
+
+平台阻擋（另記，不計入上面 12）：
+
+| case_id | method／path | 類別 | 平台結果 | 說明 |
+|---|---|---|---|---|
+| T30-FX-PB-01 | GET `/users/{username}` | SQLi（path 參數 username，A03:2025） | 平台阻擋（PATH_AMBIGUOUS） | 探測需 path 中的 `%27`，strict-1 下 guard 擋下、不到達靶機（同 §20.7 的 VAmPI path SQLi）；T33 的 `encoded-params-1` 放寬後才可達。修補版以參數化查詢修正 |
+
+live 量測另外命中數個超出這 12 個列舉案例的告警（弱點版 web：40003 CRLF Injection、6 Path Traversal、10202 Absence of Anti-CSRF Tokens、10020 Missing Anti-clickjacking Header），如實記錄於 `TOOLS.md` §7.8，不改變 12＋12、6＋6 的計數。
+
 ### 5.2 Ground truth
 
 由本人依修補 diff、重現步驟與程式測試標記正/負例，不以「某掃描器報了」當作唯一的真實標籤。
