@@ -1358,11 +1358,24 @@
       - 不收集的 run 沒有 `guard_traffic`。
       - T11 的證據缺口（同一條連線上多個請求的收包證據）仍在。
     - 給後續任務：
-      - **使用者決定**：是否放寬 guard 的 path 規則（解碼之後再比對範圍；`DECISIONS.md` §15.10、§20.7 的量化）。
+      - **使用者決定**：是否放寬 guard 的 path 規則（解碼之後再比對範圍；`DECISIONS.md` §15.10、§20.7 的量化）。2026-11-01 決定有條件放寬（T33），目前暫緩。
       - **T30**：fixture app 要有 traditional spider 走得到、query 或 form 參數的注入點，作為 web profile 的正例；量測 cookie 的合併與 `_method`；完整的 ground truth 與抽樣複核。
       - **T19**：fingerprint 與複掃比較要讀 run 的 `guard_traffic.auth.lost`，失效的 run 的 observation 不能併入已認證身分的 finding，也不能據以標 `not_observed`。
       - **M5（bench）**：以 fixture app 重新檢討速率與強度（兩個靶機的量測沒有顯示需要調整）。
+- [ ] T33 guard 的 path 編碼規則：有條件放寬（實驗用，T30 的前置）。
+  - 前置：T16。使用者的決定（2026-11-01）：有條件放寬加上安全的路徑正規化，不全面放行 `%`；證明安全之前，預設維持現行的嚴格行為。要求見 `DECISIONS.md` §21.1。
+  - DoD（恢復時沿用）：
+    - 安全設計：依 RFC 3986 先分段、再逐段受控解碼；只在 grant 明確授權的 `{佔位}` 接受編碼；編碼的分隔符、雙重編碼、路徑穿越、無效的編碼與解析可能不一致的情況一律 fail closed；guard 轉送的位元組不變。
+    - Guard Policy Version：`strict-1`（預設，等於現行行為）與 `encoded-params-1`（實驗）；每個 run 記下版本，一般掃描不能選擇。
+    - unit、integration、contract、live 涵蓋正常的 path、編碼的路由參數、歧義的 path、越權的 path 與不同的 URL 解析行為。
+    - 以隔離的 VAmPI 與 Juice Shop 對照兩個版本的 ZAP 結果：VAmPI 的 SQLi 在既有的 grant 內是否被偵測、沒有超出授權範圍的請求、靶機收到的請求等於 guard 轉送的請求；保留原始請求、guard 的判斷、靶機收到的紀錄與安全的流量統計。
+    - 是否正式啟用由使用者看過證據之後決定。
+  - 狀態：blocked（2026-11-01，使用者決定暫緩）。
+    - 實作在本機分支 `feat/t33-guard-encoded-params`，沒有合併；main 回到 PR #19（`c61a5e8`）。guard 的規則不變（path 含 `%` 一律拒絕）。
+    - 卡住的地方：live 的 A/B 在 `strict-1` 組掃描 Juice Shop 時中途失敗，`encoded-params-1` 組沒有執行；隔離的診斷顯示 Juice Shop 的 reviews 端點會讓靶機崩潰（`strict-1` 也會轉送這種請求）。
+    - 原因、保留的紀錄與恢復前要處理的事見 `DECISIONS.md` §21.3–§21.5。
 - [ ] T30 建立自製 fixture app 與 ground truth 初稿。
+  - 前置：使用者的決定（2026-11-01）把正式的 ground truth 評估排在 T33 之後。T33 暫緩期間，要等 T33，還是先以 `strict-1` 進行、把被 guard 擋下的案例另外分類為平台阻擋，由使用者決定（`DECISIONS.md` §21.5）。
   - DoD：
     - fixture app 可以切換弱點版與修補版，只放在 lab_net。
     - 約 12 個資安案例與 6 個 contract/robustness 案例，都寫好預期行為與確認方式。
