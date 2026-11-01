@@ -314,6 +314,7 @@ ExecutionPlan 只能包含：
   - 以類別為單位人工審查，並抽查高風險模板。
   - 禁用 code/headless、外部 OAST、cloud upload、HTTP 以外的協定與未知的 raw template；模板簽章只是來源證據。
   - 新增或移除模板都要留紀錄，實驗前凍結。[S06][S23]
+  - T17 已凍結：清單在 `src/secscan/scanners/domain/nuclei/templates.lock.txt`（`id sha256 path`），政策與執行旗標在 `policy.py`，產生器在 `tools/freeze_nuclei_templates.py`；選取與逐類別審查見 `DECISIONS.md` §23、`TOOLS.md` §2.1。
 - **Schemathesis**：
   - 依鎖定版本確認報告支援的格式，不捏造參數。
   - 用 JUnit 時，不能只靠 free text 猜 parameter 或位置；要關聯 NDJSON，或把缺乏定位資訊的結果標為低精度。[S07]
