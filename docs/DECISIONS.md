@@ -1312,7 +1312,7 @@ main | cli → migrations → health | runner | worker → scanners → scans �
 ### 15.10 取捨與不在 T11 範圍
 
 取捨（殘餘風險）：
-- path 中的 `%` 一律拒絕：會擋掉工具放在 path 的 payload，部分 ZAP 檢查無法執行；刻意 fail closed，M3 依量測決定。
+- path 中的 `%` 一律拒絕：會擋掉工具放在 path 的 payload，部分 ZAP 檢查無法執行；刻意 fail closed，M3 依量測決定。T16 的量化見 §20.7；2026-11-01 使用者決定有條件放寬（T33），目前暫緩，規則不變（§21）。
 - body 中的 `_method`（例如表單欄位）擋不到；lab 的靶機另外確認是否支援這個寫法。
 - proxy 憑證沒有綁定來源 IP：P0 只有一個 runner、一次一個掃描容器；ip-range 讓掃描容器拿不到 guard 的 IP。
 - mitmproxy 本身可能被惡意的靶機回應攻陷：guard 不接 control_net、docker_net；非 root、唯讀、沒有 capability；policy 唯讀；不持有目標的 secret。
@@ -1928,20 +1928,98 @@ T16 讓平台以真的 ZAP 掃描兩個標準靶機（OWASP Juice Shop v20.3.0�
 
 - **Juice Shop 的 REST 搜尋的 SQLi**（S104 的 Database Schema、User Credentials）：經完整的平台（API → runner → guard → ZAP → worker → 查詢）**命中**：`40018 SQL Injection`，`GET /rest/products/search`，參數 `q`（query），attack `apple'`，ZAP 的等級 High、信心 Low，evidence 是 500 回應。注入點是前端呼叫的 API，traditional spider 走不到，以操作者上傳的一個 operation 的規格掃描。
 - **VAmPI 的 SQLi**（S103；`/users/v1/{username}` 以字串組 SQL）：ZAP 送出了探測（`/users/v1/name1%27`），guard 以 `PATH_AMBIGUOUS` 拒絕（§15.10 的取捨），探測沒有到達靶機，**平台漏報**。量化：每次 VAmPI 的掃描有 232 個 path 參數的攻擊被拒（`/users/v1/…` 106、`/books/v1/…` 126），佔 guard 判斷的請求的 34%。
-- **對照實驗**（不經平台；同一個鎖定的映像、第一輪實際使用的 plan.yaml 與規格；只接一個 internal 的網路，沒有 guard 與速率限制）：弱點版 34 秒內命中 `40018 SQL Injection`（High，`GET /users/v1/%27`，參數 `username`），安全版沒有。結論：漏報完全來自 guard 的 path 規則，ZAP 本身判斷正確。是否放寬 §15.10（解碼之後再比對範圍）是需要使用者決定的安全取捨，T16 不改（只量化與揭露，§18.10 的決定）。
+- **對照實驗**（不經平台；同一個鎖定的映像、第一輪實際使用的 plan.yaml 與規格；只接一個 internal 的網路，沒有 guard 與速率限制）：弱點版 34 秒內命中 `40018 SQL Injection`（High，`GET /users/v1/%27`，參數 `username`），安全版沒有。結論：漏報完全來自 guard 的 path 規則，ZAP 本身判斷正確。是否放寬 §15.10（解碼之後再比對範圍）是需要使用者決定的安全取捨，T16 不改（只量化與揭露，§18.10 的決定）。後續：使用者在 2026-11-01 決定有條件放寬（T33），目前暫緩（§21）。
 - **VAmPI 的負例**：安全版沒有任何 active scan 規則的告警（live 測試的斷言）；但弱點版也只有 passive 的告警，所以這組對照在平台上**分不出**弱點版與安全版（原因同上）。
 - **設定類的正例**（passive，以實際的回應 header 可確認）：Juice Shop 缺 CSP（10038）、`Access-Control-Allow-Origin: *`（10098）；VAmPI 缺 `X-Content-Type-Options`（10021）、`Server` header 透露版本（10036）。VAmPI 的兩種在弱點版與安全版都有（和 `vulnerable` 開關無關）。
 - **漏報、不在 ZAP 能力範圍**：BOLA、mass assignment、未授權改密碼、使用者列舉、JWT 弱金鑰、缺速率限制（VAmPI）；Juice Shop 的 DOM／Reflected XSS 與大部分 challenge 在前端路由，traditional spider 只走到靜態資源與 `/ftp`。Juice Shop 的 `/ftp` 目錄列表（Confidential Document，回 200、標題 `listing directory /ftp`）有被請求，但 Directory Browsing（0）沒有告警。
 
 ### 20.8 殘餘風險與不在 T16 範圍
 
-- guard 的 path 規則讓 path 參數的注入測不到（§20.7）：報告必須揭露；放寬需要使用者決定。
+- guard 的 path 規則讓 path 參數的注入測不到（§20.7）：報告必須揭露；放寬需要使用者決定（2026-11-01 已決定有條件放寬，暫緩中，§21）。
 - 認證失效的偵測有限制（§20.4）：靶機以 302 或 200 的登入頁表示過期時看不出來；observation 仍標 scan 的身分（T19 要讀 `auth.lost`）。
 - 不收集的 run（guard 回報預算用盡、runner 的牆鐘上限、取消）沒有 `guard_traffic`，只有 `budget_usage` 的總數與 `plan_hash`。
 - `plan_hash` 不含 runner 的容器政策（網路、capability、掛載）：那些是 runner 固定的設定，不隨 run 改變。
 - 正例與負例只是小型集：完整的 12＋12、6＋6、可切換弱點與修補的 fixture app 在 T30；cookie 與 ZAP 自己的 session cookie 的合併、body 的 `_method`（T14 的交接）在 T16 沒有量到（兩個靶機都用 bearer、都不支援 method override），留給 T30 的 fixture app。
 - Juice Shop 只能以 bearer 認證 `/api/*`：它的頁面與 `/rest/user/whoami` 看 cookie，web profile 帶 bearer 的掃描大部分仍是匿名的內容。
 - 不在 T16：掃描中重新驗證與重新登入、預算用盡時收集部分輸出（使用者決定）；Nuclei（T17、T18）；rule group、fingerprint、finding（T19）；HTTPS、AJAX spider、多個 runner；T11 的同一條連線的證據缺口仍記為未實作。
+
+## 21. T33：guard 的 path 編碼，有條件放寬（暫緩，2026-11-01）
+
+狀態：**暫緩**。實作在本機分支 `feat/t33-guard-encoded-params`，沒有合併、沒有推送，live 的 A/B 也沒有完成。使用者決定（2026-11-01）先把問題記錄下來，main 回到 PR #19（`c61a5e8`）的狀態。
+
+目前的行為不變：
+- path 含 `%` 一律以 `PATH_AMBIGUOUS` 拒絕（§15.10）。
+- VAmPI 的 path 參數 SQLi 仍然漏報（§20.7），報告必須揭露（§20.8）。
+- DB 與 API 沒有 guard policy 的版本欄位。
+
+### 21.1 使用者的決定與要求
+
+採用「有條件放寬＋安全的路徑正規化」，不全面放行含 `%` 的請求。列為 T30 的前置工作：先完成獨立的安全設計、測試與驗證，再決定是否正式啟用。
+
+- **解析與解碼**：先依 RFC 3986 解析 URL 的結構，再做受控的解碼；不可以把整個 URL 解碼之後，以字串前綴判斷授權。
+- **範圍**：維持 grant 對 origin、HTTP method、path 與明確授權的路由參數的限制；只考慮放行確認不會改變路由邊界的編碼參數。
+- **fail closed**：編碼的分隔符、雙重編碼、路徑穿越、無效的編碼，以及 guard 與目標伺服器的解析可能不同的情況。
+- **對照實驗**：以隔離的 Juice Shop、VAmPI 對照修改前後的 ZAP 結果。確認 VAmPI 的 SQLi 能不能在既有的 grant 內被偵測，而且沒有新增任何超出授權範圍的請求。
+- **證據**：保留原始請求、guard 的判斷、靶機實際收到的請求與安全的流量統計，並記下 Guard Policy Version，讓實驗可以重現。
+- **測試**：unit、integration、contract、live 涵蓋正常的 path、編碼的路由參數、歧義的 path、越權的 path 與不同的 URL 解析行為。
+- **預設嚴格**：證明安全之前，預設維持現行的嚴格行為，不開放給一般掃描。
+- **T30**：正式的 ground truth 評估在這之後進行，避免把 guard 已知的阻擋混入漏洞偵測的量測。
+
+### 21.2 嘗試的做法（摘要）
+
+完整的設計在分支的 `docs/T33_IMPLEMENTATION_PLAN.md` 與該分支的 §21。要點：
+
+- **版本**：`strict-1`（預設，凍結 T11–T16 的判斷）與 `encoded-params-1`（實驗）。每個 run 記下版本（migration `v0012`、API、guard log）。一般的 compose 寫死 `strict-1`，實驗版本只出現在 live 專用的 override 檔。
+- **解析**：
+  - 在原始的 `?` 切出 path，以原始的 `/` 分段。
+  - 每個 `%HH` 只解碼一次，解出的位元組必須落在白名單內。白名單不含 unreserved、分隔符、`%`、`*`、控制字元與非 ASCII。
+  - 段落只剩點、空白與 `+` 時也拒絕。
+  - 解碼的值只用於比對，guard 轉送的位元組不變。
+- **比對**：
+  - 編碼段只能由 grant 的 `{佔位}` 涵蓋，literal 不涵蓋。
+  - `allow_all_paths` 遇到編碼段就拒絕。
+  - 排除的 pattern 可能和編碼段重疊時拒絕；多個編碼段一起判斷。
+  - 對外的 reason 維持 `PATH_AMBIGUOUS`，細分只寫進 guard log。
+- **一致性**：telemetry、coverage、parser 與認證健康度都依版本處理。worker 以 run 的 grant 與版本重算每一筆轉送；不一致時不記 coverage，`traffic_verified=false`。
+
+規模：到 `e107911` 為止，相對 `c61a5e8` 改了 102 個檔案（+6,533／−153 行），範圍涵蓋 guard、grants、runner、migration、worker、parser、coverage、API 與 live harness。分支的 §21.5 記有離線測試與突變檢查的結果，那些都不是 live 的證明。
+
+### 21.3 暫緩的原因
+
+1. **live 的 A/B 沒有完成**（2026-11-01 的第一次執行；本機的 `recordings/guard-paths-attempt-1/`，加密）：
+   - `strict-1` 組先跑完 guard 的邊界語料、route echo（Flask、Express）、固定探針與 VAmPI 的掃描，都留下了分析紀錄。
+   - 接著以 `strict-1` 掃描 Juice Shop 的 path 參數規格時，量測中途失敗：只留下 4 個檔案，沒有分析。
+   - `encoded-params-1` 組沒有執行。所以沒有任何 A/B 的比較，也沒有「沒有越權請求」的靶機端證據。
+2. **Juice Shop 的 reviews 端點會讓靶機崩潰**（隔離的診斷；本機的 `recordings/guard-paths-diagnostic/`，加密）：
+   - 這是直接對 lab 送出的請求，不經平台，不是政策的驗證。映像是 `compose.lab.yaml` 鎖定的 `bkimminich/juice-shop:v20.3.0@sha256:cea5a4af…`。
+   - 對 `/rest/products/{id}/reviews` 送兩個 GET：第一個回 200；第二個沒有得到回應，容器在啟動約 5 秒後以 exit code 1 結束（不是 OOM）。
+   - log 是 `ReferenceError: get is not defined`，堆疊停在 MarsDB 執行 `$where` 的地方（`marsdb/dist/DocumentMatcher.js`）。看起來是例外沒有被接住，Node 的程序隨之結束。
+   - 兩個請求的 path 都不含 `%`，以現行的規則重算也都在 `{id}` 的範圍內，所以 `strict-1` 一樣會轉送。這是靶機本身的行為，不是放寬造成的；但靶機在掃描中途結束時，兩個版本無法在相同的條件下比較。
+   - T16 的掃描沒有碰到這個端點（REST 的規格只有 `/rest/products/search`，spider 只走到靜態資源與 `/ftp`）。之後的規格只要包含它，一般的掃描也會讓靶機中途結束。
+   - 第一次執行時沒有保存靶機的 log，所以還不能確定那次失敗就是這個崩潰。快照 commit（§21.4）改成失敗時先加密保存所有證據，並加上重現原始失敗的 live 測試；兩者都還沒有執行。
+3. **能驗證的範圍有限，殘餘風險多**：
+   - 能驗收的只有鎖定的 Flask／Werkzeug 與 Express 的解析鏈。其他的 URL 模型（會解碼再重組請求的 proxy、去副檔名、IIS／Windows 等）只是探索，不能宣稱安全；分支的計畫保留一個去副檔名的反例。
+   - telemetry 的逐筆紀錄只有 method 與 path，不能單獨證明沒有越權的流量，需要靶機端的獨立證據。
+4. **改動大、牽動多**：policy、status 與 telemetry summary 的格式都要升版，runner、guard 與 worker 必須一起更新。兩個版本都要一直保留，舊的 run 才能照樣解析。
+5. **授權的語意還沒決定**：runner 層級的開關一啟用，所有含佔位的 grant 都會一起放寬，不必管理員重新核准。要全域啟用，還是每個 grant 自己選擇加入，需要使用者決定。
+
+### 21.4 保留的紀錄
+
+- 本機分支 `feat/t33-guard-encoded-params`（沒有推送）：
+  - `9536ce8`：設計與驗收界線的文件。
+  - `124346e`：版本化的 policy、path 的核心與 lab harness。
+  - `d996fc1`、`e107911`：測試與證據的補強。
+  - `41e1901`：暫緩時尚未提交的修改的快照（Juice Shop 崩潰的診斷），未完成、未驗證。
+- 本機的錄製（gitignore，以 Fernet 加密，金鑰是同一個目錄的 `.evidence.key`）：`recordings/guard-paths-attempt-1/`、`recordings/guard-paths-diagnostic/`。
+- 分支與錄製都只在這台電腦上，刪除之後就無法還原。
+
+### 21.5 恢復之前要處理或決定的事
+
+- **Juice Shop 的崩潰**：先以會保存完整證據的 harness 確認第一次失敗的原因。然後決定 A/B 的 Juice Shop 規格是否排除 reviews 端點，或把靶機中途結束當成量測失敗（記錄下來，不算 A/B 的結果）。不能為了讓量測跑完而放寬 guard 的規則或改變預設。
+- **重跑完整的 A/B**：兩個版本都完成，而且有靶機端的證據之後，由使用者決定是否正式啟用，以及要全域啟用還是每個 grant 自己選擇加入。
+- **T30**：依 §21.1，正式的 ground truth 評估排在 T33 之後。T33 暫緩期間有兩種做法，由使用者決定：
+  - 等 T33 完成。
+  - 先以 `strict-1` 進行，把被 guard 擋下的案例另外分類為平台阻擋，不計入掃描器的漏報。
 
 ## 來源
 
