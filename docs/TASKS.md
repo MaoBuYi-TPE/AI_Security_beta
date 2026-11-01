@@ -1374,11 +1374,25 @@
     - 實作在本機分支 `feat/t33-guard-encoded-params`，沒有合併；main 回到 PR #19（`c61a5e8`）。guard 的規則不變（path 含 `%` 一律拒絕）。
     - 卡住的地方：live 的 A/B 在 `strict-1` 組掃描 Juice Shop 時中途失敗，`encoded-params-1` 組沒有執行；隔離的診斷顯示 Juice Shop 的 reviews 端點會讓靶機崩潰（`strict-1` 也會轉送這種請求）。
     - 原因、保留的紀錄與恢復前要處理的事見 `DECISIONS.md` §21.3–§21.5。
-- [ ] T30 建立自製 fixture app 與 ground truth 初稿。
-  - 前置：使用者的決定（2026-11-01）把正式的 ground truth 評估排在 T33 之後。T33 暫緩期間，要等 T33，還是先以 `strict-1` 進行、把被 guard 擋下的案例另外分類為平台阻擋，由使用者決定（`DECISIONS.md` §21.5）。
+- [x] T30 建立自製 fixture app 與 ground truth 初稿。
+  - 前置：使用者的決定（2026-11-01）把正式的 ground truth 評估排在 T33 之後。T33 暫緩期間先以 `strict-1` 進行、把被 guard 擋下的案例另外分類為平台阻擋（使用者 2026-11-01 選定，`DECISIONS.md` §21.5、§22）。
   - DoD：
     - fixture app 可以切換弱點版與修補版，只放在 lab_net。
     - 約 12 個資安案例與 6 個 contract/robustness 案例，都寫好預期行為與確認方式。
+  - 交付（2026-11-01，done）：
+    - 使用者的決定：fixture app 用 stdlib 掛在 guard 映像（不另建映像）；評估基準先用 `strict-1`＋平台阻擋標記；建完跑一次 live 掃描驗證。
+    - 範圍：自製、可切換弱點（insecure）／修補（secure）的靶機，純函式 `handle(mode, request, state)`；12 安全正例＋12 修補負例、6 contract 正例＋6 修補負例，另 1 個平台阻擋案例；事實來源 `cases.py`。
+    - 檔案：
+      - 程式（新增）：`tests/live/fixture_app/`（`__init__`、`model`、`store`、`helpers`、`routes`、`cases`、`common`、`secure`、`insecure`、`app`）。
+      - 測試：`tests/contract/test_fixture_cases.py`（22 個，不連網，逐案例驗證）；`tests/live/test_fixture_zap_live.py`（4 個 live，重用 T16 的量測工具）。
+      - fixture／規格：`tests/fixtures/openapi/fixture-app-openapi3.yml`（登記於 `manifest.json`）。
+      - 接線：`tests/live/lab_support.py` 的 `start_fixture`／`fixture_records`；`Makefile` 的 `test-live-fixture`；`pyproject.toml` 對 `insecure.py` 忽略 S608。
+      - 文件：`DECISIONS.md` §22；`SECURITY_AND_TESTING.md` §5.1.1 案例表；`TOOLS.md` §7.8 量測；`CLAUDE.md` §1／§13；`README.md`、`START_HERE.md`。
+    - DoD 對照：可切換弱點／修補且只在 lab_net（start_fixture）✓；12 安全＋6 contract 案例含預期行為與人工確認方式（§5.1.1）✓。
+    - 實際執行的測試（2026-11-01）：`make lint` ✓、`make typecheck` ✓（438 檔）、`make test-contract` ✓（124）、`make test` ✓；`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture` ✓（4 passed，18 分 07 秒；量測見 `TOOLS.md` §7.8）。
+    - live 結果：弱點版 web 命中 SQLi（40018×3）、反射型 XSS（40012）、開放轉址（20019）與被動的缺 header／CORS；弱點版 api 的 path 參數注入（含 FX-PB-01）全被 guard 以 `PATH_AMBIGUOUS` 平台阻擋；修補版 web 與 api 無任何 active scan 告警（負例對照）。
+    - 沒有依 TDD 的地方（如實記錄）：live 測試依計畫「先量測、再寫斷言」，第一輪量測後確認斷言成立（本次無需調整）。
+    - 後續：指導教授／同學的 ≥20% 人工複核（§5.2）尚未進行；正式 recall/precision 評估與 holdout 跑分排在 T33 之後（T27/T28）。
 
 里程碑證據：第一次走通 API → 真實工具 → 解析 → DB → 查詢的完整閉環，而不只是啟動容器。
 

@@ -301,7 +301,7 @@ make down                          # 停止 app stack 與 db（資料保留在 v
   - `GET /api/v1/scan-profiles` 列出現在可以用的 profile 與規則定義的 hash。
 - **版本與流量（T16）**：每個引擎的 `plan_hash`（實際執行的 plan 的 sha256）與 `profile_definition_sha256`（zap 的規則定義）在 runner 建立容器之前寫入，不收集的 run 也有；`result.guard_traffic` 保存 guard 的轉送數、各原因的拒絕數與帶認證的請求被接受／拒絕的數量（guard 的 telemetry 6 小時後刪除，這裡留著）。
 - **憑證失效（T16）**：掃描中途 token 過期時（同一個 operation 先接受、最後被拒絕，或 auth profile 的 preflight 端點被拒絕），coverage 的 `limitations` 有 `AUTHENTICATION_LOST`；平台不重新登入。
-- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 13 分鐘；只掃 live lab 網路上的小型網站）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-lab`（約 27 分鐘；Juice Shop 與 VAmPI，結果見 `docs/TOOLS.md` §7.7）。
+- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 13 分鐘；只掃 live lab 網路上的小型網站）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-lab`（約 27 分鐘；Juice Shop 與 VAmPI，結果見 `docs/TOOLS.md` §7.7）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture`（自製的 fixture app 弱點版與修補版，量測 ground truth，結果見 `docs/TOOLS.md` §7.8）。
 - 設計見 `docs/DECISIONS.md` §18、§19、§20；量測與規則的審查見 `docs/TOOLS.md` §7。
 
 #### 隔離 lab 靶場（T03）

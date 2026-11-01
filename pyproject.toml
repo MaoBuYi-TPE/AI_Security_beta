@@ -57,6 +57,9 @@ allowed-confusables = ["，", "：", "；", "（", "）", "！", "？", "／"]
 [tool.ruff.lint.per-file-ignores]
 # S105/S106：測試用的假密碼（真實秘密只在 .env 與執行期產生，fixture 另有防洩密測試）。
 "tests/**/*.py" = ["S101", "S105", "S106"]
+# insecure.py 是 T30 自製 fixture app 的弱點版靶機（只在隔離的 lab_net 執行）：
+# S608 的 SQL 字串拼接正是要量測的注入弱點，不是程式缺陷。
+"tests/live/fixture_app/insecure.py" = ["S608"]
 # spikes/ 是 T03 一次性探查腳本（在容器內以 mitmproxy/python 執行，不屬於 src）。
 # 需要 stdout 輸出（T201）與在隔離 lab_net 綁 0.0.0.0（S104）。不納入 mypy。
 # N802/N815：BaseHTTPRequestHandler 要求 do_GET 等固定命名。

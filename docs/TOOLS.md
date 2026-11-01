@@ -320,3 +320,22 @@ M2 的 `make test-live-runner`：42 passed（5 分 41 秒），撤銷授權的 s
 - **Juice Shop 的認證**：`/rest/user/whoami` 只看 cookie（帶 bearer 也回 `{"user":{}}`）；`/api/Cards`、`/api/Addresss`、`/rest/basket/1`、`/api/Users` 以 Authorization 驗證（匿名 401）。
 - **VAmPI 的 token**：`tokentimetolive` 過期之後 `/me`、`POST /books/v1`、`GET /books/v1/{title}` 回 401，`/books/v1`、`/users/v1` 照樣 200。資料庫要先 `GET /createdb`（清空重建，grant 排除它）。
 - **速率**：實際約 1.5 req/s（2 req/s 的上限，ZAP 單執行緒）；沒有任何 run 用盡預算。
+
+### 7.8 T30：自製 fixture app 的真實掃描（`make test-live-fixture`，2026-11-01）
+
+靶機：自製的 fixture app（`tests/live/fixture_app/`），跑在 guard 映像的 python（stdlib，不需另建映像或靶機映像），由測試在 live 自己的 lab 網路上以固定 IP 啟動（一次一個，弱點版與修補版依序）。web 用 `web_active_lab`、`allow_all_paths`、GET/HEAD/POST；api 用 `api_active_lab`，grant 是規格的 path、GET/HEAD/POST，bearer 用種子 token。strict-1（預設）。
+
+**4 passed，18 分 07 秒；跑完沒有殘留的容器、volume、網路。** 每個 run 的 `plan_hash` 是 sha256、profile 定義與 `/scan-profiles` 相同、`traffic_verified=true`、guard 只看到 target、每個觀察的 (method, path) 都是 guard 為這個 run 轉送過的請求。
+
+| 情境 | 秒 | 轉送／回應 | guard 拒絕 | 407 | 觀察 | 報告 | ZAP／靶機記憶體峰值 |
+|---|---|---|---|---|---|---|---|
+| 弱點版 web | 381 | 700／699 | `PATH_AMBIGUOUS` 16 | 43 | 23 | 46,322 B | 650／16 MiB |
+| 弱點版 api | 204 | 162／162 | `PATH_AMBIGUOUS` 322、`PATH_NOT_AUTHORIZED` 28 | 181 | 11 | 13,820 B | 707／16 MiB |
+| 修補版 web | 278 | 512／512 | 0 | 34 | 4 | 10,434 B | 678／14 MiB |
+| 修補版 api | 200 | 162／162 | `PATH_AMBIGUOUS` 322、`PATH_NOT_AUTHORIZED` 28 | 181 | 1 | 3,208 B | 724／15 MiB |
+
+- **弱點版 web（23 個觀察）**：主動命中 **SQL Injection 40018×3**（`/search` 的 q、`/login` 的 user/pass）、**Reflected XSS 40012×1**（`/greet` 的 name）、**External Redirect 20019×1**（`/go` 的 next）；被動命中缺 CSP 10038×2、CORS `*` 10098×5、缺 X-Content-Type-Options 10021×5、缺 Anti-clickjacking 10020×2。另外命中超出 12 個列舉案例的 CRLF Injection 40003×1、Path Traversal 6×1、Absence of Anti-CSRF Tokens 10202×1（如實記錄，不改變計數）。
+- **弱點版 api（11 個觀察）**：只有被動的 CORS 10098×5、缺 X-Content-Type-Options 10021×5 與 10111。path 參數注入的探測（`/api/orders/{id}`、`/api/users/{id}`、`/users/{username}` 的 `%27`、`%00`、`%22` 等共 322 個）全被 guard 以 **`PATH_AMBIGUOUS`** 擋下 ＝ **平台阻擋**（含 T30-FX-PB-01 的 path SQLi）；coverage 量到 6／6 eligible／observed／authenticated。BOLA、mass assignment、過度資料暴露（FX-10～12）不在 ZAP 能力範圍：GET 已轉送、以人工確認（案例表 §5.1.1）。
+- **修補版（負例對照）**：web 與 api 都 **沒有任何 active scan 規則的告警**（web 4 個、api 1 個觀察，全是 passive／informational）。修補版 web 只剩 10055（CSP 指令不完整的 passive 提醒）、10202、10111；修補版 api 因為補了安全 header，連 CORS 與 XCTO 都不再出現，只剩 10111。
+- **contract/robustness（C1–C6）**：ZAP 不評契約；以 `tests/contract/test_fixture_cases.py` 與人工確認弱點版回 500、修補版回 400／405。
+- **對照（弱點 vs 修補）**：同一組掃描在弱點版有主動注入與設定告警、修補版清零，構成乾淨的正例／負例對照；strict-1 下 path 參數注入一律平台阻擋，與 §20.7 的 VAmPI 一致。

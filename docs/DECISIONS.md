@@ -2021,6 +2021,38 @@ T16 讓平台以真的 ZAP 掃描兩個標準靶機（OWASP Juice Shop v20.3.0�
   - 等 T33 完成。
   - 先以 `strict-1` 進行，把被 guard 擋下的案例另外分類為平台阻擋，不計入掃描器的漏報。
 
+## 22. T30：自製 fixture app 與 ground truth 初稿（strict-1 進行，2026-11-01）
+
+依 §21.5 的兩個選項，使用者（2026-11-01）決定：**T33 暫緩期間，T30 先以 `strict-1` 進行，把被 guard 擋下的案例另記為「平台阻擋」，不計入掃描器的漏報**。正式的 ground truth 指標評估（recall/precision）仍依 §21.1 排在 T33 之後，不在 T30 範圍（屬 T27/T28）。
+
+### 22.1 fixture app 的形態
+
+- **自製、可切換弱點版（insecure）與修補版（secure）的靶機**，放在 `tests/live/fixture_app/`，只在隔離的 lab_net 上執行，只為量測服務（`SECURITY_AND_TESTING.md` §5.1）。
+- **跑在既有的 guard 映像的 python（stdlib）**，以 bind-mount 掛入、`python3 -I -B -u -c` 設好 `sys.path` 後匯入（比照 `tests/live/zap_site.py`）。不另建映像、不鎖新 digest、不改 `compose.yaml`／`.dockerignore`／`test_deployment.py`。弱點／修補以啟動參數切換（沿用 VAmPI `vulnerable=1|0` 的慣例）。
+- 處理邏輯是純函式 `handle(mode, request, state) -> Response`，由薄的 `http.server` 外殼呼叫，所以單元測試不開 socket（pytest-socket）就能逐案例驗證（`tests/contract/test_fixture_cases.py`）。
+- 弱點的實作集中在 `insecure.py`；SQL 字串拼接對 ruff 的 S608 於 pyproject 對該檔忽略（這正是要量測的注入，不是程式缺陷）。
+
+### 22.2 案例集與可達性
+
+- 依 §5.1：12 個安全正例（＋12 個修補負例）、6 個 contract/robustness 正例（＋6 個修補負例），事實來源是 `cases.py`，與 `SECURITY_AND_TESTING.md` §5.1 的案例表、OpenAPI 規格三者對齊。
+- **多數安全正例放在 query／form／body／header／cookie**（strict-1 下 guard 可達）：query SQLi、反射型 XSS、表單 SQLi、錯誤訊息洩漏、缺安全 header、CORS `*`、cookie 旗標、開放轉址、敏感檔案、BOLA（數字 id 路徑段）、mass assignment、過度資料暴露。
+- **平台阻擋（另記、不計入上面 12）**：path 參數的 SQL 注入（`/users/{username}`）的探測需要 path 中的 `%27`，strict-1 下 guard 以 `PATH_AMBIGUOUS` 擋下（§15.10、§20.7），探測不會到達靶機。這和 §20.7 把 VAmPI 的 path SQLi 當成平台漏報（而非 ZAP 漏報）的處理一致；T33 的 `encoded-params-1` 放寬後此案例才可達。
+- 標記依 §5.2：由本人以修補 diff／重現／程式測試標記；保留約 25% 為 holdout（在案例表標明、凍結）；指導教授／同學抽樣複核 ≥20% 列為後續人工步驟與效度威脅（未在 T30 內完成）。
+
+### 22.3 驗證與量測
+
+- live：`make test-live-fixture`（弱點版與修補版各跑一次 web 與 api 掃描）。每個 run 的 plan_hash、profile 定義、guard 流量明細與「observed ⊆ forwarded」「guard 只看到 target」等不變條件沿用 T16 的量測工具。量測見 `TOOLS.md` §7.8。
+- 修補版是負例的對照組：active scan 規則不應有告警。
+- 不連網的單元/contract 測試（`test_fixture_cases.py`）逐案例驗證弱點版呈現、修補版修正。
+
+### 22.4 殘餘風險與不在範圍
+
+- 正式指標評估（recall/precision、holdout 跑分）排在 T33 之後。
+- path 編碼案例在 strict-1 下無法量測命中，只能證明「平台阻擋」；T33 放寬後補量。
+- Nuclei／Schemathesis 對這些案例的偵測在 M4/M6。
+- 人工複核（§5.2 的 ≥20% 抽樣）尚未進行。
+- 不涵蓋 HTTPS。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。

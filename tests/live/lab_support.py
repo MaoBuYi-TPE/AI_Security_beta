@@ -22,8 +22,16 @@ LAB_FILE = Path(__file__).resolve().parents[2] / "compose.lab.yaml"
 PREFIX = "secscan-live-lab-"
 JUICE_SHOP_IP = "10.89.10.220"
 VAMPI_IP = "10.89.10.221"
+# T30 自製 fixture app：lab 網路上半段還沒被 .210/.211/.220/.221 佔用的位址。
+FIXTURE_IP = "10.89.10.222"
 JUICE_SHOP_PORT = 3000
 VAMPI_PORT = 5000
+FIXTURE_PORT = 8080
+# fixture app 跑在 guard 映像的 python（stdlib）：把套件唯讀掛進去、以 -c 設好 sys.path 後匯入。
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixture_app"
+_FIXTURE_LAUNCH = (
+    "import sys; sys.path.insert(0, '/site'); from fixture_app.app import main; main()"
+)
 # compose.lab.yaml 的預設（掃描中途不會過期）。
 LONG_TOKEN_SECONDS = 3600
 # Juice Shop 的種子使用者（data/static/users.yml，customer）；VAmPI 的種子使用者（/createdb）。
@@ -128,6 +136,56 @@ def start_vampi(*, vulnerable: bool, token_seconds: int = LONG_TOKEN_SECONDS) ->
     status, _ = lab_call(target, "GET", "/createdb")
     assert status == 200, status
     return target
+
+
+def start_fixture(*, vulnerable: bool) -> Target:
+    """T30 自製 fixture app（弱點版或修補版）；掛在 guard 映像的 python 上，只接 lab 網路。"""
+    kind = "fixture-vuln" if vulnerable else "fixture-secure"
+    target = Target(f"{PREFIX}{kind}", _host(kind), FIXTURE_IP, FIXTURE_PORT)
+    docker("rm", "-f", target.container, check=False)
+    docker(
+        "run",
+        "-d",
+        "--name",
+        target.container,
+        "--network",
+        LAB_NET,
+        "--ip",
+        target.ip,
+        "--network-alias",
+        target.host,
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--pids-limit",
+        "256",
+        "--memory",
+        "256m",
+        "--entrypoint",
+        "python3",
+        "-v",
+        f"{FIXTURE_DIR}:/site/fixture_app:ro",
+        GUARD_IMAGE,
+        "-I",
+        "-B",
+        "-u",
+        "-c",
+        _FIXTURE_LAUNCH,
+        target.host,
+        str(target.port),
+        "1" if vulnerable else "0",
+    )
+    wait_for(lambda: '"ready": true' in docker("logs", target.container), timeout=30, interval=1)
+    return target
+
+
+def fixture_records(target: Target) -> list[dict[str, Any]]:
+    """fixture app 每個請求輸出一行 JSON 收包證據（排除 ready 那一行）。"""
+    lines = docker("logs", target.container).splitlines()
+    records = [json.loads(line) for line in lines if line.startswith("{")]
+    return [record for record in records if "ready" not in record]
 
 
 def stop_target(target: Target) -> None:

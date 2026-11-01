@@ -18,6 +18,15 @@
       "masking": "登入回應 example 中的範例 JWT → REDACTED_JWT（與 spikes/t03/mask_fixture.py 相同的樣式），其他位元組不變",
       "source": "T03 的輸入 runs/spike-t03/inputs/vampi-openapi3.yml（raw_sha256 與 inputs 相同）；上游為 VAmPI 的 openapi_specs/openapi3.yml（MIT，docs/SOURCES.md S26）",
       "added_by": "T07"
+    },
+    {
+      "path": "openapi/fixture-app-openapi3.yml",
+      "sha256": "cbf1725b1fd0efd99191e4e3561b4bc6cc5043f5d9b8f6b547f066ec6f6aefe0",
+      "raw_sha256": "cbf1725b1fd0efd99191e4e3561b4bc6cc5043f5d9b8f6b547f066ec6f6aefe0",
+      "redactions": 0,
+      "masking": "無（自製規格，未遮罩；不含任何秘密）",
+      "source": "自製：T30 的 fixture app（tests/live/fixture_app）的 API 表面；只在 lab_net 執行",
+      "added_by": "T30"
     }
   ],
   "nuclei_templates": {
