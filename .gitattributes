@@ -1,2 +1,5 @@
 # fixture 是真實工具輸出，視為二進位，不做行尾正規化或 diff 改寫。
 tests/fixtures/** -text
+
+# Nuclei 凍結清單：固定 LF，讓 sha256（TEMPLATES_LOCK_SHA256）在各平台一致，不被 CRLF 轉換破壞。
+src/secscan/scanners/domain/nuclei/templates.lock.txt text eol=lf

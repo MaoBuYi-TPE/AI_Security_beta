@@ -304,6 +304,14 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 13 分鐘；只掃 live lab 網路上的小型網站）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-lab`（約 27 分鐘；Juice Shop 與 VAmPI，結果見 `docs/TOOLS.md` §7.7）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture`（自製的 fixture app 弱點版與修補版，量測 ground truth，結果見 `docs/TOOLS.md` §7.8）。
 - 設計見 `docs/DECISIONS.md` §18、§19、§20；量測與規則的審查見 `docs/TOOLS.md` §7。
 
+#### Nuclei 模板凍結（T17）
+
+M4 的第一步，只凍結「清單與執行設定」；Adapter、JSONL parser 與 e2e 在 T18（在那之前 `nuclei` 仍回 422）。
+
+- **凍結清單**：`src/secscan/scanners/domain/nuclei/templates.lock.txt`（42 個精選、對準 lab 的純 HTTP 模板，每行 `id sha256 path`；多協定／會改 Host 的模板由內容閘門排除）；policy 與執行旗標在同目錄的 `policy.py`。
+- **產生**：`make nuclei-templates`（需要 OrbStack）驗證鎖定 archive 的 sha256、在鎖定映像裡**離線**（`--network none`）跑 `nuclei -tl` 列舉、算每檔 sha256，寫出 lock。**不連任何目標、不出網**。`make nuclei-templates-check` 逐位元組重現驗證。
+- 選取方式、逐類別審查與高風險抽查見 `docs/TOOLS.md` §2.1、`docs/DECISIONS.md` §23。
+
 #### 隔離 lab 靶場（T03）
 
 需要先啟動 OrbStack（`orb start`）。lab 只接 internal network、不發布任何 port：

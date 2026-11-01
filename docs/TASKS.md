@@ -1400,11 +1400,31 @@
 
 前置：M3。去重的單元測試可以提早進行。
 
-- [ ] T17 凍結 Nuclei 的 HTTP 模板清單與執行設定。
+- [x] T17 凍結 Nuclei 的 HTTP 模板清單與執行設定。
   - DoD：
     - 依 tag/類型產生 ID 清單，記錄 release、hash 與 ID。
     - 以類別為單位審查，並抽查高風險模板。
     - 使用 `-ni -duc -pt http`；禁用 code/headless/dos 模板、OAST 與雲端上傳。
+  - 交付（2026-11-01，done）：
+    - 範圍：只凍結「清單與執行設定」，作為 T18（Adapter、JSONL parser、e2e）的基礎。**不**把 nuclei 加入 `AVAILABLE_ENGINES`（仍回 422）、不做 parser／ExecutionPlan／`/scan-profiles` 揭露／DB 約束放寬（全在 T18）。設計與取捨見 `DECISIONS.md` §23。
+    - 使用者本輪決定：範圍採精選、對準 lab；本輪離線產生真清單並提交；列舉以 `nuclei -tl` 為準。
+    - 檔案：
+      - 程式：`src/secscan/scanners/domain/nuclei/`（`selection.py` 純函式、`policy.py` 常數與清單、`templates.lock.txt` 凍結清單、`__init__.py`）。
+      - 工具：`tools/freeze_nuclei_templates.py`（src/ 之外的產生器；ruff 對 `tools/**` 忽略 S603/S607/T201）。
+      - 測試：`tests/unit/scanners/nuclei/{test_selection,test_policy}.py`、`tests/live/test_nuclei_templates_live.py`（gated）；`tests/contract/test_fixture_manifest.py` 擴充讀驗 `nuclei_templates`。
+      - 設定與文件：`tests/fixtures/manifest.json`（`nuclei_templates.frozen_list`）、`Makefile`（`nuclei-templates`、`nuclei-templates-check`）、`pyproject.toml`（per-file-ignore）、`TOOLS.md` §2.1、`DECISIONS.md` §23、`CLAUDE.md`、`README.md`、`START_HERE.md`、`SECURITY_AND_TESTING.md`。
+    - 做法與選取：整包 v10.5.0 有 14,036 個 yaml；即使過濾，misconfiguration／exposures／technologies 仍各數百～千個，且多為本 lab 不存在的產品模板（雜訊、吃預算）。因此比照 ZAP 的 `WEB_RULES`，**以類別審查後精選 42 個**通用＋對準 lab 技術棧的模板，型別（http／非 OAST）由 `nuclei -tl -pt http -ni` 驗證，並以內容閘門（`selection.template_violations`）排除多協定／危險 tag 模板。
+    - DoD 對照：
+      - **依 tag/類型產生 ID 清單，記錄 release、hash 與 ID**：產生器驗證 archive sha256（`80fbabce…`）→ 離線跑 `nuclei -tl`（`-pt http -ni -duc`）→ 讀 id、過內容閘門、算每檔 sha256，寫 `templates.lock.txt`（`id sha256 path`）。release `v10.5.0`、commit `f8b8b8d…`、lock sha256 `1d97a256…`、定義 sha256（含每檔 sha256）`504ac80c…` 都登錄在 `policy.py` 與 `manifest.json`，契約測試交叉核對（含映像 digest）。
+      - **以類別為單位審查，並抽查高風險**：42 個分 5 類（exposures 8／miscellaneous 15／misconfiguration 4／technologies 9／vulnerabilities-generic 6），逐類別理由、每個模板的 method／guard 相容性與高風險抽查見 `TOOLS.md` §2.1；主動探測標在 `ACTIVE_PROBE_TEMPLATE_IDS`，和 ZAP active scan 同類、只對已核准 grant 的 lab 執行。**最終類別簽核由使用者確認（效度威脅）**。
+      - **`-ni -duc -pt http`；禁用 code/headless/dos/OAST/雲端**：`FROZEN_FLAGS = -ni -duc -pt http -jsonl -silent`；`-ni` 另排除 OAST；code／headless／file／fuzz 預設不載入；清單裡無 dos。`test_policy.py` 斷言這些、且禁用旗標不出現、每個模板都是 http 且在允許類別。
+    - 實際執行：
+      - TDD：先寫 `test_selection.py` 確認 RED（`ModuleNotFoundError`），再實作 `selection.py` → GREEN。`test_policy.py` 驗證已產生的清單。
+      - 產生：`make nuclei-templates` 實跑，archive sha256 相符、42 個模板、類別分布如上；`make nuclei-templates-check` 與 gated live 測試逐位元組重現。清單的 tech-detect、flask-detect 等 sha256 與 spike 的 `templates.lock.txt` 一致（佐證解壓無竄改）。
+      - 檢查：`make test`、`make lint`、`make typecheck`、`make test-contract`、`pre-commit run --all-files` 皆通過。
+    - 審查（code-reviewer＋security-reviewer，2026-11-01）：各 0 CRITICAL、1 HIGH。HIGH 相同——初版 46 個中 3 個（`cookies-without-httponly`／`-secure`、`directory-listing`）內嵌 `javascript:`／`flow:`，`-pt http` 擋不住、測試只看路徑抓不到。已修：移除這 3 個與 `host-header-injection`（改 Host，guard 一律擋）→ 42 個；加內容閘門（`template_violations`）＋對應測試；補 selection 的重複/路徑穿越防護與更強斷言（相等鎖 `FROZEN_FLAGS`、`reconcile` 標籤、行號）；定義 hash 改含每檔 sha256；加 `ACTIVE_PROBE_TEMPLATE_IDS`、映像 digest 契約斷言、lock 的 `.gitattributes` LF、產生器錯誤/逾時/資源限制。
+    - 限制／效度威脅：單人審查，最終類別簽核待使用者確認；完整性鏈為「自我證明」（獨立驗證靠 gated live `--check` 以鎖定 archive 重新推導＋程式審查）；清單對準 lab，不追求 Nuclei 全面覆蓋；lock 檔若隨 wheel 打包需在 T18 確認 package-data。
+    - 給 T18（含審查提出的 DoD）：以 `policy.load_templates()`／`INCLUDE_TEMPLATE_IDS` 取清單、`FROZEN_FLAGS` 組 ExecutionPlan（`-id`、`-sf` 的 `domains` 完全比對）、`nuclei_definition_sha256()` 供報告揭露；凍結速率/並行（`-rl`/`-c 1`…）；濾掉 guard 合成的 403 拒絕回應（以 `X-Secscan-Guard`，否則 negative-matcher 模板會誤報）；加 `-dut`＋掛載前逐檔 sha256 驗證、只掛凍結的檔；遮罩涵蓋 `extracted-results`/`response`；註冊 nuclei 時放寬 `profile_definition_valid` 的 `engine='zap'` 限制。
 - [ ] T18 實作 Nuclei Adapter、JSONL Parser 與真實 e2e。
   - DoD：空檔、壞行、重複、非零退出、取消、timeout 都有明確定義；零告警與失敗可以區分。
 - [ ] T19 實作 Observation/Finding、rule_groups、mapping 版本與保守的 fingerprint。

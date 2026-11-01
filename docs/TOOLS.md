@@ -33,7 +33,29 @@
 
 - release **v10.5.0**（2026-10-05），tag commit `f8b8b8dcd70d93826c3767e1829ef8243af9f03b`。
 - 壓縮檔 sha256 `80fbabceca095fac40afecc7f023748df22b9576b9ff10a4422bd2fbf81f9a41`，解壓 14,036 個 yaml。
-- 本 spike 選用 20 個 HTTP、info/low 模板（清單與各自 sha256 見 `spikes/t03/nuclei/templates.lock.txt`），皆無 `unsafe`/OAST 外呼。**這不是 T17 的凍結清單**，只是 spike 用的小集合。
+- spike（T03）曾選用 20 個 HTTP、info/low 模板驗證流程（`spikes/t03/nuclei/templates.lock.txt`），皆無 `unsafe`/OAST 外呼；那不是凍結清單，只是 spike 的小集合。
+
+### 2.1 T17 凍結清單（精選、對準 lab）
+
+- 清單：`src/secscan/scanners/domain/nuclei/templates.lock.txt`（每行 `id sha256 path`）；policy 在同目錄的 `policy.py`；產生器 `tools/freeze_nuclei_templates.py`（`make nuclei-templates`）；provenance 登錄在 `tests/fixtures/manifest.json` 的 `nuclei_templates`。理由見 `DECISIONS.md` §23。
+- 產生方式：驗證 archive sha256 → 乾淨解壓 → 在鎖定映像裡**離線**（`--network none`）跑 `nuclei -tl -id <清單> -pt http -ni -duc`，再對每個模板過**內容閘門**（排除含 `javascript`／`flow`／`code`／`tcp`… 等非 http／多協定頂層鍵或 `fuzz`／`dast`／`dos`／`oast` tag 的模板；`-pt http` 擋不住多協定模板），算每檔 sha256。不連任何目標、不出網（開發動作，比照 `make images`）。
+- 規模：**42 個模板**（初版 46，審查移除 3 個含 `javascript:` 的 cookie／目錄列舉模板與 1 個會改 Host 的 `host-header-injection`，見 `DECISIONS.md` §23）。lock sha256 `1d97a25695a25bd5130a37beb5fb1e78988eed541456ed4be702171f1ecefc81`；定義 sha256（release／commit／旗標／每個 id·sha256·path 的 canonical JSON）`504ac80c34da54738903d4937d770cc618d4514f53b2d05cd7ed1579ac061469`。
+- 執行設定：`-ni -duc -pt http -jsonl -silent`（T18 的 ExecutionPlan 以此組裝，每個 run 另加 `-id`／`-sf`／`-p`／`-o`／`-u` 與凍結速率/並行）。`-ni` 同時排除 OAST 類模板；code／headless／file／fuzz 在 nuclei 預設不載入。`-sf` 的 `domains` 完全比對 host:port（§6、S36）。
+
+逐類別審查（DoD：以類別為單位審查、抽查高風險）：
+
+| 類別 | 數量 | 選入（代表模板） | method／guard 相容性與高風險抽查 |
+|---|---|---|---|
+| exposures | 8 | openapi、swagger-api、wadl-api、wsdl-api、git-config、git-exposure、phpinfo-files、ds-store-file | 多為 GET 讀取偵測；wadl-api 另送 OPTIONS |
+| miscellaneous | 15 | robots／sitemap／security.txt、dir-listing、options-method、http-trace、clientaccesspolicy、email／卡號／版權年份外洩偵測等 | options-method 送 OPTIONS、http-trace 送 TRACE（grant 不允許 TRACE 時為平台阻擋）；directory-listing 因 flow 腳本（非純 http）被內容閘門移除，改用 dir-listing |
+| misconfiguration | 4 | http-missing-security-headers、missing-cookie-samesite-strict、xss-deprecated-header、exposed-docker-api | 皆 GET；http-missing-security-headers 是 negative matcher，T18 須濾掉 guard 的 403 拒絕回應以免誤報；HttpOnly／Secure 旗標的模板用 javascript 協定被移除，改由 ZAP 被動規則涵蓋 |
+| technologies | 9 | tech-detect、fingerprinthub、favicon、waf-detect、flask-detect、werkzeug-debugger-detect、angular-detect、express-default-page、graphql-detect | 多為 GET；**waf-detect 送 POST /（帶 `<script>` 測試字串）、graphql-detect 送 POST 到多個候選 path（introspection）**，需 grant 允許 POST |
+| vulnerabilities/generic | 6 | cors-misconfig、crlf-injection-generic、error-based-sql-injection、xss-uri-reflected、open-redirect-generic、generic-env | 主動探測（`ACTIVE_PROBE_TEMPLATE_IDS`），和 ZAP active scan 同類、只對已核准 grant 的 lab 執行；strict-1 下帶 % 的 path 探測多被 `PATH_AMBIGUOUS` 擋（xss-uri-reflected 全擋、open-redirect 82/94 擋） |
+
+- 內容閘門與移除：`-pt http` 擋不住多協定模板，因此產生時以 `selection.template_violations` 讀全文把關；初版的 `cookies-without-httponly`／`-secure`、`directory-listing`（含 `javascript:`／`flow:`）與 `host-header-injection`（改 Host，guard 一律 `ORIGIN_MISMATCH`）在審查後移除。
+- 多來源（M4）：Nuclei 與 ZAP 疊同一問題（SQLi/XSS/CRLF/open-redirect/CORS）目前是**候選假設**；strict-1 的 guard 會擋掉多數帶 % 的 path 探測，實際可達性與重疊待 T18 量測後如實記載（見 `DECISIONS.md` §23.4）。
+- 重現性：`make nuclei-templates-check`（或 `ENABLE_LIVE_LAB_TESTS=1` 下的 `tests/live/test_nuclei_templates_live.py`）重跑列舉並與已提交的 lock 逐位元組比對。
+- 範圍限制：只收對準 lab 的通用＋技術棧模板，不含本 lab 不存在的特定產品模板；最終類別簽核由使用者確認（效度威脅，見 `DECISIONS.md` §23.4）。
 
 ## 3. 網路拓撲與隔離（DoD：直連必須失敗）
 

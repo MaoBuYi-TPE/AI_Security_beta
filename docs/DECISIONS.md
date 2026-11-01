@@ -2053,6 +2053,42 @@ T16 讓平台以真的 ZAP 掃描兩個標準靶機（OWASP Juice Shop v20.3.0�
 - 人工複核（§5.2 的 ≥20% 抽樣）尚未進行。
 - 不涵蓋 HTTPS。
 
+## 23. T17：凍結 Nuclei 的 HTTP 模板清單與執行設定（2026-11-01）
+
+M4 的第一步。只凍結「清單與執行設定」，作為 T18（Adapter、JSONL parser、e2e）、T19（rule group、OWASP、fingerprint）的資料基礎。使用者（2026-11-01）決定：範圍採**精選、對準 lab**；本輪**離線產生真清單並提交**；列舉以 **`nuclei -tl`** 為準。
+
+### 23.1 選取方式：精選的 template id 白名單（對 §2 row20／§4 的落實與細化）
+
+- 既有決定（§2 row 20、§4）是「依 tag/類型產生固定 template ID 清單，以類別為單位審查」。實測整包 v10.5.0 有 14,036 個 yaml；即使只取 http 偵測類別、再以 severity／tag 過濾，misconfiguration 仍有 552、exposures 711、technologies 1,157，且**多數是本 lab 不存在的特定產品模板**（WordPress、Jenkins…），對 Juice Shop／VAmPI／fixture 跑起來只是雜訊，也吃掉共享預算（2 req/s、5,000 次、25 分鐘）。
+- 因此這裡把該決定**細化**為：比照 ZAP 的規則白名單（`zap/policy.py` 的 `WEB_RULES`／`API_RULES`），**以類別為單位人工審查後，精選對任何 HTTP 應用都適用的通用模板，加上對準 lab 技術棧的辨識模板**。型別判斷（只收 http、排除 OAST）交給 nuclei 自己：產生器以 `nuclei -tl -id <清單> -pt http -ni -duc` 列舉並驗證（比照 ZAP probe「以工具實際行為為準」）。這不是推翻決定，而是在「精選、對準 lab」的範圍下把「數千個無法逐一審查」落到可逐條審查的規模。
+- 結果：**42 個模板**，5 類：exposures(8)、miscellaneous(15)、misconfiguration(4)、technologies(9)、vulnerabilities/generic(6)。涵蓋安全 header／cookie SameSite／CORS／方法／目錄列舉／robots·security.txt／API 規格暴露／git·phpinfo·.DS_Store 暴露、通用與技術棧辨識（tech-detect、flask、werkzeug-debugger、angular、express…），以及會和 ZAP 主動規則**刻意重疊**的通用主動探測（SQLi、反射 XSS、CRLF、open redirect、CORS），作為 M4「同一問題多來源」的候選。清單與逐類別審查見 `TOOLS.md` §2.1。
+- 初版曾選 46 個；code-reviewer 與 security-reviewer（2026-11-01）發現其中 3 個（`cookies-without-httponly`／`-secure`、`directory-listing`）內嵌 nuclei 的 `javascript:`／`flow:` 區塊，`-pt http` 擋不住（nuclei 以第一個協定歸類），違反「只收 http、禁 code／非 http 協定」（CLAUDE.md §7）；另 `host-header-injection` 會把 Host 改成隨機值，guard 一律 `ORIGIN_MISMATCH` 擋下、永遠無訊號（和 ZAP 排除「會改 Host 的規則」一致）。這 4 個移除後為 42 個，並加上內容閘門（§23.3）讓此規則落實在程式與測試。
+
+### 23.2 凍結的形態與產生
+
+- 清單存成 `src/secscan/scanners/domain/nuclei/templates.lock.txt`，每行 `id sha256 path`（沿用 spike `templates.lock.txt` 的格式）。這是 **src/ 下第一個簽入的資料檔**，因清單太大不宜寫成 Python tuple，以大小正當化。
+- 守衛（比照 `runner/domain/policy.py` 的 `ArgumentDigest`／`*_SHA256`）：`policy.py` 以 `INCLUDE_TEMPLATE_IDS`（依類別分組、逐條註記）為白名單，`TEMPLATES_LOCK_SHA256` 固定 lock 檔雜湊，`nuclei_definition_sha256()` 以 release／commit／旗標與**每個模板的 id/sha256/path**（含每檔雜湊，內容或路徑一改就變）的 canonical JSON 產生定義雜湊（比照 `zap_definition_sha256`，供 T18 的報告揭露）。`tests/unit/scanners/nuclei/test_policy.py` 與 `tests/contract/test_fixture_manifest.py` 交叉核對 policy 常數、lock 檔與 `manifest.json` 三者一致（含映像 digest）。
+- 產生器 `tools/freeze_nuclei_templates.py`（src/ 之外的 dev／維運工具，不納入 mypy／coverage／import-linter）：驗證鎖定 archive 的 sha256（`80fbabce…`）→以 digest 確認／拉取鎖定映像→乾淨重新解壓→在鎖定映像裡**離線（`--network none`）**跑 `nuclei -tl`→讀頂層 id、算每檔 sha256、與 `INCLUDE` 對帳→寫 lock。`--check` 模式逐位元組重現驗證（`make nuclei-templates-check`、`tests/live/test_nuclei_templates_live.py`）。**全程不連任何目標、不出網**，屬開發動作（比照 `make images`）。
+
+### 23.3 執行設定與禁用
+
+- `FROZEN_FLAGS = -ni -duc -pt http -jsonl -silent`（T18 的 ExecutionPlan 以此組裝，每個 run 另加 `-id`／`-sf`／`-p`／`-o`／`-u` 與凍結的速率/並行）。`-ni` 同時關閉 interactsh 並**排除 OAST 類模板**；`-pt http` 只收 http；code／headless／file／fuzz 在 nuclei 預設就不載入。型別過濾 `TYPE_FILTER`（`-ni -duc -pt http`）是 `FROZEN_FLAGS` 與產生器 `nuclei -tl` 共用的同一份，避免手抄不一致。
+- **內容閘門**（`selection.template_violations`）：`-pt http` 擋不住「多協定」模板（nuclei 以第一個協定歸類，實測 `-ept javascript` 也無效），所以產生 lock 時另外讀每個模板全文，排除含 `flow`／`javascript`／`code`／`tcp`／`dns`… 等非 http／多協定頂層鍵、或 `fuzz`／`dast`／`dos`／`oast`／`intrusive` tag 的模板。產生器對任何違規即 fail-closed，`test_selection.py` 以 YAML 片段測閘門邏輯。這就是初版 3 個 JS 模板被攔下的機制。
+- `-sf` 的 `domains` 用**完全比對 host:port**，不用未錨定、會子字串命中的 `domains-regex`（`TOOLS.md` §6、S36）；此為 T18 組 secret 檔時落實，`policy.py` 已註記。
+
+### 23.4 人工審查、主動探測與 guard 下的可達性
+
+- 由 Claude 以類別為單位做第一手審查與高風險抽查，紀錄於 `TOOLS.md` §2.1；**最終類別簽核屬使用者**（單人作業，列為效度威脅，比照 §22 T30）。
+- `ACTIVE_PROBE_TEMPLATE_IDS` 明列會送探測 payload 或 crafted POST 的模板（6 個 generic-vuln 加 `graphql-detect`、`waf-detect`），和 ZAP 的 active scan 同一類、需 grant 明確允許對應 method，只對已核准的 lab 靶機執行；供 T18 區分、日後可組被動子集。
+- **guard 下的實際可達性（安全審查量化，列為限制）**：strict-1 下帶 `%` 的 path 探測多半被 `PATH_AMBIGUOUS` 擋下（`xss-uri-reflected` 兩條全擋、`open-redirect-generic` 82/94 擋、`crlf-injection-generic` 6/8 擋）；`http-trace` 的 TRACE、`graphql-detect`／`waf-detect` 的 POST 在只允許 GET 的 grant 下會被 guard 擋。因此「Nuclei 疊 ZAP／fixture 做多來源」目前是**候選假設、待 T18 量測**，不是已知事實；部分在 T33 放寬編碼後才可達（比照 §22 的「平台阻擋」）。
+
+### 23.5 T17／T18 邊界與殘餘風險
+
+- **不在 T17**：把 `Engine.NUCLEI` 加入 `AVAILABLE_ENGINES`（nuclei 維持回 422，§13.1）、`ENGINE_IMAGES`／`ENGINE_POLICIES`／worker 的註冊、`plan_nuclei_run`、JSONL parser、`/scan-profiles` 揭露 nuclei、`profile_definition_valid` DB 約束放寬（目前綁 `engine='zap'`，`scans/models.py`）。以上全在 T18。
+- **T18 DoD（審查提出，記在這裡）**：(1) 凍結速率與並行（`-rl` 不超過 guard 速率、`-c 1`、`-bs 1`、`-retries 0`、`-timeout`），nuclei 預設 150 rps/25 並行，對上 guard 2 req/s 會產生大量 `RATE_LIMITED` 403。(2) **濾掉 guard 的合成拒絕回應**：negative-matcher 模板（如 `http-missing-security-headers`）會把 guard 的 403（無安全 header）誤報成目標缺陷（已重現 10 筆假 finding）；T18 以 `X-Secscan-Guard`（guard 會清掉上游偽造的同名 header）丟棄這些結果，並加 fixture 測試。(3) 載入前加 `-dut`（disable-unsigned-templates，46/46 檔都有 PD 簽章）並在掛載前逐檔驗證 sha256、只掛這些檔（不掛整棵樹）。(4) 遮罩（SEC-14）涵蓋 `extracted-results`、`request`／`response`／`curl-command`（`email-extractor`、`credit-card-number-detect` 的輸出就是被擷取字串）。
+- lock 檔若要隨 wheel 打包（runner 在容器內讀），需在 T18 確認 package-data 設定（目前自 src 樹讀取可用）。
+- 殘餘：完整性鏈是「自我證明」的（協調改動 lock＋常數＋manifest 不會被離線測試抓到，真正的獨立驗證是 gated live `--check` 以鎖定 archive 重新推導，加上程式審查）；單人審查；清單對準 lab、不追求 Nuclei 全面覆蓋；預算對 Nuclei 的分配在 M4 後續依量測調整（§16.4）。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。

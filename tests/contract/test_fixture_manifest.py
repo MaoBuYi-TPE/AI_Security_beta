@@ -19,7 +19,10 @@ from pathlib import Path
 
 import pytest
 
+from secscan.scanners.domain.nuclei import policy as nuclei_policy
+
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures"
+REPO_ROOT = FIXTURES_DIR.parents[1]
 MANIFEST_PATH = FIXTURES_DIR / "manifest.json"
 DATA_SUFFIXES = {".json", ".jsonl", ".ndjson", ".xml", ".log"}
 
@@ -159,3 +162,44 @@ def test_openapi_fixtures_have_no_secrets(entry: dict[str, str]) -> None:
     assert not JWT_RE.search(text)
     assert not PRIVATE_KEY_RE.search(text)
     assert not USERINFO_RE.search(text)
+
+
+# --- T17 的 Nuclei 凍結模板清單（provenance 帳本；和 policy.py 與 lock 檔交叉核對）---------------
+
+
+def _nuclei_block() -> dict[str, object]:
+    block: dict[str, object] = _manifest()["nuclei_templates"]  # type: ignore[assignment]
+    return block
+
+
+def test_nuclei_release_matches_policy() -> None:
+    block = _nuclei_block()
+    assert block["release"] == nuclei_policy.TEMPLATE_RELEASE
+    assert block["commit"] == nuclei_policy.TEMPLATE_COMMIT
+    assert block["archive_sha256"] == nuclei_policy.TEMPLATE_ARCHIVE_SHA256
+
+
+def test_nuclei_image_digest_matches_policy() -> None:
+    # policy 手抄的映像 digest 必須和 manifest 的 nuclei fixture（T03 記錄的）一致。
+    digests = {entry["image_digest"] for entry in _entries() if entry["tool"] == "nuclei"}
+    assert digests, "manifest 沒有 nuclei fixture"
+    for digest in digests:
+        assert digest in str(nuclei_policy.NUCLEI_IMAGE), digest
+
+
+def test_nuclei_frozen_list_matches_lock_file_and_policy() -> None:
+    frozen: dict[str, object] = _nuclei_block()["frozen_list"]  # type: ignore[assignment]
+
+    lock_path = REPO_ROOT / str(frozen["path"])
+    assert lock_path.is_file(), frozen["path"]
+    digest = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+
+    # manifest 的 lock_sha256、policy 的常數、lock 檔實際內容三者必須一致（任一改動都被抓到）。
+    assert digest == frozen["lock_sha256"]
+    assert digest == nuclei_policy.TEMPLATES_LOCK_SHA256
+    assert frozen["definition_sha256"] == nuclei_policy.nuclei_definition_sha256()
+    assert frozen["template_count"] == len(nuclei_policy.load_templates())
+    categories = frozen["selected_categories"]
+    assert isinstance(categories, list)
+    assert sorted(map(str, categories)) == sorted(nuclei_policy.ALLOWED_CATEGORIES)
+    assert frozen["added_by"] == "T17"

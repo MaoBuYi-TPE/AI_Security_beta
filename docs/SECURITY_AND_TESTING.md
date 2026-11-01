@@ -256,7 +256,7 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；Nuclei 的 JSONL、Schemathesis 的輸出與報告的 Markdown 在 M4 之後。
 - **SEC-14**：T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；Nuclei、Schemathesis 的輸出與報告中的 token 在 M4 之後，不標成完成。
 - **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
-- **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。模板的 allowlist 在 M4（Nuclei）加入。
+- **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。Nuclei 模板的 allowlist 已在 **T17** 凍結（清單＋每檔 sha256＋`-ni -duc -pt http` 等執行設定，`DECISIONS.md` §23；清單外的模板一律不執行）；T18 把凍結的 `-id` 清單接進 ExecutionPlan 並由 launcher 強制。
 - **SEC-18**：T10 涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；T15 涵蓋遮罩的兩階段與 worker 只讀 manifest 列出的檔案；artifact 的下載在 M5。
 - **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
 - **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method`（`DECISIONS.md` §15.10 的取捨；T14 的小型網站沒有這個欄位，T16 以真的靶機量測）。path 中的 `%`：T14 的 live 量測中，ZAP 對 path 參數的攻擊有 83% 以 `PATH_AMBIGUOUS` 被拒（`TOOLS.md` §7.5），維持 fail closed，覆蓋的缺口在 T16 量化。
