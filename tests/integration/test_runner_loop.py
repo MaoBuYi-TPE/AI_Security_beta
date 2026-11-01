@@ -20,6 +20,7 @@ from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript
 from secscan.scanners.domain.instances import InstanceRole
+from secscan.scanners.domain.nuclei.policy import NUCLEI_IMAGE
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.scanners.service import Fleet
 from secscan.scans.domain.lifecycle import RunStatus
@@ -66,11 +67,12 @@ def clock() -> FakeClock:
 
 @pytest.fixture
 def runtime(clock: FakeClock) -> FakeContainerRuntime:
-    """這裡測的是 fake 的迴圈：沒有 zap 的映像，就不會建立 zap 的 probe 容器（probe 與迴圈的
-    互動見 test_runner_loop_probe.py）。
+    """這裡測的是 fake 的迴圈：沒有 zap、nuclei 的映像，就不會建立它們的 probe 容器（probe 與
+    迴圈的互動見 test_runner_loop_probe.py）。
     """
     runtime = FakeContainerRuntime(clock=clock)
     del runtime.images[str(ZAP_IMAGE)]
+    del runtime.images[str(NUCLEI_IMAGE)]
     return runtime
 
 
@@ -142,12 +144,13 @@ def _runner_loop(
 
 
 def _capabilities(seed: Seeder) -> dict[str, object]:
-    """fake 與 preflight 的能力；zap 沒有映像（上方的 runtime），或和它們一樣是環境的原因。"""
+    """fake 與 preflight 的能力；zap、nuclei 沒有映像，或和它們一樣是環境的原因。"""
     [row] = seed.query("SELECT capabilities FROM runner_instances WHERE role = 'runner'")
     engines: dict[str, dict[str, object]] = dict(row.capabilities["engines"])
-    zap = engines.pop("zap")
-    assert zap["image"] == str(ZAP_IMAGE)
-    assert zap["issue"] in {"IMAGE_MISSING", engines["fake"]["issue"]}
+    for engine, image in (("zap", ZAP_IMAGE), ("nuclei", NUCLEI_IMAGE)):
+        popped = engines.pop(engine)
+        assert popped["image"] == str(image)
+        assert popped["issue"] in {"IMAGE_MISSING", engines["fake"]["issue"]}
     return {"engines": engines}
 
 

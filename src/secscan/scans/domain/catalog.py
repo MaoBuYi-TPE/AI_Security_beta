@@ -37,11 +37,10 @@ ENGINE_ORDER: tuple[Engine, ...] = (
 SELECTABLE_ENGINES: tuple[Engine, ...] = tuple(
     engine for engine in ENGINE_ORDER if engine is not Engine.PREFLIGHT
 )
-AVAILABLE_ENGINES: frozenset[Engine] = frozenset({Engine.FAKE, Engine.ZAP})
+AVAILABLE_ENGINES: frozenset[Engine] = frozenset({Engine.FAKE, Engine.ZAP, Engine.NUCLEI})
 _UNAVAILABLE_REASONS: Mapping[Engine, str] = MappingProxyType(
     {
         Engine.PREFLIGHT: "preflight 不能指定：綁定 auth profile 時由平台自動加入",
-        Engine.NUCLEI: "nuclei 的 Adapter 在 M4（T18）整合之後才能使用",
         Engine.SCHEMATHESIS: "schemathesis 是 P1，M6 整合之後才能使用",
     }
 )

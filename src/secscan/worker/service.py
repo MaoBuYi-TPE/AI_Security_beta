@@ -37,10 +37,11 @@ from secscan.scans.domain.observation import RunOutcome
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, RunReport, ScanQueue
 from secscan.worker.artifacts import ArtifactReader
+from secscan.worker.nuclei import NucleiParser
 from secscan.worker.telemetry import TelemetryReader
 from secscan.worker.zap import ZapParser
 
-ENGINES = frozenset({Engine.FAKE, Engine.PREFLIGHT, Engine.ZAP})
+ENGINES = frozenset({Engine.FAKE, Engine.PREFLIGHT, Engine.ZAP, Engine.NUCLEI})
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class Worker:
         self._engines = engines
         self._monotonic = monotonic
         self._zap = ZapParser(queue, artifacts, telemetry)
+        self._nuclei = NucleiParser(queue, artifacts, telemetry)
 
     def drain(
         self,
@@ -108,6 +110,8 @@ class Worker:
             self._queue.record_preflight(lease, self._preflight(lease))
         elif lease.engine is Engine.ZAP:
             outcome = self._zap.parse(lease, keepalive)
+        elif lease.engine is Engine.NUCLEI:
+            outcome = self._nuclei.parse(lease, keepalive)
         keepalive()
         self._coverage(lease)
         keepalive()

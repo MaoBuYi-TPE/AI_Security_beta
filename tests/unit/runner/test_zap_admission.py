@@ -492,8 +492,8 @@ def test_zap_collects_the_automation_framework_exit_codes() -> None:
     assert ENGINE_POLICIES[Engine.PREFLIGHT].collect_exit_codes == frozenset({0})
 
 
-def test_only_zap_outputs_are_masked() -> None:
-    """preflight 存原始的 HTTP 回應（§16.5）：遮罩會讓 Content-Length 不符（§19.5）。"""
+def test_the_result_engines_mask_their_outputs() -> None:
+    """結果引擎（ZAP、nuclei）遮罩輸出；preflight 存原始 HTTP 回應（§16.5、§19.5）、不遮。"""
     masked = {engine for engine, policy in ENGINE_POLICIES.items() if policy.redact_outputs}
 
-    assert masked == {Engine.ZAP}
+    assert masked == {Engine.ZAP, Engine.NUCLEI}

@@ -87,8 +87,12 @@ _FIXED_HOST_CONFIG: Mapping[str, JsonValue] = MappingProxyType(
 # 檢查不會跟著一起放行（審查發現）。改動時兩邊都要改，test_container_spec.py 會核對。
 # tmpfs 也一樣：組 body 用引擎政策的 scratch，檢查用這裡的字面值（test_zap_admission.py 核對）。
 _REQUIRED_TMPFS: Mapping[Engine, Mapping[str, str]] = MappingProxyType(
-    # 容器內的 tmpfs（每個容器各自一份），不是宿主的暫存目錄。
-    {Engine.ZAP: MappingProxyType({"/tmp": "rw,noexec,nosuid,nodev,size=768m,mode=1777"})}  # noqa: S108
+    # 容器內的 tmpfs（每個容器各自一份），不是宿主的暫存目錄。字面值刻意和引擎政策的 scratch 重複：
+    # 組 body 用 scratch，送出前的檢查用這裡，任一邊寫錯另一邊擋下（test_*_admission.py 核對）。
+    {
+        Engine.ZAP: MappingProxyType({"/tmp": "rw,noexec,nosuid,nodev,size=768m,mode=1777"}),  # noqa: S108
+        Engine.NUCLEI: MappingProxyType({"/tmp": "rw,noexec,nosuid,nodev,size=256m,mode=1777"}),  # noqa: S108
+    }
 )
 _REQUIRED_HOST_CONFIG: Mapping[str, JsonValue] = MappingProxyType(
     {

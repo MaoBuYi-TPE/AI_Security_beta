@@ -807,7 +807,7 @@ def test_engines_without_a_planner_are_rejected_before_recording_a_container(
     world: World,
     scannable: Scannable,
 ) -> None:
-    """沒有 plan 的引擎（nuclei 在 M4）不能拿到其他引擎的映像與指令（審查發現）。"""
+    """沒有 plan 的引擎（schemathesis 在 M6）不能拿到其他引擎的映像與指令（審查發現）。"""
     with Session(queue_engine, expire_on_commit=False) as session, session.begin():
         ScanRepository(session).create(
             NewScan(
@@ -819,7 +819,7 @@ def test_engines_without_a_planner_are_rejected_before_recording_a_container(
                 auth=None,
                 profile=ScanProfile.API_ACTIVE_LAB,
                 budget=scannable.grant.budget,
-                runs=plan_runs((ScanEngine.NUCLEI,), available=frozenset(ScanEngine)),
+                runs=plan_runs((ScanEngine.SCHEMATHESIS,), available=frozenset(ScanEngine)),
                 operations=(),
                 idempotency_key=uuid4().hex,
                 request_sha256=bytes(32),
@@ -827,7 +827,7 @@ def test_engines_without_a_planner_are_rejected_before_recording_a_container(
             )
         )
 
-    report = make_runner().run_once(frozenset({ScanEngine.NUCLEI}))
+    report = make_runner().run_once(frozenset({ScanEngine.SCHEMATHESIS}))
 
     assert report is not None
     assert (report.run_status, report.scan_status) == (R.FAILED, S.FAILED)

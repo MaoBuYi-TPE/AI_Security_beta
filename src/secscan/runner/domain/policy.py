@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from secscan.runner.domain.inputs import AutomationPlan, ContentDigest
+from secscan.scanners.domain.nuclei.policy import load_templates, template_input_name
 from secscan.scanners.domain.plan import ResourceLimits
 from secscan.scans.domain.catalog import Engine
 
@@ -166,6 +167,39 @@ _ZAP_PLAN = AutomationPlan(
 # 最大的輸入是正規化之後的規格（specs.domain.openapi.MAX_DOCUMENT_BYTES）。
 _ZAP_MAX_INPUT_BYTES = 2 * 1024 * 1024
 
+# T03 鎖定的 nuclei（docs/TOOLS.md §1）：映像的 digest 在這裡另外寫一次（獨立白名單，不引用
+# scanners 的建構；test_nuclei_admission.py 核對與 nuclei.policy.NUCLEI_IMAGE 一致）。
+_NUCLEI = (
+    "projectdiscovery/nuclei:v3.11.1"
+    "@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb"
+)
+# 凍結的 42 個模板以 InputFile 掛進 /scan/in：名稱與每檔內容的 sha256 由 lock 守衛（lock 本身的
+# sha256 等於 TEMPLATES_LOCK_SHA256，test_policy.py 核對；此處再以 ContentDigest 逐檔獨立驗一次）。
+_NUCLEI_TEMPLATES = load_templates()
+_NUCLEI_INPUT_NAMES = frozenset(template_input_name(t) for t in _NUCLEI_TEMPLATES)
+_NUCLEI_INPUT_RULES: Mapping[str, InputRule] = MappingProxyType(
+    {template_input_name(t): ContentDigest(t.sha256) for t in _NUCLEI_TEMPLATES}
+)
+# 最大的模板是 fingerprinthub-web-fingerprints（約 326 KB）。
+_NUCLEI_MAX_INPUT_BYTES = 512 * 1024
+# 目標 origin（只 http，P0）、速率（1-9999 req/s）與每請求逾時（1-9999 秒）。
+_NUCLEI_URL = ArgumentPattern(r"http://[a-z0-9][a-z0-9.\-]{0,251}(?::[0-9]{1,5})?")
+_NUCLEI_BOUNDED_INT = ArgumentPattern(r"[1-9][0-9]{0,3}")
+# nuclei 的指令參數（順序與 scanners.domain.nuclei.plan.plan_nuclei_run 一致；逐旗標比對）。
+_NUCLEI_ARGUMENTS: tuple[ArgumentRule, ...] = (
+    "-ni", "-duc", "-pt", "http", "-jsonl", "-silent",
+    "-dut",
+    "-t", "/scan/in",
+    "-p", "/scan/secret/proxy-url",
+    "-o", "/scan/out/results.jsonl",
+    "-rl", _NUCLEI_BOUNDED_INT,
+    "-c", "1",
+    "-bs", "1",
+    "-retries", "0",
+    "-timeout", _NUCLEI_BOUNDED_INT,
+    "-u", _NUCLEI_URL,
+)  # fmt: skip
+
 ENGINE_POLICIES: Mapping[Engine, EnginePolicy] = MappingProxyType(
     {
         Engine.ZAP: EnginePolicy(
@@ -214,6 +248,28 @@ ENGINE_POLICIES: Mapping[Engine, EnginePolicy] = MappingProxyType(
             # 容器內的 tmpfs（ZAP 的 home 與 JVM 的暫存），不是宿主的暫存目錄。
             scratch=MappingProxyType({"/tmp": "rw,noexec,nosuid,nodev,size=768m,mode=1777"}),  # noqa: S108
             collect_exit_codes=frozenset({0, 1, 2}),
+            redact_outputs=True,
+        ),
+        Engine.NUCLEI: EnginePolicy(
+            images=frozenset({_NUCLEI}),
+            # 直接以 nuclei 為 entrypoint，逐旗標比對（參數見 _NUCLEI_ARGUMENTS）。
+            commands=(CommandTemplate(("nuclei",), _NUCLEI_ARGUMENTS, auth_environment=None),),
+            # nuclei 的 config/cache 寫到 HOME；唯讀 rootfs 下指向 /tmp 的 tmpfs（非機密）。
+            environment=MappingProxyType({"HOME": ArgumentPattern(r"/tmp")}),  # noqa: S108
+            input_names=_NUCLEI_INPUT_NAMES,
+            input_rules=_NUCLEI_INPUT_RULES,
+            max_input_bytes=_NUCLEI_MAX_INPUT_BYTES,
+            # 目標 secret 的 -sf 注入留待後續：本輪匿名掃描，proxy 一律經 /scan/secret/proxy-url。
+            accepts_target_auth=False,
+            max_limits=ResourceLimits(
+                memory_bytes=2 * 1024 * 1024 * 1024,
+                nano_cpus=2_000_000_000,
+                pids=1024,
+                wall_clock_seconds=1_500,
+            ),
+            # 容器內的 tmpfs（nuclei 的 HOME）；admission._REQUIRED_TMPFS 另寫一份字面值核對。
+            scratch=MappingProxyType({"/tmp": "rw,noexec,nosuid,nodev,size=256m,mode=1777"}),  # noqa: S108
+            collect_exit_codes=frozenset({0}),
             redact_outputs=True,
         ),
         Engine.PREFLIGHT: EnginePolicy(

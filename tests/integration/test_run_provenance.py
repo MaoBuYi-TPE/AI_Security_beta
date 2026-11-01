@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript
+from secscan.scanners.domain.nuclei.policy import NUCLEI_IMAGE, nuclei_definition_sha256
 from secscan.scanners.domain.profiles import zap_definition_sha256
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.scans.domain.catalog import Engine as ScanEngine
@@ -46,6 +47,7 @@ pytestmark = pytest.mark.integration
 
 OWNER = "runner-provenance"
 ZAP = frozenset({ScanEngine.ZAP})
+NUCLEI = frozenset({ScanEngine.NUCLEI})
 SHA = "ab" * 32
 
 
@@ -146,6 +148,24 @@ def test_the_runner_records_what_it_executed(
     assert row.plan_hash is not None
     assert len(row.plan_hash) == 64
     assert row.profile_definition_sha256 == zap_definition_sha256(ScanProfile.WEB_ACTIVE_LAB)
+
+
+def test_a_nuclei_run_records_its_frozen_definition(
+    make_runner: Callable[[], ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+) -> None:
+    # T18：放寬 profile_definition_valid 之後，nuclei 的 run 也記下整份凍結清單的定義 sha256。
+    runtime.scripted[str(NUCLEI_IMAGE)] = ScriptedContainer(seconds=5, exit_code=0)
+    _web_scan(queue_seed, world, engine=ScanEngine.NUCLEI)
+
+    report = make_runner().run_once(NUCLEI)
+
+    assert report is not None
+    row = _provenance(queue_seed, report.run_id)
+    assert row.plan_hash is not None
+    assert row.profile_definition_sha256 == nuclei_definition_sha256()
 
 
 def test_an_uncollected_run_keeps_its_version(
@@ -337,9 +357,10 @@ def test_only_container_runs_have_a_plan(
     assert error.diag.constraint_name == "ck_scanner_runs_plan_hash_valid"
 
 
-def test_only_zap_runs_have_a_profile_definition(
+def test_non_result_engines_have_no_profile_definition(
     queue: ScanQueue, queue_seed: Seeder, world: World, queue_engine: Engine
 ) -> None:
+    # 規則定義只屬於結果引擎（zap、nuclei）；fake 這類不產出發現的引擎不得有定義。
     run_id = _running(queue, queue_seed, world, ScanEngine.FAKE)
 
     with Session(queue_engine) as session:

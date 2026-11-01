@@ -11,6 +11,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from secscan.scanners.domain.instances import EngineStatus
+from secscan.scanners.domain.nuclei.policy import (
+    INCLUDE_TEMPLATE_IDS,
+    NUCLEI_VERSION,
+    nuclei_definition_sha256,
+)
 from secscan.scanners.domain.zap.policy import (
     ACTIVE_SCAN_RULES,
     DEFAULT_STRENGTH,
@@ -61,19 +66,33 @@ def _view(profile: ScanProfile, rule: ProfileRule, usable: Sequence[EngineStatus
 
 
 def _engine(profile: ScanProfile, status: EngineStatus) -> ProfileEngine:
-    is_zap = status.engine is Engine.ZAP
+    if status.engine is Engine.ZAP:
+        rule_count: int | None = len(ACTIVE_SCAN_RULES[profile])
+        definition: str | None = zap_definition_sha256(profile)
+        version = status.version
+    elif status.engine is Engine.NUCLEI:
+        # 可用性以環境探測（映像存在）判定，不跑容器探測：版本以鎖定的 NUCLEI_VERSION 揭露。
+        rule_count = len(INCLUDE_TEMPLATE_IDS)
+        definition = nuclei_definition_sha256()
+        version = NUCLEI_VERSION
+    else:
+        rule_count = definition = None
+        version = status.version
     return ProfileEngine(
         engine=status.engine,
-        version=status.version,
+        version=version,
         image=status.image,
-        rule_count=len(ACTIVE_SCAN_RULES[profile]) if is_zap else None,
-        definition_sha256=zap_definition_sha256(profile) if is_zap else None,
+        rule_count=rule_count,
+        definition_sha256=definition,
         grant_requirements=_grant_requirements(status.engine, profile),
     )
 
 
 def _grant_requirements(engine: Engine, profile: ScanProfile) -> tuple[str, ...]:
     if engine is Engine.ZAP and profile is ScanProfile.WEB_ACTIVE_LAB:
+        return (f"GET {WEB_SEED_PATH}",)
+    if engine is Engine.NUCLEI:
+        # nuclei 從 origin 根開始探測（凍結模板多為 GET 偵測；active-probe 需 grant 允許 POST）。
         return (f"GET {WEB_SEED_PATH}",)
     return ()
 

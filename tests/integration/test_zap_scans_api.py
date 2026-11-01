@@ -106,8 +106,9 @@ def test_a_viewer_cannot_create_a_zap_scan(
     assert response.status_code == 403
 
 
-def test_nuclei_is_still_refused(api_client: TestClient, seed: Seeder, world: World) -> None:
-    body = {**_api_body(seed.scannable(world)), "engines": ["nuclei"]}
+def test_schemathesis_is_still_refused(api_client: TestClient, seed: Seeder, world: World) -> None:
+    # nuclei 已於 T18 整合、可受理；schemathesis（M6）仍未整合。
+    body = {**_api_body(seed.scannable(world)), "engines": ["schemathesis"]}
 
     response = _create(api_client, world.operator_a, body)
 

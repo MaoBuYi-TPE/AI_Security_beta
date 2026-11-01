@@ -369,7 +369,8 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
         ),
         CheckConstraint(
             "profile_definition_sha256 IS NULL "
-            f"OR (profile_definition_sha256 ~ '{_SHA256_HEX}' AND engine = '{Engine.ZAP.value}' "
+            f"OR (profile_definition_sha256 ~ '{_SHA256_HEX}' "
+            f"AND engine IN ('{Engine.ZAP.value}', '{Engine.NUCLEI.value}') "
             "AND plan_hash IS NOT NULL)",
             name="profile_definition_valid",
         ),

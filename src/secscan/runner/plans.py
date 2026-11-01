@@ -16,6 +16,15 @@ from types import MappingProxyType
 from secscan.runner.domain.admission import PlanRejectedError, PlanRejection
 from secscan.runner.egress import RunEgress
 from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript, plan_fake_run
+from secscan.scanners.domain.nuclei.plan import (
+    NucleiBudget,
+    NucleiPlanError,
+    plan_nuclei_run,
+)
+from secscan.scanners.domain.nuclei.plan import (
+    PlanWindowTooSmallError as NucleiWindowTooSmall,
+)
+from secscan.scanners.domain.nuclei.policy import NUCLEI_IMAGE
 from secscan.scanners.domain.plan import ExecutionPlan, ImageReference
 from secscan.scanners.domain.preflight import PREFLIGHT_IMAGE, plan_preflight_run
 from secscan.scanners.domain.zap.plan import (
@@ -36,7 +45,12 @@ from secscan.specs.domain.tool_document import ToolDocumentError, tool_document
 
 # 有 plan 的引擎與它的映像（prepare 時記下 image_ref）。
 ENGINE_IMAGES: Mapping[Engine, ImageReference] = MappingProxyType(
-    {Engine.FAKE: FAKE_IMAGE, Engine.PREFLIGHT: PREFLIGHT_IMAGE, Engine.ZAP: ZAP_IMAGE}
+    {
+        Engine.FAKE: FAKE_IMAGE,
+        Engine.PREFLIGHT: PREFLIGHT_IMAGE,
+        Engine.ZAP: ZAP_IMAGE,
+        Engine.NUCLEI: NUCLEI_IMAGE,
+    }
 )
 
 
@@ -68,8 +82,30 @@ class RunPlanner:
                 return _preflight(lease, launch)
             case Engine.ZAP:
                 return self._zap(lease, launch)
+            case Engine.NUCLEI:
+                return self._nuclei(lease, launch)
             case _:
                 raise PlanRejectedError(PlanRejection.ENGINE_NOT_ALLOWED)
+
+    def _nuclei(self, lease: Lease, launch: Launch) -> ExecutionPlan:
+        egress = launch.egress
+        if egress is None:
+            raise PlanRejectedError(PlanRejection.ENGINE_NOT_ALLOWED)
+        try:
+            return plan_nuclei_run(
+                run_id=lease.run_id,
+                scan_id=lease.scan_id,
+                origin=egress.origin,
+                budget=NucleiBudget(
+                    requests_per_second=egress.budget.requests_per_second,
+                    remaining_seconds=launch.max_duration_seconds,
+                ),
+            )
+        except NucleiWindowTooSmall:
+            # runner 以 BUDGET_EXHAUSTED 結束（和 ZAP 走同一條 PlanWindowTooSmallError 路徑）。
+            raise PlanWindowTooSmallError("nuclei 的時間不夠") from None
+        except NucleiPlanError:
+            raise PlanRejectedError(PlanRejection.INPUT_NOT_ALLOWED) from None
 
     def _zap(self, lease: Lease, launch: Launch) -> ExecutionPlan:
         egress = launch.egress

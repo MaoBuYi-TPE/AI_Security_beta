@@ -12,6 +12,11 @@ from sqlalchemy.orm import sessionmaker
 
 from secscan.main import create_app
 from secscan.scanners.domain.instances import Capabilities, EngineCapability, InstanceRole
+from secscan.scanners.domain.nuclei.policy import (
+    INCLUDE_TEMPLATE_IDS,
+    NUCLEI_IMAGE,
+    NUCLEI_VERSION,
+)
 from secscan.scanners.domain.zap.policy import API_RULES, WEB_RULES
 from secscan.scanners.service import Fleet
 from secscan.scans.domain.catalog import Engine as ScanEngine
@@ -71,6 +76,28 @@ def test_a_live_runner_lists_what_can_be_used(
     [web_zap] = profiles["web_active_lab"]["engines"]
     assert web_zap["rule_count"] == len(WEB_RULES)
     assert web_zap["grant_requirements"] == ["GET /"]
+
+
+def test_a_live_runner_lists_nuclei_with_its_static_version(
+    client: TestClient, world: World, queue_engine: Engine
+) -> None:
+    # 能力快照沒有版本（不跑容器探測）：/scan-profiles 以鎖定的 NUCLEI_VERSION 揭露。
+    _beat(queue_engine, EngineCapability(ScanEngine.NUCLEI, str(NUCLEI_IMAGE), None))
+
+    body = client.get(PROFILES, headers=world.viewer_a.headers).json()
+
+    profiles = {item["profile"]: item for item in body["data"]}
+    assert set(profiles) == {"api_active_lab", "web_active_lab"}
+    for profile in profiles.values():
+        [nuclei] = profile["engines"]
+        assert (nuclei["engine"], nuclei["version"], nuclei["image"]) == (
+            "nuclei",
+            NUCLEI_VERSION,
+            str(NUCLEI_IMAGE),
+        )
+        assert nuclei["rule_count"] == len(INCLUDE_TEMPLATE_IDS)
+        assert len(nuclei["definition_sha256"]) == 64
+        assert nuclei["grant_requirements"] == ["GET /"]
 
 
 def test_a_key_is_required(client: TestClient) -> None:

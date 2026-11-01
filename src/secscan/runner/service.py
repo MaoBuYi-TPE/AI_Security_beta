@@ -47,10 +47,11 @@ from secscan.runner.guard import GuardChannel, GuardUnavailableError
 from secscan.runner.plans import ENGINE_IMAGES, RunPlanner, secret_files
 from secscan.runner.workspace import ArtifactRejectedError, Workspace, WorkspaceError
 from secscan.scanners.domain.fake import FakeScript
+from secscan.scanners.domain.nuclei.policy import nuclei_definition_sha256
 from secscan.scanners.domain.plan import ExecutionPlan, plan_hash
 from secscan.scanners.domain.profiles import zap_definition_sha256
 from secscan.scanners.domain.zap.plan import PlanWindowTooSmallError
-from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.queue import (
@@ -73,6 +74,15 @@ STOP_GRACE_SECONDS = 5
 POLL_SECONDS = 1.0
 # 連續幾次查不到容器的狀態才放棄（socket-proxy 或 Docker 的暫時錯誤不放棄整個 run）。
 MAX_STATE_FAILURES = 3
+
+
+def _definition_sha256(engine: Engine, profile: ScanProfile | None) -> str | None:
+    """這個 run 執行的規則定義 sha256（§20.2）：ZAP 依 profile，nuclei 是整份凍結清單。"""
+    if engine is Engine.ZAP and profile is not None:
+        return zap_definition_sha256(profile)
+    if engine is Engine.NUCLEI:
+        return nuclei_definition_sha256()
+    return None
 
 
 class _Ending(StrEnum):
@@ -220,14 +230,10 @@ class ContainerRunner:
 
     def _record_plan(self, lease: Lease, launch: Launch, plan: ExecutionPlan) -> None:
         """建立容器之前記下實際執行的內容（§20.2）：之後不收集的 run 也查得到版本。"""
-        profile = launch.scan_profile
-        definition = (
-            zap_definition_sha256(profile)
-            if lease.engine is Engine.ZAP and profile is not None
-            else None
-        )
         self._queue.record_plan(
-            lease, plan_hash=plan_hash(plan), profile_definition_sha256=definition
+            lease,
+            plan_hash=plan_hash(plan),
+            profile_definition_sha256=_definition_sha256(lease.engine, launch.scan_profile),
         )
 
     def _never_started(self, lease: Lease, error_code: RunErrorCode) -> RunReport:

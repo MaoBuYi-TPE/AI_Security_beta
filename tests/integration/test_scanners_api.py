@@ -67,8 +67,9 @@ def test_without_a_runner_nothing_is_available(client: TestClient, world: World)
     body = client.get("/api/v1/scanners", headers=world.viewer_a.headers).json()
 
     engines = _engines(body)
-    assert engines["nuclei"] == {
-        "engine": "nuclei",
+    # schemathesis 仍未整合；zap、nuclei（T18）、fake 都已整合，只是沒有存活的 runner。
+    assert engines["schemathesis"] == {
+        "engine": "schemathesis",
         "integrated": False,
         "available": False,
         "image": None,
@@ -78,6 +79,8 @@ def test_without_a_runner_nothing_is_available(client: TestClient, world: World)
     }
     assert engines["zap"]["integrated"] is True
     assert engines["zap"]["unavailable_reason"] == "RUNNER_UNAVAILABLE"
+    assert engines["nuclei"]["integrated"] is True
+    assert engines["nuclei"]["unavailable_reason"] == "RUNNER_UNAVAILABLE"
     assert engines["fake"]["unavailable_reason"] == "RUNNER_UNAVAILABLE"
     assert body["data"]["runner"] == {"alive": False, "last_heartbeat_at": None}
     assert body["data"]["worker"] == {"alive": False, "last_heartbeat_at": None}

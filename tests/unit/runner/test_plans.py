@@ -101,7 +101,7 @@ def test_every_engine_with_an_image_has_its_own_plan() -> None:
 
 
 def test_engines_without_a_plan_are_refused() -> None:
-    lease = _lease(Engine.NUCLEI)
+    lease = _lease(Engine.SCHEMATHESIS)
 
     assert _rejected(lease, _launch(), str(ZAP_IMAGE)) is PlanRejection.ENGINE_NOT_ALLOWED
 

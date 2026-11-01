@@ -21,6 +21,7 @@ from secscan.runner.domain.runtime import (
     RuntimeUnavailableError,
 )
 from secscan.scanners.domain.fake import FAKE_IMAGE
+from secscan.scanners.domain.nuclei.policy import NUCLEI_IMAGE
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 
 SIGTERM_EXIT = 143
@@ -70,7 +71,11 @@ class FakeContainerRuntime:
         default_factory=lambda: EngineVersion("1.54", "1.40", "linux", "arm64")
     )
     images: dict[str, str] = field(
-        default_factory=lambda: {str(FAKE_IMAGE): "arm64", str(ZAP_IMAGE): "arm64"}
+        default_factory=lambda: {
+            str(FAKE_IMAGE): "arm64",
+            str(ZAP_IMAGE): "arm64",
+            str(NUCLEI_IMAGE): "arm64",
+        }
     )
     networks: dict[str, NetworkState] = field(
         default_factory=lambda: {
