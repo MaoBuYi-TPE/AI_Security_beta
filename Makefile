@@ -243,3 +243,12 @@ test-live-lab: LIVE_TESTS := tests/live/test_lab_zap_live.py
 test-live-lab: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/lab
 test-live-lab: LIVE_PYTEST_ARGS := -s
 test-live-lab: lab-images test-live-runner
+
+# T30（docs/SECURITY_AND_TESTING.md §5）：以真的 ZAP 掃描自製的 fixture app（弱點版與修補版），
+# 量測 ground truth。fixture app 跑在 guard 映像的 python（stdlib），由測試在 live 自己的 lab 網路上
+# 啟動（一次一個；不需要 Juice Shop／VAmPI 映像）。strict-1 下被 guard 擋下的案例另記為平台阻擋
+# （DECISIONS.md §21.5）。量測印在輸出（-s），錄製到 recordings/fixture/<情境>/（gitignore）。
+test-live-fixture: LIVE_TESTS := tests/live/test_fixture_zap_live.py
+test-live-fixture: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture
+test-live-fixture: LIVE_PYTEST_ARGS := -s
+test-live-fixture: test-live-runner

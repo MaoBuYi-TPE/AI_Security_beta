@@ -1,0 +1,173 @@
+openapi: 3.0.3
+info:
+  title: T30 fixture app
+  version: "1.0.0"
+  description: >-
+    自製可切換弱點／修補的 lab 靶機的 API 表面（tests/live/fixture_app）。只在隔離的
+    lab_net 上執行，供掃描器量測 ground truth（docs/SECURITY_AND_TESTING.md §5）。
+    servers 上傳後由平台改綁核准的 origin。
+servers:
+  - url: http://fixture-app.lab/
+paths:
+  /me:
+    get:
+      operationId: getMe
+      summary: auth preflight（帶有效 bearer 回 success）
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: 已認證
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401":
+          description: 未認證
+  /api/users:
+    get:
+      operationId: listUsers
+      summary: 使用者清單
+      responses:
+        "200":
+          description: 使用者陣列
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+    post:
+      operationId: createUser
+      summary: 註冊使用者
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewUser"
+      responses:
+        "201":
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: 輸入錯誤
+  /api/users/{id}:
+    get:
+      operationId: getUser
+      summary: 單一使用者
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 1
+      responses:
+        "200":
+          description: 使用者
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: 找不到
+  /api/orders/{id}:
+    get:
+      operationId: getOrder
+      summary: 單一訂單（需認證；物件層級授權案例）
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 1001
+      responses:
+        "200":
+          description: 訂單
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "404":
+          description: 找不到
+  /users/{username}:
+    get:
+      operationId: getUserByName
+      summary: 以 username 查使用者（path 參數注入案例；strict-1 下 guard 阻擋編碼探測）
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+          example: alice
+      responses:
+        "200":
+          description: 使用者
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: 找不到
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Me:
+      type: object
+      properties:
+        status:
+          type: string
+        username:
+          type: string
+      required:
+        - status
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        email:
+          type: string
+      required:
+        - id
+        - username
+        - email
+    NewUser:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+      required:
+        - username
+        - password
+    Order:
+      type: object
+      properties:
+        id:
+          type: integer
+        owner:
+          type: string
+        item:
+          type: string
+        total_cents:
+          type: integer
+      required:
+        - id
+        - owner
+        - item
+        - total_cents
