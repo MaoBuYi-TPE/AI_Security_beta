@@ -253,10 +253,10 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-01**：「建立或開始掃描被拒」已在 T09 實作並測試：建立 scan 時以 gate 拒絕，排隊中的 scan 在 runner 啟動前（prepare）重新判斷、不通過就 failed。「已執行者停止新出站」在 T13 完成（見下方 T13 與 §4.4）。
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
-- **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；Nuclei 的 JSONL、Schemathesis 的輸出與報告的 Markdown 在 M4 之後。
-- **SEC-14**：T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；Nuclei、Schemathesis 的輸出與報告中的 token 在 M4 之後，不標成完成。
+- **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；**T18 涵蓋 Nuclei 的 JSONL（逐行嚴格解析、壞行整份 OUTPUT_INVALID、大小上限）**；Schemathesis 的輸出與報告的 Markdown 在 M6 之後。
+- **SEC-14**：T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；**T18 完成 Nuclei 的 JSONL 輸出與觀察（runner 以 `SecretMasker` 做位元組級遮罩、parser 以 `redact_text`／`redact_url` 做文字層遮罩，涵蓋 extracted-results／request／response／curl-command，`DECISIONS.md` §24.3）**；Schemathesis 的 token 在 M6 之後，不標成完成。
 - **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
-- **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。Nuclei 模板的 allowlist 已在 **T17** 凍結（清單＋每檔 sha256＋`-ni -duc -pt http` 等執行設定，`DECISIONS.md` §23；清單外的模板一律不執行）；T18 把凍結的 `-id` 清單接進 ExecutionPlan 並由 launcher 強制。
+- **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。Nuclei 模板的 allowlist 已在 **T17** 凍結（清單＋每檔 sha256＋`-ni -duc -pt http` 等執行設定，`DECISIONS.md` §23；清單外的模板一律不執行）；**T18 把凍結的 42 個模板以 InputFile 掛進 `/scan/in`、admission 以每檔 `ContentDigest` 核准（清單外的模板無法掛載，不用 `-id`），並加 `-dut` 只跑簽章模板（§24.2）**。
 - **SEC-18**：T10 涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；T15 涵蓋遮罩的兩階段與 worker 只讀 manifest 列出的檔案；artifact 的下載在 M5。
 - **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
 - **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method`（`DECISIONS.md` §15.10 的取捨；T14 的小型網站沒有這個欄位，T16 以真的靶機量測）。path 中的 `%`：T14 的 live 量測中，ZAP 對 path 參數的攻擊有 83% 以 `PATH_AMBIGUOUS` 被拒（`TOOLS.md` §7.5），維持 fail closed，覆蓋的缺口在 T16 量化。
@@ -288,10 +288,10 @@ T14 已涵蓋（真的 DB 佇列、記憶體中的容器 runtime 模擬 ZAP 的�
 - **退出碼**：0、1、2 收集輸出，manifest 記下退出碼與 plan.yaml 的 hash；64、65、3、143 是 `ENGINE_FAILED` 而且不收集；OOM 是 `RESOURCE_LIMIT_EXCEEDED`。
 - **預算**：剩下的時間（100 秒）或請求數（200 個）不夠 ZAP 執行時不建立容器、`BUDGET_EXHAUSTED`。
 - **取消**：執行中的 zap run 被取消時停止、刪除容器與 secret，run 是 `cancelled`。
-- **runner 的加固**：沒有 plan 的引擎（nuclei）不會拿到其他引擎的 plan、不記下容器與映像。
+- **runner 的加固**：沒有 plan 的引擎（schemathesis）不會拿到其他引擎的 plan、不記下容器與映像。
 - **佇列**：zap 的 api run 在 prepare 時拿到上傳時正規化的文件、base path 與凍結為 eligible 的 operation；web run 與其他引擎沒有規格。
 - **迴圈與 probe**：probe 期間 fake 照常認領、zap 是 `ENGINE_PROBE_PENDING`，runner 停止時刪除執行中的 probe 容器；zap 的 run 等 probe 通過之後才執行，能力記下版本。
-- **API**：T15 起接受 zap 的 scan（nuclei 仍是 422 `ENGINE_UNSUPPORTED`）；zap 的 web profile 而 grant 沒有 `GET /` 是 422 `PROFILE_INCOMPATIBLE`，fake 不受這個規則影響。
+- **API**：T15 起接受 zap、**T18 起接受 nuclei** 的 scan（schemathesis 仍是 422 `ENGINE_UNSUPPORTED`）；zap 的 web profile 而 grant 沒有 `GET /` 是 422 `PROFILE_INCOMPATIBLE`，fake 不受這個規則影響。
 
 T15 已涵蓋（真的 DB）：
 - **schema**：artifacts、observations 的每個 CHECK、唯一約束與複合 FK（不能跨 scan 引用、報告屬於同一個 run）；沒有直接 FK 到 scans；不可修改、刪除或 TRUNCATE；run 的結果欄位一致，run 結束之後被 trigger 凍結。
@@ -422,6 +422,8 @@ crAPI、DVWA 是替代擴充，不增加必要工作量 [S17]。fixture app 只�
 
 自製的 fixture app 在 `tests/live/fixture_app/`（弱點版 insecure＝正例、修補版 secure＝負例，以啟動參數切換；跑在 guard 映像上）。事實來源是 `cases.py`，與這張表、OpenAPI 規格（`tests/fixtures/openapi/fixture-app-openapi3.yml`）三者對齊；不連網的程式測試 `tests/contract/test_fixture_cases.py` 逐案例驗證弱點版呈現、修補版修正。「平台結果」是 2026-11-01 的 live 量測（`make test-live-fixture`；數字見 `docs/TOOLS.md` §7.8）。strict-1 的 guard 只擋 path 中的百分比編碼，被擋下的案例標為「平台阻擋」，不計入掃描器漏報（`DECISIONS.md` §21.5、§22）。holdout 的案例在規則凍結前不使用（§5.2）。
 
+T18 另以真的 nuclei 掃同一個 fixture app（`make test-live-fixture-nuclei`）：弱點版的可利用 CORS（FX-06）由 `cors-misconfig` 命中、修補版不命中，與 ZAP 10098 構成「同一問題多來源」；實跑驗證 plan_hash、與 /scan-profiles 一致的定義、`observed ⊆ forwarded`（guard-403 不誤報）、平台阻擋與共享預算（`DECISIONS.md` §24.5）。錄製到 `recordings/fixture-nuclei/`（gitignore），人工審查後才搬進 fixture。
+
 安全案例（12 個正例＋12 個修補負例）：
 
 | case_id | method／path | auth | 類別（OWASP） | ZAP 能否偵測 | 平台結果 | 人工確認方式 | 修補差異 | holdout |
@@ -431,7 +433,7 @@ crAPI、DVWA 是替代擴充，不增加必要工作量 [S17]。fixture app 只�
 | T30-FX-03 | POST `/login` | anonymous | SQLi（表單 user/pass，A03:2025） | 主動（40018） | **命中**（40018） | `admin'--` 註解掉密碼條件即登入 | 參數化查詢，壞值回 401 |  |
 | T30-FX-04 | GET `/search` | anonymous | 錯誤訊息／堆疊洩漏（A05:2025） | 被動（90022）/人工 | 漏報（無 90022；以 40018 間接命中） | 500 回應 body 含 OperationalError | 錯誤只回一般訊息 | ✓ |
 | T30-FX-05 | GET `/` | anonymous | 缺安全 header／CSP（A05:2025） | 被動（10038、10021） | **命中**（10038、10021、10020） | 回應缺 CSP 與 X-Content-Type-Options | 每個回應補 SECURITY_HEADERS |  |
-| T30-FX-06 | GET `/api/users` | anonymous | CORS 萬用字元（A05:2025） | 被動（10098） | **命中**（10098） | 回應含 `Access-Control-Allow-Origin: *` | 不輸出萬用 CORS |  |
+| T30-FX-06 | GET `/api/users` | anonymous | CORS 反射並帶憑證（A05:2025） | 被動（ZAP 10098）與 nuclei cors-misconfig | **命中**（ZAP 10098、nuclei cors-misconfig） | 反射 Origin 並帶 `Allow-Credentials: true`（可利用） | 不輸出 CORS header |  |
 | T30-FX-07 | POST `/login` | anonymous | Cookie 缺 HttpOnly/Secure（A05:2025） | 被動（10010/10011） | 漏報（spider 未提交登入表單取得 Set-Cookie） | Set-Cookie 缺 HttpOnly、Secure | 補 HttpOnly; Secure; SameSite |  |
 | T30-FX-08 | GET `/go` | anonymous | 開放轉址（query 參數 next，A01:2025） | 主動（20019） | **命中**（20019 External Redirect） | next=外部 URL 回 302 指向外部 | next 僅允許白名單相對路徑 |  |
 | T30-FX-09 | GET `/backup.sql` | anonymous | 敏感檔案暴露（A05:2025） | 主動/人工 | 漏報（無檔案暴露告警，同 Juice Shop /ftp） | 回 200、body 含帳密 | 回 404 | ✓ |

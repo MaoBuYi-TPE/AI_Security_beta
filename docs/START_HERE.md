@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立；`test-live-fixture` 已在 T30 建立；`nuclei-templates`、`nuclei-templates-check` 已在 T17 建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立；`test-live-fixture` 已在 T30 建立；`nuclei-templates`、`nuclei-templates-check` 已在 T17 建立；`test-live-fixture-nuclei` 已在 T18 建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -113,6 +113,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make test-live-fixture | M3（T30 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：以真的 ZAP 掃描自製的 fixture app 弱點版與修補版，量測 ground truth；fixture 跑在 guard 映像上（不需靶機映像），錄製到 `recordings/fixture/`（gitignore）；量測見 `docs/TOOLS.md` §7.8 |
 | make nuclei-templates | M4（T17 已建立） | 需要 OrbStack：驗證鎖定的 nuclei-templates archive（sha256）、在鎖定映像裡離線（`--network none`）跑 `nuclei -tl`，產生 `src/secscan/scanners/domain/nuclei/templates.lock.txt`；不連任何目標、不出網。選取與審查見 `docs/TOOLS.md` §2.1、`docs/DECISIONS.md` §23 |
 | make nuclei-templates-check | M4（T17 已建立） | 重跑列舉並與已提交的 lock 逐位元組比對（重現性；不覆寫） |
+| make test-live-fixture-nuclei | M4（T18 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：以真的 nuclei 掃自製 fixture app 的弱點版與修補版（弱點版 `cors-misconfig` 命中、修補版不命中），驗證端到端整合；跑在 guard 映像上，錄製到 `recordings/fixture-nuclei/`（gitignore） |
 | make record-fixtures | M3（T15 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：只在 live lab 網路重新錄製 ZAP 的輸出到 `recordings/zap/`（gitignore），人工審查之後才搬進 `tests/fixtures/zap/`；約 8 分鐘 |
 | make bench | M5 起 | 透過自己的 API 執行實驗，結果輸出到 benchmarks/results/ |
 

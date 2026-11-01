@@ -40,7 +40,7 @@
 - 清單：`src/secscan/scanners/domain/nuclei/templates.lock.txt`（每行 `id sha256 path`）；policy 在同目錄的 `policy.py`；產生器 `tools/freeze_nuclei_templates.py`（`make nuclei-templates`）；provenance 登錄在 `tests/fixtures/manifest.json` 的 `nuclei_templates`。理由見 `DECISIONS.md` §23。
 - 產生方式：驗證 archive sha256 → 乾淨解壓 → 在鎖定映像裡**離線**（`--network none`）跑 `nuclei -tl -id <清單> -pt http -ni -duc`，再對每個模板過**內容閘門**（排除含 `javascript`／`flow`／`code`／`tcp`… 等非 http／多協定頂層鍵或 `fuzz`／`dast`／`dos`／`oast` tag 的模板；`-pt http` 擋不住多協定模板），算每檔 sha256。不連任何目標、不出網（開發動作，比照 `make images`）。
 - 規模：**42 個模板**（初版 46，審查移除 3 個含 `javascript:` 的 cookie／目錄列舉模板與 1 個會改 Host 的 `host-header-injection`，見 `DECISIONS.md` §23）。lock sha256 `1d97a25695a25bd5130a37beb5fb1e78988eed541456ed4be702171f1ecefc81`；定義 sha256（release／commit／旗標／每個 id·sha256·path 的 canonical JSON）`504ac80c34da54738903d4937d770cc618d4514f53b2d05cd7ed1579ac061469`。
-- 執行設定：`-ni -duc -pt http -jsonl -silent`（T18 的 ExecutionPlan 以此組裝，每個 run 另加 `-id`／`-sf`／`-p`／`-o`／`-u` 與凍結速率/並行）。`-ni` 同時排除 OAST 類模板；code／headless／file／fuzz 在 nuclei 預設不載入。`-sf` 的 `domains` 完全比對 host:port（§6、S36）。
+- 執行設定（T18 的 ExecutionPlan，`scanners/domain/nuclei/plan.py`）：`-ni -duc -pt http -jsonl -silent -dut`，加 `-t /scan/in`（掛載 42 個凍結模板，admission 以每檔 `ContentDigest` 驗、不用 `-id`）、`-p /scan/secret/proxy-url`（proxy 從機密檔讀，不上命令列）、`-o`、`-u <origin>`，與凍結速率/並行（`-rl` 不超過 guard、`-c 1`、`-bs 1`、`-retries 0`、`-timeout 15`）。本輪**匿名**掃描（目標 secret 的 `-sf` 注入延後）；`-ni` 排除 OAST，code／headless／file／fuzz 預設不載入。見 `DECISIONS.md` §24。
 
 逐類別審查（DoD：以類別為單位審查、抽查高風險）：
 
@@ -48,12 +48,12 @@
 |---|---|---|---|
 | exposures | 8 | openapi、swagger-api、wadl-api、wsdl-api、git-config、git-exposure、phpinfo-files、ds-store-file | 多為 GET 讀取偵測；wadl-api 另送 OPTIONS |
 | miscellaneous | 15 | robots／sitemap／security.txt、dir-listing、options-method、http-trace、clientaccesspolicy、email／卡號／版權年份外洩偵測等 | options-method 送 OPTIONS、http-trace 送 TRACE（grant 不允許 TRACE 時為平台阻擋）；directory-listing 因 flow 腳本（非純 http）被內容閘門移除，改用 dir-listing |
-| misconfiguration | 4 | http-missing-security-headers、missing-cookie-samesite-strict、xss-deprecated-header、exposed-docker-api | 皆 GET；http-missing-security-headers 是 negative matcher，T18 須濾掉 guard 的 403 拒絕回應以免誤報；HttpOnly／Secure 旗標的模板用 javascript 協定被移除，改由 ZAP 被動規則涵蓋 |
+| misconfiguration | 4 | http-missing-security-headers、missing-cookie-samesite-strict、xss-deprecated-header、exposed-docker-api | 皆 GET；http-missing-security-headers 是 negative matcher，T18 以回應的 `X-Secscan-Guard` header 濾掉 guard 的 403 以免誤報（e2e 驗證 `observed ⊆ forwarded`）；HttpOnly／Secure 旗標的模板用 javascript 協定被移除，改由 ZAP 被動規則涵蓋 |
 | technologies | 9 | tech-detect、fingerprinthub、favicon、waf-detect、flask-detect、werkzeug-debugger-detect、angular-detect、express-default-page、graphql-detect | 多為 GET；**waf-detect 送 POST /（帶 `<script>` 測試字串）、graphql-detect 送 POST 到多個候選 path（introspection）**，需 grant 允許 POST |
 | vulnerabilities/generic | 6 | cors-misconfig、crlf-injection-generic、error-based-sql-injection、xss-uri-reflected、open-redirect-generic、generic-env | 主動探測（`ACTIVE_PROBE_TEMPLATE_IDS`），和 ZAP active scan 同類、只對已核准 grant 的 lab 執行；strict-1 下帶 % 的 path 探測多被 `PATH_AMBIGUOUS` 擋（xss-uri-reflected 全擋、open-redirect 82/94 擋） |
 
 - 內容閘門與移除：`-pt http` 擋不住多協定模板，因此產生時以 `selection.template_violations` 讀全文把關；初版移除 `cookies-without-httponly`／`-secure`（含 `javascript:`）、`directory-listing`（含 `flow:` 與 `fuzz` tag）與 `host-header-injection`（改 Host，guard 一律 `ORIGIN_MISMATCH`）。
-- 多來源（M4）：Nuclei 與 ZAP 疊同一問題（SQLi/XSS/CRLF/open-redirect/CORS）目前是**候選假設**；strict-1 的 guard 會擋掉多數帶 % 的 path 探測，實際可達性與重疊待 T18 量測後如實記載（見 `DECISIONS.md` §23.4）。
+- 多來源（M4）：T18 的 fixture e2e 已**實證** CORS 由 nuclei `cors-misconfig` 與 ZAP 10098 同時偵測（FX-06，弱點版命中、修補版不命中）。其餘疊同一問題（SQLi/XSS/CRLF/open-redirect）仍是候選：strict-1 的 guard 擋掉多數帶 % 的 path 探測（見 `DECISIONS.md` §23.4、§24.5）。
 - 重現性：`make nuclei-templates-check`（或 `ENABLE_LIVE_LAB_TESTS=1` 下的 `tests/live/test_nuclei_templates_live.py`）重跑列舉並與已提交的 lock 逐位元組比對。
 - 範圍限制：只收對準 lab 的通用＋技術棧模板，不含本 lab 不存在的特定產品模板；最終類別簽核由使用者確認（效度威脅，見 `DECISIONS.md` §23.4）。
 
