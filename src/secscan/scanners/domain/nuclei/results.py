@@ -25,7 +25,7 @@ from secscan.grants.domain.matching import ScopeRules
 from secscan.guard.domain.requests import (
     DENY_MESSAGE,
     GUARD_HEADER,
-    header_key,
+    Reason,
     scope_reason,
     split_target,
 )
@@ -35,6 +35,8 @@ from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.domain.observation import (
     OBSERVATION_METHODS,
     POSITION_MAX_LENGTH,
+    RAW_LEVEL_MAX_LENGTH,
+    RULE_MAX_LENGTH,
     TEXT_MAX_LENGTH,
     TITLE_MAX_LENGTH,
     Exclusion,
@@ -65,6 +67,11 @@ _RAW_CONFIDENCE = "unknown"
 _CONFIDENCE_LABEL = "Unknown"
 _CWE = re.compile(r"CWE-([0-9]{1,7})", re.IGNORECASE)
 _REPORT_UNREADABLE = "report_unreadable"
+# template-id 要存進 source_rule（VARCHAR 64、non-blank）：首字英數，其餘英數與 . _ -。
+_TEMPLATE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# guard 合成回應的標記：名稱精確比對、值為 Reason（guard 只剝除精確名稱）。
+_GUARD_HEADER_LOWER = GUARD_HEADER.lower()
+_GUARD_REASONS = frozenset(reason.value for reason in Reason)
 
 _Answers = frozenset[tuple[str, str]]
 
@@ -118,7 +125,9 @@ class _Collected:
 
 
 def interpret(output: NucleiOutput) -> ParsedRun:
-    if output.exit_code != _SUCCESS and not output.report_listed:
+    # 非零退出（collect_exit_codes={0}）且沒有列出報告 → 引擎失敗；exit_code 讀不到（manifest 壞）
+    # 不算失敗，往下走成 OUTPUT_INVALID（report_unreadable），和 worker/nuclei.py 的文件一致。
+    if output.exit_code is not None and output.exit_code != _SUCCESS and not output.report_listed:
         return ParsedRun(PARSER_VERSION, RunOutcome(RunStatus.FAILED, RunErrorCode.ENGINE_FAILED))
     if output.report is None:
         return _invalid(_REPORT_UNREADABLE)
@@ -144,7 +153,9 @@ def parse_report(raw: bytes) -> tuple[NucleiFinding, ...] | JsonlProblem:
         return JsonlProblem.NOT_JSONL
     findings: list[NucleiFinding] = []
     try:
-        for line in text.splitlines():
+        # 只以 \n 切行（JSONL 的分隔）：不可用 splitlines()，否則目標回應裡的 U+0085／U+2028／
+        # U+2029 會把一行切成兩段、讓整份報告變成不合法（來自目標的位元組，不做 Unicode 斷行）。
+        for line in text.split("\n"):
             if line.strip():
                 findings.append(_finding(_strict_json(line)))
     except _RejectedError:
@@ -181,13 +192,16 @@ def _finding(document: object) -> NucleiFinding:
     top = _object(document)
     if _text(top, "type") != "http":
         raise _RejectedError  # 凍結清單只收 http；其他型別不應出現
+    template_id = _text(top, "template-id")
+    if _TEMPLATE_ID.fullmatch(template_id) is None:
+        raise _RejectedError  # 不合格的識別碼存不進 source_rule（整份判 OUTPUT_INVALID）
     info = _object(top.get("info"))
-    severity = _text(info, "severity")
     name = _text(info, "name")
-    if not name.strip() or not severity.strip():
+    severity = _text(info, "severity")  # 缺 key 由 _text 拒絕；長度在 _observation 截斷
+    if not name.strip():
         raise _RejectedError
     return NucleiFinding(
-        template_id=_text(top, "template-id"),
+        template_id=template_id,
         name=name,
         severity=severity,
         matched_at=_matched_at(top),
@@ -297,13 +311,17 @@ def _exclusion(
 
 
 def _guard_marked(response: str) -> bool:
-    """回應的 header 區塊有沒有 X-Secscan-Guard（guard 合成回應的權威標記）。"""
-    head = response.split("\r\n\r\n", 1)[0].split("\n\n", 1)[0]
-    wanted = header_key(GUARD_HEADER)
-    for line in head.splitlines()[1:]:  # 跳過狀態列
-        name, separator, _ = line.partition(":")
-        if separator and header_key(name.strip()) == wanted:
-            return True
+    """回應的 header 區塊有沒有 X-Secscan-Guard（guard 合成回應的權威標記）。
+
+    只以 \\r?\\n 切 header（不用 splitlines，否則目標在 header 值裡放 U+2028／U+0085 可偽造一行）；
+    名稱精確比對、不折疊 `_`（guard 只剝除名稱精確為 X-Secscan-Guard 的 header，X_Secscan_Guard
+    不會被剝除、也不該被當成標記）；值必須是 Reason（縱深防禦）。
+    """
+    head = re.split(r"\r\n\r\n|\n\n", response, maxsplit=1)[0]
+    for line in re.split(r"\r?\n", head)[1:]:  # 跳過狀態列
+        name, separator, value = line.partition(":")
+        if separator and name.strip().lower() == _GUARD_HEADER_LOWER:
+            return value.strip() in _GUARD_REASONS
     return False
 
 
@@ -312,24 +330,32 @@ def _observation(finding: NucleiFinding, target: str, index: int) -> tuple[Obser
     evidence = redact_text(" ".join(finding.extracted), values=values)
     position = redact_url(target)
     path, _, query = position.partition("?")
-    source_event_id = event_id(finding.template_id, finding.method, position, evidence)
+    # 去重鍵含 variant（matcher/extractor 名稱）：同模板不同 matcher 是不同發現，不可當重複丟掉。
+    source_event_id = event_id(
+        finding.template_id, finding.variant or "", finding.method, position, evidence
+    )
     fields = (
         display_text(redact_text(finding.name), max_length=TITLE_MAX_LENGTH),
         display_text(path, max_length=POSITION_MAX_LENGTH),
         display_text(query, max_length=POSITION_MAX_LENGTH),
         display_text(evidence, max_length=TEXT_MAX_LENGTH),
         display_text(redact_text(finding.matched_at, values=values), max_length=TEXT_MAX_LENGTH),
+        # 識別欄位也有長度上限（簽章模板有 76 字元的 matcher 名）：一併截斷。
+        display_text(finding.variant or "", max_length=RULE_MAX_LENGTH),
+        display_text(finding.severity, max_length=RAW_LEVEL_MAX_LENGTH),
     )
-    title, shown_path, shown_query, shown_evidence, shown_other = (text for text, _ in fields)
+    title, shown_path, shown_query, shown_evidence, shown_other, shown_variant, shown_severity = (
+        text for text, _ in fields
+    )
     return (
         ObservationInput(
             source_event_id=source_event_id,
             source_index=index,
             source_rule=finding.template_id,
-            rule_variant=finding.variant,
+            rule_variant=shown_variant or None,
             title=title,
-            raw_severity=finding.severity,
-            severity_label=_SEVERITY_LABELS.get(finding.severity.lower(), "Unknown"),
+            raw_severity=shown_severity or "unknown",
+            severity_label=_SEVERITY_LABELS.get(finding.severity.strip().lower(), "Unknown"),
             raw_confidence=_RAW_CONFIDENCE,
             confidence_label=_CONFIDENCE_LABEL,
             cwe_id=finding.cwe_id,

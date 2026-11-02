@@ -179,6 +179,20 @@ def test_findings_are_recorded_as_observations(
     assert rows[0].raw_confidence == "unknown"
 
 
+def test_a_long_matcher_name_does_not_crash_the_worker(
+    queue: ScanQueue, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    # 簽章模板有 76 字元的 matcher-name：要截斷進 VARCHAR(64)、不讓 worker 因 DataError 結束。
+    report_bytes = _jsonl(_finding(**{"matcher-name": "c" * 76}))
+    lease = _collected(queue, queue_seed, world, dirs, report_bytes)
+
+    [report] = _worker(queue, dirs).drain()
+
+    assert report.run_status is RunStatus.SUCCEEDED
+    [row] = _observations(queue_seed, lease.run_id)
+    assert len(row.rule_variant) <= 64
+
+
 def test_empty_output_is_a_clean_success(
     queue: ScanQueue, queue_seed: Seeder, world: World, dirs: Dirs
 ) -> None:

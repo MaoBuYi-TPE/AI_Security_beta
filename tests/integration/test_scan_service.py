@@ -198,6 +198,15 @@ def test_an_unauthenticated_scan_is_anonymous(db_session: Session, world: ScanWo
     assert scan.auth_role == "anonymous"
 
 
+def test_nuclei_cannot_bind_an_auth_profile(db_session: Session, world: ScanWorld) -> None:
+    # nuclei 本輪只做匿名掃描：綁 auth profile 的 scan 選 nuclei 要被拒（避免匿名被標成登入角色）。
+    error = app_error(
+        lambda: create_scan(db_session, world, world.authenticated(engines=(Engine.NUCLEI,)))
+    )
+
+    assert (error.status_code, error.code) == (422, ErrorCode.PROFILE_INCOMPATIBLE)
+
+
 def test_a_web_scan_has_no_spec_and_no_operations(db_session: Session, world: ScanWorld) -> None:
     team = world.team
     target = make_target(db_session, team.admin, team.project_a, kind=TargetKind.WEB)

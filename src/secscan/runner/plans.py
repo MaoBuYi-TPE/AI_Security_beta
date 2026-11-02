@@ -16,11 +16,7 @@ from types import MappingProxyType
 from secscan.runner.domain.admission import PlanRejectedError, PlanRejection
 from secscan.runner.egress import RunEgress
 from secscan.scanners.domain.fake import FAKE_IMAGE, FakeScript, plan_fake_run
-from secscan.scanners.domain.nuclei.plan import (
-    NucleiBudget,
-    NucleiPlanError,
-    plan_nuclei_run,
-)
+from secscan.scanners.domain.nuclei.plan import NucleiBudget, plan_nuclei_run
 from secscan.scanners.domain.nuclei.plan import (
     PlanWindowTooSmallError as NucleiWindowTooSmall,
 )
@@ -102,10 +98,12 @@ class RunPlanner:
                 ),
             )
         except NucleiWindowTooSmall:
-            # runner 以 BUDGET_EXHAUSTED 結束（和 ZAP 走同一條 PlanWindowTooSmallError 路徑）。
+            # runner 以 BUDGET_EXHAUSTED 結束（和 ZAP 同一條路徑）。
             raise PlanWindowTooSmallError("nuclei 的時間不夠") from None
-        except NucleiPlanError:
-            raise PlanRejectedError(PlanRejection.INPUT_NOT_ALLOWED) from None
+        except (ValueError, OSError) as error:
+            # 預算不合法（NucleiPlanError）或模板 sha256 不符／檔案遺失（load_template_files，
+            # fail-closed）：都轉成 PLAN_REJECTED，不讓 runner 崩潰。
+            raise PlanRejectedError(PlanRejection.INPUT_NOT_ALLOWED) from error
 
     def _zap(self, lease: Lease, launch: Launch) -> ExecutionPlan:
         egress = launch.egress

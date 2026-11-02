@@ -348,7 +348,9 @@ class ContainerRunner:
         lease = attempt.lease
         try:
             files = {PROXY_FILE: egress.proxy_url, **secret_files(plan, egress)}
-            if secret is not None:
+            # 只有真的使用認證的 plan 才把目標 secret 解密、寫進容器：匿名的引擎（nuclei 本輪，
+            # target_auth=False）即使 run 綁了 secret 也不得取得（最小權限，CLAUDE.md §9）。
+            if secret is not None and plan.target_auth:
                 value = SecretValue(self._reveal(secret))
                 files[SECRET_FILE] = value.value
                 files[AUTH_HEADER_FILE] = header_line(secret.credential, value).value

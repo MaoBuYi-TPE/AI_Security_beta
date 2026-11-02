@@ -17,6 +17,7 @@ from secscan.scans.domain.catalog import (
     PlannedRun,
     ScanProfile,
     UnsupportedEngineError,
+    check_engine_auth,
     check_operations,
     check_profile,
     check_seed_path,
@@ -185,6 +186,24 @@ def test_only_zap_on_the_web_profile_needs_the_root() -> None:
     check_seed_path((FAKE,), WEB_LAB, _rules("/shop"))
     check_seed_path((ZAP,), API_LAB, _rules("/api/items"))
     check_seed_path((Engine.PREFLIGHT, ZAP), API_LAB, _rules("/me"))
+
+
+def test_nuclei_needs_the_root_on_any_profile() -> None:
+    # nuclei 從 origin 根探測：兩個 profile 都需要 grant 允許 GET /。
+    for profile in (WEB_LAB, API_LAB):
+        check_seed_path((NUCLEI,), profile, _rules("/"))
+        check_seed_path((NUCLEI,), profile, _rules())  # allow-all
+        with pytest.raises(IncompatibleProfileError, match="GET /"):
+            check_seed_path((NUCLEI,), profile, _rules("/shop"))
+
+
+def test_nuclei_cannot_be_combined_with_an_auth_profile() -> None:
+    # nuclei 本輪只做匿名掃描：綁 auth profile 時拒絕（避免匿名流量被標成登入角色）。
+    check_engine_auth((NUCLEI,), authenticated=False)
+    check_engine_auth((ZAP,), authenticated=True)
+    for engines in ((NUCLEI,), (ZAP, NUCLEI)):
+        with pytest.raises(IncompatibleProfileError, match="匿名"):
+            check_engine_auth(engines, authenticated=True)
 
 
 def test_the_seed_path_is_the_root() -> None:

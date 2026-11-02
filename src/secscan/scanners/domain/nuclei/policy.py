@@ -151,8 +151,15 @@ TEMPLATES_LOCK_SHA256 = "1d97a25695a25bd5130a37beb5fb1e78988eed541456ed4be702171
 
 @cache
 def load_templates() -> tuple[Template, ...]:
-    """載入凍結清單（templates.lock.txt）。格式錯誤會由 parse_lock 拋 ValueError。"""
-    return parse_lock(lock_text())
+    """載入凍結清單（templates.lock.txt）。格式錯誤由 parse_lock 拋 ValueError。
+
+    執行期核對 lock 的 sha256 等於 TEMPLATES_LOCK_SHA256（不只離線測試）：被竄改就 fail-closed、
+    不以未知清單執行（runner 掛載前另以每檔 ContentDigest 再驗一次）。
+    """
+    text = lock_text()
+    if hashlib.sha256(text.encode("ascii")).hexdigest() != TEMPLATES_LOCK_SHA256:
+        raise ValueError("templates.lock.txt 的 sha256 與 TEMPLATES_LOCK_SHA256 不符")
+    return parse_lock(text)
 
 
 def lock_text() -> str:

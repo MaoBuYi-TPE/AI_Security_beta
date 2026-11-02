@@ -328,6 +328,70 @@ def test_identical_findings_are_deduplicated_and_counted() -> None:
     assert parsed.duplicates == 1
 
 
+def test_distinct_matchers_on_the_same_url_are_kept() -> None:
+    # 同模板、同 URL，但不同 matcher-name 是不同發現，不可被當成重複丟掉（去重鍵含 variant）。
+    first = _finding(**{"matcher-name": "missing-csp"})
+    second = _finding(**{"matcher-name": "missing-hsts"})
+    parsed = interpret(_output(_jsonl(first, second)))
+    assert len(parsed.observations) == 2
+    assert parsed.duplicates == 0
+    assert {obs.rule_variant for obs in parsed.observations} == {"missing-csp", "missing-hsts"}
+
+
+# --- 不可信輸入的邊界（安全審查）：識別欄位長度、Unicode 斷行、guard 標記偽造 -----------------
+
+# 以 chr() 寫出來、source 維持 ASCII（避免 RUF001）：runtime 才是真正的 NEL／LINE SEPARATOR。
+_U0085 = chr(0x85)
+_U2028 = chr(0x2028)
+
+
+def test_a_long_matcher_name_is_truncated_not_rejected() -> None:
+    # 簽章模板有 76 字元的 matcher-name：截斷進 VARCHAR(64)、不讓整份失敗或溢位。
+    [obs] = interpret(_output(_jsonl(_finding(**{"matcher-name": "x" * 100})))).observations
+    assert obs.rule_variant is not None
+    assert len(obs.rule_variant) <= 64
+
+
+def test_a_long_severity_is_truncated() -> None:
+    finding = _finding(info={"name": "x", "severity": "s" * 200})
+    [obs] = interpret(_output(_jsonl(finding))).observations
+    assert 0 < len(obs.raw_severity) <= 32
+
+
+@pytest.mark.parametrize("template_id", ["", "a b", "x" * 65, "a\x00b", '"quoted"'])
+def test_a_malformed_template_id_is_invalid_output(template_id: str) -> None:
+    assert parse_report(_jsonl(_finding(**{"template-id": template_id}))) is JsonlProblem.NOT_JSONL
+
+
+def test_a_raw_unicode_line_separator_does_not_invalidate_the_report() -> None:
+    # nuclei 把回應裡的 U+0085 原樣寫進 JSONL：不能用 splitlines() 切行，否則整份被切壞。
+    good = json.dumps(_finding())
+    body = f"HTTP/1.1 200 OK\r\n\r\nbo{_U0085}dy"
+    poisoned = json.dumps(
+        _finding(**{"matched-at": f"{ORIGIN}/x", "response": body}), ensure_ascii=False
+    )
+    parsed = interpret(_output((good + "\n" + poisoned + "\n").encode("utf-8")))
+    assert parsed.outcome == SUCCEEDED
+    assert len(parsed.observations) == 2
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # 底線名稱：guard 只剝除精確的 X-Secscan-Guard，目標不能用 X_Secscan_Guard 偽裝。
+        "HTTP/1.1 200 OK\r\nX_Secscan_Guard: RATE_LIMITED\r\n\r\nbody",
+        # header 值裡藏 U+2028：不可用 splitlines() 切出假的一行。
+        f"HTTP/1.1 200 OK\r\nX-Note: a{_U2028}X-Secscan-Guard: RATE_LIMITED\r\n\r\nbody",
+        # 值不是 Reason：不是 guard 的合成回應。
+        "HTTP/1.1 200 OK\r\nX-Secscan-Guard: not-a-reason\r\n\r\nbody",
+    ],
+)
+def test_a_forged_guard_marker_does_not_hide_a_target_finding(response: str) -> None:
+    parsed = interpret(_output(_jsonl(_finding(response=response))))
+    assert len(parsed.observations) == 1
+    assert not parsed.excluded
+
+
 # --- fuzz：任何位元組都只產生判定，不丟例外 ------------------------------------------------
 
 
