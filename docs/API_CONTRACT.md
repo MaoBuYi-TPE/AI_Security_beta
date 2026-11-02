@@ -905,7 +905,7 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 
 ## 17. Scan（T09 已實作）
 
-理由見 `DECISIONS.md` §13。`fake` 不連任何位址、不啟動容器，結果由 `secscan-admin fake-runner` 產生，回應中 `fixture` 為 true。`zap` 在 T15 開放（`DECISIONS.md` §19）。`nuclei`、`schemathesis` 在 Adapter 整合之前回 422。以下的值都是示例，不是實驗結果。
+理由見 `DECISIONS.md` §13。`fake` 不連任何位址、不啟動容器，結果由 `secscan-admin fake-runner` 產生，回應中 `fixture` 為 true。`zap` 在 T15、`nuclei` 在 T18 開放（`DECISIONS.md` §19、§24）。`schemathesis` 在 Adapter 整合之前回 422。以下的值都是示例，不是實驗結果。
 
 ### 17.1 建立
 
@@ -931,7 +931,7 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 
 | 欄位 | 規則 |
 |---|---|
-| `engines` | 1–4 個，不可重複。可用的是 `zap` 與 `fake`（`fake` 必須單獨使用）；其他引擎回 422 `ENGINE_UNSUPPORTED`。建立時不看 probe 的當下狀態：zap 不可用時 run 照常排隊，runner 在 probe 通過之後才認領（T15，`DECISIONS.md` §19.10）。執行順序固定為 zap → nuclei → schemathesis，與請求的順序無關。`preflight` 不能指定（422 `ENGINE_UNSUPPORTED`）：綁定 auth profile 時由平台自動排在第一個（T12，`DECISIONS.md` §16.5） |
+| `engines` | 1–4 個，不可重複。可用的是 `zap`、`nuclei` 與 `fake`（`fake` 必須單獨使用；`nuclei` 本輪只做匿名掃描，和 auth profile 一起指定時回 422 `PROFILE_INCOMPATIBLE`）；`schemathesis` 回 422 `ENGINE_UNSUPPORTED`。建立時不看 probe 的當下狀態：引擎不可用時 run 照常排隊，runner 在 probe 通過之後才認領（T15，`DECISIONS.md` §19.10）。執行順序固定為 zap → nuclei → schemathesis，與請求的順序無關。`preflight` 不能指定（422 `ENGINE_UNSUPPORTED`）：綁定 auth profile 時由平台自動排在第一個（T12，`DECISIONS.md` §16.5） |
 | `profile` | `api_active_lab`：必須有 `api_spec_id`，target 是 api 或 hybrid，至少一個 operation 在 grant 的範圍內。`web_active_lab`：不帶 `api_spec_id`，target 是 web 或 hybrid；引擎含 zap 時 grant 必須允許 `GET /`（spider 的起點，T14）。不符合回 422 `PROFILE_INCOMPATIBLE` |
 | `scope_grant_id` | 必須是這個 target 目前可用的 grant（§14.5 的 gate） |
 | `api_spec_id` | 必須屬於這個 target |
@@ -1276,4 +1276,4 @@ uv run secscan-admin worker [--once]
 ```
 
 - `definition_sha256`：這個 profile 實際執行的規則定義（規則白名單、會改 method 的規則、強度與門檻）的 canonical JSON 的 sha256。
-- `grant_requirements`：grant 必須允許的請求（zap 的 web profile 從 `GET /` 開始 spider）。
+- `grant_requirements`：grant 必須允許的請求（zap 的 web profile 從 `GET /` 開始 spider；nuclei 從 origin 根探測，也需要 `GET /`）。

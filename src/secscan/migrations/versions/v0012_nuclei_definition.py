@@ -9,8 +9,9 @@ Create Date: 2026-11-01 12:00:00+00:00
   放寬成 engine IN ('zap', 'nuclei')。Postgres 不能就地改 CHECK，先 drop 再以放寬後的條件 create。
   其餘條件不變（sha256 格式、要和 plan_hash 一起）。既有資料列不受影響（zap 的仍合法，nuclei 的
   之前都是 null）。凍結用的 trigger scanner_runs_plan_once 與引擎無關，不動。
-- downgrade：改回只允許 engine = 'zap'。若已有 nuclei 的 profile_definition_sha256，downgrade 會因
-  CHECK 失敗而中止（需先把那些資料列的欄位清為 null）；只用於開發與測試。
+- downgrade：改回只允許 engine = 'zap'。若已有 nuclei 的 profile_definition_sha256，重建 CHECK 會
+  失敗而中止（那些資料列違反收緊後的條件）；因為 scanner_runs_plan_once trigger 會擋住把已寫入的
+  欄位清成 null，實務上得先停掉該 trigger 再清，只用於開發與測試。
 """
 
 from collections.abc import Sequence

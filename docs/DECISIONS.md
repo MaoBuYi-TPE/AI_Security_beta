@@ -2106,20 +2106,22 @@ M4 的第一步。只凍結「清單與執行設定」，作為 T18（Adapter、
 ### 24.3 判定階梯、guard-403 過濾、遮罩
 - parser（`nuclei/results.py`）純函式、不丟例外，比照 `zap/results.py`：非零退出（`collect_exit_codes={0}`）→ ENGINE_FAILED；報告讀不到／過大／任一行壞 → OUTPUT_INVALID；空檔＋有 forwarded → 乾淨成功（零告警，與失敗明確可分）；無 forwarded → NO_TARGET_TRAFFIC。
 - **guard-403 過濾**：以回應的 `X-Secscan-Guard` header 權威排除 guard 的合成 403（guard 會剝除上游偽造的同名 header）；`DENY_MESSAGE` body 僅在無 telemetry 時 fallback（body 目標可控）。目標真正回的 403 不被誤殺（單元測試釘反例）。budget/wall-clock 逾時由 runner 以 BUDGET_EXHAUSTED/TIME_LIMIT 處理（收集前），worker 傳 `time_limit_reached=False`。
-- **遮罩**兩層：runner 以 `redact_outputs=True`／`SecretMasker` 在收集時對整份 JSONL 做位元組級秘密遮罩（target bearer／proxy token，涵蓋 request／response／curl-command）；parser 另以 `redact_text`／`redact_url` 做文字層遮罩（extracted-results、matched-at）。
+- **遮罩**兩層：runner 以 `redact_outputs=True`／`SecretMasker` 在收集時對整份 JSONL 做位元組級秘密遮罩（target bearer／proxy token，涵蓋 request／response／curl-command）；parser 另以 `redact_text`／`redact_url` 做文字層遮罩（extracted-results、matched-at）。限制：`redact_text` 只認憑證形狀，`email-extractor`／`credit-card-number-detect` 擷取到的 email／卡號本身是偵測目標，目前以原文存入 `evidence`（lab-only 風險；PAN／email 專用遮罩或只存雜湊留待後續）。
 
 ### 24.4 可用性、版本、速率、DB
-- **環境探測＋靜態版本**：不新增容器能力探測（比照 FAKE）；可用性以映像存在＋guard 就緒判定；`/scan-profiles` 與 GET /scanners 以鎖定的 `NUCLEI_VERSION` 揭露版本（digest 已鎖定、真實可信）、`rule_count=42`、`nuclei_definition_sha256()` 為定義。
+- **環境探測＋靜態版本**：不新增容器能力探測（比照 FAKE）；可用性以映像存在＋guard 就緒判定。`/scan-profiles` 以鎖定的 `NUCLEI_VERSION`（digest 已鎖定、真實可信）、`rule_count=42`、`nuclei_definition_sha256()` 揭露。GET /scanners 的版本來自能力探測，nuclei 沒有容器探測、故為 null（可用性仍正確；版本一致化留待日後加探測）。
 - 凍結速率/並行：`-rl` 取 guard 的 req/s、`-c 1`、`-bs 1`、`-retries 0`、`-timeout 15`。
 - DB：migration v0012 把 `profile_definition_valid` 放寬為 `engine IN ('zap','nuclei')`；runner 為 nuclei 記 `nuclei_definition_sha256()`（profile-independent）。
 
 ### 24.5 真實 e2e 與多來源
 - `make test-live-fixture-nuclei`：以真的 nuclei 掃 fixture app 弱點版（insecure）與修補版（secure）。為產生乾淨正負對照，把弱點版的 CORS 最小擴充成**可利用**（反射 Origin＋`Allow-Credentials: true`）：nuclei `cors-misconfig` 在弱點版命中、修補版不命中；同一問題也由 ZAP 10098 偵測 → M4「同一問題多來源」的實證（FX-06）。
-- 實跑驗證：兩版 succeeded；plan_hash、與 /scan-profiles 一致的定義；`observed ⊆ forwarded`（guard-403 不誤報）；平台阻擋（PATH_AMBIGUOUS、METHOD_NOT_AUTHORIZED）；共享預算未耗盡；容器清理。
+- 實跑驗證（2026-11-02）：兩版 succeeded；plan_hash、與 /scan-profiles 一致的定義；`observed ⊆ forwarded`（guard-403 不誤報）；平台阻擋（PATH_AMBIGUOUS、METHOD_NOT_AUTHORIZED）；共享預算未耗盡；容器清理。nuclei 弱點版 `cors-misconfig` 1＋`http-missing-security-headers` 10 筆、修補版 6 筆（無 CORS）。
+- 多來源實證（同日重跑 `make test-live-fixture`，確認加 Allow-Credentials 後 ZAP 無回歸）：ZAP 的 `10098 Cross-Domain Misconfiguration` 在弱點版命中 5 筆、修補版 0 筆，和 nuclei `cors-misconfig` 指向同一個 CORS 問題。
 
 ### 24.6 T18／T19 邊界
 - **不在 T18（T19）**：Observation→Finding、`rule_groups.yaml`、OWASP Top10:2025／API2023 對應、fingerprint、跨工具合併；嚴格 severity／confidence 正規化（T18 只做 raw 透傳＋穩定 label，confidence 以 `unknown` 佔位，因 DB 要求非空）。
-- 殘餘：匿名掃描（auth 延後）；fixture 的乾淨 nuclei 對照僅 CORS（其餘模板在此自製小站多半不命中，屬預期——對準 lab 靶機的覆蓋見 `TOOLS.md` §2.1）。
+- 殘餘：匿名掃描（auth 延後）；fixture 的乾淨 nuclei 對照以 CORS 為主（`cors-misconfig` 加 `http-missing-security-headers`：弱點版 11 筆、修補版 6 筆；其餘模板在此自製小站多半不命中，屬預期——對準 lab 靶機的覆蓋見 `TOOLS.md` §2.1）。
+- 其他已知限制：`open-redirect-generic` 的 payload 含 `oast.me` 字串（僅當參數送出、非 interactsh callback，`-ni` 仍有效；多數帶 `%` 的探測被 guard 擋），不改 payload（會破壞 `-dut` 簽章）；JSONL 大小上限沿用 ZAP 的 8 MiB（nuclei 每筆帶完整 request/response，大頁面可能超過而整份失敗，lab 靶機碰不到）；vendored 的 42 個上游模板來自 ProjectDiscovery 的 nuclei-templates（provenance 與版本見 `SOURCES.md` S23；散布前再確認上游授權並視需要附 NOTICE）。
 
 ## 來源
 
