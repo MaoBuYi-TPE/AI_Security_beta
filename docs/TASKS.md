@@ -1425,8 +1425,15 @@
     - 審查（code-reviewer＋security-reviewer，2026-11-01）：各 0 CRITICAL、1 HIGH。HIGH 相同——初版 46 個中 3 個內嵌非 http 區塊（`cookies-without-httponly`／`-secure` 含 `javascript:`、`directory-listing` 含 `flow:`＋`fuzz` tag），`-pt http` 擋不住、測試只看路徑抓不到。已修：移除這 3 個與 `host-header-injection`（改 Host，guard 一律擋）→ 42 個；加內容閘門（`template_violations`）＋對應測試；補 selection 的重複/路徑穿越防護與更強斷言（相等鎖 `FROZEN_FLAGS`、`reconcile` 標籤、行號）；定義 hash 改含每檔 sha256；加 `ACTIVE_PROBE_TEMPLATE_IDS`、映像 digest 契約斷言、lock 的 `.gitattributes` LF、產生器錯誤/逾時/資源限制。
     - 限制／效度威脅：單人審查，最終類別簽核待使用者確認；完整性鏈為「自我證明」（獨立驗證靠 gated live `--check` 以鎖定 archive 重新推導＋程式審查）；清單對準 lab，不追求 Nuclei 全面覆蓋；lock 檔若隨 wheel 打包需在 T18 確認 package-data。
     - 給 T18（含審查提出的 DoD）：以 `policy.load_templates()`／`INCLUDE_TEMPLATE_IDS` 取清單、`FROZEN_FLAGS` 組 ExecutionPlan（`-id`、`-sf` 的 `domains` 完全比對）、`nuclei_definition_sha256()` 供報告揭露；凍結速率/並行（`-rl`/`-c 1`…）；濾掉 guard 合成的 403 拒絕回應（以 `X-Secscan-Guard`，否則 negative-matcher 模板會誤報）；加 `-dut`＋掛載前逐檔 sha256 驗證、只掛凍結的檔；遮罩涵蓋 `extracted-results`/`response`；註冊 nuclei 時放寬 `profile_definition_valid` 的 `engine='zap'` 限制。
-- [ ] T18 實作 Nuclei Adapter、JSONL Parser 與真實 e2e。
+- [x] T18 實作 Nuclei Adapter、JSONL Parser 與真實 e2e。（設計與取捨見 `docs/DECISIONS.md` §24）
   - DoD：空檔、壞行、重複、非零退出、取消、timeout 都有明確定義；零告警與失敗可以區分。
+  - 交付：
+    - 純 domain：`scanners/domain/nuclei/results.py`（JSONL parser，判定階梯比照 ZAP、不丟例外、guard-403 過濾、遮罩）、`plan.py`（`plan_nuclei_run`，匿名、凍結速率/並行、`-dut`、42 模板逐檔 sha256 驗證後以 InputFile 掛載）。
+    - vendored 42 個 PD 簽章模板（byte-exact、`.gitattributes -text`、pre-commit 排除；`tools/freeze_nuclei_templates.py` 亦輸出/驗證）。
+    - 引擎註冊：`catalog.AVAILABLE_ENGINES`、`runner.plans`、`runner.domain.policy`（每模板 `ContentDigest`）、`admission._REQUIRED_TMPFS`、`runner.service`（記定義 hash）、`worker`（`NucleiParser`）、`scanners.domain.profiles`（環境探測＋靜態 `NUCLEI_VERSION`）；migration v0012 放寬 `profile_definition_valid`；部署 `Makefile`／`compose.yaml`。
+    - 測試：nuclei parser/plan/admission 單元、worker 與 run-provenance／scan-profiles 整合、vendored↔lock 契約；真實 e2e `make test-live-fixture-nuclei`（弱點版 cors-misconfig 命中、修補版不命中；與 ZAP 10098 同一問題多來源）。
+    - 實跑驗證：兩版 succeeded；plan_hash 與 /scan-profiles 定義一致；`observed ⊆ forwarded`（guard-403 不誤報）；平台阻擋 PATH_AMBIGUOUS/METHOD_NOT_AUTHORIZED；共享預算未耗盡；容器清理。`make test` 5342 passed、coverage 99.70%。
+    - 限制：本輪**匿名**掃描（目標 secret 的 `-sf` 注入延後）；嚴格 severity/confidence 正規化與 Finding/rule_groups/OWASP/fingerprint 屬 T19。
 - [ ] T19 實作 Observation/Finding、rule_groups、mapping 版本與保守的 fingerprint。
   - DoD：
     - 正確保留來源、kind、severity、confidence。

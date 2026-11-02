@@ -142,6 +142,8 @@ ACTIVE_PROBE_TEMPLATE_IDS: tuple[str, ...] = (
 )
 
 _LOCK_PATH = Path(__file__).with_name("templates.lock.txt")
+# vendored 的模板（T18）：runner 以 InputFile 掛進 /scan/in 給 nuclei 跑；逐檔 sha256 以 lock 守衛。
+_TEMPLATES_DIR = Path(__file__).with_name("templates")
 # 凍結守衛：lock 檔內容的 sha256。改清單時由 tools/freeze_nuclei_templates.py 重新產生並更新這裡，
 # test_policy.py 核對兩者一致。T18 另在掛載模板前逐檔驗證 sha256（執行期 fail-closed）。
 TEMPLATES_LOCK_SHA256 = "1d97a25695a25bd5130a37beb5fb1e78988eed541456ed4be702171f1ecefc81"
@@ -149,13 +151,41 @@ TEMPLATES_LOCK_SHA256 = "1d97a25695a25bd5130a37beb5fb1e78988eed541456ed4be702171
 
 @cache
 def load_templates() -> tuple[Template, ...]:
-    """載入凍結清單（templates.lock.txt）。格式錯誤會由 parse_lock 拋 ValueError。"""
-    return parse_lock(lock_text())
+    """載入凍結清單（templates.lock.txt）。格式錯誤由 parse_lock 拋 ValueError。
+
+    執行期核對 lock 的 sha256 等於 TEMPLATES_LOCK_SHA256（不只離線測試）：被竄改就 fail-closed、
+    不以未知清單執行（runner 掛載前另以每檔 ContentDigest 再驗一次）。
+    """
+    text = lock_text()
+    if hashlib.sha256(text.encode("ascii")).hexdigest() != TEMPLATES_LOCK_SHA256:
+        raise ValueError("templates.lock.txt 的 sha256 與 TEMPLATES_LOCK_SHA256 不符")
+    return parse_lock(text)
 
 
 def lock_text() -> str:
     """lock 檔的原始內容（供雜湊與測試使用）。"""
     return _LOCK_PATH.read_text(encoding="ascii")
+
+
+def template_input_name(template: Template) -> str:
+    """vendored 模板在 /scan/in 的扁平 InputFile 名稱（只小寫英數與 . _ -，<64 字元）。"""
+    return f"{template.id}.yaml"
+
+
+@cache
+def load_template_files() -> tuple[tuple[str, bytes], ...]:
+    """載入 vendored 模板的（InputFile 名稱, 原始位元組）；逐檔驗 sha256 等於 lock（fail-closed）。
+
+    T18 的 plan_nuclei_run 以此組 ExecutionPlan.inputs；runner 掛載前 admission 另以 ContentDigest
+    再驗一次（獨立白名單）。
+    """
+    files: list[tuple[str, bytes]] = []
+    for template in load_templates():
+        content = (_TEMPLATES_DIR / template.path).read_bytes()
+        if hashlib.sha256(content).hexdigest() != template.sha256:
+            raise ValueError(f"vendored 模板 sha256 與 lock 不符：{template.path}")
+        files.append((template_input_name(template), content))
+    return tuple(files)
 
 
 def definition_sha256_for(templates: Sequence[Template]) -> str:

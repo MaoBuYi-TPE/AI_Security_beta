@@ -45,7 +45,10 @@ _TEMPLATES_SUBDIR = f"nuclei-templates-{_RELEASE}"
 _ARCHIVE_REL = f"runs/spike-t03/templates/v{_RELEASE}/archive/{_TEMPLATES_SUBDIR}.tar.gz"
 _DEFAULT_ARCHIVE = _ROOT / _ARCHIVE_REL
 _EXTRACT_ROOT = _ROOT / "runs/t17-nuclei"
-_LOCK_PATH = _ROOT / "src/secscan/scanners/domain/nuclei/templates.lock.txt"
+_NUCLEI_DIR = _ROOT / "src/secscan/scanners/domain/nuclei"
+_LOCK_PATH = _NUCLEI_DIR / "templates.lock.txt"
+# vendored 的模板（T18）：runner 掛載給 nuclei 跑，隨 wheel 打包；原樣位元組，sha256 以 lock 守衛。
+_TEMPLATES_DIR = _NUCLEI_DIR / "templates"
 
 _INSPECT_TIMEOUT = 30
 _PULL_TIMEOUT = 600
@@ -180,6 +183,36 @@ def _report(lock: str, templates: list[Template]) -> None:
     print(f"[ok] definition_sha256     = {policy.definition_sha256_for(templates)}")
 
 
+def write_templates(templates_root: Path, templates: list[Template]) -> None:
+    """把選中的模板原樣複製到 src 樹（T18 的 runner 掛載）；保留原始位元組與行尾。"""
+    if _TEMPLATES_DIR.exists():
+        shutil.rmtree(_TEMPLATES_DIR)
+    for template in templates:
+        destination = _TEMPLATES_DIR / template.path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((templates_root / template.path).read_bytes())
+
+
+def verify_templates(templates_root: Path, templates: list[Template]) -> bool:
+    """vendored 的模板是否和剛抽出的位元組完全一致，且沒有多餘的檔。"""
+    expected = {template.path for template in templates}
+    for template in templates:
+        vendored = _TEMPLATES_DIR / template.path
+        source = (templates_root / template.path).read_bytes()
+        if not vendored.is_file() or vendored.read_bytes() != source:
+            print(f"[FAIL] vendored 模板與來源不同：{template.path}", file=sys.stderr)
+            return False
+    extra = sorted(
+        path.relative_to(_TEMPLATES_DIR).as_posix()
+        for path in _TEMPLATES_DIR.rglob("*.yaml")
+        if path.relative_to(_TEMPLATES_DIR).as_posix() not in expected
+    )
+    if extra:
+        print(f"[FAIL] vendored 目錄有多餘的檔：{extra}", file=sys.stderr)
+        return False
+    return True
+
+
 def _freeze(archive: Path, *, check: bool) -> int:
     data = load_archive(archive)
     ensure_image()
@@ -191,11 +224,14 @@ def _freeze(archive: Path, *, check: bool) -> int:
         if current != lock:
             print("[FAIL] 重新產生的 lock 與已提交的不同（來源有變？）", file=sys.stderr)
             return 1
-        print("[ok] lock 與重新產生的結果一致")
+        if not verify_templates(templates_root, templates):
+            return 1
+        print("[ok] lock 與 vendored 模板都與重新產生的結果一致")
         _report(lock, templates)
         return 0
     _LOCK_PATH.write_text(lock, encoding="ascii")
-    print(f"[ok] wrote {_LOCK_PATH.relative_to(_ROOT)}")
+    write_templates(templates_root, templates)
+    print(f"[ok] wrote {_LOCK_PATH.relative_to(_ROOT)} 與 {len(templates)} 個 vendored 模板")
     _report(lock, templates)
     print("\n下一步：把 TEMPLATES_LOCK_SHA256 填回 policy.py，並更新 manifest.json。")
     return 0

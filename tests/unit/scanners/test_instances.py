@@ -81,8 +81,9 @@ def _by_engine(capabilities: Capabilities | None) -> dict[Engine, tuple[bool, st
 def test_engines_that_are_not_integrated_say_so() -> None:
     statuses = _by_engine(READY)
 
-    for engine in (Engine.NUCLEI, Engine.SCHEMATHESIS):
-        assert statuses[engine] == (False, "NOT_INTEGRATED")
+    # schemathesis 仍未整合；nuclei（T18）已整合，只是 READY 這個能力快照只回報了 fake。
+    assert statuses[Engine.SCHEMATHESIS] == (False, "NOT_INTEGRATED")
+    assert statuses[Engine.NUCLEI] == (False, "RUNNER_UNAVAILABLE")
     assert statuses[Engine.FAKE] == (True, None)
 
 
@@ -110,7 +111,8 @@ def test_statuses_follow_the_engine_order_with_profiles_and_images() -> None:
     ]
     fake = statuses[-1]
     assert (fake.integrated, fake.image, fake.profiles) == (True, IMAGE, tuple(ScanProfile))
-    assert (statuses[1].image, statuses[1].profiles) == (None, ())
+    # schemathesis（statuses[2]）未整合：沒有映像也沒有 profile。
+    assert (statuses[2].image, statuses[2].profiles) == (None, ())
 
 
 # --- zap 的 probe（docs/DECISIONS.md §18.8）-------------------------------------------------

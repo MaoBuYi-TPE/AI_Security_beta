@@ -31,6 +31,7 @@ from secscan.scans.domain.catalog import (
     InvalidScanRequestError,
     PlannedRun,
     UnsupportedEngineError,
+    check_engine_auth,
     check_operations,
     check_profile,
     check_seed_path,
@@ -324,6 +325,7 @@ class ScanService:
 def _planned_runs(request: ScanRequest, target: Target) -> tuple[PlannedRun, ...]:
     """引擎與 profile 的規則：只看請求本身與 target 的種類，在取得任何鎖之前判斷。"""
     try:
+        check_engine_auth(request.engines, authenticated=request.auth_profile_id is not None)
         runs = plan_runs(request.engines, authenticated=request.auth_profile_id is not None)
         check_profile(
             request.profile, target_kind=target.kind, has_spec=request.api_spec_id is not None

@@ -37,11 +37,10 @@ ENGINE_ORDER: tuple[Engine, ...] = (
 SELECTABLE_ENGINES: tuple[Engine, ...] = tuple(
     engine for engine in ENGINE_ORDER if engine is not Engine.PREFLIGHT
 )
-AVAILABLE_ENGINES: frozenset[Engine] = frozenset({Engine.FAKE, Engine.ZAP})
+AVAILABLE_ENGINES: frozenset[Engine] = frozenset({Engine.FAKE, Engine.ZAP, Engine.NUCLEI})
 _UNAVAILABLE_REASONS: Mapping[Engine, str] = MappingProxyType(
     {
         Engine.PREFLIGHT: "preflight 不能指定：綁定 auth profile 時由平台自動加入",
-        Engine.NUCLEI: "nuclei 的 Adapter 在 M4（T18）整合之後才能使用",
         Engine.SCHEMATHESIS: "schemathesis 是 P1，M6 整合之後才能使用",
     }
 )
@@ -148,13 +147,26 @@ def check_operations(profile: ScanProfile, *, eligible_operations: int | None) -
 
 
 def check_seed_path(engines: Collection[Engine], profile: ScanProfile, rules: ScopeRules) -> None:
-    """zap 的 web profile 從 / 開始 spider：grant 必須允許 GET /（§18.7）。
+    """探測的起點 GET /：zap 的 web profile 從 / 開始 spider（§18.7），nuclei 從 origin 根探測。
 
-    只檢查 zap：fake 不送流量，不需要起點；api profile 由規格決定要送的請求。
+    fake 不送流量、zap 的 api profile 由規格決定要送的請求，都不需要起點。
     """
-    if Engine.ZAP not in engines or profile is not ScanProfile.WEB_ACTIVE_LAB:
+    needs_seed = Engine.NUCLEI in engines or (
+        Engine.ZAP in engines and profile is ScanProfile.WEB_ACTIVE_LAB
+    )
+    if not needs_seed:
         return
     if rules.classify(method="GET", path=WEB_SEED_PATH) is not None:
         raise IncompatibleProfileError(
-            f"zap 的 {profile.value} 需要 scope grant 允許 GET /（spider 的起點）"
+            f"{profile.value} 的 zap／nuclei 需要 scope grant 允許 GET /（探測的起點）"
         )
+
+
+def check_engine_auth(engines: Collection[Engine], *, authenticated: bool) -> None:
+    """nuclei 本輪只做匿名掃描（§24.1）：綁定 auth profile 時不接受 nuclei。
+
+    否則匿名流量的觀察會被標成登入角色（CLAUDE.md §9、§10），目標 secret 也不該掛進匿名容器。
+    -sf 注入完成後再放寬。
+    """
+    if authenticated and Engine.NUCLEI in engines:
+        raise IncompatibleProfileError("nuclei 目前只支援匿名掃描，不能和 auth profile 一起指定")

@@ -9,6 +9,7 @@ from secscan.runner.domain.runtime import EngineVersion, NetworkState
 from secscan.runner.probe import probe, require_guard
 from secscan.scanners.domain.fake import FAKE_IMAGE
 from secscan.scanners.domain.instances import CapabilityIssue, EngineCapability
+from secscan.scanners.domain.nuclei.policy import NUCLEI_IMAGE
 from secscan.scanners.domain.preflight import PREFLIGHT_IMAGE
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.scans.domain.catalog import Engine
@@ -30,8 +31,11 @@ def test_a_ready_environment_makes_every_engine_with_a_policy_available() -> Non
         EngineCapability(engine=Engine.FAKE, image=str(FAKE_IMAGE), issue=None),
         EngineCapability(engine=Engine.PREFLIGHT, image=str(PREFLIGHT_IMAGE), issue=None),
         EngineCapability(engine=Engine.ZAP, image=str(ZAP_IMAGE), issue=None),
+        EngineCapability(engine=Engine.NUCLEI, image=str(NUCLEI_IMAGE), issue=None),
     }
-    assert capabilities.available_engines == frozenset({Engine.FAKE, Engine.PREFLIGHT, Engine.ZAP})
+    assert capabilities.available_engines == frozenset(
+        {Engine.FAKE, Engine.PREFLIGHT, Engine.ZAP, Engine.NUCLEI}
+    )
 
 
 def test_a_missing_zap_image_affects_only_zap() -> None:
@@ -40,7 +44,9 @@ def test_a_missing_zap_image_affects_only_zap() -> None:
 
     capabilities = probe(runtime, POLICY)
 
-    assert capabilities.available_engines == frozenset({Engine.FAKE, Engine.PREFLIGHT})
+    assert capabilities.available_engines == frozenset(
+        {Engine.FAKE, Engine.PREFLIGHT, Engine.NUCLEI}
+    )
     [zap] = [item for item in capabilities.engines if item.engine is Engine.ZAP]
     assert zap.issue is CapabilityIssue.IMAGE_MISSING
 

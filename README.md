@@ -205,7 +205,7 @@ rm profile.json new-token.json
 
 #### 建立 scan（T09）
 
-T09 只開放 `fake` 引擎：它不連任何位址、不啟動容器，結果由 `secscan-admin fake-runner` 產生（`fixture: true`）。`zap`、`nuclei` 在 M3、M4 整合之前回 422 `ENGINE_UNSUPPORTED`。
+T09 只開放 `fake` 引擎：它不連任何位址、不啟動容器，結果由 `secscan-admin fake-runner` 產生（`fixture: true`）。`zap`（M3、T15）、`nuclei`（M4、T18）已整合；`schemathesis` 在 M6 整合之前回 422 `ENGINE_UNSUPPORTED`。
 
 ```bash
 cd ~/.config/secscan
@@ -259,7 +259,7 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 
 `make up` 一併啟動 guard（`secscan-guard:dev`，`make build` 建立），它只接 `secscan_scan_net` 與 `secscan_lab_net`，固定在兩個網段的最後一個位址（10.89.8.254、10.89.7.254），只在 scan 那一側的 8080 聽。
 
-- **掃描容器**：拿到 `/scan/secret/proxy-url`（0400，`http://<run_id>:<token>@10.89.8.254:8080`），只能經 guard 連到 grant 核准的 target origin；被擋下的請求回 403（`X-Secscan-Guard: <原因>`）或 407（帳密）。ZAP 以 0400 的 `zap.properties`（`-configfile`）使用同一組帳密（T14）；Nuclei 在 M4。
+- **掃描容器**：拿到 `/scan/secret/proxy-url`（0400，`http://<run_id>:<token>@10.89.8.254:8080`），只能經 guard 連到 grant 核准的 target origin；被擋下的請求回 403（`X-Secscan-Guard: <原因>`）或 407（帳密）。ZAP 以 0400 的 `zap.properties`（`-configfile`）使用同一組帳密（T14）；Nuclei 以 `-p /scan/secret/proxy-url` 從同一個檔案讀 proxy（T18，不上命令列）。
 - **guard 不可用時**：`GET /api/v1/scanners` 顯示 `GUARD_UNAVAILABLE`，runner 不認領；執行中斷掉的 run 標成 `interrupted`。`docker logs secscan-guard-1` 是每個請求的決定（不含 header 的值、query 與 token）。
 - **保留的位址**：`LAB_CIDR` 的最後一個主機位址（預設 10.89.7.254）保留給 guard，target 與 grant 都不能用。
 - **telemetry**：guard 在 `secscan_guard_telemetry`（tmpfs）為每個 run 寫 summary 與每個轉送請求一行的 jsonl（不含 query 與 header 的值），runner 與 worker 唯讀；6 小時後刪除。
@@ -301,16 +301,17 @@ make down                          # 停止 app stack 與 db（資料保留在 v
   - `GET /api/v1/scan-profiles` 列出現在可以用的 profile 與規則定義的 hash。
 - **版本與流量（T16）**：每個引擎的 `plan_hash`（實際執行的 plan 的 sha256）與 `profile_definition_sha256`（zap 的規則定義）在 runner 建立容器之前寫入，不收集的 run 也有；`result.guard_traffic` 保存 guard 的轉送數、各原因的拒絕數與帶認證的請求被接受／拒絕的數量（guard 的 telemetry 6 小時後刪除，這裡留著）。
 - **憑證失效（T16）**：掃描中途 token 過期時（同一個 operation 先接受、最後被拒絕，或 auth profile 的 preflight 端點被拒絕），coverage 的 `limitations` 有 `AUTHENTICATION_LOST`；平台不重新登入。
-- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 13 分鐘；只掃 live lab 網路上的小型網站）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-lab`（約 27 分鐘；Juice Shop 與 VAmPI，結果見 `docs/TOOLS.md` §7.7）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture`（自製的 fixture app 弱點版與修補版，量測 ground truth，結果見 `docs/TOOLS.md` §7.8）。
+- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-zap`（約 13 分鐘；只掃 live lab 網路上的小型網站）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-lab`（約 27 分鐘；Juice Shop 與 VAmPI，結果見 `docs/TOOLS.md` §7.7）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture`（自製的 fixture app 弱點版與修補版，量測 ground truth，結果見 `docs/TOOLS.md` §7.8）；`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-nuclei`（同一個 fixture app，改以真的 nuclei 掃，約 8 分鐘）。
 - 設計見 `docs/DECISIONS.md` §18、§19、§20；量測與規則的審查見 `docs/TOOLS.md` §7。
 
-#### Nuclei 模板凍結（T17）
+#### Nuclei 模板凍結與整合（T17、T18）
 
-M4 的第一步，只凍結「清單與執行設定」；Adapter、JSONL parser 與 e2e 在 T18（在那之前 `nuclei` 仍回 422）。
+M4 的第一步 T17 只凍結「清單與執行設定」；**T18 已把 Nuclei 整合進引擎管線（Adapter、JSONL parser、真實 e2e）**，`nuclei` 現可受理（`schemathesis` 仍回 422）。
 
 - **凍結清單**：`src/secscan/scanners/domain/nuclei/templates.lock.txt`（42 個精選、對準 lab 的純 HTTP 模板，每行 `id sha256 path`；多協定／會改 Host 的模板由內容閘門排除）；policy 與執行旗標在同目錄的 `policy.py`。
 - **產生**：`make nuclei-templates`（需要 OrbStack）驗證鎖定 archive 的 sha256、在鎖定映像裡**離線**（`--network none`）跑 `nuclei -tl` 列舉、算每檔 sha256，寫出 lock。**不連任何目標、不出網**。`make nuclei-templates-check` 逐位元組重現驗證。
 - 選取方式、逐類別審查與高風險抽查見 `docs/TOOLS.md` §2.1、`docs/DECISIONS.md` §23。
+- **T18 整合**：`scanners/domain/nuclei/{plan,results}.py`（匿名掃描、proxy 從 `/scan/secret/proxy-url` 讀、`-dut`、42 模板以 InputFile 掛載並逐檔 sha256 驗證）、`worker/nuclei.py`、引擎註冊與 migration v0012；parser 以 `X-Secscan-Guard` 濾掉 guard 的合成 403、兩層遮罩輸出。真實 e2e 見上（弱點版 `cors-misconfig` 命中、修補版不命中）。設計見 `docs/DECISIONS.md` §24。
 
 #### 隔離 lab 靶場（T03）
 

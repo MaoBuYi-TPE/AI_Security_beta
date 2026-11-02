@@ -101,9 +101,23 @@ def test_every_engine_with_an_image_has_its_own_plan() -> None:
 
 
 def test_engines_without_a_plan_are_refused() -> None:
-    lease = _lease(Engine.NUCLEI)
+    lease = _lease(Engine.SCHEMATHESIS)
 
     assert _rejected(lease, _launch(), str(ZAP_IMAGE)) is PlanRejection.ENGINE_NOT_ALLOWED
+
+
+def test_nuclei_without_egress_is_refused() -> None:
+    image = str(ENGINE_IMAGES[Engine.NUCLEI])
+    assert _rejected(_lease(Engine.NUCLEI), _launch(egress=False), image) is (
+        PlanRejection.ENGINE_NOT_ALLOWED
+    )
+
+
+def test_nuclei_with_too_small_a_window_is_budget_exhausted() -> None:
+    # 時間不夠 → plan_nuclei_run 拋 nuclei 的 window 錯誤，_nuclei 轉成 runner 的那條路徑。
+    image = str(ENGINE_IMAGES[Engine.NUCLEI])
+    with pytest.raises(PlanWindowTooSmallError):
+        _planner().plan(_lease(Engine.NUCLEI), _launch(seconds=30), image_ref=image)
 
 
 def test_a_plan_for_another_engine_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:

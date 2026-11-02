@@ -198,6 +198,15 @@ def test_an_unauthenticated_scan_is_anonymous(db_session: Session, world: ScanWo
     assert scan.auth_role == "anonymous"
 
 
+def test_nuclei_cannot_bind_an_auth_profile(db_session: Session, world: ScanWorld) -> None:
+    # nuclei 本輪只做匿名掃描：綁 auth profile 的 scan 選 nuclei 要被拒（避免匿名被標成登入角色）。
+    error = app_error(
+        lambda: create_scan(db_session, world, world.authenticated(engines=(Engine.NUCLEI,)))
+    )
+
+    assert (error.status_code, error.code) == (422, ErrorCode.PROFILE_INCOMPATIBLE)
+
+
 def test_a_web_scan_has_no_spec_and_no_operations(db_session: Session, world: ScanWorld) -> None:
     team = world.team
     target = make_target(db_session, team.admin, team.project_a, kind=TargetKind.WEB)
@@ -403,7 +412,6 @@ def test_viewers_cannot_create_scans(db_session: Session, world: ScanWorld) -> N
 @pytest.mark.parametrize(
     ("engines", "code"),
     [
-        ((Engine.NUCLEI,), ErrorCode.ENGINE_UNSUPPORTED),
         ((Engine.SCHEMATHESIS,), ErrorCode.ENGINE_UNSUPPORTED),
         ((Engine.FAKE, Engine.FAKE), ErrorCode.INVALID_REQUEST),
         ((Engine.FAKE, Engine.ZAP), ErrorCode.INVALID_REQUEST),
@@ -424,7 +432,7 @@ def test_engine_rules_come_before_the_gate(db_session: Session, world: ScanWorld
     )
 
     error = app_error(
-        lambda: create_scan(db_session, world, world.request(engines=(Engine.NUCLEI,)))
+        lambda: create_scan(db_session, world, world.request(engines=(Engine.SCHEMATHESIS,)))
     )
 
     assert error.code is ErrorCode.ENGINE_UNSUPPORTED

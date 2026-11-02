@@ -30,7 +30,7 @@ SCAN_SUBNET ?= 10.89.8.0/24
 SCAN_IP_RANGE ?= 10.89.8.0/25
 # runner 不 pull 映像：核准的掃描器映像由這裡以 digest pull（和 runner/domain/policy.py 一致，
 # tests/unit/test_deployment.py 會核對）。
-SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e zaproxy/zap-stable:20261016@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6
+SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e projectdiscovery/nuclei:v3.11.1@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb zaproxy/zap-stable:20261016@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6
 # live 測試用的獨立 stack：自己的 DB volume、網路與 volume 名稱；API 只綁 127.0.0.1:8765。
 LIVE_PROJECT := secscan-live
 LIVE_SCAN_NET := secscan_live_scan_net
@@ -51,7 +51,7 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	lab-net lab-up lab-down lab-verify lab-images build images ensure-net scan-net up down \
 	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
-	nuclei-templates nuclei-templates-check
+	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -263,3 +263,11 @@ test-live-fixture: LIVE_TESTS := tests/live/test_fixture_zap_live.py
 test-live-fixture: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture
 test-live-fixture: LIVE_PYTEST_ARGS := -s
 test-live-fixture: test-live-runner
+
+# T18（docs/SECURITY_AND_TESTING.md §5）：以真的 Nuclei 掃描同一個 fixture app（弱點版與修補版）。
+# insecure 反射 CORS → cors-misconfig 命中；secure 補安全 header → 不命中。同樣跑在 guard 映像的
+# python，不需要 Juice Shop／VAmPI 映像。量測印在輸出（-s），錄製到 recordings/fixture-nuclei/。
+test-live-fixture-nuclei: LIVE_TESTS := tests/live/test_fixture_nuclei_live.py
+test-live-fixture-nuclei: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture-nuclei
+test-live-fixture-nuclei: LIVE_PYTEST_ARGS := -s
+test-live-fixture-nuclei: test-live-runner

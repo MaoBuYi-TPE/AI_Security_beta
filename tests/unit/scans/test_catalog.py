@@ -17,6 +17,7 @@ from secscan.scans.domain.catalog import (
     PlannedRun,
     ScanProfile,
     UnsupportedEngineError,
+    check_engine_auth,
     check_operations,
     check_profile,
     check_seed_path,
@@ -29,15 +30,19 @@ API_LAB, WEB_LAB = ScanProfile.API_ACTIVE_LAB, ScanProfile.WEB_ACTIVE_LAB
 
 
 def test_only_integrated_engines_are_available() -> None:
-    """使用者的決定（2026-10-26）：真的 Adapter 整合之前，DB 不會出現它們的 run（zap 在 T15）。"""
-    assert frozenset({FAKE, ZAP}) == AVAILABLE_ENGINES
+    """真的 Adapter 整合之前，DB 不會出現它們的 run（zap 在 T15、nuclei 在 T18）。"""
+    assert frozenset({FAKE, ZAP, NUCLEI}) == AVAILABLE_ENGINES
 
 
 def test_fake_alone_is_planned_as_the_first_run() -> None:
     assert plan_runs([FAKE]) == (PlannedRun(engine=FAKE, sequence=1),)
 
 
-@pytest.mark.parametrize(("engine", "milestone"), [(NUCLEI, "T18"), (SCHEMATHESIS, "M6")])
+def test_nuclei_is_planned_now_that_it_is_integrated() -> None:
+    assert plan_runs([NUCLEI]) == (PlannedRun(engine=NUCLEI, sequence=1),)
+
+
+@pytest.mark.parametrize(("engine", "milestone"), [(SCHEMATHESIS, "M6")])
 def test_engines_without_an_adapter_are_unsupported(engine: Engine, milestone: str) -> None:
     with pytest.raises(UnsupportedEngineError, match=milestone) as caught:
         plan_runs([engine])
@@ -181,6 +186,24 @@ def test_only_zap_on_the_web_profile_needs_the_root() -> None:
     check_seed_path((FAKE,), WEB_LAB, _rules("/shop"))
     check_seed_path((ZAP,), API_LAB, _rules("/api/items"))
     check_seed_path((Engine.PREFLIGHT, ZAP), API_LAB, _rules("/me"))
+
+
+def test_nuclei_needs_the_root_on_any_profile() -> None:
+    # nuclei 從 origin 根探測：兩個 profile 都需要 grant 允許 GET /。
+    for profile in (WEB_LAB, API_LAB):
+        check_seed_path((NUCLEI,), profile, _rules("/"))
+        check_seed_path((NUCLEI,), profile, _rules())  # allow-all
+        with pytest.raises(IncompatibleProfileError, match="GET /"):
+            check_seed_path((NUCLEI,), profile, _rules("/shop"))
+
+
+def test_nuclei_cannot_be_combined_with_an_auth_profile() -> None:
+    # nuclei 本輪只做匿名掃描：綁 auth profile 時拒絕（避免匿名流量被標成登入角色）。
+    check_engine_auth((NUCLEI,), authenticated=False)
+    check_engine_auth((ZAP,), authenticated=True)
+    for engines in ((NUCLEI,), (ZAP, NUCLEI)):
+        with pytest.raises(IncompatibleProfileError, match="匿名"):
+            check_engine_auth(engines, authenticated=True)
 
 
 def test_the_seed_path_is_the_root() -> None:
