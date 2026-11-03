@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import re
+
+from secscan.findings.domain.owasp import top10_category
 from tests.live.fixture_app import cases
 from tests.live.fixture_app.app import handle
 from tests.live.fixture_app.insecure import HANDLERS as INSECURE
@@ -71,6 +74,27 @@ def test_every_case_path_is_a_declared_route() -> None:
     declared = {(route.method, route.template) for route in ROUTES}
     for case in cases.ALL_CASES:
         assert (case.method, case.path) in declared, case.case_id
+
+
+def test_owasp_labels_follow_the_official_cwe_lists() -> None:
+    """T19 的更正（DECISIONS §25.10）：Top 10:2025 的標記由案例的 CWE 查官方清單而來，不再手寫。"""
+    for case in cases.ALL_CASES:
+        assert case.top10_2025 == top10_category(case.cwe), case.case_id
+
+
+def test_security_cases_have_a_cwe_and_contract_cases_have_no_owasp() -> None:
+    for case in cases.ALL_CASES:
+        if case.kind == "security":
+            assert case.cwe is not None, case.case_id
+        else:
+            assert (case.cwe, case.top10_2025, case.api_2023) == (None, None, None), case.case_id
+
+
+def test_api_2023_labels_are_curated_for_api_cases_only() -> None:
+    for case in cases.ALL_CASES:
+        if case.api_2023 is not None:
+            assert re.fullmatch(r"API(?:[1-9]|10):2023", case.api_2023), case.case_id
+            assert case.surface == "api", case.case_id
 
 
 # ---- 安全案例：弱點版呈現、修補版修正 -------------------------------------

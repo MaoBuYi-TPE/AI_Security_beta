@@ -30,13 +30,17 @@ class Case:
     auth_role: str
     kind: str  # security / contract
     category: str  # 弱點/檢查類別
-    owasp: str  # OWASP 對應（official/curated；沒有時留空）
+    cwe: int | None  # 案例的 CWE（contract 案例沒有）
     detection: str  # ZAP 能否偵測
     vulnerable_behavior: str  # insecure 模式的預期（正例）
     patched_behavior: str  # secure 模式的修補（負例），即修補差異
     verification: str  # 人工確認方式
     platform_blocked: bool = False  # strict-1 下 guard 擋下
     holdout: bool = False  # 保留作 holdout（§5.2）
+    # OWASP Top 10:2025 由 cwe 查官方 CWE 清單（findings/taxonomy/owasp_top10_2025.json）而來，
+    # 契約測試核對兩者一致；清單中沒有的 CWE 是 None（不改 CWE 去湊）。API Top 10:2023 是 curated。
+    top10_2025: str | None = None
+    api_2023: str | None = None
 
 
 SECURITY_CASES: tuple[Case, ...] = (
@@ -49,11 +53,12 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "SQL 注入（query 參數 q）",
-        "A03:2025 Injection",
+        89,
         "主動（40018）",
         "q 以字串拼接進 SQL；單引號造成 sqlite 語法錯誤回 500 並洩漏訊息",
         "以參數化查詢執行，q 當資料處理，壞值回正常空結果",
         "q=apple' 回 500（sqlite OperationalError）；對照合法 q 回 200",
+        top10_2025="A05:2025",
     ),
     Case(
         "T30-FX-02",
@@ -64,11 +69,12 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "反射型 XSS（query 參數 name）",
-        "A03:2025 Injection",
+        79,
         "主動（40012/40014）",
         "name 未轉義直接寫進 HTML，標籤被反射",
         "以 html.escape 轉義後才輸出",
         "name=<b>x</b> 在回應中原樣出現（未轉義）",
+        top10_2025="A05:2025",
     ),
     Case(
         "T30-FX-03",
@@ -79,11 +85,12 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "SQL 注入（表單 body user/pass）",
-        "A03:2025 Injection",
+        89,
         "主動（40018）",
         "表單欄位拼接進登入 SQL，單引號回 500；永真條件可繞過登入",
         "參數化查詢比對帳密，壞值回 401",
         "user=admin'-- 之類造成 500 或非預期登入；對照正常登入回 200",
+        top10_2025="A05:2025",
     ),
     Case(
         "T30-FX-04",
@@ -94,12 +101,13 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "錯誤訊息／堆疊洩漏",
-        "A05:2025 Security Misconfiguration",
+        209,
         "被動（90022）/人工",
         "SQL 錯誤時回應 body 含 sqlite 的例外訊息與內部細節",
         "錯誤只回一般訊息，不含內部細節",
         "q=apple' 的 500 回應 body 含 OperationalError 字樣",
         holdout=True,
+        top10_2025="A10:2025",
     ),
     Case(
         "T30-FX-05",
@@ -110,11 +118,12 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "缺少安全 header（含 CSP）",
-        "A05:2025 Security Misconfiguration",
+        693,
         "被動（10038 CSP、10021 XCTO）",
         "回應缺 Content-Security-Policy、X-Content-Type-Options 等",
         "每個回應附上 SECURITY_HEADERS",
         "任一頁回應的 header 缺 CSP 與 X-Content-Type-Options",
+        top10_2025="A06:2025",
     ),
     Case(
         "T30-FX-06",
@@ -125,11 +134,13 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "CORS 反射並帶憑證",
-        "A05:2025 Security Misconfiguration",
+        942,
         "被動（ZAP 10098）與 nuclei cors-misconfig",
         "反射 Origin 並帶 Access-Control-Allow-Credentials: true（可利用）",
         "不輸出 CORS header",
         "回應含 Access-Control-Allow-Origin 反射並帶 Allow-Credentials",
+        top10_2025="A02:2025",
+        api_2023="API8:2023",
     ),
     Case(
         "T30-FX-07",
@@ -140,11 +151,12 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "Cookie 缺 HttpOnly/Secure",
-        "A05:2025 Security Misconfiguration",
+        1004,
         "被動（10010 HttpOnly、10011 Secure）",
         "登入成功的 Set-Cookie 沒有 HttpOnly、Secure、SameSite",
         "Set-Cookie 附上 HttpOnly; Secure; SameSite=Strict",
         "登入回應的 Set-Cookie 缺 HttpOnly 與 Secure",
+        top10_2025="A02:2025",
     ),
     Case(
         "T30-FX-08",
@@ -155,11 +167,12 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "開放轉址（query 參數 next）",
-        "A01:2025 Broken Access Control",
+        601,
         "主動（40011）/人工",
         "next 任意外部 URL 都 302 轉出去",
         "next 只允許白名單內的相對路徑，否則回 400",
         "next=http://lab-canary:8080/ 回 302 Location 指向外部",
+        top10_2025="A01:2025",
     ),
     Case(
         "T30-FX-09",
@@ -170,7 +183,7 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "敏感檔案暴露",
-        "A05:2025 Security Misconfiguration",
+        530,
         "主動/人工",
         "/backup.sql 回 200 並吐出含帳密的傾印內容",
         "/backup.sql 回 404",
@@ -186,11 +199,13 @@ SECURITY_CASES: tuple[Case, ...] = (
         STANDARD_USER,
         "security",
         "BOLA／IDOR（物件層級授權）",
-        "API1:2023 BOLA",
+        639,
         "不在 ZAP 能力範圍（人工）",
         "任何帶 token 者都能讀任一 order，不檢查擁有者",
         "只允許讀自己（token 對應使用者）的 order，否則回 404",
         "以 alice 的 token 讀 bob 的 order（1002）仍回 200",
+        top10_2025="A01:2025",
+        api_2023="API1:2023",
     ),
     Case(
         "T30-FX-11",
@@ -201,11 +216,13 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "Mass assignment（JSON body 的 is_admin）",
-        "API3:2023 BOPLA / A04:2025",
+        915,
         "不在 ZAP 能力範圍（人工）",
         "註冊時 body 的 is_admin 直接寫入，可自封管理員",
         "只接受白名單欄位，is_admin 一律 0",
         "註冊帶 is_admin=true 後該使用者的 is_admin 為真",
+        top10_2025="A08:2025",
+        api_2023="API3:2023",
     ),
     Case(
         "T30-FX-12",
@@ -216,12 +233,13 @@ SECURITY_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "過度資料暴露",
-        "API3:2023 BOPLA",
+        213,
         "不在 ZAP 能力範圍（人工）",
         "使用者清單回傳 password 與 secret_note 等敏感欄位",
         "只回傳 id、username、email 的安全投影",
         "GET /api/users 的回應含 password／secret_note",
         holdout=True,
+        api_2023="API3:2023",
     ),
 )
 
@@ -235,7 +253,7 @@ CONTRACT_CASES: tuple[Case, ...] = (
         STANDARD_USER,
         "contract",
         "壞輸入的狀態碼（非整數 id）",
-        "",
+        None,
         "人工/被動（90022）",
         "非整數 id 造成未處理例外、回 500",
         "非整數 id 回 400",
@@ -250,7 +268,7 @@ CONTRACT_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "contract",
         "缺必填欄位的狀態碼",
-        "",
+        None,
         "人工",
         "缺 username 造成未處理例外、回 500",
         "缺必填欄位回 400",
@@ -265,7 +283,7 @@ CONTRACT_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "contract",
         "回應不符宣告的 schema",
-        "",
+        None,
         "人工（對照 OpenAPI）",
         "回應多出未宣告欄位、型別與 OpenAPI 不符",
         "回應符合 OpenAPI 宣告的 schema",
@@ -281,7 +299,7 @@ CONTRACT_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "contract",
         "型別混淆（body 是陣列）",
-        "",
+        None,
         "人工",
         "body 是 JSON 陣列時造成未處理例外、回 500",
         "非物件 body 回 400",
@@ -296,7 +314,7 @@ CONTRACT_CASES: tuple[Case, ...] = (
         STANDARD_USER,
         "contract",
         "未文件化 method 的狀態碼",
-        "",
+        None,
         "人工",
         "OpenAPI 未宣告的 PUT 造成未處理例外、回 500",
         "未支援的 method 回 405",
@@ -311,7 +329,7 @@ CONTRACT_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "contract",
         "格式錯誤的 JSON body",
-        "",
+        None,
         "人工",
         "body 不是合法 JSON 時造成未處理例外、回 500",
         "非法 JSON 回 400",
@@ -330,12 +348,13 @@ PLATFORM_BLOCKED_CASES: tuple[Case, ...] = (
         ANONYMOUS,
         "security",
         "SQL 注入（path 參數 username）",
-        "A03:2025 Injection",
+        89,
         "主動（40018），strict-1 平台阻擋",
         "username 拼接進 SQL；但探測需 path 中的 %27，strict-1 下 guard 以 PATH_AMBIGUOUS 擋下",
         "參數化查詢；T33 encoded-params-1 放寬後此案例才可達",
         "對照實驗（不經 guard）name1' 回 500；經 guard 被 PATH_AMBIGUOUS 擋下",
         platform_blocked=True,
+        top10_2025="A05:2025",
     ),
 )
 
