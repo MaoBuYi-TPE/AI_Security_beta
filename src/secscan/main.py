@@ -19,6 +19,7 @@ from secscan.core.config import Settings
 from secscan.core.db import DatabaseResources, create_db_engine
 from secscan.core.errors import register_error_handlers
 from secscan.core.request_id import RequestIdMiddleware
+from secscan.findings.router import router as findings_router
 from secscan.grants.router import router as grants_router
 from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
@@ -87,6 +88,7 @@ def _api_v1() -> APIRouter:
     api_v1.include_router(specs_router)
     api_v1.include_router(auth_profiles_router)
     api_v1.include_router(scans_router)
+    api_v1.include_router(findings_router)
     api_v1.include_router(scanners_router)
     api_v1.include_router(scan_profiles_router)
     return api_v1

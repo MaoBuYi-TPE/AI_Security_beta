@@ -64,6 +64,8 @@ V1_ROUTES = {
     ("GET", "/api/v1/scans/{scan_id}/events"),
     ("GET", "/api/v1/scans/{scan_id}/observations"),
     ("POST", "/api/v1/scans/{scan_id}/cancel"),
+    # T19
+    ("GET", "/api/v1/scans/{scan_id}/findings"),
     # T10
     ("GET", "/api/v1/scanners"),
     ("GET", "/api/v1/scan-profiles"),
