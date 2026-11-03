@@ -495,7 +495,7 @@ def test_a_container_left_by_a_finished_run_is_removed_without_changing_the_run(
     run = _run(queue_seed, report.run_id)
     assert (run.status, run.container_removed_at is not None) == ("collected", True)
     assert runtime.containers == {}
-    [parsed] = Worker(queue, owner="worker-1").drain()
+    [parsed] = Worker(queue, owner="worker-1", findings=None).drain()
     assert parsed.run_status is R.SUCCEEDED
 
 

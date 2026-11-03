@@ -1,0 +1,361 @@
+# 語意規則群組（T19；docs/DECISIONS.md §25.3、docs/TOOLS.md §8）。人工審查、有版本，sha256 釘選在
+# secscan/findings/domain/taxonomy.py 的 RULE_GROUPS_SHA256（改這個檔就要更新它與 version）。
+#
+# - 成員是 (engine, rule, variant)：rule 是 observation 的 source_rule；variant 是 rule_variant（ZAP 的
+#   alertRef 等於 pluginid 時、或 Nuclei 沒有 matcher 名時省略）。對不到的觀察走 fallback
+#   `engine:rule[:variant]`，永遠單一引擎、標 needs_review。
+# - 成員跨引擎的群組必須 reviewed 並寫下 evidence（實際的同時命中）；provisional 只能單一引擎。
+# - granularity：parameter（預設，參數名是 fingerprint 的一部分）或 endpoint（參數是群組身分的一部分，
+#   例如缺的 header 名稱；兩個工具對參數的回報不同，ZAP 給 header 名、Nuclei 沒有）。
+# - cwe 是審查後的值，必須是成員工具自己回報的 CWE 之一（契約測試核對），不為了對應 OWASP 改 CWE。
+# - owasp_api_2023 是 curated 對應，每筆要有 rationale（依官方分類頁；docs/SOURCES.md S106）。
+# 只收 2026-11-03 之前真實輸出出現過的規則（CLAUDE.md §1）；動態的 variant（tech-detect 的技術名、
+# fingerprinthub 的指紋名）與需要判斷嚴重程度的規則（werkzeug-debugger-detect）留給 fallback。
+schema: 1
+version: "1"
+groups:
+  # --- 跨引擎（evidence 是 fixture 弱點版 GET / 的同一個回應，T18 的 e2e，docs/TOOLS.md §8.2）---
+  - id: cors-permissive-policy
+    title: Permissive cross-origin resource sharing (CORS) policy
+    kind: security
+    cwe: 942
+    granularity: endpoint
+    owasp_api_2023:
+      category: API8:2023
+      rationale: >-
+        API8:2023 Security Misconfiguration 列出「A Cross-Origin Resource Sharing (CORS) policy is
+        missing or improperly set」。
+    review:
+      status: reviewed
+      evidence: >-
+        T30-FX-06：fixture 弱點版對同一個 CORS 政策（沒有 Origin 時回 *、有 Origin 時反射並帶
+        Allow-Credentials），ZAP 10098 與 nuclei cors-misconfig 都在 GET / 命中
+        （recordings/fixture/fixture-vuln-web、recordings/fixture-nuclei/fixture-nuclei-vuln）。
+        CWE 取 nuclei 分類中的 CWE-942；ZAP 的 CWE-264 是 CWE 的分類節點。
+    members:
+      - engine: zap
+        rule: "10098"
+      - engine: nuclei
+        rule: cors-misconfig
+        variant: arbitrary-origin
+  - id: csp-header-missing
+    title: Content-Security-Policy header not set
+    kind: security
+    cwe: 693
+    granularity: endpoint
+    owasp_api_2023:
+      category: API8:2023
+      rationale: >-
+        API8:2023 列出「Security or cache control directives are not sent to clients」，預防措施
+        要求「include applicable Security Headers」。
+    review:
+      status: reviewed
+      evidence: >-
+        T30-FX-05：fixture 弱點版的回應沒有 Content-Security-Policy，ZAP 10038-1 與 nuclei
+        http-missing-security-headers:content-security-policy 都在 GET / 命中；修補版補上之後兩者都
+        沒有出現。
+    members:
+      - engine: zap
+        rule: "10038"
+        variant: 10038-1
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: content-security-policy
+  - id: x-content-type-options-missing
+    title: X-Content-Type-Options header missing
+    kind: security
+    cwe: 693
+    granularity: endpoint
+    owasp_api_2023:
+      category: API8:2023
+      rationale: >-
+        API8:2023 列出「Security or cache control directives are not sent to clients」，預防措施
+        要求「include applicable Security Headers」。
+    review:
+      status: reviewed
+      evidence: >-
+        T30-FX-05：fixture 弱點版沒有 X-Content-Type-Options，ZAP 10021（參數是 header 名）與 nuclei
+        http-missing-security-headers:x-content-type-options（沒有參數）都在 GET / 命中。
+    members:
+      - engine: zap
+        rule: "10021"
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: x-content-type-options
+  - id: anti-clickjacking-header-missing
+    title: Anti-clickjacking header missing
+    kind: security
+    cwe: 1021
+    granularity: endpoint
+    owasp_api_2023:
+      category: API8:2023
+      rationale: >-
+        API8:2023 列出「Security or cache control directives are not sent to clients」，預防措施
+        要求「include applicable Security Headers」。
+    review:
+      status: reviewed
+      evidence: >-
+        T30-FX-05：fixture 弱點版沒有 X-Frame-Options（也沒有 CSP frame-ancestors），ZAP 10020-1 與
+        nuclei http-missing-security-headers:x-frame-options 都在 GET / 命中。CWE 取 ZAP 的
+        CWE-1021（比 nuclei 的 CWE-693 具體）。
+    members:
+      - engine: zap
+        rule: "10020"
+        variant: 10020-1
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: x-frame-options
+
+  # --- ZAP（單一引擎；golden fixture、T16 的靶機與 T30 的 fixture 錄製中出現過）---
+  - id: zap-server-version-disclosure
+    title: Server leaks version information via the Server header
+    kind: security
+    cwe: 497
+    granularity: endpoint
+    review:
+      status: reviewed
+      evidence: ZAP 10036-2（Juice Shop、VAmPI 的錄製；docs/TOOLS.md §8.3）。
+    members:
+      - engine: zap
+        rule: "10036"
+        variant: 10036-2
+  - id: zap-csp-directive-without-fallback
+    title: "CSP: failure to define a directive with no fallback"
+    kind: security
+    cwe: 693
+    granularity: endpoint
+    owasp_api_2023:
+      category: API8:2023
+      rationale: API8:2023 要求「include applicable Security Headers」；CSP 不完整屬於同一類設定問題。
+    review:
+      status: reviewed
+      evidence: ZAP 10055-13（T30 fixture 修補版的錄製；參數是 header 名）。
+    members:
+      - engine: zap
+        rule: "10055"
+        variant: 10055-13
+  - id: zap-modern-web-application
+    title: Modern web application
+    kind: informational
+    review:
+      status: reviewed
+      evidence: ZAP 10109（riskcode 0、沒有 CWE；Juice Shop 的錄製）。
+    members:
+      - engine: zap
+        rule: "10109"
+  - id: zap-authentication-request-identified
+    title: Authentication request identified
+    kind: informational
+    review:
+      status: reviewed
+      evidence: ZAP 10111（riskcode 0、沒有 CWE；VAmPI 與 T30 fixture 的錄製）。
+    members:
+      - engine: zap
+        rule: "10111"
+  - id: zap-anti-csrf-tokens-absent
+    title: Absence of anti-CSRF tokens
+    kind: security
+    cwe: 352
+    review:
+      status: reviewed
+      evidence: ZAP 10202（golden fixture findings、T30 fixture 的錄製）。
+    members:
+      - engine: zap
+        rule: "10202"
+  - id: zap-private-ip-disclosure
+    title: Private IP disclosure
+    kind: security
+    cwe: 497
+    review:
+      status: reviewed
+      evidence: ZAP 2（golden fixture unanswered）。
+    members:
+      - engine: zap
+        rule: "2"
+  - id: zap-external-redirect
+    title: External redirect
+    kind: security
+    cwe: 601
+    review:
+      status: reviewed
+      evidence: ZAP 20019-1（T30-FX-08，參數 next）。
+    members:
+      - engine: zap
+        rule: "20019"
+        variant: 20019-1
+  - id: zap-crlf-injection
+    title: CRLF injection
+    kind: security
+    cwe: 113
+    review:
+      status: reviewed
+      evidence: ZAP 40003（T30 fixture 弱點版，參數 next）。
+    members:
+      - engine: zap
+        rule: "40003"
+  - id: zap-reflected-xss
+    title: Cross-site scripting (reflected)
+    kind: security
+    cwe: 79
+    review:
+      status: reviewed
+      evidence: ZAP 40012（T30-FX-02，參數 name）。
+    members:
+      - engine: zap
+        rule: "40012"
+  - id: zap-sql-injection
+    title: SQL injection
+    kind: security
+    cwe: 89
+    review:
+      status: reviewed
+      evidence: ZAP 40018（T30-FX-01、FX-03；Juice Shop 的 search）。
+    members:
+      - engine: zap
+        rule: "40018"
+  - id: zap-path-traversal
+    title: Path traversal
+    kind: security
+    cwe: 22
+    review:
+      status: reviewed
+      evidence: ZAP 6-5（T30 fixture 弱點版，參數 next）。
+    members:
+      - engine: zap
+        rule: "6"
+        variant: 6-5
+
+  # --- Nuclei（單一引擎；golden fixture 與 T18 的錄製中出現過）---
+  # 其他缺少的 header：Nuclei 標 info，ZAP 不回報；在 HTTP 的 lab 中不是可利用的弱點（例如 HSTS 只對
+  # HTTPS 有意義），審查為 informational。
+  - id: nuclei-hsts-missing
+    title: Strict-Transport-Security header missing
+    kind: informational
+    cwe: 693
+    granularity: endpoint
+    review:
+      status: reviewed
+      evidence: nuclei http-missing-security-headers:strict-transport-security（T18 的錄製）。
+    members:
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: strict-transport-security
+  - id: nuclei-permissions-policy-missing
+    title: Permissions-Policy header missing
+    kind: informational
+    cwe: 693
+    granularity: endpoint
+    review:
+      status: reviewed
+      evidence: nuclei http-missing-security-headers:permissions-policy（T18 的錄製）。
+    members:
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: permissions-policy
+  - id: nuclei-referrer-policy-missing
+    title: Referrer-Policy header missing
+    kind: informational
+    cwe: 693
+    granularity: endpoint
+    review:
+      status: reviewed
+      evidence: nuclei http-missing-security-headers:referrer-policy（T18 的錄製）。
+    members:
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: referrer-policy
+  - id: nuclei-coep-missing
+    title: Cross-Origin-Embedder-Policy header missing
+    kind: informational
+    cwe: 693
+    granularity: endpoint
+    review:
+      status: reviewed
+      evidence: nuclei http-missing-security-headers:cross-origin-embedder-policy（T18 的錄製）。
+    members:
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: cross-origin-embedder-policy
+  - id: nuclei-coop-missing
+    title: Cross-Origin-Opener-Policy header missing
+    kind: informational
+    cwe: 693
+    granularity: endpoint
+    review:
+      status: reviewed
+      evidence: nuclei http-missing-security-headers:cross-origin-opener-policy（T18 的錄製）。
+    members:
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: cross-origin-opener-policy
+  - id: nuclei-corp-missing
+    title: Cross-Origin-Resource-Policy header missing
+    kind: informational
+    cwe: 693
+    granularity: endpoint
+    review:
+      status: reviewed
+      evidence: nuclei http-missing-security-headers:cross-origin-resource-policy（T18 的錄製）。
+    members:
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: cross-origin-resource-policy
+  - id: nuclei-x-permitted-cross-domain-policies-missing
+    title: X-Permitted-Cross-Domain-Policies header missing
+    kind: informational
+    cwe: 693
+    granularity: endpoint
+    review:
+      status: reviewed
+      evidence: nuclei http-missing-security-headers:x-permitted-cross-domain-policies（T18 的錄製）。
+    members:
+      - engine: nuclei
+        rule: http-missing-security-headers
+        variant: x-permitted-cross-domain-policies
+  - id: nuclei-robots-txt
+    title: robots.txt file present
+    kind: informational
+    review:
+      status: reviewed
+      evidence: nuclei robots-txt（golden fixture nuclei-juice-shop）。
+    members:
+      - engine: nuclei
+        rule: robots-txt
+  - id: nuclei-robots-txt-endpoints
+    title: Endpoints listed in robots.txt
+    kind: informational
+    review:
+      status: reviewed
+      evidence: nuclei robots-txt-endpoint:endpoints（golden fixture nuclei-juice-shop）。
+    members:
+      - engine: nuclei
+        rule: robots-txt-endpoint
+        variant: endpoints
+  - id: nuclei-security-txt
+    title: security.txt file present
+    kind: informational
+    review:
+      status: reviewed
+      evidence: nuclei security-txt（golden fixture）。
+    members:
+      - engine: nuclei
+        rule: security-txt
+  - id: nuclei-openapi-document
+    title: OpenAPI document exposed
+    kind: informational
+    cwe: 200
+    review:
+      status: reviewed
+      evidence: nuclei openapi（golden fixture nuclei-vampi-vuln；CWE 取模板分類的 CWE-200）。
+    members:
+      - engine: nuclei
+        rule: openapi
+  - id: nuclei-options-method
+    title: OPTIONS method enabled
+    kind: informational
+    review:
+      status: reviewed
+      evidence: nuclei options-method（golden fixture）。
+    members:
+      - engine: nuclei
+        rule: options-method

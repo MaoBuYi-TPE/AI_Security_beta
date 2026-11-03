@@ -267,7 +267,9 @@ def test_the_scan_cannot_be_deleted_under_the_records(
         ("TRUNCATE artifacts CASCADE", "artifacts"),
         ("UPDATE observations SET title = 'x'", "observations"),
         ("DELETE FROM observations", "observations"),
-        ("TRUNCATE observations", "observations"),
+        # finding_observations 以 FK 引用 observations（T19）：不加 CASCADE 時 PostgreSQL 先以 0A000
+        # 拒絕，trigger 不會執行；加上 CASCADE 才驗證得到 trigger 本身（同 artifacts）。
+        ("TRUNCATE observations CASCADE", "observations"),
     ],
 )
 def test_records_are_append_only(

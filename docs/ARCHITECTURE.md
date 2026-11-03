@@ -338,8 +338,9 @@ ExecutionPlan 只能包含：
 | scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code、container_name、image_ref、用量（requests_allotted、requests_sent、requests_denied、traffic_seconds）、preflight_result、coverage_recorded、解析的結果（T15）、plan_hash 與 profile_definition_sha256（T16）；同時是 runner 與 worker 的工作佇列（T09 已建立；容器名稱與映像在 T10 加入，用量、preflight 與 coverage 在 T12，解析的結果與 engine_version 在 T15，實際執行的 plan 在 T16；不自動重跑，所以沒有 attempt） |
 | runner_instances | id、role（runner/worker）、owner（唯一）、software_version、capabilities（引擎、映像與不可用的原因）、heartbeat_at、created_at；每個程序一列，30 秒內有心跳才算存活（T10 新增） |
 | scan_operations | scan_id、ordinal、method、path、operation_id、ineligible_reason；建立 scan 時凍結的 inventory 與 grant 的判斷，coverage 的分母（T09 新增） |
-| findings | id、target_id、fingerprint、kind、normalized_severity、owasp_2025、owasp_api_2023、mapping_source、mapping_version、triage/lifecycle、first/last_seen |
-| observations | id、scan_id、scanner_run_id、ordinal、source_event_id、source_index、source_rule、rule_variant、title、raw_severity、severity_label、raw_confidence、confidence_label、CWE、WASC、method、path、query、parameter 與位置、attack、evidence、other_info（遮罩並截斷）、auth_role、report_artifact_id、parser_version（T15 新增；finding_id、rule_group 由 T19 加入） |
+| findings | id、target_id、fingerprint（`(target_id, fingerprint)` 唯一）、kind、rule_group、title、method、route 與 route_source、參數位置與名稱、resource、auth_role、auth_verified、normalized_severity、severity_conflict、needs_review、cwe_id 與 cwe_source、owasp_top10_2025 與來源、owasp_api_2023 與來源、mapping_version、taxonomy_sha256、triage_state、lifecycle_state、first/last seen 的 run 與 scan、last_seen_at（T19 新增） |
+| finding_observations | observation_id（主鍵：每個觀察最多連結一次）、finding_id、連結時的 normalized_severity、normalized_confidence、needs_review、taxonomy_sha256（T19 新增；append-only） |
+| observations | id、scan_id、scanner_run_id、ordinal、source_event_id、source_index、source_rule、rule_variant、title、raw_severity、severity_label、raw_confidence、confidence_label、CWE、WASC、method、path、query、parameter 與位置、attack、evidence、other_info（遮罩並截斷）、auth_role、report_artifact_id、parser_version（T15 新增；T19 不加欄位，連結在 finding_observations，`DECISIONS.md` §25.2） |
 | artifacts | id、scanner_run_id、scan_id、kind（input/output）、path、sha256、size、redactions、classification、encrypted、storage_key（T15 新增；保留期限在 T23） |
 | reports | id、scan_id、format（json/markdown；P1 加 sarif）、status、artifact_id、lease 欄位、error；同時是 worker 的工作佇列 |
 | scan_events | scan_id、sequence（每個 scan 各自連號）、event_type、scanner_run_id、payload（只由 enum 與 id 組成）、時間；供輪詢使用（T09 已建立） |
@@ -407,7 +408,8 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
 - **T15（migration `0010`）**：
   - scanner_runs 新增 `results_recorded`、`parser_version`、`engine_version`、`exit_code`、`observation_count`、`result_details`（JSONB ≤ 4 KiB：排除與重複的計數、判定、AF 的摘要與 add-on 的版本）；CHECK 要求一起有值；run 結束之後由 0009 的 trigger 凍結。
   - artifacts、observations：只以複合 FK `(scanner_run_id, scan_id)` 引用 scanner_runs，不直接引用 scans（對帳先鎖 scans 再鎖 run）；不可修改、刪除或 TRUNCATE。
-- **其餘資料表由各功能任務以自己的 migration 加入**：findings、reports 在 M4、M5 加入。
+- **T19（migration `0013`）**：findings 與 finding_observations（`DECISIONS.md` §25.8）。findings 的 first/last seen 以複合 FK 引用 scanner_runs、不直接引用 scans（同 observations 的鎖序理由）；trigger `findings_guard` 讓身分、對應、triage 與 lifecycle 不可修改，只有 last seen 與三個聚合可以更新而且只會往上，不能刪除。finding_observations append-only。
+- **其餘資料表由各功能任務以自己的 migration 加入**：reports 在 M5 加入。
 
 ## 7. ScanPlan 與執行快照
 
@@ -547,7 +549,7 @@ T09 已實作（`DECISIONS.md` §13.4）：
 
 HTTP body、敏感的 query 與 Token 不直接當作索引。
 
-Finding 的 proposed fingerprint：
+Finding 的 fingerprint（T19 已實作，`DECISIONS.md` §25.6；實際的欄位是 `{v, target_id, kind, rule_group, method, route, route_templated, parameter_location, parameter_name, auth: {role, verified}, resource}`）：
 
 ```text
 SHA256(canonical_json({
@@ -566,13 +568,14 @@ SHA256(canonical_json({
 **語意規則群組**：
 
 - `reviewed_semantic_rule_group` 來自 `findings/taxonomy/rule_groups.yaml`。這份表經過人工審查並有版本號，把 (scanner, rule_id) 對到語意群組；不是用 CWE 代替。
-- 對不到群組的規則，以 `scanner:rule_id` 作為群組，保持獨立，不跨工具合併。
+- 對不到群組的規則，以 `scanner:rule_id`（有 variant 時是 `scanner:rule_id:variant`）作為群組，保持獨立，不跨工具合併。
+- T19 的查找只做精確比對；成員跨引擎的群組必須經過審查並寫下同時命中的證據（`DECISIONS.md` §25.3、`TOOLS.md` §8）。
 
 **路徑與參數**：
 
 - 只有存在可信的 OpenAPI 或 route map 時，才把 API 路徑中的具體 ID 對應成 `{id}`。
 - 與授權或特定資源有關的問題，仍要保留 resource discriminator，避免把不同物件合併在一起。
-- Query 不全部刪除。像 action/type 這類有業務語意的欄位，要依規則保留。
+- Query 不全部刪除。像 action/type 這類有業務語意的欄位，要依規則保留（T19 尚未實作：query 不在 fingerprint 中，列為限制）。
 - secret 值要遮罩；必要的識別欄位可以用專案穩定的 HMAC。
 - 不要過度 decode path，導致把不同的路徑當成相同。
 
@@ -594,7 +597,8 @@ SHA256(canonical_json({
 **合併原則**：
 
 - 去重不刪除 Observation。
-- 跨工具命中只代表有多個來源，不自動提高 severity，也不標為 confirmed。
+- 跨工具命中只代表有多個來源，不自動提高 severity，也不標為 confirmed。finding 的等級是各來源正規化之後的最高值，來源不一致時 `severity_conflict`（使用者決定，`DECISIONS.md` §25.1）。
+- 身分在 run 中失效或無法證明（`auth_verified=false`）的觀察是另一個 finding，不併入已驗證身分的 finding。
 - severity 的衝突或未知時，保留原值與理由；不可以用空的 CVSS 補一個假分數。
 
 ## 11. 人工 triage 與複掃

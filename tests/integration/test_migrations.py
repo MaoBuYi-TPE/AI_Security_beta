@@ -33,6 +33,8 @@ APP_TABLES = {
     "run_coverage",
     "artifacts",
     "observations",
+    "findings",
+    "finding_observations",
 }
 TRIGGER_FUNCTIONS = (
     "audit_events_reject_mutation",
@@ -45,6 +47,7 @@ TRIGGER_FUNCTIONS = (
     "scan_records_guard",
     "scan_operations_insert_guard",
     "scanner_runs_container_guard",
+    "findings_guard",
 )
 
 

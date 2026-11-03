@@ -196,7 +196,7 @@ T05 已涵蓋 project 層的權限：
 - 遮罩以固定 seed 的隨機輸入檢查 idempotent，並檢查惡意輸入下仍是線性時間。
 - 以突變檢查確認上述測試有鑑別力（`TASKS.md` T05）。
 
-SEC-16 要求的 finding、artifact 跨專案測試，隨這些資源在 M4–M5 加入，尚未完成；scan 已在 T09、observation 已在 T15 涵蓋（見下）。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
+SEC-16 要求的 artifact 跨專案測試隨下載端點在 M5 加入，尚未完成；scan 已在 T09、observation 已在 T15、scan 的 finding 清單已在 T19 涵蓋（見下；`GET /findings/{id}` 在 T20）。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
 
 T08 已涵蓋認證設定：
 - **secret 不外流（SEC-14 的平台這一側）**：以 canary 確認 secret 不出現在任何回應（含 4xx）與 header、DEBUG 等級的所有日誌、audit、DB 的明文；422 只說明欄位與原因，expected_json 的 key 也不回顯。FastAPI 內建的 telemetry 已關閉；查詢的路由拿不到加密元件。
@@ -298,6 +298,12 @@ T15 已涵蓋（真的 DB）：
 - **worker**（`tests/integration/test_worker_zap.py`，真實的輸出經 runner 的收集）：每份 fixture 的 run、scan、observation 與 artifact；壞掉的輸出是判定、不是崩潰（NUL 與孤立的 surrogate 不再讓 worker 反覆失敗）；寫入是原子的，第二次寫入與失效的 lease 被拒絕；寫入之後中斷時重試以存下的判定結束，輸出已刪除也一樣；解析中要求取消、授權撤回不中斷解析；解析期間延長 lease，失效時留給對帳。
 - **runner**：secret 在收集之前已不在 secret 檔，仍以 provision 時的值遮罩；proxy 的 token 與 base64 的形式；preflight 的輸出不遮罩；收集的過程中持續心跳，lease 失效時中止。
 - **API（SEC-16）**：`GET /scans/{id}/observations` 的欄位、順序、分頁、limit 的上限、引擎篩選；其他 project 與不存在的一樣 404；`GET /scans/{id}` 的 `result`；`GET /scan-profiles` 只列可用的 profile 與引擎。
+
+T19 已涵蓋（真的 DB；`DECISIONS.md` §25）：
+- **schema**（`test_findings_schema.py`）：findings 的每類 CHECK（OWASP 的格式與來源一致、CWE 與來源一致、參數位置與名稱、列舉）、`(target_id, fingerprint)` 唯一、first／last seen 的複合 FK；trigger 讓身分、對應、triage 與 lifecycle 不可修改，聚合只會往上，不能 DELETE／TRUNCATE；finding_observations append-only、每個觀察最多一次。
+- **連結**（`test_finding_linker.py`）：同一個 scan 的 ZAP 與 Nuclei 在同一個位置命中審查過的群組 → 一個 finding（最高等級、衝突、對應）；fallback 單一引擎；冪等；複掃沿用同一個 finding、聚合只往上；不同 target 不共用；有規格時 route 樣板化；身分失效（`auth.lost`）或 preflight 沒有通過 → 另一個未驗證的 finding；lease 失效不連結；兩個 run 同時連結不死鎖、不重複。
+- **worker**：解析入庫之後連結（ZAP golden 的 11 個觀察都連結到審查過的群組；nuclei 的 fallback 標 needs_review）；中斷之後重試只補上沒有連結的觀察。
+- **API（SEC-16）**（`test_findings_api.py`）：`GET /scans/{id}/findings` 的欄位、來源彙總、排序、篩選、分頁、不合法的值 422；只列這個 scan 的 finding、sources 只算這個 scan；其他 project 與不存在的一樣 404，沒有 key 是 401。
 
 ### 4.4 Live E2E
 
@@ -424,22 +430,26 @@ crAPI、DVWA 是替代擴充，不增加必要工作量 [S17]。fixture app 只�
 
 T18 另以真的 nuclei 掃同一個 fixture app（`make test-live-fixture-nuclei`）：弱點版的可利用 CORS（FX-06）由 `cors-misconfig` 命中、修補版不命中，與 ZAP 10098 構成「同一問題多來源」；實跑驗證 plan_hash、與 /scan-profiles 一致的定義、`observed ⊆ forwarded`（guard-403 不誤報）、平台阻擋與共享預算（`DECISIONS.md` §24.5）。錄製到 `recordings/fixture-nuclei/`（gitignore），人工審查後才搬進 fixture。
 
+OWASP 標記（T19 更正，`DECISIONS.md` §25.10）：Top 10:2025 由案例的 CWE 查官方的 CWE 清單（`findings/taxonomy/owasp_top10_2025.json`）而來，`test_fixture_cases.py` 核對一致；清單中沒有的 CWE 不標分類，不改 CWE 去湊。API Security Top 10:2023 是 curated。T30 初稿誤用了 2021 的編號（例如「A03:2025 Injection」），正負例與量測結果不受影響。
+
+T19 以同一個 scan 同時跑 ZAP 與 Nuclei（`make test-live-fixture-findings`）：worker 把觀察連結到 finding，弱點版 FX-06 的 CORS 是一個有兩個引擎來源的 finding（等級取最高值、標衝突），修補版沒有 CORS 的 finding（`DECISIONS.md` §25）。
+
 安全案例（12 個正例＋12 個修補負例）：
 
 | case_id | method／path | auth | 類別（OWASP） | ZAP 能否偵測 | 平台結果 | 人工確認方式 | 修補差異 | holdout |
 |---|---|---|---|---|---|---|---|---|
-| T30-FX-01 | GET `/search` | anonymous | SQLi（query 參數 q，A03:2025） | 主動（40018） | **命中**（40018×3） | q=apple' 回 500（sqlite OperationalError） | 參數化查詢，q 當資料 |  |
-| T30-FX-02 | GET `/greet` | anonymous | 反射型 XSS（query 參數 name，A03:2025） | 主動（40012/40014） | **命中**（40012） | name=`<b>x</b>` 原樣反射（未轉義） | 以 html.escape 轉義 |  |
-| T30-FX-03 | POST `/login` | anonymous | SQLi（表單 user/pass，A03:2025） | 主動（40018） | **命中**（40018） | `admin'--` 註解掉密碼條件即登入 | 參數化查詢，壞值回 401 |  |
-| T30-FX-04 | GET `/search` | anonymous | 錯誤訊息／堆疊洩漏（A05:2025） | 被動（90022）/人工 | 漏報（無 90022；以 40018 間接命中） | 500 回應 body 含 OperationalError | 錯誤只回一般訊息 | ✓ |
-| T30-FX-05 | GET `/` | anonymous | 缺安全 header／CSP（A05:2025） | 被動（10038、10021） | **命中**（10038、10021、10020） | 回應缺 CSP 與 X-Content-Type-Options | 每個回應補 SECURITY_HEADERS |  |
-| T30-FX-06 | GET `/api/users` | anonymous | CORS 反射並帶憑證（A05:2025） | 被動（ZAP 10098）與 nuclei cors-misconfig | **命中**（ZAP 10098、nuclei cors-misconfig） | 反射 Origin 並帶 `Allow-Credentials: true`（可利用） | 不輸出 CORS header |  |
-| T30-FX-07 | POST `/login` | anonymous | Cookie 缺 HttpOnly/Secure（A05:2025） | 被動（10010/10011） | 漏報（spider 未提交登入表單取得 Set-Cookie） | Set-Cookie 缺 HttpOnly、Secure | 補 HttpOnly; Secure; SameSite |  |
-| T30-FX-08 | GET `/go` | anonymous | 開放轉址（query 參數 next，A01:2025） | 主動（20019） | **命中**（20019 External Redirect） | next=外部 URL 回 302 指向外部 | next 僅允許白名單相對路徑 |  |
-| T30-FX-09 | GET `/backup.sql` | anonymous | 敏感檔案暴露（A05:2025） | 主動/人工 | 漏報（無檔案暴露告警，同 Juice Shop /ftp） | 回 200、body 含帳密 | 回 404 | ✓ |
-| T30-FX-10 | GET `/api/orders/{id}` | standard_user | BOLA／IDOR（API1:2023） | 不在 ZAP 能力範圍 | 不在範圍（GET 已轉送；人工確認） | 以 alice 的 token 讀 bob 的 order（1002）回 200 | 只允許讀自己的 order，否則 404 |  |
-| T30-FX-11 | POST `/api/users` | anonymous | Mass assignment（API3:2023） | 不在 ZAP 能力範圍 | 不在範圍（人工確認） | 註冊帶 is_admin=true 後 is_admin 為真 | 白名單欄位，is_admin 一律 0 |  |
-| T30-FX-12 | GET `/api/users` | anonymous | 過度資料暴露（API3:2023） | 不在 ZAP 能力範圍 | 不在範圍（人工確認） | 回應含 password／secret_note | 只回 id、username、email |  ✓ |
+| T30-FX-01 | GET `/search` | anonymous | SQLi（query 參數 q，CWE-89，A05:2025） | 主動（40018） | **命中**（40018×3） | q=apple' 回 500（sqlite OperationalError） | 參數化查詢，q 當資料 |  |
+| T30-FX-02 | GET `/greet` | anonymous | 反射型 XSS（query 參數 name，CWE-79，A05:2025） | 主動（40012/40014） | **命中**（40012） | name=`<b>x</b>` 原樣反射（未轉義） | 以 html.escape 轉義 |  |
+| T30-FX-03 | POST `/login` | anonymous | SQLi（表單 user/pass，CWE-89，A05:2025） | 主動（40018） | **命中**（40018） | `admin'--` 註解掉密碼條件即登入 | 參數化查詢，壞值回 401 |  |
+| T30-FX-04 | GET `/search` | anonymous | 錯誤訊息／堆疊洩漏（CWE-209，A10:2025） | 被動（90022）/人工 | 漏報（無 90022；以 40018 間接命中） | 500 回應 body 含 OperationalError | 錯誤只回一般訊息 | ✓ |
+| T30-FX-05 | GET `/` | anonymous | 缺安全 header／CSP（CWE-693，A06:2025） | 被動（10038、10021） | **命中**（10038、10021、10020） | 回應缺 CSP 與 X-Content-Type-Options | 每個回應補 SECURITY_HEADERS |  |
+| T30-FX-06 | GET `/api/users` | anonymous | CORS 反射並帶憑證（CWE-942，A02:2025、API8:2023） | 被動（ZAP 10098）與 nuclei cors-misconfig | **命中**（ZAP 10098、nuclei cors-misconfig） | 反射 Origin 並帶 `Allow-Credentials: true`（可利用） | 不輸出 CORS header |  |
+| T30-FX-07 | POST `/login` | anonymous | Cookie 缺 HttpOnly/Secure（CWE-1004，A02:2025） | 被動（10010/10011） | 漏報（spider 未提交登入表單取得 Set-Cookie） | Set-Cookie 缺 HttpOnly、Secure | 補 HttpOnly; Secure; SameSite |  |
+| T30-FX-08 | GET `/go` | anonymous | 開放轉址（query 參數 next，CWE-601，A01:2025） | 主動（20019） | **命中**（20019 External Redirect） | next=外部 URL 回 302 指向外部 | next 僅允許白名單相對路徑 |  |
+| T30-FX-09 | GET `/backup.sql` | anonymous | 敏感檔案暴露（CWE-530，不在 Top 10:2025 的清單） | 主動/人工 | 漏報（無檔案暴露告警，同 Juice Shop /ftp） | 回 200、body 含帳密 | 回 404 | ✓ |
+| T30-FX-10 | GET `/api/orders/{id}` | standard_user | BOLA／IDOR（CWE-639，A01:2025、API1:2023） | 不在 ZAP 能力範圍 | 不在範圍（GET 已轉送；人工確認） | 以 alice 的 token 讀 bob 的 order（1002）回 200 | 只允許讀自己的 order，否則 404 |  |
+| T30-FX-11 | POST `/api/users` | anonymous | Mass assignment（CWE-915，A08:2025、API3:2023） | 不在 ZAP 能力範圍 | 不在範圍（人工確認） | 註冊帶 is_admin=true 後 is_admin 為真 | 白名單欄位，is_admin 一律 0 |  |
+| T30-FX-12 | GET `/api/users` | anonymous | 過度資料暴露（CWE-213，API3:2023） | 不在 ZAP 能力範圍 | 不在範圍（人工確認） | 回應含 password／secret_note | 只回 id、username、email |  ✓ |
 
 contract/robustness 案例（6 個正例＋6 個修補負例；獨立標記，不加入 security TP/FP；由 `test_fixture_cases.py` 與人工確認，不以 ZAP 評）：
 
@@ -456,7 +466,7 @@ contract/robustness 案例（6 個正例＋6 個修補負例；獨立標記，�
 
 | case_id | method／path | 類別 | 平台結果 | 說明 |
 |---|---|---|---|---|
-| T30-FX-PB-01 | GET `/users/{username}` | SQLi（path 參數 username，A03:2025） | 平台阻擋（PATH_AMBIGUOUS） | 探測需 path 中的 `%27`，strict-1 下 guard 擋下、不到達靶機（同 §20.7 的 VAmPI path SQLi）；T33 的 `encoded-params-1` 放寬後才可達。修補版以參數化查詢修正 |
+| T30-FX-PB-01 | GET `/users/{username}` | SQLi（path 參數 username，CWE-89，A05:2025） | 平台阻擋（PATH_AMBIGUOUS） | 探測需 path 中的 `%27`，strict-1 下 guard 擋下、不到達靶機（同 §20.7 的 VAmPI path SQLi）；T33 的 `encoded-params-1` 放寬後才可達。修補版以參數化查詢修正 |
 
 live 量測另外命中數個超出這 12 個列舉案例的告警（弱點版 web：40003 CRLF Injection、6 Path Traversal、10202 Absence of Anti-CSRF Tokens、10020 Missing Anti-clickjacking Header），如實記錄於 `TOOLS.md` §7.8，不改變 12＋12、6＋6 的計數。
 

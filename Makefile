@@ -51,7 +51,8 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	lab-net lab-up lab-down lab-verify lab-images build images ensure-net scan-net up down \
 	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
-	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check
+	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check \
+	owasp-top10 owasp-top10-check test-live-fixture-findings
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -179,6 +180,16 @@ nuclei-templates: docker-check
 nuclei-templates-check: docker-check
 	$(UV_RUN) python tools/freeze_nuclei_templates.py --check
 
+# 產生 T19 凍結的 OWASP Top 10:2025 官方 CWE 對應表（docs/DECISIONS.md §25.5）：讀手動下載到
+# runs/t19-owasp/<commit>/ 的 10 個分類 markdown（鎖定 commit、逐檔驗 sha256），寫出
+# src/secscan/findings/taxonomy/owasp_top10_2025.json。不連網、不需要 Docker；下載方式見工具的檔頭。
+owasp-top10:
+	$(UV_RUN) python tools/freeze_owasp_top10.py
+
+# 只驗證對應表能從鎖定的官方來源逐位元組重現（不覆寫）。
+owasp-top10-check:
+	$(UV_RUN) python tools/freeze_owasp_top10.py --check
+
 # 建立或檢查一個 internal＋gateway isolated 的網路（NET、SUBNET、IP_RANGE 由呼叫端給定）。
 # 已存在時只檢查：舊的網路沒有 ip-range 時會失敗，刪除後重建（README）。
 ensure-net: docker-check
@@ -271,3 +282,11 @@ test-live-fixture-nuclei: LIVE_TESTS := tests/live/test_fixture_nuclei_live.py
 test-live-fixture-nuclei: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture-nuclei
 test-live-fixture-nuclei: LIVE_PYTEST_ARGS := -s
 test-live-fixture-nuclei: test-live-runner
+
+# T19（docs/DECISIONS.md §25）：同一個 scan 以真的 ZAP 與 Nuclei 掃 fixture app 的弱點版與修補版，
+# worker 連結 finding；以 GET /scans/{id}/findings 驗證跨引擎合併、最高等級與衝突、每個觀察連結一次。
+# 量測印在輸出（-s），錄製到 recordings/fixture-findings/。約 20 分鐘。
+test-live-fixture-findings: LIVE_TESTS := tests/live/test_fixture_findings_live.py
+test-live-fixture-findings: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture-findings
+test-live-fixture-findings: LIVE_PYTEST_ARGS := -s
+test-live-fixture-findings: test-live-runner

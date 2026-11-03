@@ -71,8 +71,8 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/scans/{scan_id}/observations | 同專案 | 200；工具的單次觀察，分頁，可依引擎篩選；只有遮罩後的欄位（T15 已實作，§17.8） |
 | GET | /api/v1/scans/{scan_id}/events | 同專案 | 200；以 after_sequence 輪詢，不先做 WebSocket（T09 已實作） |
 | POST | /api/v1/scans/{scan_id}/cancel | operator/admin | 202/200；取消中/已終止，不代表已撤銷外部操作（T09 已實作） |
-| GET | /api/v1/scans/{scan_id}/findings | 同專案 | 200；kind/severity/tool/triage filter |
-| GET | /api/v1/findings/{finding_id} | 同專案 | 200；來源 observations、遮罩證據與歷史 |
+| GET | /api/v1/scans/{scan_id}/findings | 同專案 | 200；這個 scan 的觀察連結到的 finding，分頁，可依 kind／severity／engine／triage_state 篩選；sources 只有這個 scan 的來源（T19 已實作，§17.9） |
+| GET | /api/v1/findings/{finding_id} | 同專案 | 200；來源 observations、遮罩證據與歷史（T20） |
 | PATCH | /api/v1/findings/{finding_id}/triage | operator/admin | 200；需 reason；敏感變更留 audit |
 | POST | /api/v1/scan-comparisons | 同專案 | 200；只比較有權限且相同 target 的 scans |
 | POST | /api/v1/scans/{scan_id}/reports | operator/admin | 201；建立 JSON/Markdown 遮罩報告 artifact（P1 加 SARIF） |
@@ -246,27 +246,42 @@ T09 已實作狀態、引擎與凍結的 operation 數（§17.2）；T12 加上 
 
 ## 9. Finding 回應
 
+T19 已實作清單（§17.9）；以下是實際的形狀，數字與規則不是實驗結果：
+
 ```json
 {
-  "finding_id": "66666666-6666-4666-8666-666666666666",
+  "id": "66666666-6666-4666-8666-666666666666",
+  "target_id": "…",
   "kind": "security",
-  "title": "待人工確認的 SQL 注入告警",
-  "normalized_severity": "high",
-  "cwe_ids": ["CWE-89"],
-  "cve_ids": [],
-  "cvss": null,
-  "location": {"method": "GET", "path": "/api/search", "parameter_location": "query", "parameter_name": "q"},
-  "auth_role": "standard_user",
+  "rule_group": "cors-permissive-policy",
+  "title": "Permissive cross-origin resource sharing (CORS) policy",
+  "normalized_severity": "medium",
+  "scan_severity": "medium",
+  "severity_conflict": true,
+  "needs_review": false,
+  "cwe_ids": ["CWE-942"],
+  "cwe_source": "rule_group",
+  "location": {"method": "GET", "route": "/", "route_source": "literal", "parameter_location": null, "parameter_name": null, "resource": null},
+  "auth_role": "anonymous",
+  "auth_verified": true,
+  "owasp": {"top10_2025": "A02:2025", "top10_2025_source": "official", "api_2023": "API8:2023", "api_2023_source": "curated"},
+  "mapping_version": "rules-1+owasp2025-57db8ec5ddbc+norm-1+fp-1",
   "triage_state": "unreviewed",
   "lifecycle_state": "open",
-  "observations": [
-    {"engine": "zap", "source_rule_id": "<FROM_REAL_OUTPUT>", "evidence_artifact_id": "77777777-7777-4777-8777-777777777777"}
-  ],
-  "verification": {"status": "not_performed", "notes": "工具告警尚未經人工確認"}
+  "first_seen_scan_id": "…",
+  "last_seen_scan_id": "…",
+  "created_at": "…",
+  "last_seen_at": "…",
+  "sources": [
+    {"engine": "zap", "source_rule": "10098", "rule_variant": "10098", "raw_severity": "2", "severity_label": "Medium", "normalized_severity": "medium", "raw_confidence": "2", "confidence_label": "Medium", "normalized_confidence": "medium", "cwe_id": 264, "observations": 5},
+    {"engine": "nuclei", "source_rule": "cors-misconfig", "rule_variant": "arbitrary-origin", "raw_severity": "info", "severity_label": "Informational", "normalized_severity": "info", "raw_confidence": "unknown", "confidence_label": "Unknown", "normalized_confidence": "unknown", "cwe_id": 346, "observations": 1}
+  ]
 }
 ```
 
-這不是聲稱某個實際靶場存在弱點。API 資料需由真實輸出產生；title/分類/mapping 有版本，缺乏 CWE 時可空陣列，不從文字硬猜。
+- API 資料由真實輸出產生；title、分類與對應有版本（`mapping_version`），缺乏 CWE 時 `cwe_ids` 是空陣列，不從文字硬猜。
+- 沒有 CVE／CVSS 的資料來源，所以不輸出這兩個欄位（原規劃的 `cve_ids`、`cvss` 取消，不放空值假裝有）。
+- 來源 observation → artifact 的追溯、遮罩證據與 `verification`（人工確認）在 T20、T21。
 
 ## 10. Triage 與複掃比較
 
@@ -1150,7 +1165,7 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 }
 ```
 
-- 觀察不是 finding：等級與信心是工具的原始值，正規化、去重與 fingerprint 在 T19。
+- 觀察不是 finding：等級與信心是工具的原始值。T19 起 worker 在解析之後把觀察連結到 finding（§17.9），觀察本身不改。
 - `attack`、`evidence`、`other_info` 是目標回應的不可信內容：已遮罩、截斷，API 只以 JSON 字串輸出；顯示時要編碼。
 - 工具回報、但不是目標的回應或不在範圍內的告警不會入庫，只計數在 `engines[].result.excluded`。
 
@@ -1192,6 +1207,18 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 
 - `plan_hash`：runner 準備執行的 ExecutionPlan（映像 digest、指令、非秘密的環境變數、輸入檔的 sha256、資源與牆鐘上限；plan 中有 profile 的規則與 maxDuration）的 sha256，在建立容器之前寫入、之後不能改。plan 沒有產生的 run 是 null（還沒開始、`PLAN_REJECTED`、剩下的預算不夠 ZAP 執行的 `BUDGET_EXHAUSTED`）；不收集的 run（`TIME_LIMIT_EXCEEDED`、guard 回報的 `BUDGET_EXHAUSTED`、取消）與之後才失敗的（`GUARD_UNAVAILABLE`）也有。hash 相同代表執行的內容相同；反之不成立：maxDuration 隨剩下的預算與 grant 的期限改變，fake 的輸入檔含 run 的 id。
 - `profile_definition_sha256`：zap 的 run 開始時的規則定義（和 `GET /scan-profiles` 的 `definition_sha256` 同一個算法）；之後改了規則，已執行的 run 仍是當時的值。其他引擎是 null。
+
+### 17.9 Finding（T19）
+
+`GET /api/v1/scans/{scan_id}/findings?kind=security&severity=high&engine=zap&triage_state=unreviewed&page=1&limit=25`（200，同專案；其他 project 的 scan 與不存在的一樣回 404）：這個 scan 的觀察連結到的 finding（形狀見 §9），等級由高到低、再依 rule group、route、id；分頁（`limit` 上限 100）。篩選都可省略；不合法的值回 422（`INVALID_REQUEST`）。
+
+- finding 是 target 層級、跨掃描的議題（`DECISIONS.md` §25）：語意規則群組、method、route、參數與 auth role（含身分是否驗證過）都相同才是同一個；不能只靠相同的 CWE、URL 或相似的標題合併。對不到審查過的群組時，rule_group 是 `engine:rule[:variant]`（fallback），永遠只有一個引擎、`needs_review` 是 true。
+- `normalized_severity` 是 finding 所有掃描的來源正規化之後的最高值（只會往上），來源數本身不加分；來源不一致時 `severity_conflict`。`severity_conflict`、排序與 `severity` 篩選都用這個 finding 層級的值；`scan_severity` 是這個 scan 的來源中的最高值（同一個 finding 在別的 scan 可能更高），這個 scan 自己的來源是否一致看 `sources`。兩個工具同時命中只代表有多個來源，**不是人工確認**，也不提高信心（confidence 不聚合，只在各來源保留）。
+- `sources` 只有這個 scan 中的來源（同一個引擎、規則、variant 與原值的觀察數）；`engine` 篩選的是「這個引擎在這個 scan 有來源」的 finding，sources 仍列出全部來源。
+- `location.route`：scan 有規格時，剛好一個最具體的 operation 才用它的樣板（`openapi`），否則是字面的 path（`literal`）；query 不在 finding 的身分中。
+- `auth_verified` 是 false：帶認證的身分在那個 run 中失效或無法證明（preflight 沒有通過，或 guard 記下任何被拒絕、退化或探針被拒絕的帶認證請求），這種觀察不併入已驗證身分的 finding。
+- `owasp.top10_2025` 依官方的 CWE 清單（`official`），`owasp.api_2023` 依 curated 表（`curated`），沒有對應時是 null 與 `none`。
+- `triage_state`、`lifecycle_state` 在 T21 才能修改（這裡都是初始值）。
 
 ## 18. Runner、worker 與掃描器（T10 已實作）
 

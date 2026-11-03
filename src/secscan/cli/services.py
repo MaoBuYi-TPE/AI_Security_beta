@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
+from secscan.findings.service import FindingLinker
 from secscan.migrations import head_revision
 from secscan.runner.config import RunnerSettings
 from secscan.runner.docker_runtime import DockerRuntime
@@ -162,7 +163,7 @@ def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
         owner = _owner(InstanceRole.WORKER)
         with stop_signals() as stop:
             reports = WorkerLoop(
-                _worker(_queue(sessions, settings), owner),
+                _worker(sessions, _queue(sessions, settings), owner),
                 _fleet(sessions, owner, InstanceRole.WORKER),
                 stop_requested=stop.is_set,
                 poll_seconds=WORKER_POLL_SECONDS,
@@ -177,13 +178,15 @@ def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
     return EXIT_OK
 
 
-def _worker(queue: ScanQueue, owner: str) -> Worker:
+def _worker(sessions: sessionmaker[Session], queue: ScanQueue, owner: str) -> Worker:
     worker_settings = WorkerSettings()
     return Worker(
         queue,
         owner=owner,
         artifacts=ArtifactReader(worker_settings.runs_dir),
         telemetry=TelemetryReader(worker_settings.telemetry_dir),
+        # taxonomy 在這裡載入（sha256 不符時 worker 啟動就失敗，§25.3）。
+        findings=FindingLinker(sessions),
     )
 
 

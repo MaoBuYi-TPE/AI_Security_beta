@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
+from secscan.findings.service import FindingLinker
 from secscan.guard.domain.telemetry import (
     ForwardedRequest,
     RunSummary,
@@ -206,6 +207,7 @@ def _summary(dirs: Dirs, lease: Lease, *, forwarded: int, denied: dict[str, int]
 
 
 def _worker(queue: ScanQueue, dirs: Dirs, **options: Any) -> Worker:
+    options.setdefault("findings", None)
     return Worker(
         queue,
         owner="worker-1",
@@ -304,6 +306,33 @@ def test_the_observations_keep_the_tool_values_and_the_run(
     query = [row for row in rows if row.query == "q=hello"]
     assert query
     assert {row.path for row in query} == {"/search"}
+
+
+def test_the_golden_findings_link_to_reviewed_groups(
+    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    """T19（§25.7）：golden fixture 的 11 個觀察都連結一次，規則都有審查過的群組。"""
+    lease = _collected(queue, queue_seed, world, dirs, "findings")
+    linker = FindingLinker(sessionmaker(queue_engine, expire_on_commit=False))
+
+    _worker(queue, dirs, findings=linker).drain()
+
+    rows = queue_seed.query(
+        "SELECT f.rule_group, f.needs_review, f.owasp_top10_2025, count(*) AS n FROM findings f "
+        "JOIN finding_observations l ON l.finding_id = f.id "
+        "JOIN observations o ON o.id = l.observation_id WHERE o.scanner_run_id = :id "
+        "GROUP BY f.id",
+        id=lease.run_id,
+    )
+    assert sum(row.n for row in rows) == 11
+    assert {row.rule_group for row in rows} == {
+        "zap-anti-csrf-tokens-absent",
+        "anti-clickjacking-header-missing",
+        "x-content-type-options-missing",
+        "csp-header-missing",
+    }
+    assert not any(row.needs_review for row in rows)
+    assert {row.owasp_top10_2025 for row in rows} == {"A01:2025", "A06:2025"}
 
 
 def test_the_artifacts_describe_the_collected_files(
@@ -457,7 +486,7 @@ def test_a_worker_without_the_volumes_cannot_read_the_output(
 ) -> None:
     lease = _collected(queue, queue_seed, world, dirs, "findings")
 
-    Worker(queue, owner="worker-1").drain()
+    Worker(queue, owner="worker-1", findings=None).drain()
 
     assert _run(queue_seed, lease.run_id).error_code == "OUTPUT_INVALID"
 
