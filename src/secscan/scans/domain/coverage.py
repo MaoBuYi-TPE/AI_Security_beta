@@ -42,29 +42,40 @@ def telemetry_complete(exchanges: Sized, *, forwarded: int) -> bool:
     return forwarded - 1 <= len(exchanges) <= forwarded
 
 
+type OperationRoutes = tuple[tuple[FrozenOperation, Route], ...]
+
+
 def observed_operations(
     operations: Iterable[FrozenOperation], exchanges: Iterable[Exchange]
 ) -> Mapping[int, bool]:
     """ordinal → 是否有帶認證、而且認證沒有被拒絕的請求。"""
-    routes = [(operation, parse_route(operation.path)) for operation in operations]
+    routes = operation_routes(operations)
     observed: dict[int, bool] = {}
     for exchange in exchanges:
         if exchange.status is None:
             continue
         accepted = exchange.authenticated and exchange.status not in REJECTED_CREDENTIALS
-        for ordinal in _matches(routes, exchange):
-            observed[ordinal] = observed.get(ordinal, False) or accepted
+        for operation in most_specific(routes, exchange.method, parse_route(exchange.path)):
+            observed[operation.ordinal] = observed.get(operation.ordinal, False) or accepted
     return observed
 
 
-def _matches(routes: list[tuple[FrozenOperation, Route]], exchange: Exchange) -> list[int]:
-    path = parse_route(exchange.path)
+def operation_routes(operations: Iterable[FrozenOperation]) -> OperationRoutes:
+    """先把 operation 的 route 解析好（比對大量請求時不必重複解析）。"""
+    return tuple((operation, parse_route(operation.path)) for operation in operations)
+
+
+def most_specific(routes: OperationRoutes, method: str, path: Route) -> list[FrozenOperation]:
+    """method 相同、route 不寬鬆地涵蓋 path 的 operation 中，佔位符最少的（可能不只一個）。
+
+    finding 的 route 樣板化也用它（docs/DECISIONS.md §25.6）：和 coverage 是同一套比對。
+    """
     candidates = [
-        (sum(segment is None for segment in route.segments), operation.ordinal)
+        (sum(segment is None for segment in route.segments), operation)
         for operation, route in routes
-        if operation.method == exchange.method and covers(route, path, lenient=False)
+        if operation.method == method and covers(route, path, lenient=False)
     ]
     if not candidates:
         return []
     fewest = min(placeholders for placeholders, _ in candidates)
-    return [ordinal for placeholders, ordinal in candidates if placeholders == fewest]
+    return [operation for placeholders, operation in candidates if placeholders == fewest]
