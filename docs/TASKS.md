@@ -1434,11 +1434,35 @@
     - 測試：nuclei parser/plan/admission 單元、worker 與 run-provenance／scan-profiles 整合、vendored↔lock 契約；真實 e2e `make test-live-fixture-nuclei`（弱點版 cors-misconfig 命中、修補版不命中；與 ZAP 10098 同一問題多來源）。
     - 實跑驗證：兩版 succeeded；plan_hash 與 /scan-profiles 定義一致；`observed ⊆ forwarded`（guard-403 不誤報）；平台阻擋 PATH_AMBIGUOUS/METHOD_NOT_AUTHORIZED；共享預算未耗盡；容器清理。`make test` 5342 passed、coverage 99.70%。
     - 限制：本輪**匿名**掃描（目標 secret 的 `-sf` 注入延後）；嚴格 severity/confidence 正規化與 Finding/rule_groups/OWASP/fingerprint 屬 T19。
-- [ ] T19 實作 Observation/Finding、rule_groups、mapping 版本與保守的 fingerprint。
+- [x] T19 實作 Observation/Finding、rule_groups、mapping 版本與保守的 fingerprint。（設計與取捨見 `docs/DECISIONS.md` §25）
   - DoD：
     - 正確保留來源、kind、severity、confidence。
     - OWASP Top 10:2025 與 API 2023 的對應都記錄 mapping_source。
     - 不可信的映射不跨工具合併。
+  - 使用者本輪決定（2026-11-03）：API 只做 `GET /scans/{scan_id}/findings`（`GET /findings/{id}` 的追溯在 T20）；等級取各來源正規化之後的最高值、不一致時標衝突；T19 一併更正 T30 ground truth 的 OWASP 標記；實跑同一個 scan 的 ZAP＋Nuclei e2e。
+  - 交付：
+    - `src/secscan/findings/`：`domain/`（`owasp` 官方對應表的解析與釘選、`normalization` 有版本的對照表、`taxonomy` 規則群組、`fingerprint`、`linking` 連結的規劃與聚合、`model`）、`taxonomy/`（`rule_groups.yaml` v1、`owasp_top10_2025.json`）、`models`、`repository`、`service`（`FindingLinker`、`FindingService`）、`schemas`、`router`。
+    - migration v0013（`findings`、`finding_observations`、trigger `findings_guard`）；worker 在解析之後連結；`scans/domain/coverage.py` 的比對公開為 `most_specific`（行為不變）。
+    - 工具：`tools/freeze_owasp_top10.py`；`Makefile` 的 `owasp-top10`、`owasp-top10-check`、`test-live-fixture-findings`。
+    - 測試：`tests/unit/findings/`（含 fingerprint 與 RouteIndex 的 Hypothesis property test）、`tests/contract/test_taxonomy_contract.py`、`tests/integration/test_{finding_linker,findings_schema,findings_api}.py`、worker 的整合測試、`tests/live/test_fixture_findings_live.py`；ground truth 的一致性測試在 `tests/contract/test_fixture_cases.py`。
+  - DoD 對照：
+    - **保留來源、kind、severity、confidence**：觀察不改；每個連結記下正規化的等級、信心、需要確認與 taxonomy 的 sha256；finding 的 `sources` 並列各來源的原值與正規化值；kind 來自審查過的群組（fallback 由等級推導）；confidence 不聚合。
+    - **OWASP 的 mapping_source**：Top 10:2025 由鎖定 commit 的官方「List of Mapped CWEs」凍結（`official`）、API 2023 只來自群組的 curated 對應（`curated`）、沒有就是 `none`；finding 另記 `mapping_version` 與 `taxonomy_sha256`。
+    - **不可信的映射不跨工具合併**：只有 `reviewed` 並寫下同時命中證據的群組能有多個引擎的成員（載入時強制）；對不到的是單一引擎的 `engine:rule[:variant]`；fingerprint 不含標題、證據、等級、query 或工具的 CWE；身分失效或無法證明的觀察不併入已驗證的 finding。
+  - 實際執行：
+    - TDD：每個 domain 模組先寫會失敗的測試（OWASP 的釘選測試在對應表產生之前是 RED），再實作。
+    - 產生：`make owasp-top10` 從 `OWASP/Top10@57db8ec5` 的 10 個分類頁產生對應表（249 個 CWE、跨分類沒有重複；Introduction 寫 A05 有 38 個、全部 248 個，分類頁的清單是 37 個、249 個，記入 §25.5）；`make owasp-top10-check` 逐位元組重現。
+    - 離線：`make test` 5625 passed、7 skipped，coverage 99.73%（`findings` 全部 100%、`findings.domain` branch 100%）；`make lint`、`make typecheck`、`make test-contract`、`make owasp-top10-check`、`pre-commit run --all-files` 皆通過。
+    - live（`make test-live-fixture-findings`，2026-11-03，最終版本，2 passed、18 分 21 秒，跑完沒有殘留）：
+      - 弱點版：scan completed（592 秒）；ZAP 23 個觀察、轉送 700，nuclei 11 個、轉送 312，共享預算未耗盡；34 個觀察都恰好連結一次 → 29 個 finding（security 21、informational 8）。4 個審查過的跨引擎群組（CORS、CSP、X-Content-Type-Options、anti-clickjacking）在 GET / 各是一個有兩個引擎來源的 finding，等級是 ZAP 的值（CORS medium、XCTO low）並標 `severity_conflict`；CORS 對應 A02:2025（official）、API8:2023（curated）。其他位置（例如 ZAP 10098 在 /go、/search）各自獨立；SQLi 在 POST /login 的兩個參數是兩個 finding。
+      - 修補版：scan completed（490 秒）；10 個觀察 → 10 個 finding，沒有 CORS，也沒有跨引擎的合併。
+      - 審查修正之前另跑過一次，結果相同（2 passed、18 分 30 秒）。錄製在 `recordings/fixture-findings/`（gitignore）。
+    - ground truth 更正：差異清單見 `DECISIONS.md` §25.10；正負例與量測結果不變。
+  - 審查（2026-11-03）：
+    - security-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、6 LOW。已修 MEDIUM（身分判定只看 `lost`，中途過期、之後只打新端點的 run 會被當成已驗證 → 改成沒有任何被拒絕、退化或探針被拒絕的請求才算，依 T16 的真實資料）與 5 個 LOW（大括號 path 撞名、清單的等級語意、連結的讀取量與比對成本、worker 的 `findings` 必填、新增時的 triage 狀態）；其餘記入限制。
+    - code-reviewer：APPROVE，0 CRITICAL、0 HIGH、1 MEDIUM、4 LOW。已修 MEDIUM（沒有 cwe 的審查群組會吃到工具的 CWE）與測試缺口（確定性的併發測試、跨批次、RouteIndex 的 property test）；其餘寫成取捨或限制（§25.12、§25.13）。
+  - 限制／效度威脅：rule groups 與 OWASP 對應是單人審查，**最終簽核由使用者確認**（比照 T17）；query 不在 fingerprint 中；T19 之前的觀察不回填；對應在建立 finding 時寫入、不隨 taxonomy 改版；DB 不檢查連結跨表的 target 一致性（由 linker 保證）；沒有 finding 數量的上限；多個 worker 時連結的等鎖可能逾時（P0 只有一個 worker）。
+  - 給 T20／T21／T22：T20 做去重的反例套件與 `GET /findings/{id}` 的來源追溯（observation → artifact → run → plan_hash），一併處理跨表的 target 一致性；T21 以新的 migration 開放 triage 的修改並留 audit；T22 讀 `auth_verified`，不據未驗證的 finding 標 `not_observed`。
 - [ ] T20 建立去重的反例測試與來源追溯查詢。
   - DoD：
     - 這些情況都不會誤合併：同 CWE 但參數不同、同 route 但身分或物件不同、不同的弱點。

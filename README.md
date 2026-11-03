@@ -297,7 +297,7 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **結果（T15）**：
   - 退出碼不等於結果：`GET /api/v1/scans/{id}` 的 `engines[].status`、`error_code` 與 `result` 分得出成功（0 個觀察就是乾淨的結果）、ZAP 回報錯誤（`ENGINE_REPORTED_ERRORS`，部分結果保留）、未掃到端點（`NO_TARGET_TRAFFIC`）、輸出不能用（`OUTPUT_INVALID`）與時間到（`ENGINE_TIMEOUT`，觀察保留）。
   - 不是目標的回應（guard 的拒絕、proxy 的錯誤頁）與不在範圍內的告警不會入庫，只計數在 `result.excluded`。
-  - 觀察是工具的單次回報，等級是工具的原始值；正規化、去重與 finding 在 T19。
+  - 觀察是工具的單次回報，等級是工具的原始值；T19 起 worker 在解析之後把觀察連結到 finding（見下方「Finding（T19）」）。
   - `GET /api/v1/scan-profiles` 列出現在可以用的 profile 與規則定義的 hash。
 - **版本與流量（T16）**：每個引擎的 `plan_hash`（實際執行的 plan 的 sha256）與 `profile_definition_sha256`（zap 的規則定義）在 runner 建立容器之前寫入，不收集的 run 也有；`result.guard_traffic` 保存 guard 的轉送數、各原因的拒絕數與帶認證的請求被接受／拒絕的數量（guard 的 telemetry 6 小時後刪除，這裡留著）。
 - **憑證失效（T16）**：掃描中途 token 過期時（同一個 operation 先接受、最後被拒絕，或 auth profile 的 preflight 端點被拒絕），coverage 的 `limitations` 有 `AUTHENTICATION_LOST`；平台不重新登入。
@@ -312,6 +312,18 @@ M4 的第一步 T17 只凍結「清單與執行設定」；**T18 已把 Nuclei �
 - **產生**：`make nuclei-templates`（需要 OrbStack）驗證鎖定 archive 的 sha256、在鎖定映像裡**離線**（`--network none`）跑 `nuclei -tl` 列舉、算每檔 sha256，寫出 lock。**不連任何目標、不出網**。`make nuclei-templates-check` 逐位元組重現驗證。
 - 選取方式、逐類別審查與高風險抽查見 `docs/TOOLS.md` §2.1、`docs/DECISIONS.md` §23。
 - **T18 整合**：`scanners/domain/nuclei/{plan,results}.py`（匿名掃描、proxy 從 `/scan/secret/proxy-url` 讀、`-dut`、42 模板以 InputFile 掛載並逐檔 sha256 驗證）、`worker/nuclei.py`、引擎註冊與 migration v0012；parser 以 `X-Secscan-Guard` 濾掉 guard 的合成 403、兩層遮罩輸出。真實 e2e 見上（弱點版 `cors-misconfig` 命中、修補版不命中）。設計見 `docs/DECISIONS.md` §24。
+
+#### Finding（T19）
+
+observation 是不可變的單次觀察；finding 是 target 層級、跨掃描的議題（`src/secscan/findings/`）。worker 解析入庫之後，在一個 transaction 中把觀察連結到 finding（冪等，中斷之後重試只補上沒有連結的）。
+
+- **語意規則群組**：`src/secscan/findings/taxonomy/rule_groups.yaml`（人工審查、有版本、sha256 執行期釘選）。只有審查過、寫下同時命中證據的群組能跨引擎合併（v1 有 4 個：permissive CORS、CSP、X-Content-Type-Options、anti-clickjacking）；對不到的觀察是單一引擎的 `engine:rule[:variant]`，標 `needs_review`。審查紀錄見 `docs/TOOLS.md` §8。
+- **fingerprint**：target、kind、群組、method、route（有規格時剛好一個最具體的 operation 才用樣板）、參數位置與名稱、auth role 與身分是否驗證過；標題、證據、等級、query、工具的 CWE 都不影響。
+- **等級**：各來源正規化之後的最高值，來源數本身不加分；來源不一致時 `severity_conflict`。兩個工具同時命中不是人工確認。
+- **OWASP**：Top 10:2025 依官方的 CWE 清單（`make owasp-top10` 從鎖定 commit 的官方分類頁凍結成 `findings/taxonomy/owasp_top10_2025.json`，`make owasp-top10-check` 逐位元組重現；不連網）；API Security Top 10:2023 是 curated。每個 finding 記下對應的來源與版本。
+- **API**：`GET /api/v1/scans/{scan_id}/findings`（分頁，可依 kind、severity、engine、triage_state 篩選；sources 只有這個 scan 的來源）。`GET /findings/{id}` 的來源追溯在 T20，triage 在 T21。
+- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-findings`（同一個 scan 跑 ZAP 與 Nuclei，掃 fixture app 的弱點版與修補版，約 20 分鐘）。
+- 設計見 `docs/DECISIONS.md` §25；API 見 `docs/API_CONTRACT.md` §9、§17.9。
 
 #### 隔離 lab 靶場（T03）
 

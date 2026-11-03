@@ -361,3 +361,46 @@ M2 的 `make test-live-runner`：42 passed（5 分 41 秒），撤銷授權的 s
 - **修補版（負例對照）**：web 與 api 都 **沒有任何 active scan 規則的告警**（web 4 個、api 1 個觀察，全是 passive／informational）。修補版 web 只剩 10055（CSP 指令不完整的 passive 提醒）、10202、10111；修補版 api 因為補了安全 header，連 CORS 與 XCTO 都不再出現，只剩 10111。
 - **contract/robustness（C1–C6）**：ZAP 不評契約；以 `tests/contract/test_fixture_cases.py` 與人工確認弱點版回 500、修補版回 400／405。
 - **對照（弱點 vs 修補）**：同一組掃描在弱點版有主動注入與設定告警、修補版清零，構成乾淨的正例／負例對照；strict-1 下 path 參數注入一律平台阻擋，與 §20.7 的 VAmPI 一致。
+
+## 8. T19：語意規則群組的審查紀錄（2026-11-03）
+
+`src/secscan/findings/taxonomy/rule_groups.yaml`（`version: "1"`、sha256 釘在 `taxonomy.RULE_GROUPS_SHA256`）。原則與機制見 `DECISIONS.md` §25.3：只收真實輸出出現過的規則；成員跨引擎的群組必須 reviewed、寫下同時命中的 evidence；對不到的觀察走單一引擎的 fallback。**單人審查，最終簽核屬使用者（效度威脅）。**
+
+### 8.1 依據的真實輸出
+- 已提交的 golden fixture：`tests/fixtures/zap/{findings,timeout,unanswered}/report.json`、`zap-juice-shop.json`、`zap-vampi-vuln.json`、`tests/fixtures/nuclei/nuclei-{juice-shop,vampi-vuln}.jsonl`。
+- gitignore 的錄製（人工審查過的 live 輸出）：`recordings/lab/`（T16 的 Juice Shop、VAmPI）、`recordings/fixture/`（T30）、`recordings/fixture-nuclei/`（T18）。
+- 契約測試（`tests/contract/test_taxonomy_contract.py`）核對：nuclei 成員是凍結的 42 個模板、variant 是模板中具名的 matcher／extractor；群組的 CWE 是成員工具自己回報的（nuclei 的模板分類、ZAP golden 的 cweid）；golden fixture 出現的規則都有群組，或在刻意留給 fallback 的清單中。只在錄製中出現的 ZAP 規則（10055-13、20019-1、40003、40012、40018、6-5），CWE 依下表的錄製值。
+
+### 8.2 跨引擎（4 個；evidence：T18 fixture 弱點版 GET / 的同一個回應）
+| 群組 | ZAP | Nuclei | CWE（審查） | 粒度 | 理由 |
+|---|---|---|---|---|---|
+| `cors-permissive-policy` | 10098（CWE-264，Medium） | `cors-misconfig:arbitrary-origin`（CWE-346、942，info） | 942 | endpoint | 同一個 CORS 政策：沒有 Origin 時回 `*`（ZAP 看到）、有 Origin 時反射並帶 credentials（nuclei 看到）。264 是 CWE 的分類節點；取 nuclei 分類中最具體的 942 |
+| `csp-header-missing` | 10038-1（693，Medium） | `http-missing-security-headers:content-security-policy`（693，info） | 693 | endpoint | 同一個回應缺 CSP；修補版補上之後兩者都消失 |
+| `x-content-type-options-missing` | 10021（693，Low；參數是 header 名） | `…:x-content-type-options`（693，info；沒有參數） | 693 | endpoint | 同一個回應缺 XCTO；兩個工具對參數的回報不同，所以參數不入 fingerprint |
+| `anti-clickjacking-header-missing` | 10020-1（1021，Medium；參數是 header 名） | `…:x-frame-options`（693，info） | 1021 | endpoint | 同一個回應缺 X-Frame-Options（也沒有 frame-ancestors）；1021 比 693 具體 |
+
+四個群組的 API 2023 對應都是 curated 的 API8:2023（官方頁列出 CORS 設定不當、缺 security directives、應加上 Security Headers）。Top 10:2025 依官方清單：942 → A02；693、1021 → A06。
+
+### 8.3 單一引擎
+| 群組 | 成員 | kind | CWE | 依據 |
+|---|---|---|---|---|
+| `zap-server-version-disclosure` | 10036-2 | security | 497 | Juice Shop、VAmPI |
+| `zap-csp-directive-without-fallback` | 10055-13 | security | 693（API8:2023） | T30 修補版 |
+| `zap-modern-web-application` | 10109 | informational | — | Juice Shop（riskcode 0、沒有 CWE） |
+| `zap-authentication-request-identified` | 10111 | informational | — | VAmPI、T30（riskcode 0） |
+| `zap-anti-csrf-tokens-absent` | 10202 | security | 352 | golden findings、T30 |
+| `zap-private-ip-disclosure` | 2 | security | 497 | golden unanswered |
+| `zap-external-redirect` | 20019-1 | security | 601 | T30-FX-08 |
+| `zap-crlf-injection` | 40003 | security | 113 | T30 弱點版 |
+| `zap-reflected-xss` | 40012 | security | 79 | T30-FX-02 |
+| `zap-sql-injection` | 40018 | security | 89 | T30-FX-01／03、Juice Shop |
+| `zap-path-traversal` | 6-5 | security | 22 | T30 弱點版 |
+| `nuclei-{hsts,permissions-policy,referrer-policy,coep,coop,corp,x-permitted-cross-domain-policies}-missing` | `http-missing-security-headers` 的對應 matcher | informational | 693 | T18；nuclei 標 info、ZAP 不回報，在 HTTP 的 lab 中不是可利用的弱點（例如 HSTS 只對 HTTPS 有意義） |
+| `nuclei-robots-txt`、`nuclei-robots-txt-endpoints`、`nuclei-security-txt`、`nuclei-options-method` | 同名模板 | informational | — | golden nuclei |
+| `nuclei-openapi-document` | `openapi` | informational | 200（模板分類） | golden nuclei-vampi-vuln |
+
+刻意不建群組（fallback、`needs_review`）：`tech-detect`、`fingerprinthub-web-fingerprints`（variant 是動態的技術／指紋名）、`werkzeug-debugger-detect`（模板標 info，但除錯器外露的嚴重程度需要人工判斷）。
+
+### 8.4 給審查者的提醒
+- `endpoint` 粒度只用在「參數就是群組身分」的 header 類群組；注入類（SQLi、XSS、CRLF、redirect、path traversal）維持 `parameter` 粒度，不同參數是不同的 finding。
+- kind 的判斷（security／informational）是審查結果，不由工具的等級決定；等級的聚合見 `DECISIONS.md` §25.4、§25.7。

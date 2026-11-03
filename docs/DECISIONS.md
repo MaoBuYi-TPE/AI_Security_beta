@@ -2123,6 +2123,85 @@ M4 的第一步。只凍結「清單與執行設定」，作為 T18（Adapter、
 - 殘餘：匿名掃描（auth 延後）；fixture 的乾淨 nuclei 對照以 CORS 為主（`cors-misconfig` 加 `http-missing-security-headers`：弱點版 11 筆、修補版 6 筆；其餘模板在此自製小站多半不命中，屬預期——對準 lab 靶機的覆蓋見 `TOOLS.md` §2.1）。
 - 其他已知限制：`open-redirect-generic` 的 payload 含 `oast.me` 字串（僅當參數送出、非 interactsh callback，`-ni` 仍有效；多數帶 `%` 的探測被 guard 擋），不改 payload（會破壞 `-dut` 簽章）；JSONL 大小上限沿用 ZAP 的 8 MiB（nuclei 每筆帶完整 request/response，大頁面可能超過而整份失敗，lab 靶機碰不到）；vendored 的 42 個上游模板來自 ProjectDiscovery 的 nuclei-templates（provenance 與版本見 `SOURCES.md` S23；散布前再確認上游授權並視需要附 NOTICE）。
 
+## 25. T19：Observation → Finding、rule groups、對應版本與保守的 fingerprint（2026-11-03）
+
+observation 仍是不可變的單次觀察；T19 在它之上加上 target 層級、跨掃描的 finding。既有原則不變：§2 第 11 列「語意規則群組＋method＋route＋參數＋auth role 都相同才合併；多工具命中不升級」、`ARCHITECTURE.md` §10、`CLAUDE.md` §10、T16 的交接（身分失效的 run 不併入已認證身分的 finding）。
+
+### 25.1 使用者的決定（2026-11-03）
+1. **API 範圍**：T19 只做 `GET /scans/{scan_id}/findings`（含這個 scan 的來源摘要）；`GET /findings/{id}` 的完整來源追溯（observation → artifact → run → plan_hash）留給 T20。
+2. **severity 聚合**：取各來源正規化之後的**最高值**；來源數本身不加分；來源不一致時 `severity_conflict=true`，並列各來源的原值。
+3. **ground truth**：T19 一併更正 T30 案例表的 OWASP 標記（§25.10），不改正負例的語意。
+4. **live e2e**：實跑「同一個 scan 同時跑 ZAP＋Nuclei」的 fixture e2e（弱點版、修補版各一）。
+
+### 25.2 模組、分層與連結表
+- 新功能模組 `src/secscan/findings/`：`domain/`（純函式：`owasp`、`normalization`、`taxonomy`、`fingerprint`、`linking`、`model`）、`taxonomy/`（`rule_groups.yaml`、`owasp_top10_2025.json`）、`models`、`repository`、`service`、`schemas`、`router`。
+- import-linter 的 layers 在 `health | runner | worker` 之下加 `scanners | findings`（findings 以 scans 的觀察與 scan 的授權為基礎，和 scanners 互不依賴）；`findings.domain` 受「domain 不得依賴框架／DB／Docker」約束。
+- **連結表，不在 observations 加欄位**（推翻 `ARCHITECTURE.md` §6「observations 加 finding_id、rule_group」）：observations 有 append-only 的 trigger、連結在入庫之後另外計算，而且每個連結要記下當時的 taxonomy 版本。`finding_observations` 以 observation_id 為主鍵：每個觀察最多連結一次。
+
+### 25.3 rule_groups.yaml（人工審查、有版本、執行期釘選）
+- 以 specs 的嚴格 YAML 解析（拒絕 anchor、alias、tag、重複的 key），欄位逐一檢查，錯誤是 `TaxonomyError`。`RULE_GROUPS_SHA256` 在執行期核對：檔案被改動就 fail closed；`FindingLinker` 建立時載入，所以 worker 啟動就失敗，不是每個 run 才失敗。
+- 每個群組：`id`（不含 `:`，不會和 fallback 撞名）、`title`、`kind`、審查後的 `cwe`、`granularity`（`parameter` 預設／`endpoint`：參數本身是群組身分，例如缺的 header 名）、`resource_scoped`、curated 的 `owasp_api_2023`（每筆要有 rationale）、`review`（`reviewed`／`provisional`＋`evidence`）、`members`（`engine`、`rule`、`variant`）。
+- **「不可信的映射不跨工具合併」的機制**：成員跨引擎的群組必須 `reviewed` 並寫下 evidence；`provisional` 只能單一引擎、標 `needs_review`。
+- **查找只做精確比對**（簡化計畫中的「rule 萬用字元」）：`(engine, rule, variant)`，variant 為 None 或等於 rule（ZAP 的 alertRef 等於 pluginid）時是「沒有 variant」。對不到就是 fallback `engine:rule[:variant]`：永遠單一引擎、`needs_review`，kind 由等級推導（info → informational，其餘 → security），CWE 用工具回報的值（只有 fallback 用；審查過的群組沒有填 cwe 就是沒有，code review 發現）。kind 在 fingerprint 中，所以同一條未審查的規則若工具改了等級（info ↔ 非 info）會成為另一個 finding：接受這個取捨，因為把 informational 的偵測固定成 security 會誤導；要穩定就是把規則審查進群組。萬用字元會讓同一個模板的不同 matcher（例如不同的缺少 header）被合併，不夠保守。
+- v1 只收 2026-11-03 之前**真實輸出**出現過的規則（`CLAUDE.md` §1），審查紀錄見 `TOOLS.md` §8：
+  - 跨引擎（4 個，evidence 是 T18 fixture 弱點版 GET / 的同一個回應）：permissive CORS（ZAP 10098 ↔ nuclei `cors-misconfig:arbitrary-origin`，CWE-942）、CSP 未設（10038-1 ↔ `content-security-policy`）、X-Content-Type-Options（10021 ↔ `x-content-type-options`）、anti-clickjacking（10020-1 ↔ `x-frame-options`，CWE-1021）；都是 `endpoint` 粒度（ZAP 把 header 名放在參數、nuclei 沒有參數）。
+  - 單一引擎：其餘出現過的 ZAP 規則與 nuclei 的 header／資訊類模板。
+  - 刻意留給 fallback：動態的 variant（`tech-detect` 的技術名、`fingerprinthub-web-fingerprints` 的指紋名）、需要人工判斷嚴重程度的 `werkzeug-debugger-detect`。計畫中「凍結的 42 個模板都建群組」取消：沒有真實輸出、variant 未知，fallback 才是保守的預設。
+- 群組審查後的 CWE 必須是成員工具自己回報的 CWE 之一（契約測試核對 nuclei 的模板分類與 ZAP golden fixture 的 cweid），不為了對應 OWASP 改 CWE。
+- **最終簽核屬使用者（單人審查，列為效度威脅，比照 §23.4）**。
+
+### 25.4 正規化（`NORMALIZATION_VERSION = "1"`）
+- severity：ZAP riskcode 0–3 → info／low／medium／high；Nuclei 的值一對一（去空白、不分大小寫）；其他（含 `unknown`）→ info＋`needs_review`。
+- confidence：ZAP 0–4 依 ZAP 自己的標籤（false_positive、low、medium、high、confirmed：工具的自評，不是人工 triage）；Nuclei 不回報 → unknown。**finding 不聚合 confidence**，只在各來源保留。
+
+### 25.5 OWASP 對應
+- **Top 10:2025（official）**：`tools/freeze_owasp_top10.py`（比照 T17 的產生器）讀手動下載、鎖定 commit（`OWASP/Top10@57db8ec5`，2026-04-06）的 10 個官方分類 markdown，逐檔驗 sha256 → 擷取「List of Mapped CWEs」→ 驗證分類齊全、CWE 不重複（重複或格式改變就失敗、由人決定）→ 寫 `owasp_top10_2025.json`（含來源 commit 與每檔 sha256），sha256 釘在 `OWASP_TOP10_2025_SHA256`；`make owasp-top10-check` 逐位元組重現。實際內容：249 個 CWE、跨分類沒有重複。
+- 官方自身的不一致（記錄、以分類頁的清單為準）：Introduction 寫 A05「38 CWEs」、全部「248 CWEs」，分類頁的清單是 A05 37 個、合計 249 個（A05 頁的 Background 也寫 37）。
+- 對應方式：finding 的 CWE（群組審查後的，fallback 是工具的）查官方表；查不到就是 none。結果中值得注意的：缺安全 header 的 CWE-693 與 clickjacking 的 CWE-1021 在 **A06:2025 Insecure Design**；ZAP 10098 回報的 CWE-264 是 CWE 的分類節點，不在任何清單。依原則照實標記，不改 CWE 去湊直覺上的 A02。
+- **API Security Top 10:2023（curated）**：只來自群組的 `owasp_api_2023`（rationale 依官方 API8:2023 頁：「CORS policy is missing or improperly set」「Security or cache control directives are not sent」「include applicable Security Headers」，`SOURCES.md` S106）；fallback 一律 none。API6、API10 是 DAST 的限制。
+- finding 記 `owasp_top10_2025_source`（official／none）、`owasp_api_2023_source`（curated／none）、`mapping_version`（人讀的摘要，例如 `rules-1+owasp2025-57db8ec5ddbc+norm-1+fp-1`）與 `taxonomy_sha256`（三份資料與 fingerprint 版本的雜湊）；每個連結也記當時的 `taxonomy_sha256`。
+
+### 25.6 fingerprint、route 樣板化與身分
+- `sha256(canonical JSON)`：`{v, target_id, kind, rule_group, method, route, route_templated, parameter_location, parameter_name, auth: {role, verified}, resource}`。標題、證據、等級、query、工具的 CWE 都不在裡面。`endpoint` 粒度不含參數；`resource_scoped` 的群組加上字面 path（v1 沒有這類群組）。
+- `route_templated`（安全審查後加入）：route 是含佔位符的規格樣板時為 true。工具保留大括號的字面 path（例如 `/orders/{id}`）和樣板的文字相同，沒有它就會併入整個樣板層級的 finding；不放整個 route_source，是讓沒有佔位符、與字面 path 完全相同的 operation 仍能和沒有規格的掃描合併。
+- route：scan 有規格時，把 (method, path) 以 coverage 的同一套比對（`scans.domain.coverage.most_specific`，由原本的 `_matches` 公開，行為不變）對到凍結、範圍內的 operation；剛好一個最具體的才用樣板（`openapi`），否則字面 path（`literal`）。不 decode、不改大小寫；grant 語法不接受的 path（編碼、空段、大括號）保持字面。operation 先依 (method, 段數, 結尾斜線) 分組（`RouteIndex`；不寬鬆的比對本來就要求三者相同，結果不變），連結時持有 run 的鎖，最多約 2 萬個觀察 × 1,000 個 operation 不必逐一比對。
+- 身分：`auth_verified` = anonymous，或 preflight `passed`、guard 記下帶認證的請求被接受過（`accepted > 0`），而且**沒有任何**被拒絕（`rejected`）、退化（`regressed`）或探針被拒絕（`probe_rejected`）的請求、`lost` 是 false；不明一律 false。未驗證的觀察是另一個 finding（仍然可見），不併入已驗證身分的 finding；T22 不能據以標 `not_observed`。
+- 比 T16 的 `lost` 嚴格（安全審查發現）：`lost` 是揭露用的門檻（退化 2 個以上、探針被拒絕或從未被接受），中途過期、之後只打新端點的 run 不會觸發它，若只看 `lost`，整個 run 的觀察會被當成已驗證。T16 的真實資料支持這個門檻：健康的已認證 run（VAmPI、Juice Shop、fixture 的 api，共 13 個錄製）都是 `rejected = 0`，token 過期的 run 是 `rejected = 74`、`regressed = 2`。代價：角色本來就會碰到 401／403 的掃描（例如 standard_user 掃到 admin 區、WAF 擋下攻擊請求），觀察都是未驗證的 finding（獨立、不漏報，只是較少合併）；scan 層級的揭露（coverage 的 `AUTHENTICATION_LOST`）仍用 `lost`，所以可能出現「scan 沒有揭露失效、finding 卻是未驗證」——前者是揭露門檻，後者是合併的證明門檻（code review 提醒）。
+
+### 25.7 連結流程（worker）
+- `FindingLinker.link(lease)`：一個 transaction、**冪等**（只處理還沒有連結的觀察）。鎖序固定：以 lease 的 fencing `FOR UPDATE` 鎖 run → 依 fingerprint 的順序 `INSERT … ON CONFLICT DO NOTHING` → 依 fingerprint 的順序 `SELECT … FOR UPDATE` 既有的 finding → 更新聚合（只往上）→ 寫連結。不鎖 scans（對帳是 scans → runs）。新增階段只鎖新的列、鎖定階段在新增之後，兩個 run 同時連結不會互等成環；以併發的整合測試驗證（同一個 scan 的 zap 與 nuclei 同時在解析）。只讀連結需要的觀察欄位（不讀 evidence 等長文字）。
+- `Worker` 的 `findings` 是必填的參數（只測解析的測試明確傳 None）：新的組裝點不會默默少了連結（安全審查）。
+- worker 在解析入庫之後、coverage 之前呼叫；中斷之後重試（已記錄的判定不再解析）只補上沒有連結的觀察。T19 之前的觀察不回填。
+- last_seen：`greatest(last_seen_at, clock_timestamp())`，在持有列鎖時取時間，不會倒退。
+
+### 25.8 資料表（migration v0013）
+- `findings`：(target_id, fingerprint) 唯一；first／last seen 以複合 FK 引用 `scanner_runs`，**不直接引用 scans**（worker 持有 run 的鎖時檢查 scans 的 FK 要 KEY SHARE，會和對帳的 scans FOR UPDATE → run 形成死鎖，同 observations）。trigger `findings_guard`：新的列一律從 unreviewed、open 開始；身分、對應、triage 與 lifecycle 不可修改（T21 另以 migration 開放 triage）；只有 last seen 與三個聚合可以更新，而且只會往上；不能 DELETE／TRUNCATE。CHECK 涵蓋列舉、`A01–A10:2025`、`API1–10:2023` 的格式與來源一致、CWE 與來源一致、參數位置與名稱一起有值。
+- **不另存 `fingerprint_inputs` 的 JSON**（計畫原本有，≤ 4 KiB）：欄位都在表中，可以重算；而 path 是目標可控的文字，長的非 ASCII path 會超過上限、讓連結失敗並拖垮 run（重試耗盡）。
+- 實作中發現：CHECK 的文字經 SQLAlchemy 的 `text()`，`'^A(0[1-9]|10):2025$'` 中的 `:2025` 被當成 bind 參數、渲染成 NULL（CHECK 永遠不成立）；以 `\:` 跳脫，model 與 migration 一致。既有的 CHECK 沒有「冒號後接字母或數字」的寫法。
+- finding_observations 以 FK 引用 observations：對 observations 單純 TRUNCATE 時 PostgreSQL 先以 0A000 拒絕（trigger 不會執行），既有測試改成 `TRUNCATE … CASCADE` 驗證 trigger 本身（同 artifacts）。
+
+### 25.9 API
+- `GET /api/v1/scans/{scan_id}/findings?kind&severity&engine&triage_state&page&limit`：先以 `ScanService.get` 檢查（其他 project 與不存在的一樣 404，SEC-16），列出這個 scan 的觀察連結到的 finding，等級由高到低、再依群組、route、id。`sources[]` 只有這個 scan 的來源（引擎、規則、variant、原值、正規化值、工具的 CWE、觀察數）；engine 篩選的是「這個引擎在這個 scan 有來源」，sources 仍列全部。不輸出 CVE／CVSS（沒有資料來源，不捏造）。
+- `normalized_severity` 是 finding 所有掃描的聚合（只會往上）；`severity_conflict`、排序與 `severity` 篩選都用這個 finding 層級的值（triage 的優先順序看的是議題本身）。`scan_severity` 是這個 scan 的來源中的最高值（安全審查：同一個 finding 在別的 scan 可能更高，只看 normalized_severity 會誤解這次掃描的結果）；這個 scan 自己的來源是否一致，看 `sources` 的正規化值（code review 提醒）。
+
+### 25.10 ground truth 更正（研究資料的更正）
+- T30 案例表把 2021 的編號當成 2025（「A03:2025 Injection」、「A05:2025 Security Misconfiguration」、「A04:2025」）。更正方式：`Case` 改記案例的 `cwe`，`top10_2025` 由官方表查得，`api_2023` 維持 curated；契約測試核對每個案例的標記等於官方表對該 CWE 的對應（`tests/contract/test_fixture_cases.py`）。正負例、可達性與量測結果都不變。
+- 差異：FX-01／02／03／PB-01（CWE-89、79）A03 → **A05**；FX-04（CWE-209）A05 → **A10**；FX-05（CWE-693）A05 → **A06**；FX-06（CWE-942）A05 → **A02**（另加 curated API8:2023）；FX-07（CWE-1004）A05 → **A02**；FX-08（CWE-601）A01 不變；FX-09（CWE-530 Exposure of Backup File）A05 → **無**（官方清單沒有 530，不改用父節點去湊）；FX-10（CWE-639）加 **A01**、API1:2023 不變；FX-11（CWE-915）「A04:2025」→ **A08**、API3:2023 不變；FX-12（CWE-213）維持只有 API3:2023（213 不在官方清單）。contract 案例沒有 CWE 與 OWASP。
+
+### 25.11 驗證
+- 離線：`tests/unit/findings/`（taxonomy 的壞檔與跨引擎規則、正規化、OWASP 解析與釘選、fingerprint 的 Hypothesis property test、連結與聚合；`findings.domain` branch 100%）、`tests/contract/test_taxonomy_contract.py`、`tests/integration/test_{finding_linker,findings_schema,findings_api}.py`、worker 的整合測試（ZAP golden 的 11 個觀察都連結到審查過的群組；中斷之後重試補上連結）。
+- live：`make test-live-fixture-findings`（2026-11-03，2 passed）：弱點版 34 個觀察都恰好連結一次、29 個 finding，4 個審查過的跨引擎群組在 GET / 各合併成一個 finding、等級取最高值並標衝突；修補版沒有 CORS 的 finding。細節見 `TASKS.md` T19 的交付。
+
+### 25.12 限制與邊界
+- T20：去重的反例測試套件（同 CWE 不同參數、同 route 不同身分或物件、不同弱點）與 `GET /findings/{id}` 的來源追溯。T21：triage PATCH、audit、報告。T22：複掃比較（讀 `auth_verified`；不據未驗證的 finding 標 `not_observed`）。
+- 限制：query 不在 fingerprint 中（action／type 這類語意 query 會被合併成同一個 route，未處理）；T19 之前的觀察不回填；對應在 finding 建立時寫入、之後不隨 taxonomy 改版而改（新版本只記在新的連結上）；last_seen 依連結的時間而不是 scan 的順序；taxonomy 與 OWASP 對應是單人審查。
+- 安全審查提出、留待後續（縱深防禦，目前沒有可利用的路徑）：DB 不檢查連結的觀察與 finding 屬於同一個 target、last seen 的 run 屬於同一個 target（由 linker 依 target 鎖定與查詢保證，整合測試釘住；T20 的來源追溯一併處理）；沒有規格的掃描以字面 path 為 route，敵意的目標可以製造大量不同的 path 或參數，每個都是永久的 finding（每個 run 最多約 2 萬個觀察；上限與保存期限在 T23 決定）。
+- code review 提出、記入限制：連結的 transaction 持有鎖的時間隨 run 的大小增長（既有的 finding 逐筆 UPDATE）；P0 只有一個 worker，不會兩個連結同時等待；多個 worker 時，等鎖超過 `DB_LOCK_TIMEOUT_SECONDS` 會是 DB 的錯誤（worker 結束、run 留給對帳重試），屆時改成批次 UPDATE 並把等鎖逾時當成可重試。`findings.route_source` 記的是建立時的值：沒有佔位符的 route 在有或沒有規格的掃描都是同一個 finding，它的 route_source 取決於哪一次先建立（只影響顯示）。
+
+### 25.13 審查（2026-11-03）
+- security-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、6 LOW。已修：MEDIUM（身分判定只看 `lost`，§25.6）；LOW 的大括號 path 與樣板撞名（`route_templated`）、清單的等級語意（`scan_severity`）、連結時讀整個觀察與逐一比對 operation（只讀需要的欄位、`RouteIndex`）、worker 的 `findings` 預設 None（改成必填）、新增時可以直接寫入非初始的 triage（trigger）。記入限制：跨表的 target 一致性、finding 的數量上限。
+- code-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、4 LOW（APPROVE）。已修：MEDIUM（沒有 cwe 的審查群組會吃到工具的 CWE，§25.3）；測試的缺口（併發測試改成確定性的：第一個連結在 commit 之前停住、確認第二個在等鎖再放行；`BATCH_SIZE` 改成 2 的跨批次測試；`RouteIndex` 的 Hypothesis property test）。記入取捨或限制：fallback 的 kind 由等級推導（§25.3）、清單的衝突與排序是 finding 層級（§25.9）、身分判定與 scan 層級揭露的門檻不同（§25.6）、連結持有鎖的時間（§25.12）。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。
