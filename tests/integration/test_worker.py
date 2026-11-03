@@ -66,7 +66,7 @@ def test_the_worker_completes_collected_fake_runs(
     second = _collected(queue, queue_seed, world)
     seen: list[RunReport] = []
 
-    reports = Worker(queue, owner="worker-1").drain(on_report=seen.append)
+    reports = Worker(queue, owner="worker-1", findings=None).drain(on_report=seen.append)
 
     assert {report.run_id for report in reports} == {first.run_id, second.run_id}
     assert all(report.run_status is RunStatus.SUCCEEDED for report in reports)
@@ -78,9 +78,9 @@ def test_the_worker_stops_at_the_limit(queue: ScanQueue, queue_seed: Seeder, wor
     _collected(queue, queue_seed, world)
     _collected(queue, queue_seed, world)
 
-    assert len(Worker(queue, owner="worker-1").drain(limit=1)) == 1
-    assert len(Worker(queue, owner="worker-1").drain()) == 1
-    assert Worker(queue, owner="worker-1").drain() == []
+    assert len(Worker(queue, owner="worker-1", findings=None).drain(limit=1)) == 1
+    assert len(Worker(queue, owner="worker-1", findings=None).drain()) == 1
+    assert Worker(queue, owner="worker-1", findings=None).drain() == []
 
 
 def test_the_worker_retries_expired_parsing(
@@ -94,7 +94,7 @@ def test_the_worker_retries_expired_parsing(
         id=lease.run_id,
     )
 
-    [report] = Worker(queue, owner="worker-1").drain()
+    [report] = Worker(queue, owner="worker-1", findings=None).drain()
 
     assert (report.run_id, report.run_status) == (lease.run_id, RunStatus.SUCCEEDED)
 
@@ -104,7 +104,10 @@ def test_the_worker_ignores_engines_it_cannot_parse(
 ) -> None:
     _collected(queue, queue_seed, world)
 
-    assert Worker(queue, owner="worker-1", engines=frozenset({ScanEngine.ZAP})).drain() == []
+    assert (
+        Worker(queue, owner="worker-1", findings=None, engines=frozenset({ScanEngine.ZAP})).drain()
+        == []
+    )
 
 
 def test_the_worker_leaves_expired_runner_stages_alone(
@@ -120,7 +123,7 @@ def test_the_worker_leaves_expired_runner_stages_alone(
         id=lease.run_id,
     )
 
-    assert Worker(queue, owner="worker-1").drain() == []
+    assert Worker(queue, owner="worker-1", findings=None).drain() == []
     [row] = queue_seed.query("SELECT status FROM scanner_runs WHERE id = :id", id=lease.run_id)
     assert row.status == "running"
 
@@ -205,7 +208,9 @@ def test_the_worker_judges_the_preflight(
 ) -> None:
     lease = _collected_preflight(queue, queue_seed, world, runs, outputs)
 
-    [report] = Worker(queue, owner="worker-1", artifacts=ArtifactReader(runs)).drain()
+    [report] = Worker(
+        queue, owner="worker-1", findings=None, artifacts=ArtifactReader(runs)
+    ).drain()
 
     assert report.run_id == lease.run_id
     assert _result(queue_seed, lease.run_id) == ("succeeded", expected)
@@ -217,7 +222,7 @@ def test_without_a_reader_the_preflight_was_not_executed(
     outputs = {"authenticated.http": _http(200, ME), "anonymous.http": _http(401, DENIED)}
     lease = _collected_preflight(queue, queue_seed, world, runs, outputs)
 
-    Worker(queue, owner="worker-1").drain()
+    Worker(queue, owner="worker-1", findings=None).drain()
 
     assert _result(queue_seed, lease.run_id) == ("succeeded", "not_executed")
 
@@ -288,6 +293,7 @@ def _worker(queue: ScanQueue, runs: Path, telemetry: Path) -> Worker:
     return Worker(
         queue,
         owner="worker-1",
+        findings=None,
         artifacts=ArtifactReader(runs),
         telemetry=TelemetryReader(telemetry),
     )
@@ -415,6 +421,6 @@ def test_a_lost_lease_skips_the_run_instead_of_stopping_the_worker(
 
     monkeypatch.setattr(queue, "advance", lose_the_first)
 
-    reports = Worker(queue, owner="worker-1").drain()
+    reports = Worker(queue, owner="worker-1", findings=None).drain()
 
     assert [report.run_id for report in reports] == [second.run_id]

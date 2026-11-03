@@ -189,7 +189,7 @@ def test_a_fake_run_goes_through_a_container_and_the_worker(
     assert (tmp_path / "runs" / str(report.run_id) / "manifest.json").exists()
     assert list((tmp_path / "secrets").iterdir()) == []
 
-    [parsed] = Worker(queue, owner="worker-1").drain()
+    [parsed] = Worker(queue, owner="worker-1", findings=None).drain()
 
     assert (parsed.run_status, parsed.scan_status) == (R.SUCCEEDED, S.COMPLETED)
     assert _events(queue_seed, scan.id) == [

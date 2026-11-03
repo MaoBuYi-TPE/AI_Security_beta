@@ -128,7 +128,7 @@ def test_the_worker_moves_on_after_an_unexpected_error(
     queue.coverage_inputs = failing  # type: ignore[method-assign]
 
     with caplog.at_level(logging.WARNING, logger="secscan.worker.service"):
-        reports = Worker(queue, owner=OWNER).drain()
+        reports = Worker(queue, owner=OWNER, findings=None).drain()
 
     assert [report.run_id for report in reports] == [healthy.run_id]
     assert _status(queue_seed, broken.run_id) == ("normalizing", None)  # lease 過期之後重試
@@ -149,4 +149,4 @@ def test_a_database_error_still_stops_the_worker(
     queue.coverage_inputs = unavailable  # type: ignore[method-assign]
 
     with pytest.raises(OperationalError):
-        Worker(queue, owner=OWNER).drain()
+        Worker(queue, owner=OWNER, findings=None).drain()

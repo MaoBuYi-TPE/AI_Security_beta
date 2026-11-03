@@ -9,8 +9,10 @@ collected 的 run。單一 run 的非預期例外只記類別、繼續處理其�
   完整的 telemetry → 對應到 operation；轉送數不明或 telemetry 不完整 → 不標記（沒有量測依據）。
   preflight 是平台的健檢探測，它的請求不算 coverage（已量測、涵蓋 0 個）。已經記錄過就跳過：
   寫入之後、轉成 succeeded 之前中斷，退回 collected 之後重試仍能完成。
-- zap（worker/zap.py）：讀輸出、判定（scanners.domain.zap.results）、結果入庫。輸出一律是不可信的
+- zap（worker/zap.py）、nuclei（worker/nuclei.py）：讀輸出、判定、結果入庫。輸出一律是不可信的
   資料，資料的問題都走判定；已經寫入判定就不再解析。
+- finding（§25.7）：觀察入庫之後、coverage 之前，以 findings 連結到 finding（只處理還沒有連結的，
+  重試時補上）。findings 是必填的參數：只測解析的測試明確傳 None 才不連結。
 解析期間依心跳的間隔延長 lease（失效就留給對帳）並寫 fleet 的心跳。不看取消與授權：解析不送流量，
 要求取消時解析照常完成，scan 由彙總成為 cancelled。
 """
@@ -23,6 +25,7 @@ from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from secscan.findings.service import FindingLinker
 from secscan.scanners.domain.preflight import (
     ANONYMOUS_OUTPUT,
     AUTHENTICATED_OUTPUT,
@@ -52,6 +55,8 @@ class Worker:
         queue: ScanQueue,
         *,
         owner: str,
+        # 必填（只測解析的測試明確傳 None）：新的組裝點不會默默少了連結（安全審查）。
+        findings: FindingLinker | None,
         artifacts: ArtifactReader | None = None,
         telemetry: TelemetryReader | None = None,
         engines: frozenset[Engine] = ENGINES,
@@ -61,6 +66,7 @@ class Worker:
         self._owner = owner
         self._artifacts = artifacts
         self._telemetry = telemetry
+        self._findings = findings
         self._engines = engines
         self._monotonic = monotonic
         self._zap = ZapParser(queue, artifacts, telemetry)
@@ -113,6 +119,9 @@ class Worker:
         elif lease.engine is Engine.NUCLEI:
             outcome = self._nuclei.parse(lease, keepalive)
         keepalive()
+        if self._findings is not None:
+            self._findings.link(lease)
+            keepalive()
         self._coverage(lease)
         keepalive()
         progress = self._queue.advance(lease, outcome.status, error_code=outcome.error_code)

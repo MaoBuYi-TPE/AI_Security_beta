@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
+from secscan.findings.service import FindingLinker
 from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.nuclei.plan import RESULTS_NAME
 from secscan.scanners.domain.nuclei.policy import NUCLEI_IMAGE, NUCLEI_VERSION
@@ -131,12 +132,13 @@ def _collected(
     return lease
 
 
-def _worker(queue: ScanQueue, dirs: Dirs) -> Worker:
+def _worker(queue: ScanQueue, dirs: Dirs, findings: FindingLinker | None = None) -> Worker:
     return Worker(
         queue,
         owner="worker-1",
         artifacts=ArtifactReader(dirs.runs),
         telemetry=TelemetryReader(dirs.telemetry),
+        findings=findings,
     )
 
 
@@ -177,6 +179,75 @@ def test_findings_are_recorded_as_observations(
     rows = _observations(queue_seed, lease.run_id)
     assert [row.source_rule for row in rows] == ["http-missing-security-headers", "tech-detect"]
     assert rows[0].raw_confidence == "unknown"
+
+
+def _linked(seed: Seeder, run_id: UUID) -> list[Any]:
+    return list(
+        seed.query(
+            "SELECT f.rule_group, f.route, f.normalized_severity, f.needs_review, count(*) AS n "
+            "FROM findings f JOIN finding_observations l ON l.finding_id = f.id "
+            "JOIN observations o ON o.id = l.observation_id WHERE o.scanner_run_id = :id "
+            "GROUP BY f.id ORDER BY f.rule_group",
+            id=run_id,
+        )
+    )
+
+
+def test_the_worker_links_the_observations_to_findings(
+    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    """T19：解析入庫之後、run 結束之前連結（§25.7）。"""
+    results = _jsonl(
+        _finding(**{"matcher-name": "x-frame-options"}),
+        _finding(**{"template-id": "tech-detect", "matcher-name": "python"}),
+    )
+    lease = _collected(queue, queue_seed, world, dirs, results)
+    linker = FindingLinker(sessionmaker(queue_engine, expire_on_commit=False))
+
+    [report] = _worker(queue, dirs, linker).drain()
+
+    assert report.run_status is RunStatus.SUCCEEDED
+    rows = _linked(queue_seed, lease.run_id)
+    assert [(row.rule_group, row.route, row.n) for row in rows] == [
+        ("anti-clickjacking-header-missing", "/", 1),
+        ("nuclei:tech-detect:python", "/", 1),
+    ]
+    assert [row.needs_review for row in rows] == [False, True]
+
+
+class _FailingOnce:
+    """第一次連結時失敗（模擬 worker 在寫入觀察之後、連結之前中斷）。"""
+
+    def __init__(self, real: FindingLinker) -> None:
+        self._real = real
+        self.calls = 0
+
+    def link(self, lease: Lease) -> int:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("中斷")
+        return self._real.link(lease)
+
+
+def test_a_retry_links_what_the_interrupted_attempt_left(
+    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    lease = _collected(queue, queue_seed, world, dirs, _jsonl(_finding()))
+    linker = _FailingOnce(FindingLinker(sessionmaker(queue_engine, expire_on_commit=False)))
+    worker = _worker(queue, dirs, linker)  # type: ignore[arg-type]
+
+    assert worker.drain() == []
+    assert _linked(queue_seed, lease.run_id) == []
+    queue_seed.execute(
+        "UPDATE scanner_runs SET lease_expires_at = now() - interval '1 second' WHERE id = :id",
+        id=lease.run_id,
+    )
+    [report] = worker.drain()
+
+    # 已記錄的判定不再解析；沒有連結的觀察在重試時補上，而且只連結一次。
+    assert report.run_status is RunStatus.SUCCEEDED
+    assert [row.n for row in _linked(queue_seed, lease.run_id)] == [1]
+    assert len(_observations(queue_seed, lease.run_id)) == 1
 
 
 def test_a_long_matcher_name_does_not_crash_the_worker(

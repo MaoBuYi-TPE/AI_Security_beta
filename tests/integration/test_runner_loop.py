@@ -271,7 +271,7 @@ def test_the_worker_loop_completes_collected_runs(
     worker_clock = FakeClock()
 
     reports = WorkerLoop(
-        Worker(queue, owner="worker:loop"),
+        Worker(queue, owner="worker:loop", findings=None),
         _fleet(queue_engine, InstanceRole.WORKER),
         stop_requested=lambda: worker_clock.now >= 10,
         sleep=worker_clock.sleep,
@@ -286,7 +286,7 @@ def test_the_worker_loop_completes_collected_runs(
 def test_the_worker_loop_once(queue: ScanQueue, queue_engine: Engine) -> None:
     clock = FakeClock()
     loop = WorkerLoop(
-        Worker(queue, owner="worker:loop"),
+        Worker(queue, owner="worker:loop", findings=None),
         _fleet(queue_engine, InstanceRole.WORKER),
         stop_requested=lambda: False,
         sleep=clock.sleep,
