@@ -72,7 +72,9 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/scans/{scan_id}/events | 同專案 | 200；以 after_sequence 輪詢，不先做 WebSocket（T09 已實作） |
 | POST | /api/v1/scans/{scan_id}/cancel | operator/admin | 202/200；取消中/已終止，不代表已撤銷外部操作（T09 已實作） |
 | GET | /api/v1/scans/{scan_id}/findings | 同專案 | 200；這個 scan 的觀察連結到的 finding，分頁，可依 kind／severity／engine／triage_state 篩選；sources 只有這個 scan 的來源（T19 已實作，§17.9） |
-| GET | /api/v1/findings/{finding_id} | 同專案 | 200；來源 observations、遮罩證據與歷史（T20） |
+| GET | /api/v1/findings/{finding_id} | 同專案 | 200；有上限的摘要：身分、對應、快照中的 scan 數與觀察數、各引擎的數量、近期 5 次 scan（T20 已實作，§17.10） |
+| GET | /api/v1/findings/{finding_id}/scans | 同專案 | 200；完整的掃描歷史（由舊到新，分頁、`as_of` 快照）；每個 scan 列出所有 run 與它們的觀察數（T20 已實作，§17.10） |
+| GET | /api/v1/findings/{finding_id}/observations | 同專案 | 200；來源追溯：連結當時的值、遮罩後的觀察、報告 artifact 的 metadata 與 run（依連結序號分頁、`as_of` 快照，可依 scan_id／engine 篩選；T20 已實作，§17.10） |
 | PATCH | /api/v1/findings/{finding_id}/triage | operator/admin | 200；需 reason；敏感變更留 audit |
 | POST | /api/v1/scan-comparisons | 同專案 | 200；只比較有權限且相同 target 的 scans |
 | POST | /api/v1/scans/{scan_id}/reports | operator/admin | 201；建立 JSON/Markdown 遮罩報告 artifact（P1 加 SARIF） |
@@ -267,7 +269,7 @@ T19 已實作清單（§17.9）；以下是實際的形狀（2026-11-04 簽核�
   "auth_role": "anonymous",
   "auth_verified": true,
   "owasp": {"top10_2025": "A06:2025", "top10_2025_source": "official", "top10_2025_unmapped_reason": null, "api_2023": "API8:2023", "api_2023_source": "curated", "api_2023_unmapped_reason": null},
-  "mapping_version": "rules-2+owasp2025-57db8ec5ddbc+norm-1+fp-1",
+  "mapping_version": "rules-2+owasp2025-57db8ec5ddbc+norm-1+fp-2",
   "triage_state": "unreviewed",
   "lifecycle_state": "open",
   "first_seen_scan_id": "…",
@@ -286,7 +288,8 @@ T19 已實作清單（§17.9）；以下是實際的形狀（2026-11-04 簽核�
 - `category`：security 是 `vulnerability`（偵測條件顯示可被利用的行為）或 `misconfiguration`（缺少或設定不當的防護）；informational 是 `technology`、`detection` 或 `hardening`；`unclassified` 是沒有審查的 fallback（人工確認前分開統計）。人工 triage 之前都不是已驗證的漏洞（`DECISIONS.md` §25.14）。
 - 沒有 OWASP 對應時另給原因：`top10_2025_unmapped_reason` 是 `no_cwe`（沒有 CWE）或 `cwe_not_listed`（CWE 不在官方清單，例如 CWE-264）；`api_2023_unmapped_reason` 是 `not_curated`。
 - 沒有 CVE／CVSS 的資料來源，所以不輸出這兩個欄位（原規劃的 `cve_ids`、`cvss` 取消，不放空值假裝有）。
-- 來源 observation → artifact 的追溯、遮罩證據與 `verification`（人工確認）在 T20、T21。
+- 來源追溯（observation → artifact → run → plan_hash）在 `GET /findings/{id}/observations`（T20，§17.10）；`verification`（人工確認）與 artifact 下載在 T21。
+- fingerprint v2（T20）：scan 有規格、route 是樣板時，沒有審查過的規則（fallback）以字面 path 作為 `location.resource`，同一個樣板的不同物件不合併；審查過的群組不變（`DECISIONS.md` §26.2）。
 
 ## 10. Triage 與複掃比較
 
@@ -1226,6 +1229,48 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 - `auth_verified` 是 false：帶認證的身分在那個 run 中失效或無法證明（preflight 沒有通過，或 guard 記下任何被拒絕、退化或探針被拒絕的帶認證請求），這種觀察不併入已驗證身分的 finding。
 - `owasp.top10_2025` 依官方的 CWE 清單（`official`），`owasp.api_2023` 依 curated 表（`curated`），沒有對應時是 null 與 `none`。
 - `triage_state`、`lifecycle_state` 在 T21 才能修改（這裡都是初始值）。
+
+### 17.10 Finding 的明細與來源追溯（T20）
+
+三個端點都先取 finding、再以它的 target 檢查權限（`PROJECT_READ`，viewer 可讀）：其他 project 的 finding 與不存在的一樣回 404（SEC-16），每個請求都重新檢查。
+
+**快照（`as_of`）**：finding 的每個連結有一個序號（`link_sequence`，1 起算、不重複、不留空號）：linker 持有 finding 的列鎖時保留序號，DB 在寫入與 commit 時核對（`DECISIONS.md` §26.4）；`observations_as_of`（明細）與 `meta.as_of`（清單）是讀取當時的連結數。序號 <= as_of 的連結都已提交、之後提交的序號一定更大，所以帶同一個 `as_of` 翻頁時集合固定，不重複也不遺漏；省略 `as_of` 時是目前的值（新的快照）。`as_of` 大於目前的連結數、或小於 1 時回 422。快照固定的是**連結的集合**與由它算出的數量；scan 與 run 的狀態是讀取時的現值。分頁沿用 `page`／`limit`（`limit` 上限 100、`page` 上限 10,000，所以一個快照最多可讀到約一百萬個連結，上限與保存期限在 T23 決定）。
+
+`GET /api/v1/findings/{finding_id}?as_of=`（200）：§17.9 的 finding 欄位（不含 scan 層級的 `scan_severity`、`sources`、`tool_cwe_ids`、`related_finding_ids`），加上：
+
+```json
+{
+  "fingerprint": "…64 hex…",
+  "taxonomy_sha256": "…finding 建立時的 taxonomy…",
+  "observations_as_of": 3,
+  "seen": {"scans": 3, "observations": 3, "first_seen_scan_id": "…", "first_seen_run_id": "…", "last_seen_scan_id": "…", "last_seen_run_id": "…"},
+  "engines": [{"engine": "zap", "observations": 3, "scans": 3}],
+  "recent_scans": [
+    {"scan_id": "…", "created_at": "…", "status": "completed", "observations": 1, "scan_severity": "high",
+     "runs": [{"id": "…", "engine": "zap", "sequence": 1, "status": "succeeded", "error_code": null, "observations": 1}]}
+  ]
+}
+```
+
+- 回應有上限：`engines` 以引擎分組、`recent_scans` 最多 5 次（由新到舊）；完整的歷史與觀察以下面兩個端點分頁。`seen`、`engines`、`recent_scans` 依快照計算（`seen` 的 first／last 是快照中第一個與最後一個連結的 scan 與 run）；頂層的 finding 欄位（`normalized_severity`、`needs_review`、`last_seen_scan_id`、`last_seen_at` 等）是讀取時的現值，帶舊的 `as_of` 時可能比快照新。
+
+`GET /api/v1/findings/{finding_id}/scans?as_of=&page=&limit=`（200）：快照中出現過這個 finding 的 scan，由舊到新（scan 的建立時間，再依 id），每項的形狀同 `recent_scans[]`。`runs` 列出這個 scan 的**所有** run（含失敗、沒有觀察的引擎，例如預算不足而沒有執行的 nuclei 是 `failed`、`BUDGET_EXHAUSTED`、0），`observations` 是它們在快照中連結到這個 finding 的數量；`scan_severity` 是這個 scan 的連結當時的正規化等級的最高值。`meta` 是 `{page, limit, total, as_of}`。
+
+`GET /api/v1/findings/{finding_id}/observations?as_of=&scan_id=&engine=&page=&limit=`（200）：依連結的序號排序；`scan_id`、`engine` 篩選同一個快照的集合（其他 target 的 scan_id 只會是空的清單）。每項：
+
+```json
+{
+  "link": {"sequence": 1, "normalized_severity": "high", "normalized_confidence": "medium", "needs_review": false, "taxonomy_sha256": "…", "linked_at": "…"},
+  "observation": {"id": "…", "scan_id": "…", "scanner_run_id": "…", "engine": "zap", "…": "同 §17.8 的遮罩後欄位"},
+  "artifact": {"id": "…", "kind": "output", "path": "zap-report.json", "sha256": "…", "size_bytes": 46542, "redactions": 0, "classification": "masked", "encrypted": false},
+  "run": {"id": "…", "engine": "zap", "sequence": 1, "status": "succeeded", "error_code": null, "image_ref": "zaproxy/zap-stable:…@sha256:…", "plan_hash": "…", "profile_definition_sha256": "…", "engine_version": "2.17.0", "parser_version": "zap-traditional-json/1", "started_at": "…", "finished_at": "…"}
+}
+```
+
+- `link` 是連結當時寫入、之後不可修改的值（append-only）：不以目前的 taxonomy 重算，`taxonomy_sha256` 說明當時的規則與對應版本。
+- `observation` 和 `GET /scans/{id}/observations` 相同：遮罩、截斷之後的目標內容，仍是不可信的資料，顯示時要編碼。
+- `artifact` 是觀察引用的報告的 metadata（`sha256` 是遮罩後檔案的雜湊，不是原始報告或簽章）；**不輸出 storage_key 與檔案內容**。storage_key 不是秘密（由 run id、kind 與 path 組成），不能當成存取控制：T21 的下載必須以 artifact id 走 artifact → run → scan → target → project 的授權，不接受 client 給的 path 或 storage_key。T20 起新的觀察一定引用自己 run 的報告（寫入端拒絕沒有報告的觀察）；更早的資料可能是 null，如實回傳、不補造。
+- `run`：`plan_hash` 是準備執行的 ExecutionPlan 的雜湊（含映像、參數與上限），不代表執行成功；沒有建立容器的 run 沒有 plan（null）。版本不明時是 null，不以目前的設定補上。
 
 ## 18. Runner、worker 與掃描器（T10 已實作）
 

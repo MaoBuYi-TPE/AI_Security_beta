@@ -171,6 +171,8 @@ T15 已涵蓋：
 
 T15 的 ZAP fixture（`tests/fixtures/zap/<情境>/`，真實輸出，`make record-fixtures` 錄製、人工審查之後搬入；離線的情境在 `--network none` 錄製）：`clean`（零告警）、`findings`、`timeout`（plan 的 maxDuration，退出碼 2）、`unanswered`（目標沒有回應，mitmproxy 的 502 被告警）、`unreachable`（連不到 host，退出碼 1、有報告）、`engine-error`（ZAP 啟動失敗，退出碼 1、沒有報告）。壞掉的輸出在測試中由真實報告的位元組衍生，不存成檔案。`tests/contract/test_zap_fixtures.py` 固定每份輸出判讀的結果（`make test-contract`）。
 
+T20 把 T30 的 fixture app 弱點版錄製升為 golden（`tests/fixtures/zap/fixture-vuln-{web,api}/`，原樣複製，`report.json`、`zap.log` 的 sha256 等於 runner manifest；審查：只有 lab 主機、沒有 Authorization／Bearer／Cookie 的值、JWT、平台 key 或種子 token；manifest 記下錄製時的 grant 以重建 scope）。`test_zap_fixtures.py` 加上兩個情境（觀察數 23／11 等於平台當時寫入的數量），`test_dedup_recorded_outputs.py` 以真的 parser 與 `plan_links` 斷言實際的分群（DEDUP 表）。這些錄製只用於去重的回歸，不用來調整規則（holdout 在 T27／T28）。
+
 T07 加入上傳用的規格 fixture `tests/fixtures/openapi/vampi-openapi3.yml`：T03 輸入的 VAmPI 規格，只把登入回應 example 中的範例 JWT 遮罩成 `REDACTED_JWT`。manifest 的 `openapi_fixtures` 記下遮罩前後的 sha256，contract 測試檢查兩者與防洩密規則。
 
 ### 4.3 Integration
@@ -305,6 +307,34 @@ T19 已涵蓋（真的 DB；`DECISIONS.md` §25）：
 - **worker**：解析入庫之後連結（ZAP golden 的 11 個觀察都連結到審查過的群組；nuclei 的 fallback 標 needs_review）；中斷之後重試只補上沒有連結的觀察。
 - **API（SEC-16）**（`test_findings_api.py`）：`GET /scans/{id}/findings` 的欄位（category、原始 CWE、未對應的原因、相關的 finding）、來源彙總、排序、篩選（含 category、needs_review）、分頁、不合法的值 422；只列這個 scan 的 finding、sources 只算這個 scan；其他 project 與不存在的一樣 404，沒有 key 是 401。
 
+T20 已涵蓋（`DECISIONS.md` §26）：
+
+**去重的反例（DEDUP；Gate D 的去重部分）**：`tests/unit/findings/test_dedup_counterexamples.py` 以真的 taxonomy 與 `plan_links` 比較 fingerprint；`tests/dedup_support.py` 的不變式（每個 finding 的觀察在 method、route、參數、身分、物件上都相同；不同的規則只能是同一個審查群組的成員；跨引擎只限佐證群組且有同一次 scan、同一個位置的錨點）在 unit、contract、integration、live 共用。
+
+| 編號 | 不應合併的情況 | 層級 |
+|---|---|---|
+| DEDUP-01 | 同 CWE-89、同一個 path 的不同參數（POST /login 的 username 與 password） | unit、contract（真實錄製）、live |
+| DEDUP-02 | 同一個參數名、位置不同（query 與不明） | unit |
+| DEDUP-03 | 同 CWE-693 的不同群組（CSP 與 X-Content-Type-Options） | unit、contract |
+| DEDUP-04 | 未審查規則的不同參數 | unit |
+| DEDUP-05、06 | 同 route、不同身分（anonymous／standard_user／admin） | unit |
+| DEDUP-07 | 同一個身分、驗證有效與失效 | unit（T19 的整合測試另有真的 guard 計數） |
+| DEDUP-08、18 | 同一個規格樣板的不同物件（fallback，v2；帶參數也一樣） | unit（舊程式下 RED） |
+| DEDUP-09 | 沒有規格時不同物件是不同的字面 route | unit |
+| DEDUP-10 | 同一個參數的不同弱點（SQLi 與 XSS；真實錄製 GET /go `next` 的三個群組） | unit、contract |
+| DEDUP-11 | 同一個規則的不同 variant（審查過與未審查） | unit |
+| DEDUP-12 | 未審查的規則不跨引擎合併 | unit |
+| DEDUP-13 | CORS 兩個工具只標示相關 | unit、T19 的整合與 live |
+| DEDUP-14 | 技術識別以技術名區分 | unit |
+| DEDUP-15 | 佐證只限同一次 scan | unit、T19 的整合 |
+| DEDUP-16、17 | 不同 method、不同 target | unit |
+
+合併的對照組（必須合併，避免反例只靠「什麼都不合併」通過）：MERGE-01 只有標題、等級、信心、工具 CWE 不同；MERGE-02 佐證的 header；MERGE-03 審查過的參數群組跨物件；MERGE-04 endpoint 粒度不看參數；MERGE-05 同一個 role label 的不同 auth profile（刻意的合併）；MERGE-06 同一個物件的複掃；真實錄製中 /search 的兩個 X-Content-Type-Options 觀察只有 query 不同。另外三個 Hypothesis 性質：只改一個身分維度一定拆開、只改非身分欄位一定合併、任意一批觀察的規劃都滿足不變式。
+
+- **schema（v0015）**（`test_findings_schema.py`）：連結帶著在 finding 上保留的序號；沒有保留、重複或沒有序號的連結被拒絕；保留了卻沒有連結（含直接改計數、新的 finding 宣稱有連結）在 commit 時失敗；連結數不能減少；觀察與 finding、first／last seen 的 scan 與 finding 屬於不同 target 時拒絕；連到不存在的 finding 是 FK 的錯誤；第二個寫入者等第一個 commit，別人保留、還沒提交的序號不能用（讀者看到的連結數 H 之內都已提交，rollback 不留空號）；升級依連結順序回填序號；既有資料跨 target 時升級失敗、停在 0014。
+- **寫入端**（`test_worker_zap.py`）：有觀察但 manifest 沒有這個 run 的報告 artifact 時整筆不寫入。
+- **追溯 API（SEC-16）**（`test_finding_provenance_api.py`，真的佇列與 linker）：明細有上限、不含 storage_key；每個觀察追到報告 artifact（sha256、大小）與 run（映像、plan_hash、版本）；連結的值是寫入時的值（舊的 taxonomy_sha256 原樣回傳）；沒有引用報告的舊觀察 artifact 是 null、不丟掉；跨 3 次 scan 的歷史與觀察在翻頁之間新增 scan 也不重複、不遺漏（同一個 as_of）；1,500 個觀察的 finding 15 頁完整，1 筆與 100 筆的頁 SQL 數相同、明細與歷史也都在 12 個以內（沒有 N+1）；明細帶舊的 as_of 時 seen、engines、recent_scans 是快照的值；近期只留 5 次 scan；部分失敗（ZAP timed_out 或 succeeded、nuclei 預算不足 failed）時已取得的觀察可追溯、歷史列出 0 個觀察的失敗引擎、scan 不是 completed；中斷之後重試沒有重複；scan_id、engine 篩選；不合法的值 422；其他 project 與不存在的一樣 404（帶 as_of、scan_id、engine 也一樣，參數的檢查在權限之後），沒有 key 是 401。
+
 ### 4.4 Live E2E
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。
@@ -434,6 +464,8 @@ OWASP 標記（T19 更正，`DECISIONS.md` §25.10）：Top 10:2025 由案例的
 
 T19 以同一個 scan 同時跑 ZAP 與 Nuclei（`make test-live-fixture-findings`）：worker 把觀察連結到 finding。依使用者的簽核（`DECISIONS.md` §25.14），弱點版 FX-05 的缺 header 以 ZAP 為準、nuclei 在同一次 scan 同一個位置佐證時併入一個 finding（等級取最高值、標衝突）；FX-06 的 CORS 兩個工具偵測的行為不同，是兩個互相標示相關的 finding；修補版沒有 CORS 的 finding。
 
+T20 擴充同一個指令（`DECISIONS.md` §26.8）：每個 finding 以追溯 API 翻完明細、歷史與觀察（同一個 as_of）；所有 finding 的觀察聯集等於 scan 的觀察、互不重疊；每個觀察的 artifact sha256 與大小等於 runs volume 的檔案，run 的 plan_hash、映像與版本和 scan 一致；去重的不變式成立；弱點版 POST /login 的 SQLi 在 username、password 上是兩個 finding（DEDUP-01 的 live 版本）。另加部分失敗的情境：同一個 fixture、時間預算 240 秒（先跑 3 次校準、結果相同才寫死斷言）——ZAP `timed_out`／`ENGINE_TIMEOUT`（時間上限）、nuclei `failed`／`BUDGET_EXHAUSTED`（沒有 plan、沒有容器）、scan `timed_out`（不是 completed）；ZAP 已取得的觀察都可追溯，流量秒數不超過預算。
+
 安全案例（12 個正例＋12 個修補負例）：
 
 | case_id | method／path | auth | 類別（OWASP） | ZAP 能否偵測 | 平台結果 | 人工確認方式 | 修補差異 | holdout |
@@ -547,7 +579,7 @@ Gate B：SEC-01 至 SEC-20 適用測試有結果；未支援能力明確關閉�
 
 Gate C：取消/故障/重送/partial 狀態測試通過。
 
-Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。
+Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重的反例已通過，§4.3 的 DEDUP 表；複掃的反例在 T22。）
 
 Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 

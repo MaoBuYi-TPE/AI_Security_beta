@@ -49,6 +49,16 @@ class Envelope[DataT](BaseModel):
         return self
 
 
+class SnapshotPageMeta(PageMeta):
+    """快照的清單（finding 的來源追溯）：as_of 固定這次翻頁的集合，下一頁帶回同一個值。"""
+
+    as_of: int = Field(ge=0)
+
+
+class SnapshotEnvelope[DataT](Envelope[DataT]):
+    meta: SnapshotPageMeta | None = None
+
+
 def ok[DataT](data: DataT) -> Envelope[DataT]:
     """包裝成功回應。"""
     return Envelope(success=True, data=data)

@@ -45,7 +45,7 @@ RULE_GROUPS_PATH = Path(__file__).parents[1] / "taxonomy" / "rule_groups.yaml"
 # （test_taxonomy.py 核對）。
 RULE_GROUPS_SHA256 = "3c1d616dfe066aaab78dbe04895858dd4b61904ae586b231c8bb599877e6aa38"
 # fingerprint 的欄位或規則改變時升版（同一個問題的 fingerprint 會改變）。
-FINGERPRINT_VERSION = 1
+FINGERPRINT_VERSION = 2
 RULE_GROUP_MAX_LENGTH = 160
 TITLE_MAX_LENGTH = 512
 WILDCARD = "*"

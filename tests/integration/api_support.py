@@ -268,6 +268,12 @@ class Seeder:
         with self._session() as session:
             session.execute(text(statement), params)
 
+    def execute_together(self, *statements: str, **params: object) -> None:
+        """多個語句在同一個 transaction 中執行並 commit（例如先保留連結的序號再寫入連結）。"""
+        with self._session() as session:
+            for statement in statements:
+                session.execute(text(statement), params)
+
 
 def lab_grant_request(target: Target, **overrides: object) -> GrantRequest:
     """target 的申請內容：預設只允許 GET /users/v1、lab 內的一個 IP，期限 7 天。"""

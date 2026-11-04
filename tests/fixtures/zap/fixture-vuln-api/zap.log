@@ -1,0 +1,78 @@
+Found Java version 17.0.20.1
+Available memory: 8005 MB
+Using JVM args: -Xmx1536m
+308 [main] INFO  org.parosproxy.paros.Constant - Copying default configuration to /tmp/zap/config.xml
+420 [main] INFO  org.parosproxy.paros.Constant - Creating directory /tmp/zap/session
+420 [main] INFO  org.parosproxy.paros.Constant - Creating directory /tmp/zap/dirbuster
+420 [main] INFO  org.parosproxy.paros.Constant - Creating directory /tmp/zap/fuzzers
+420 [main] INFO  org.parosproxy.paros.Constant - Creating directory /tmp/zap/plugin
+Nov 02, 2026 8:44:42 AM java.util.prefs.FileSystemPreferences$1 run
+WARNING: Couldn't create user preferences directory. User preferences are unusable.
+Nov 02, 2026 8:44:42 AM java.util.prefs.FileSystemPreferences$1 run
+WARNING: java.io.IOException: No such file or directory
+Job passiveScan-config set scanOnlyInScope = true
+Job openapi set apiFile = /scan/in/openapi.json
+Job openapi set targetUrl = http://lab-fixture-vuln-2fa2af:8080
+Job openapi set context = target
+Job passiveScan-wait set maxDuration = 0
+Job activeScan set context = target
+Job activeScan set maxRuleDurationInMins = 0
+Job activeScan set maxScanDurationInMins = 0
+Job activeScan set threadPerHost = 1
+Job activeScan set addQueryParam = false
+Job activeScan set handleAntiCSRFTokens = true
+Job activeScan set injectPluginIdInHeader = false
+Job activeScan set scanHeadersAllRequests = false
+Job activeScan set defaultStrength = low
+Job activeScan set defaultThreshold = off
+Job report set template = traditional-json
+Job report set reportDir = /scan/out
+Job report set reportFile = zap-report
+Job passiveScan-config started
+Job passiveScan-config finished, time taken: 00:00:00
+Job openapi started
+Job openapi added 6 URLs
+Job openapi finished, time taken: 00:00:02
+Job passiveScan-wait started
+Job passiveScan-wait finished, time taken: 00:00:00
+Job activeScan started
+Job activeScan set default strength to LOW
+Job activeScan set default threshold to OFF
+Job activeScan set rule 0 threshold to MEDIUM
+Job activeScan set rule 7 threshold to MEDIUM
+Job activeScan set rule 20019 threshold to MEDIUM
+Job activeScan set rule 40003 threshold to MEDIUM
+Job activeScan set rule 40008 threshold to MEDIUM
+Job activeScan set rule 40009 threshold to MEDIUM
+Job activeScan set rule 40018 threshold to MEDIUM
+Job activeScan set rule 40042 threshold to MEDIUM
+Job activeScan set rule 90017 threshold to MEDIUM
+Job activeScan set rule 90019 threshold to MEDIUM
+Job activeScan set rule 90020 threshold to MEDIUM
+Job activeScan set rule 90021 threshold to MEDIUM
+Job activeScan set rule 90035 threshold to MEDIUM
+Nov 02, 2026 8:45:14 AM java.util.prefs.FileSystemPreferences checkLockFile0ErrorCode
+WARNING: Could not lock User prefs.  Unix error code 2.
+Nov 02, 2026 8:45:14 AM java.util.prefs.FileSystemPreferences syncWorld
+WARNING: Couldn't flush user prefs: java.util.prefs.BackingStoreException: Couldn't get file lock.
+Nov 02, 2026 8:45:44 AM java.util.prefs.FileSystemPreferences checkLockFile0ErrorCode
+WARNING: Could not lock User prefs.  Unix error code 2.
+Nov 02, 2026 8:45:44 AM java.util.prefs.FileSystemPreferences syncWorld
+WARNING: Couldn't flush user prefs: java.util.prefs.BackingStoreException: Couldn't get file lock.
+Nov 02, 2026 8:46:14 AM java.util.prefs.FileSystemPreferences checkLockFile0ErrorCode
+WARNING: Could not lock User prefs.  Unix error code 2.
+Nov 02, 2026 8:46:14 AM java.util.prefs.FileSystemPreferences syncWorld
+WARNING: Couldn't flush user prefs: java.util.prefs.BackingStoreException: Couldn't get file lock.
+Nov 02, 2026 8:46:44 AM java.util.prefs.FileSystemPreferences checkLockFile0ErrorCode
+WARNING: Could not lock User prefs.  Unix error code 2.
+Nov 02, 2026 8:46:44 AM java.util.prefs.FileSystemPreferences syncWorld
+WARNING: Couldn't flush user prefs: java.util.prefs.BackingStoreException: Couldn't get file lock.
+Nov 02, 2026 8:47:14 AM java.util.prefs.FileSystemPreferences checkLockFile0ErrorCode
+WARNING: Could not lock User prefs.  Unix error code 2.
+Nov 02, 2026 8:47:14 AM java.util.prefs.FileSystemPreferences syncWorld
+WARNING: Couldn't flush user prefs: java.util.prefs.BackingStoreException: Couldn't get file lock.
+Job activeScan finished, time taken: 00:02:46
+Job report started
+Job report generated report /scan/out/zap-report.json
+Job report finished, time taken: 00:00:00
+Automation plan succeeded!

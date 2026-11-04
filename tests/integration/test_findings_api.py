@@ -12,8 +12,9 @@ from fastapi.testclient import TestClient
 
 from secscan.api_keys.domain import Role
 from secscan.scans.domain.catalog import Engine as ScanEngine
+from secscan.targets.domain import Target
 from tests.integration.api_support import Caller, Seeder, World
-from tests.integration.finding_support import web_scan, web_target
+from tests.integration.finding_support import link_by_sql, web_scan, web_target
 
 pytestmark = pytest.mark.integration
 
@@ -38,24 +39,42 @@ INSERT_FINDING = (
     ":severity, :conflict, :review, :cwe, :cwe_source, :top10, :top10_source, :api, "
     ":api_source, 'rules-1', :sha, :run, :scan, :run, :scan) RETURNING id"
 )
-INSERT_LINK = (
-    "INSERT INTO finding_observations (observation_id, finding_id, normalized_severity, "
-    "normalized_confidence, needs_review, taxonomy_sha256) VALUES (:observation, :finding, "
-    ":severity, :confidence, false, :sha)"
-)
 
 
 class Scan:
-    """一個 web scan（zap 與 nuclei 兩個 run），以 SQL 寫入觀察與 finding。"""
+    """一個 web scan（zap 與 nuclei 兩個 run），以 SQL 寫入觀察與 finding。
 
-    def __init__(self, seed: Seeder, world: World) -> None:
-        target, grant_id = web_target(seed, world)
+    after：同一個 target 的下一次 scan（先結束前一次；一個 target 同時只有一個進行中的 scan）。
+    finding 與連結的觀察必須屬於同一個 target（v0015 的 trigger）。
+    """
+
+    def __init__(self, seed: Seeder, world: World, after: "Scan | None" = None) -> None:
+        if after is None:
+            target, grant_id = web_target(seed, world)
+        else:
+            after.finish()
+            target, grant_id = after.target, after.grant_id
         self.seed = seed
+        self.target: Target = target
+        self.grant_id: UUID = grant_id
         self.target_id = target.id
         self.id = web_scan(seed, world, target, grant_id, (ScanEngine.ZAP, ScanEngine.NUCLEI))
         rows = seed.query("SELECT id, engine FROM scanner_runs WHERE scan_id = :id", id=self.id)
         self.runs = {row.engine: row.id for row in rows}
         self._ordinal = 0
+
+    def finish(self) -> None:
+        """模擬 scan 已結束（佇列的轉換由 queue 的測試負責）。"""
+        self.seed.execute(
+            "UPDATE scanner_runs SET status = 'cancelled', finished_at = now() "
+            "WHERE scan_id = :id AND status = 'queued'",
+            id=self.id,
+        )
+        self.seed.execute(
+            "UPDATE scans SET status = 'cancelled', cancel_requested_at = now(), "
+            "finished_at = now() WHERE id = :id",
+            id=self.id,
+        )
 
     def observe(
         self,
@@ -109,13 +128,8 @@ class Scan:
         return UUID(str(row.id))
 
     def link(self, finding: UUID, observation: UUID, severity: str, confidence: str) -> None:
-        self.seed.execute(
-            INSERT_LINK,
-            observation=observation,
-            finding=finding,
-            severity=severity,
-            confidence=confidence,
-            sha=SHA,
+        link_by_sql(
+            self.seed, finding, observation, severity=severity, confidence=confidence, sha=SHA
         )
 
 
@@ -364,8 +378,9 @@ def test_only_this_scans_findings_and_sources(
     api_client: TestClient, seed: Seeder, world: World
 ) -> None:
     """另一個 scan 的觀察連結到的 finding 不列出；同一個 finding 的來源只算這個 scan 的。"""
-    first, second = Scan(seed, world), Scan(seed, world)
+    first = Scan(seed, world)
     shared = _xcto(first)
+    second = Scan(seed, world, after=first)
     observed = second.observe("zap", "10021", "10021", "1", "Low", 693)
     second.link(shared, observed, "low", "medium")
     _xcto(second)
@@ -384,9 +399,10 @@ def test_scan_severity_is_this_scans_highest_source(
     api_client: TestClient, seed: Seeder, world: World
 ) -> None:
     """finding 的等級是所有掃描的最高值；scan_severity 只看這個 scan 的來源（安全審查）。"""
-    first, second = Scan(seed, world), Scan(seed, world)
+    first = Scan(seed, world)
     sqli = first.finding("zap-sql-injection", "high", conflict=True)
     first.link(sqli, first.observe("zap", "40018", "40018", "3", "High", 89), "high", "low")
+    second = Scan(seed, world, after=first)
     second.link(sqli, second.observe("zap", "40018", "40018", "2", "Medium", 89), "medium", "low")
 
     [item] = _list(api_client, world.viewer_a, second.id, "?severity=high").json()["data"]

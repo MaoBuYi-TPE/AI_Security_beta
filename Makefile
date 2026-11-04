@@ -285,7 +285,9 @@ test-live-fixture-nuclei: test-live-runner
 
 # T19（docs/DECISIONS.md §25）：同一個 scan 以真的 ZAP 與 Nuclei 掃 fixture app 的弱點版與修補版，
 # worker 連結 finding；以 GET /scans/{id}/findings 驗證跨引擎合併、最高等級與衝突、每個觀察連結一次。
-# 量測印在輸出（-s），錄製到 recordings/fixture-findings/。約 20 分鐘。
+# T20（§26）：以追溯 API 驗證每個觀察追到報告與 run、去重的不變式；另跑小時間預算的部分失敗情境
+# （SECSCAN_PARTIAL_BUDGET_SECONDS，預設 240）。量測印在輸出（-s），錄製到 recordings/fixture-findings/。
+# 約 25 分鐘。
 test-live-fixture-findings: LIVE_TESTS := tests/live/test_fixture_findings_live.py
 test-live-fixture-findings: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture-findings
 test-live-fixture-findings: LIVE_PYTEST_ARGS := -s

@@ -574,7 +574,7 @@ SHA256(canonical_json({
 **路徑與參數**：
 
 - 只有存在可信的 OpenAPI 或 route map 時，才把 API 路徑中的具體 ID 對應成 `{id}`。
-- 與授權或特定資源有關的問題，仍要保留 resource discriminator，避免把不同物件合併在一起。
+- 與授權或特定資源有關的問題，仍要保留 resource discriminator，避免把不同物件合併在一起。T20（fingerprint v2）：route 是樣板時，沒有審查過的規則（fallback）一律以字面 path 作為 resource——無法證明問題在端點而不在物件上；審查過的 34 個群組逐一審查為端點或參數層級（`TOOLS.md` §8.7），`resource_scoped` 的群組也保留字面 path（`DECISIONS.md` §26.2）。
 - Query 不全部刪除。像 action/type 這類有業務語意的欄位，要依規則保留（T19 尚未實作：query 不在 fingerprint 中，列為限制）。
 - secret 值要遮罩；必要的識別欄位可以用專案穩定的 HMAC。
 - 不要過度 decode path，導致把不同的路徑當成相同。
@@ -593,6 +593,8 @@ SHA256(canonical_json({
 - ZAP 的 riskcode 3/2/1/0 對到 high/medium/low/info。
 - Nuclei 的 severity 一對一對應；unknown 轉成 info，並標記 needs_review。
 - Schemathesis 依 kind 與安全影響對應，5xx 預設為 robustness。
+
+**來源追溯**（T20，`DECISIONS.md` §26、`API_CONTRACT.md` §17.10）：finding → 連結（連結當時的正規化值與 `taxonomy_sha256`，append-only）→ 遮罩後的 observation → 報告 artifact 的 metadata（sha256、大小、遮罩次數；不輸出 storage_key）→ run（映像、`plan_hash`、工具與 parser 的版本）。連結有 DB 指定的序號，追溯以「序號 <= 讀取時的連結數」作為快照分頁；DB 也檢查連結的 observation、first／last seen 的 scan 與 finding 屬於同一個 target。
 
 **合併原則**：
 

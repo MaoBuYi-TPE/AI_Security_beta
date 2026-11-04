@@ -44,6 +44,10 @@ from secscan.specs.repository import ApiSpecRepository
 from secscan.targets.domain import Origin, parse_origin
 
 
+class MissingReportError(ValueError):
+    """解析出觀察，卻沒有可引用的報告 artifact（來源追溯不完整，不寫入）。"""
+
+
 @dataclass(frozen=True, slots=True)
 class RunUsage:
     """run 用掉的預算：guard 的 telemetry 記下的轉送與拒絕數，以及容器啟動到停止的秒數。
@@ -312,6 +316,10 @@ class RunRecords:
         )
         report_id = self._insert_artifacts(lease, artifacts, report_path)
         if parsed.observations:
+            if report_id is None:
+                # 觀察都來自報告：manifest 沒有這個 run 的報告就無法追溯（T20），整筆不寫入
+                # （同一個 transaction 回滾，worker 之後重試）。
+                raise MissingReportError("有觀察，但 manifest 中沒有這個 run 的報告 artifact")
             self._insert_observations(lease, parsed, report_id)
 
     def _insert_artifacts(
@@ -342,7 +350,7 @@ class RunRecords:
                 return artifact_id
         return None
 
-    def _insert_observations(self, lease: Lease, parsed: ParsedRun, report_id: UUID | None) -> None:
+    def _insert_observations(self, lease: Lease, parsed: ParsedRun, report_id: UUID) -> None:
         auth_role = self._session.execute(
             select(ScanModel.auth_role).where(ScanModel.id == lease.scan_id)
         ).scalar_one()

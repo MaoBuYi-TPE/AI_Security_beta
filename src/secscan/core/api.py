@@ -7,7 +7,13 @@ from typing import Annotated
 from fastapi import Depends, Query
 from pydantic import AfterValidator, AwareDatetime
 
-from secscan.core.envelope import MAX_PAGE_LIMIT, Envelope, PageMeta
+from secscan.core.envelope import (
+    MAX_PAGE_LIMIT,
+    Envelope,
+    PageMeta,
+    SnapshotEnvelope,
+    SnapshotPageMeta,
+)
 from secscan.core.pagination import DEFAULT_PAGE_LIMIT, MAX_PAGE, Page, PageRequest
 
 API_V1_PREFIX = "/api/v1"
@@ -45,4 +51,17 @@ def ok_page[T, R](page: Page[T], convert: Callable[[T], R]) -> Envelope[list[R]]
         success=True,
         data=[convert(item) for item in page.items],
         meta=PageMeta(page=page.request.page, limit=page.request.limit, total=page.total),
+    )
+
+
+def ok_snapshot_page[T, R](
+    page: Page[T], convert: Callable[[T], R], *, as_of: int
+) -> SnapshotEnvelope[list[R]]:
+    """快照的清單回應：meta 另外帶 as_of（同一個值翻頁，集合不變）。"""
+    return SnapshotEnvelope(
+        success=True,
+        data=[convert(item) for item in page.items],
+        meta=SnapshotPageMeta(
+            page=page.request.page, limit=page.request.limit, total=page.total, as_of=as_of
+        ),
     )

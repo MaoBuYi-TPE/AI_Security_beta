@@ -359,6 +359,183 @@
       "masking": "離線（--network none，掃描容器的強化旗標）；未改動",
       "scenario": "engine-error",
       "exit_code": 1
+    },
+    {
+      "path": "zap/fixture-vuln-web/report.json",
+      "tool": "zap",
+      "tool_version": "2.17.0",
+      "image_digest": "sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+      "target": "http://lab-fixture-vuln-2fa2af:8080",
+      "run_id": "ad4f55c5-e914-473c-b6e7-792c9954dbda",
+      "recorded_utc": "2026-11-02T08:44:23.535584Z",
+      "sha256": "4595af1c92f0d68b59160de1af581ca473dd3bcd88eeb5c61c2aa21168fe902f",
+      "raw_sha256": "4595af1c92f0d68b59160de1af581ca473dd3bcd88eeb5c61c2aa21168fe902f",
+      "redactions": 0,
+      "masking": "T30 的 make test-live-fixture 錄製（recordings/fixture/，gitignore），未改動任何位元組；report.json、zap.log 的 sha256 等於 runner manifest。T20 審查：只有 lab 主機、沒有 Authorization／Bearer／Cookie 的值、JWT、平台 key 或 fixture 的種子 token；telemetry 只有 method、path、auth 旗標與 status",
+      "scenario": "fixture-vuln-web",
+      "exit_code": 0,
+      "auth_role": "anonymous",
+      "grant": {
+        "allow_all_paths": true,
+        "methods": [
+          "GET",
+          "HEAD",
+          "POST"
+        ]
+      },
+      "source": "T30 fixture app 弱點版（tests/live/fixture_app，lab_net）；去重的回歸，不用來調整規則（holdout 在 T27／T28）",
+      "added_by": "T20"
+    },
+    {
+      "path": "zap/fixture-vuln-web/zap.log",
+      "tool": "zap",
+      "tool_version": "2.17.0",
+      "image_digest": "sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+      "target": "http://lab-fixture-vuln-2fa2af:8080",
+      "run_id": "ad4f55c5-e914-473c-b6e7-792c9954dbda",
+      "recorded_utc": "2026-11-02T08:44:23.535584Z",
+      "sha256": "654f98e2a4957db0203604ae77ac7cbbf4907e704bb0cc7918ace17b6d68c4a8",
+      "raw_sha256": "654f98e2a4957db0203604ae77ac7cbbf4907e704bb0cc7918ace17b6d68c4a8",
+      "redactions": 0,
+      "masking": "T30 的 make test-live-fixture 錄製（recordings/fixture/，gitignore），未改動任何位元組；report.json、zap.log 的 sha256 等於 runner manifest。T20 審查：只有 lab 主機、沒有 Authorization／Bearer／Cookie 的值、JWT、平台 key 或 fixture 的種子 token；telemetry 只有 method、path、auth 旗標與 status",
+      "scenario": "fixture-vuln-web",
+      "exit_code": 0,
+      "auth_role": "anonymous",
+      "grant": {
+        "allow_all_paths": true,
+        "methods": [
+          "GET",
+          "HEAD",
+          "POST"
+        ]
+      },
+      "source": "T30 fixture app 弱點版（tests/live/fixture_app，lab_net）；去重的回歸，不用來調整規則（holdout 在 T27／T28）",
+      "added_by": "T20"
+    },
+    {
+      "path": "zap/fixture-vuln-web/telemetry.jsonl",
+      "tool": "zap",
+      "tool_version": "2.17.0",
+      "image_digest": "sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+      "target": "http://lab-fixture-vuln-2fa2af:8080",
+      "run_id": "ad4f55c5-e914-473c-b6e7-792c9954dbda",
+      "recorded_utc": "2026-11-02T08:44:23.535584Z",
+      "sha256": "4f9c38a652474873872cb95adb163179d85253aee3fb50274dfdacbccd6f45c6",
+      "raw_sha256": "4f9c38a652474873872cb95adb163179d85253aee3fb50274dfdacbccd6f45c6",
+      "redactions": 0,
+      "masking": "T30 的 make test-live-fixture 錄製（recordings/fixture/，gitignore），未改動任何位元組；report.json、zap.log 的 sha256 等於 runner manifest。T20 審查：只有 lab 主機、沒有 Authorization／Bearer／Cookie 的值、JWT、平台 key 或 fixture 的種子 token；telemetry 只有 method、path、auth 旗標與 status",
+      "scenario": "fixture-vuln-web",
+      "exit_code": 0,
+      "auth_role": "anonymous",
+      "grant": {
+        "allow_all_paths": true,
+        "methods": [
+          "GET",
+          "HEAD",
+          "POST"
+        ]
+      },
+      "source": "T30 fixture app 弱點版（tests/live/fixture_app，lab_net）；去重的回歸，不用來調整規則（holdout 在 T27／T28）",
+      "added_by": "T20"
+    },
+    {
+      "path": "zap/fixture-vuln-api/report.json",
+      "tool": "zap",
+      "tool_version": "2.17.0",
+      "image_digest": "sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+      "target": "http://lab-fixture-vuln-2fa2af:8080",
+      "run_id": "60611b4c-418b-4125-9fcb-8795018a17eb",
+      "recorded_utc": "2026-11-02T08:47:43.355101Z",
+      "sha256": "8e930f2519b5e5b3bdc1df1375859d0d062ba8d196527a498964dcec36d9a2f8",
+      "raw_sha256": "8e930f2519b5e5b3bdc1df1375859d0d062ba8d196527a498964dcec36d9a2f8",
+      "redactions": 0,
+      "masking": "T30 的 make test-live-fixture 錄製（recordings/fixture/，gitignore），未改動任何位元組；report.json、zap.log 的 sha256 等於 runner manifest。T20 審查：只有 lab 主機、沒有 Authorization／Bearer／Cookie 的值、JWT、平台 key 或 fixture 的種子 token；telemetry 只有 method、path、auth 旗標與 status",
+      "scenario": "fixture-vuln-api",
+      "exit_code": 0,
+      "auth_role": "standard_user",
+      "grant": {
+        "paths": [
+          "/me",
+          "/api/users",
+          "/api/users/{id}",
+          "/api/orders/{id}",
+          "/users/{username}"
+        ],
+        "methods": [
+          "GET",
+          "HEAD",
+          "POST"
+        ],
+        "api_spec": "openapi/fixture-app-openapi3.yml"
+      },
+      "source": "T30 fixture app 弱點版（tests/live/fixture_app，lab_net）；去重的回歸，不用來調整規則（holdout 在 T27／T28）",
+      "added_by": "T20"
+    },
+    {
+      "path": "zap/fixture-vuln-api/zap.log",
+      "tool": "zap",
+      "tool_version": "2.17.0",
+      "image_digest": "sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+      "target": "http://lab-fixture-vuln-2fa2af:8080",
+      "run_id": "60611b4c-418b-4125-9fcb-8795018a17eb",
+      "recorded_utc": "2026-11-02T08:47:43.355101Z",
+      "sha256": "cd50f9eba8e436aaafc4d189a0183477f9510ba9dd1e4bbbf4df22340f51579a",
+      "raw_sha256": "cd50f9eba8e436aaafc4d189a0183477f9510ba9dd1e4bbbf4df22340f51579a",
+      "redactions": 0,
+      "masking": "T30 的 make test-live-fixture 錄製（recordings/fixture/，gitignore），未改動任何位元組；report.json、zap.log 的 sha256 等於 runner manifest。T20 審查：只有 lab 主機、沒有 Authorization／Bearer／Cookie 的值、JWT、平台 key 或 fixture 的種子 token；telemetry 只有 method、path、auth 旗標與 status",
+      "scenario": "fixture-vuln-api",
+      "exit_code": 0,
+      "auth_role": "standard_user",
+      "grant": {
+        "paths": [
+          "/me",
+          "/api/users",
+          "/api/users/{id}",
+          "/api/orders/{id}",
+          "/users/{username}"
+        ],
+        "methods": [
+          "GET",
+          "HEAD",
+          "POST"
+        ],
+        "api_spec": "openapi/fixture-app-openapi3.yml"
+      },
+      "source": "T30 fixture app 弱點版（tests/live/fixture_app，lab_net）；去重的回歸，不用來調整規則（holdout 在 T27／T28）",
+      "added_by": "T20"
+    },
+    {
+      "path": "zap/fixture-vuln-api/telemetry.jsonl",
+      "tool": "zap",
+      "tool_version": "2.17.0",
+      "image_digest": "sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6",
+      "target": "http://lab-fixture-vuln-2fa2af:8080",
+      "run_id": "60611b4c-418b-4125-9fcb-8795018a17eb",
+      "recorded_utc": "2026-11-02T08:47:43.355101Z",
+      "sha256": "0400ecc4ca2e23b419068f7ef30b04e16eb53d3589d2f36af7fb8174bc35cabc",
+      "raw_sha256": "0400ecc4ca2e23b419068f7ef30b04e16eb53d3589d2f36af7fb8174bc35cabc",
+      "redactions": 0,
+      "masking": "T30 的 make test-live-fixture 錄製（recordings/fixture/，gitignore），未改動任何位元組；report.json、zap.log 的 sha256 等於 runner manifest。T20 審查：只有 lab 主機、沒有 Authorization／Bearer／Cookie 的值、JWT、平台 key 或 fixture 的種子 token；telemetry 只有 method、path、auth 旗標與 status",
+      "scenario": "fixture-vuln-api",
+      "exit_code": 0,
+      "auth_role": "standard_user",
+      "grant": {
+        "paths": [
+          "/me",
+          "/api/users",
+          "/api/users/{id}",
+          "/api/orders/{id}",
+          "/users/{username}"
+        ],
+        "methods": [
+          "GET",
+          "HEAD",
+          "POST"
+        ],
+        "api_spec": "openapi/fixture-app-openapi3.yml"
+      },
+      "source": "T30 fixture app 弱點版（tests/live/fixture_app，lab_net）；去重的回歸，不用來調整規則（holdout 在 T27／T28）",
+      "added_by": "T20"
     }
   ]
 }

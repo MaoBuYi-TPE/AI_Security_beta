@@ -2248,6 +2248,96 @@ observation 仍是不可變的單次觀察；T19 在它之上加上 target 層�
 - security-reviewer：0 CRITICAL、0 HIGH；項目 M1、L1–L4、I1。已修：M1（同一個等級內 security 排在 informational 之前，清單不會被大量的技術識別蓋過）、L1（v0014 回填的列標 `needs_review`）、L3（related 只查本頁的位置）、L4（技術名的字元集與長度）、L2（worker 依 sequence 解析同一個 scan 的 run，剩下的情況記入限制）。I1 記入限制。
 - code-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、3 LOW（APPROVE）。已修：MEDIUM（解析順序，同上，並加上依序認領的整合測試）；LOW 的 taxonomy 驗證（佐證只有一層、`*` 不混精確成員、related 不指向技術識別群組）、效能（related 只查本頁的位置、ZAP 的 run 不查錨點）、測試與遷移（帶資料的 0013 → 0014 升級測試、回填的列標 `needs_review`、`KIND_CATEGORIES` 的 M6 註記）。
 
+## 26. T20：去重的反例、物件鑑別（fingerprint v2）與來源追溯（2026-11-04）
+
+T20 是 M4 的最後一項：DoD 是「同 CWE 但參數不同、同 route 但身分或物件不同、不同的弱點都不會誤合併」與「所有證據都能追溯到來源」。T19 的交接另要求處理跨表的 target 一致性（§25.12）。
+
+### 26.1 使用者的決定（2026-11-04）
+1. **物件鑑別**：未審查的規則保留物件（樣板 route 下 fallback 的 resource 是字面 path），審查過的群組照舊合併；`FINGERPRINT_VERSION` 升到 2。
+2. **追溯 API**：明細＋觀察分頁。附帶條件：大量 scan 的歷史也要分頁，明細只留彙總、first／last 與有限的近期紀錄；每個觀察都能追到 artifact、run、plan_hash、工具與 parser 的版本、連結當時的 taxonomy_sha256，不受日後版本影響；只給授權範圍內的遮罩證據與 artifact metadata，不給檔案內容與 storage_key；穩定排序、支援 scan_id 與 engine 篩選，資料成長時不重複也不遺漏；驗收涵蓋跨多次 scan、單一 scan 大量觀察與部分 run 失敗。
+3. **真實資料**：T30 的錄製升為 golden fixture，並擴充 `make test-live-fixture-findings`；不另外做匿名／認證身分的 live 掃描。
+4. **部分失敗**：live 加一個情境（同一個 fixture、小的時間預算跑 ZAP＋Nuclei），先實測確認可重現再定斷言；已取得的資料不遺失、狀態正確不誤判成功、沒有殘留、重試不重複；保存預算、狀態、結果與追溯紀錄作為 M4 的驗收依據。
+
+### 26.2 物件鑑別（fingerprint v2）
+- `linking._object_scoped`：resource 是字面 path 的條件是群組 `resource_scoped`，**或** fallback 而且 route 是樣板（`Position.templated`）。fallback 沒有審查過，無法判斷問題在端點還是在物件上；規格的樣板把 `/orders/1001`、`/orders/1002` 變成同一個 route，不能證明是同一個問題（不誤合併優先）。沒有規格時 path 本來就是 route，不重複加入；同一個物件在複掃時仍合併（MERGE-06）。
+- 審查過的 34 個群組逐一審查為端點或參數層級（`TOOLS.md` §8.7），`resource_scoped` 都維持 false；真實的 api 錄製沒有 fallback，所以 11 個觀察的分群不變（契約測試）。
+- `FINGERPRINT_VERSION = 2`：fingerprint 文件的 `v` 改變，所以**所有** finding 的 fingerprint 都改變（不只 fallback）。v1 的 finding 保留、不改寫（不可修改），新的觀察連結到 v2 的 finding；`mapping_version` 變成 `…+fp-2`、`taxonomy_sha256` 也跟著變，每個連結記得是哪一版語意。既有的 finding 都是開發與測試的資料：要乾淨就重建開發 DB（不由 migration 自動清除）。T22 比較時只比同一個 fingerprint 版本的 finding。
+- 刻意的合併與限制：同一個 role label 的不同 auth profile 合併（`CLAUDE.md` §10 以 auth role 為身分，MERGE-05）；以 query 指定物件（`?id=1`）與 action／type 類的語意 query 仍不在身分中（沒有真實輸出支持規則，沿用 §25.12）。
+
+### 26.3 去重的反例套件
+- `tests/dedup_support.py`：純函式的不變式，unit、contract、integration、live 共用。每個 finding 的觀察：method 相同；字面 route 時 path 等於 route；有 resource 時 path 等於 resource；參數粒度時位置與名稱相同；auth role 相同；不同的 (engine, rule, variant) 只能是同一個審查群組的成員；跨引擎只限佐證群組，而且佐證的觀察在同一次 scan、同一個 method 與 path 有錨點。不變式以目前的 taxonomy 檢查，只用在以目前版本連結的資料。
+- `test_dedup_counterexamples.py`：具名的反例 DEDUP-01–18 與合併的對照組 MERGE-01–06（`SECURITY_AND_TESTING.md` §4.3），加上三個 Hypothesis 性質。在舊的 linking 下 DEDUP-08、18 與同一個 run 的版本失敗（RED），改了之後全部通過。
+- `test_dedup_recorded_outputs.py`：golden fixture → 真的 ZAP parser（以 manifest 記下的 grant 重建 scope）→ `plan_links`。web 23 個觀察 → 22 個 finding：POST /login 的 SQLi 是 username、password 兩個；GET /go 的 `next` 上三個不同群組；GET / 五個不同群組；10098 在五個 path 各一個；唯一的合併是 /search 的兩個 X-Content-Type-Options（只有 query 不同）。api 11 → 11，樣板化成 `/api/orders/{id}`、`/api/users/{id}`、`/users/{username}`，GET 與 POST /api/users 各自獨立。
+- golden fixture 的審查：原樣複製、不改位元組；`report.json`、`zap.log` 的 sha256 等於 runner manifest；目標只有 lab 主機（報告中其他的 URL 是 ZAP 說明文字的參考連結，以及開放轉址告警中 ZAP 自己的測試 payload `https://8342850138707411404.owasp.org`：它只是參數值，guard 只允許 lab 的 origin）；沒有 Authorization／Bearer／Cookie 的值、JWT、平台 key 或 fixture 的種子 token（`cookie`、`token` 只出現在 ZAP 的說明文字與 anti-CSRF 的參數名清單）；telemetry 只有 method、path、auth 旗標與 status。這兩份錄製只用於去重的回歸，不用來調整規則（holdout 在 T27／T28）。
+
+### 26.4 連結序號與快照（分頁的一致性）
+- 計畫原本以「同一個 target 一次只有一個進行中的 scan、run 依序解析」主張 offset 分頁不會重複或遺漏；審查（architect）指出不成立：scan 的 `created_at` 是 transaction 開始的時間、不是 commit 的順序，讀取第一頁時尚未提交的連結之後才出現，若排序落在已讀過的位置就會遺漏；`clock_timestamp()`、UUID、sequence 或 `MAX(id)` 都不保證 commit 的順序，單純改成 cursor 也一樣。
+- 採用：**每個 finding 的連結序號＋讀取時的高水位**。migration v0015 加上 `findings.observations_linked` 與 `finding_observations.link_sequence`（`(finding_id, link_sequence)` unique、> 0）。linker 持有 finding 的列鎖（新增或 `FOR UPDATE`）時，每個 finding 每個 transaction 以一次 `observations_linked + k`（新的 finding 直接以 k 建立）保留 k 個序號，連結帶著 (保留之前的值, 之後] 的序號寫入。DB 強制：
+  - BEFORE INSERT 的 trigger：序號不能超過這個 transaction 看得到的連結數（別的 transaction 保留、還沒提交的序號看不到，所以也不能用）。
+  - deferred 的 constraint trigger：commit 時連結數必須等於這個 finding 的連結筆數；配合 unique 與 > 0，序號恰好是 1..連結數，不留空號（保留了不用、或直接改計數都會讓 commit 失敗）。
+  - `findings_guard`：連結數只能增加。
+- 為什麼一致：同一個 finding 的配號以列鎖排隊，所以連結依序號的順序提交，rollback 也退回計數。讀取時的 `observations_linked`＝H：序號 <= H 的連結都已提交，之後提交的序號一定大於 H，所以「`link_sequence <= H`」的集合固定；API 以 `as_of` 帶回 H 翻頁。
+- **第一版改掉的原因（量測）**：第一版由 BEFORE INSERT 的 trigger 逐列 `UPDATE findings … + 1` 指定序號。審查（code-reviewer、security-reviewer）指出同一列在一個 transaction 中更新上萬次是二次方的成本（舊版本無法 prune，HOT 鏈越來越長）；敵意的目標可以讓上萬個只有 query 不同的觀察落到同一個 finding（parser 的上限是每個 run 2 萬個）。實測（db-test，同一個 run 的 N 個觀察連到一個 finding，`FindingLinker.link` 的時間）：
+
+  | N | 逐列更新（第一版） | 一次保留（採用） |
+  |---|---|---|
+  | 1,500 | 0.47 秒 | 0.15 秒 |
+  | 5,000 | 1.81 秒 | 0.46 秒 |
+  | 20,000 | 16.65 秒 | 1.68 秒 |
+
+  第一版在 2 萬個時已接近 30 秒的 lease 與 statement timeout；採用的版本接近線性。量測是一次性的（開發機 Apple M1 Pro、OrbStack 的 db-test），不是效能基準，腳本不提交。
+- 鎖序不變：linker 本來就先以 fingerprint 的順序新增（鎖住新列）並 `FOR UPDATE` 既有的 finding，之後才寫連結；trigger 只用不加鎖的 SELECT；不鎖 scans（§25.8）。commit 時每個有變動的 finding 一次 count（用 unique 的索引）。
+- 快照固定的是**連結的集合**與由它算出的數量（scan 數、各 run 的觀察數、scan_severity、first／last）；scan 與 run 的狀態、明細頂層的 finding 欄位（`normalized_severity`、`last_seen_*` 等）是讀取時的現值，不凍結。不持有跨 HTTP 請求的 transaction 或 exported snapshot。`page` 上限 10,000：一個快照最多可讀到約一百萬個連結（limit 100），上限與保存期限在 T23 決定。
+- 不採用：持久化的快照表（可凍結狀態，但要 TTL、清理與配額，單人的 M4 不需要）；HMAC 的 token（as_of 只是比較值，不是授權憑證：每個請求都重新檢查權限，as_of 大於目前的連結數回 422，而且這個檢查在權限之後）。
+
+### 26.5 跨表的 target 一致性（v0015）
+- 連結的 trigger 同時檢查觀察所屬 scan 的 target 等於 finding 的 target；`findings_guard` 改版：連結數只能增加；first／last seen 的 scan 必須屬於 finding 的 target（INSERT 與 last seen 改變時檢查；找不到 scan 時交給 FK）。只用不加鎖的 SELECT，被讀的 `scans.target_id`、`observations.scan_id` 都不可修改（`scans_guard`、append-only）。
+- 升級先鎖住兩張表（`SHARE ROW EXCLUSIVE`）再核對既有資料：有跨 target 的連結或 first／last seen 就**失敗**（fail closed，由人處理），不靜默排除；核對以 SQL 的 DO 區塊執行，離線模式（`alembic --sql`）也會產生。回填序號時在同一個 transaction 內暫停兩張表的不可變 trigger。升級前先停 worker；降級只用於開發與測試。
+- 既有測試中有兩個 API 測試以不同 target 的 scan 連結同一個 finding（不符合真實流程），改成同一個 target 的依序 scan。
+
+### 26.6 觀察必須引用報告
+- 計畫原本要加 `CHECK (report_artifact_id IS NOT NULL) NOT VALID`；未採用：無法證明引用的是正確的報告（kind、path），而且歷史資料可能是 null。改在寫入端強制：`RunRecords.record_results` 有觀察、manifest 卻沒有這個 run 的報告 artifact 時拋 `MissingReportError`，整筆不寫入（同一個 transaction 回滾，worker 之後重試、重試耗盡就失敗）。ZAP 與 Nuclei 的 worker 一向傳入固定的報告路徑，觀察本來就只來自 manifest 列出的報告。
+- 更早的觀察若沒有引用報告，追溯 API 回 `artifact: null`（LEFT JOIN，不丟掉這一列、不補造）。
+
+### 26.7 追溯 API（`API_CONTRACT.md` §17.10）
+- `GET /findings/{id}`：§17.9 的 finding 欄位，加上 fingerprint、建立時的 taxonomy_sha256、`observations_as_of`、`seen`（快照中的 scan 數、觀察數、first／last 的 scan 與 run）、`engines`（依引擎分組）與 `recent_scans`（最多 5 次）。**回應有上限**：計畫原本的 sources 全部彙總、tool_cwe_ids 與跨 scan 的 related 會隨資料成長，移出明細（scan 層級的 sources 與 related 仍在 `GET /scans/{id}/findings`；related 的語意維持同一次 scan、同一個位置）。
+- `GET /findings/{id}/scans`：由舊到新的完整歷史；每個 scan 列出所有 run（含失敗、沒有觀察的引擎），部分失敗在這裡看得到。
+- `GET /findings/{id}/observations`：依序號排序；`link`（連結當時的正規化值、needs_review、taxonomy_sha256：append-only，不以目前的 taxonomy 重算——taxonomy_sha256 說明當時的版本，但完整的歷史 taxonomy 內容要由 Git 歷史還原，資料庫只存雜湊）、遮罩後的觀察（同 `GET /scans/{id}/observations`）、artifact 的 metadata（不含 storage_key 與內容）、run（映像、plan_hash、profile 定義、工具與 parser 的版本、時間）。
+- 授權：先取 finding，再以它的 target `TargetService.get`（`PROJECT_READ`）檢查；其他 project 與不存在的一樣 404；每個請求都重新檢查。查詢都限定在快照的連結上，每頁的 SQL 數固定（整合測試以 SQLAlchemy 的事件計數）。
+- 程式：`findings/domain/provenance.py`（frozen dataclass）、`findings/provenance.py`（查詢）、`findings/provenance_schemas.py`、`FindingService.detail／scans／observations`（repository 回傳 frozen 的 `FindingHead`，service 不讀 ORM model）；`core` 加上 `SnapshotPageMeta`、`SnapshotEnvelope` 與 `ok_snapshot_page`（其他清單的 meta 不變）；`scans.repository.observation_of`、`findings.repository.finding_of` 公開給追溯共用。
+
+### 26.8 部分失敗的 live 情境（M4 的里程碑證據）
+- 情境：同一個 fixture app 弱點版、同一個 scan 跑 ZAP＋Nuclei，`budget.max_duration_seconds` 取小值。ZAP 的 plan 是剩下的時間減去保留的 60 秒（`RESERVED_SECONDS`），所以 ZAP 會在自己的時間上限停止；剩下的時間不夠 nuclei 的最小時間窗（60 秒）時，runner 不建立容器、不送流量，nuclei 以 `BUDGET_EXHAUSTED` 結束。
+- **狀態的語意**：依 §13.4 的 `aggregate`，任何掃描引擎 `timed_out` 時 scan 是 `timed_out`（不是 `partially_completed`）；`partially_completed` 是「有引擎成功、其他失敗」。這個情境在 API 中呈現為 `timed_out`＋`results_complete=false`：功能上是部分失敗（ZAP 有結果、nuclei 沒有執行），沒有被判成成功。`partially_completed`（ZAP 成功、nuclei 失敗）由整合測試以真的佇列涵蓋；要在 live 中穩定得到它，需要 ZAP 剛好在時間上限之前自然結束、同時剩下的時間又不夠 nuclei，時間窗太窄、不可重現，所以不做。
+- **校準**（先量測再定斷言；2026-11-04，預算 240 秒，`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-findings LIVE_PYTEST_ARGS="-s -k partial"`，3 次）：
+
+  | 次 | scan | ZAP | ZAP 的觀察 | nuclei | 流量秒數（guard） | 轉送／拒絕 | 殘留 |
+  |---|---|---|---|---|---|---|---|
+  | 1 | timed_out | timed_out、ENGINE_TIMEOUT、time_limit_reached、exit 2 | 22 | failed、BUDGET_EXHAUSTED、沒有 plan | 194 | 343／10 | 無 |
+  | 2 | timed_out | 同上 | 22 | 同上 | 194 | 342／10 | 無 |
+  | 3 | timed_out | 同上 | 22 | 同上 | 193 | 345／10 | 無 |
+
+  三次的狀態與錯誤碼相同，所以斷言寫死：scan `timed_out`、`results_complete=false`；ZAP `timed_out`／`ENGINE_TIMEOUT`／`time_limit_reached`；nuclei `failed`／`BUDGET_EXHAUSTED`、沒有 plan_hash、沒有容器、沒有觀察；流量秒數不超過預算。觀察數只要求大於 0（ZAP 的行為不保證每次相同的數量）。
+- 已取得的資料不遺失：ZAP 的每個觀察都恰好連結一次，追溯到報告 artifact（sha256 與大小等於 runs volume 的檔案）與 run（plan_hash、映像、版本）；歷史列出 nuclei `failed`、0 個觀察。重試不重複：live 沒辦法強制中斷重試，由整合測試涵蓋（連結之後中斷、重試只補上沒連結的觀察，追溯中每個觀察只出現一次）。
+- 錄製：`recordings/fixture-findings/fixture-findings-partial/provenance.json`（預算、scan、引擎狀態與每個 finding 的明細、歷史與觀察頁；gitignore）。
+
+### 26.9 驗證
+- 離線：`make test`（全部通過，整體 coverage 99.7%；`findings` 的 domain、`provenance`、`service`、v0015 都是 100%）、`make lint`、`make typecheck`、`make test-contract`、`make owasp-top10-check`、`pre-commit run --all-files`。實際的數字見 `TASKS.md` T20 的交付。
+- RED：DEDUP-08、18、同一個 run 的拆分與不變式的性質測試在舊的 linking 下失敗，改了之後通過（以 `git stash` 暫時還原 linking 驗證）。
+- live：`make test-live-fixture-findings`（2026-11-04，3 passed、21 分 59 秒，跑完沒有殘留的容器與網路）：弱點版 34 個觀察 → 30 個 finding（和 T19 相同：沒有規格，v2 不改變分群），每個觀察都追到報告 artifact 與 run，POST /login 的 SQLi 是 username、password 兩個 finding；修補版 10 → 10；部分失敗和 §26.8 的校準相同（scan timed_out，ZAP 22 個觀察、196 秒，nuclei BUDGET_EXHAUSTED）。細節見 `TASKS.md` T20。
+
+### 26.10 限制
+- query 中的物件（`/doc?id=1` 與 `?id=2`）與 action／type 類的語意 query 不在身分中，fallback 也一樣（沒有真實輸出支持規則）；審查過的 endpoint 粒度群組在樣板 route 下跨物件合併（例如 `zap-private-ip-disclosure` 在不同物件洩漏不同位址時，`TOOLS.md` §8.7）；同一個 role label 的不同 auth profile 合併。T21 的 triage 要注意：標記一個 finding 會涵蓋它所有的物件與觀察，報告要揭露 finding 內不同 path 的數量。
+- fingerprint v2：v1 的 finding 保留為 open，同一個問題可能有 v1、v2 兩個 finding；T22 比較時 fingerprint 或 mapping 的版本不同要判成 `inconclusive`，不能判成 `not_observed`。
+- 讀取成本：明細與每一頁都依快照重新彙總（count、group by），成本隨連結數線性增加；專案目前沒有 API 的 rate limit。finding 的數量、連結的保存期限與彙總表在 T23 決定。
+- `MissingReportError` 走 worker 一般的重試（lease 過期之後重試、重試耗盡就是 `PARSE_ATTEMPTS_EXHAUSTED`）：它是平台不變式的違反（正常流程不會發生），不是工具或驗證的失敗；不另外定義錯誤碼。
+- 不另外做匿名／認證身分的 live 掃描（使用者決定）：身分的反例在 unit 與 T19 的整合測試（guard 的真實計數）。
+
+### 26.11 審查（2026-11-04）
+- architect（設計階段）：指出計畫的 offset 分頁論證不成立 → 改成序號＋高水位的快照（§26.4）；明細的無上限欄位、nullable 的 artifact／plan_hash、`timed_out` 與 `partially_completed` 的差異都依建議處理。
+- security-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、9 LOW。已修：MEDIUM（逐列更新同一個 finding 的二次方成本 → 每個 finding 一次保留，實測見 §26.4）；L1（直接改計數 → commit 時核對）、L4（SEC-16 的測試加上 as_of、scan_id、engine，確認在權限之後才檢查）、L8（不存在的量測引用 → 補上實測）、L9（升級前鎖表、先停 worker）、L2（storage_key 不是秘密，記入 `API_CONTRACT.md` §17.10 與 T21 的交接）。記入限制：L3、L5、L6、L7（§26.10）。
+- code-reviewer：0 CRITICAL、0 HIGH、3 MEDIUM、6 LOW（APPROVE）。已修：M1（N+1 的測試改成比較 1 筆與 100 筆的頁並加上上限，明細與歷史也量）、M2（repository 回傳 frozen 的 `FindingHead`）、M3（同 security 的 MEDIUM）；L1、L2（舊 as_of 的明細、近期 5 次的上限、移除恆真的斷言）、L3（不變式加上 v2 的規則、性質測試涵蓋 fallback 與規格；live 斷言真實的 POST /login 反例）、L4、L5（文件）、L6 的型別收窄。`finding_fields` 以 dict 交給 `model_validate`（執行期才檢查欄位名稱）維持：清單與明細共用，欄位由 schema 的測試釘住。
+
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。
