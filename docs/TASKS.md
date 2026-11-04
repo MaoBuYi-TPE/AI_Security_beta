@@ -1423,7 +1423,7 @@
       - 產生：`make nuclei-templates` 實跑，archive sha256 相符、42 個模板、類別分布如上；`make nuclei-templates-check` 與 gated live 測試逐位元組重現。清單的 tech-detect、flask-detect 等 sha256 與 spike 的 `templates.lock.txt` 一致（佐證解壓無竄改）。
       - 檢查：`make test`、`make lint`、`make typecheck`、`make test-contract`、`pre-commit run --all-files` 皆通過。
     - 審查（code-reviewer＋security-reviewer，2026-11-01）：各 0 CRITICAL、1 HIGH。HIGH 相同——初版 46 個中 3 個內嵌非 http 區塊（`cookies-without-httponly`／`-secure` 含 `javascript:`、`directory-listing` 含 `flow:`＋`fuzz` tag），`-pt http` 擋不住、測試只看路徑抓不到。已修：移除這 3 個與 `host-header-injection`（改 Host，guard 一律擋）→ 42 個；加內容閘門（`template_violations`）＋對應測試；補 selection 的重複/路徑穿越防護與更強斷言（相等鎖 `FROZEN_FLAGS`、`reconcile` 標籤、行號）；定義 hash 改含每檔 sha256；加 `ACTIVE_PROBE_TEMPLATE_IDS`、映像 digest 契約斷言、lock 的 `.gitattributes` LF、產生器錯誤/逾時/資源限制。
-    - 限制／效度威脅：單人審查，最終類別簽核待使用者確認；完整性鏈為「自我證明」（獨立驗證靠 gated live `--check` 以鎖定 archive 重新推導＋程式審查）；清單對準 lab，不追求 Nuclei 全面覆蓋；lock 檔若隨 wheel 打包需在 T18 確認 package-data。
+    - 限制／效度威脅：單人審查；使用者已於 2026-11-04 簽核：模板選擇與排除清單接受（補充 42 個模板的適用範圍，`TOOLS.md` §2.1.1）、`-ni` 與證據保存有條件接受（補充安全控制與資料管理，`TOOLS.md` §2.1.2），見 `DECISIONS.md` §23.6；完整性鏈為「自我證明」（獨立驗證靠 gated live `--check` 以鎖定 archive 重新推導＋程式審查）；清單對準 lab，不追求 Nuclei 全面覆蓋；lock 檔若隨 wheel 打包需在 T18 確認 package-data。
     - 給 T18（含審查提出的 DoD）：以 `policy.load_templates()`／`INCLUDE_TEMPLATE_IDS` 取清單、`FROZEN_FLAGS` 組 ExecutionPlan（`-id`、`-sf` 的 `domains` 完全比對）、`nuclei_definition_sha256()` 供報告揭露；凍結速率/並行（`-rl`/`-c 1`…）；濾掉 guard 合成的 403 拒絕回應（以 `X-Secscan-Guard`，否則 negative-matcher 模板會誤報）；加 `-dut`＋掛載前逐檔 sha256 驗證、只掛凍結的檔；遮罩涵蓋 `extracted-results`/`response`；註冊 nuclei 時放寬 `profile_definition_valid` 的 `engine='zap'` 限制。
 - [x] T18 實作 Nuclei Adapter、JSONL Parser 與真實 e2e。（設計與取捨見 `docs/DECISIONS.md` §24）
   - DoD：空檔、壞行、重複、非零退出、取消、timeout 都有明確定義；零告警與失敗可以區分。
@@ -1461,7 +1461,24 @@
   - 審查（2026-11-03）：
     - security-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、6 LOW。已修 MEDIUM（身分判定只看 `lost`，中途過期、之後只打新端點的 run 會被當成已驗證 → 改成沒有任何被拒絕、退化或探針被拒絕的請求才算，依 T16 的真實資料）與 5 個 LOW（大括號 path 撞名、清單的等級語意、連結的讀取量與比對成本、worker 的 `findings` 必填、新增時的 triage 狀態）；其餘記入限制。
     - code-reviewer：APPROVE，0 CRITICAL、0 HIGH、1 MEDIUM、4 LOW。已修 MEDIUM（沒有 cwe 的審查群組會吃到工具的 CWE）與測試缺口（確定性的併發測試、跨批次、RouteIndex 的 property test）；其餘寫成取捨或限制（§25.12、§25.13）。
-  - 限制／效度威脅：rule groups 與 OWASP 對應是單人審查，**最終簽核由使用者確認**（比照 T17）；query 不在 fingerprint 中；T19 之前的觀察不回填；對應在建立 finding 時寫入、不隨 taxonomy 改版；DB 不檢查連結跨表的 target 一致性（由 linker 保證）；沒有 finding 數量的上限；多個 worker 時連結的等鎖可能逾時（P0 只有一個 worker）。
+  - 限制／效度威脅：rule groups 與 OWASP 對應是單人審查，使用者已於 2026-11-04 簽核並要求修正（見下方的「簽核與修正」）；query 不在 fingerprint 中；T19 之前的觀察不回填；對應在建立 finding 時寫入、不隨 taxonomy 改版；DB 不檢查連結跨表的 target 一致性（由 linker 保證）；沒有 finding 數量的上限；多個 worker 時連結的等鎖可能逾時（P0 只有一個 worker）。
+  - 簽核與修正（2026-11-04；rule groups v2、migration v0014；`DECISIONS.md` §25.14、`TOOLS.md` §8）：
+    - 使用者的簽核與選擇：
+      - CORS 去重（建議修改）：選「同一次 scan＋證據行為也相同」→ ZAP 10098（沒有 Origin 時回 `*`）與 nuclei `cors-misconfig`（反射任意 Origin 並允許 credentials）行為不同，拆成兩個群組，以 related 標示、不合併。
+      - CSP／XCTO／XFO 去重（原則接受）：選「以 ZAP 為準＋同一次 scan 佐證」→ nuclei 的成員只有在同一次 scan、同一個 method 與 path 有 ZAP 的觀察時才併入；nuclei 單獨的 XFO 是 hardening。
+      - Security／Info（有條件接受）：分類準則；security 分 vulnerability 與 misconfiguration（不把設定問題說成已驗證的漏洞），informational 分 technology、detection、hardening；fallback 是 unclassified＋needs_review，人工確認之前分開統計；werkzeug debugger 審查為 security；HTTP lab 的 HSTS 是 hardening。
+      - OWASP 2025／API8（接受）：保留原始 CWE（`tool_cwe_ids`），交代未對應的原因（`*_unmapped_reason`、`TOOLS.md` §8.5）。
+      - 動態技術識別（建議補強）：選「審查成技術識別類別」→ category technology，以 `群組/技術名` 保留技術名。
+      - T17 的兩項簽核：補充 42 個模板的適用範圍與安全控制、資料管理（`TOOLS.md` §2.1.1、§2.1.2，`DECISIONS.md` §23.6）。
+    - 交付：taxonomy schema 2（`category`、`corroborated_by`、`related`、技術識別的 `*`，載入時檢查一致性）；migration v0014（`findings.category`＋CHECK，回填的列標 `needs_review`）；`findings/records.py`（連結的寫入）；API 的 `category`、`tool_cwe_ids`、`*_unmapped_reason`、`related_finding_ids` 與 `?category`、`?needs_review` 篩選，同一個等級內 security 排在前面；worker 依 sequence 解析同一個 scan 的 run（`scans/queue.py`）。
+    - 實際執行：
+      - 離線：`make test` 5691 passed、7 skipped，coverage 99.73%；`make lint`、`make typecheck`、`make test-contract`、`make owasp-top10-check`、`pre-commit run --all-files` 皆通過。
+      - live（`make test-live-fixture-findings`，2026-11-04，最終版本，2 passed、18 分 18 秒，跑完沒有殘留）：
+        - 弱點版：scan completed（586 秒）；ZAP 23 個觀察、轉送 700，nuclei 11 個、轉送 312，共享預算未耗盡；34 個觀察都恰好連結一次 → 30 個 finding（security 22：vulnerability 8、misconfiguration 14；informational 8：hardening 7、detection 1；unclassified 0）。GET / 的 CSP（medium）、anti-clickjacking（medium）、X-Content-Type-Options（low）各是一個 ZAP＋nuclei 兩個來源的 finding（等級是 ZAP 的值、標 `severity_conflict`）；CORS 是兩個相關、不合併的 finding：`zap-cors-wildcard-origin`（misconfiguration、CWE-264，Top 10:2025 未對應）與 `nuclei-cors-arbitrary-origin-with-credentials`（vulnerability、A02:2025），互相列在 `related_finding_ids`；ZAP 10098 在其他位置各自獨立。
+        - 修補版：scan completed（492 秒）；10 個觀察 → 10 個 finding（misconfiguration 3、hardening 6、detection 1），沒有 CORS，也沒有跨引擎的合併。
+        - 解析順序修正之前另跑過一次，結果相同（2 passed、18 分 23 秒）。錄製在 `recordings/fixture-findings/`（gitignore）。
+    - 審查：security-reviewer 0 CRITICAL、0 HIGH（M1、L1、L3、L4 已修，L2 以依序解析修正、剩下的情況與 I1 記入限制）；code-reviewer APPROVE（MEDIUM 的解析順序與 3 個 LOW 已修）。
+    - 限制：佐證以「同一次 scan、同一個 method 與 path」近似「相同回應」；沒有跑 ZAP、ZAP 失敗或沒有走到那個 URL 時，nuclei 的 header 告警留在自己的群組，同一個問題在不同 scan 的身分可能不同（T22 比較時要對照）；nuclei 單獨的 XFO 只標 hardening；既有的 v1 finding 是 unclassified，要乾淨的分類就重建開發 DB。
   - 給 T20／T21／T22：T20 做去重的反例套件與 `GET /findings/{id}` 的來源追溯（observation → artifact → run → plan_hash），一併處理跨表的 target 一致性；T21 以新的 migration 開放 triage 的修改並留 audit；T22 讀 `auth_verified`，不據未驗證的 finding 標 `not_observed`。
 - [ ] T20 建立去重的反例測試與來源追溯查詢。
   - DoD：

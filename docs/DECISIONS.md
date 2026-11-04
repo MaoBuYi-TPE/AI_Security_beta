@@ -2078,7 +2078,7 @@ M4 的第一步。只凍結「清單與執行設定」，作為 T18（Adapter、
 
 ### 23.4 人工審查、主動探測與 guard 下的可達性
 
-- 由 Claude 以類別為單位做第一手審查與高風險抽查，紀錄於 `TOOLS.md` §2.1；**最終類別簽核屬使用者**（單人作業，列為效度威脅，比照 §22 T30）。
+- 由 Claude 以類別為單位做第一手審查與高風險抽查，紀錄於 `TOOLS.md` §2.1；**最終類別簽核屬使用者**（單人作業，列為效度威脅，比照 §22 T30）；使用者已於 2026-11-04 簽核（§23.6）。
 - `ACTIVE_PROBE_TEMPLATE_IDS` 明列會送探測 payload 或 crafted POST 的模板（6 個 generic-vuln 加 `graphql-detect`、`waf-detect`），和 ZAP 的 active scan 同一類、需 grant 明確允許對應 method，只對已核准的 lab 靶機執行；供 T18 區分、日後可組被動子集。
 - **guard 下的實際可達性（安全審查量化，列為限制）**：strict-1 下帶 `%` 的 path 探測多半被 `PATH_AMBIGUOUS` 擋下（`xss-uri-reflected` 兩條全擋、`open-redirect-generic` 82/94 擋、`crlf-injection-generic` 6/8 擋）；`http-trace` 的 TRACE、`graphql-detect`／`waf-detect` 的 POST 在只允許 GET 的 grant 下會被 guard 擋。因此「Nuclei 疊 ZAP／fixture 做多來源」在 **T18 的 e2e 已實證 CORS**（nuclei `cors-misconfig` 與 ZAP 10098，§24.5）；SQLi/XSS/CRLF/open-redirect 等帶 `%` 的 path 探測仍多被 guard 擋，屬候選、部分在 T33 放寬編碼後才可達（比照 §22 的「平台阻擋」）。
 
@@ -2088,6 +2088,11 @@ M4 的第一步。只凍結「清單與執行設定」，作為 T18（Adapter、
 - **T18 DoD（審查提出，記在這裡）**：(1) 凍結速率與並行（`-rl` 不超過 guard 速率、`-c 1`、`-bs 1`、`-retries 0`、`-timeout`），nuclei 預設 150 rps/25 並行，對上 guard 2 req/s 會產生大量 `RATE_LIMITED` 403。(2) **濾掉 guard 的合成拒絕回應**：negative-matcher 模板（如 `http-missing-security-headers`）會把 guard 的 403（無安全 header）誤報成目標缺陷（已重現 10 筆假 finding）；T18 以 `X-Secscan-Guard`（guard 會清掉上游偽造的同名 header）丟棄這些結果，並加 fixture 測試。(3) 載入前加 `-dut`（disable-unsigned-templates；42/42 檔都有 PD 簽章 `# digest:`）並在掛載前逐檔驗證 sha256、只掛這些檔（不掛整棵樹）。(4) 遮罩（SEC-14）涵蓋 `extracted-results`、`request`／`response`／`curl-command`（`email-extractor`、`credit-card-number-detect` 的輸出就是被擷取字串）。
 - lock 檔若要隨 wheel 打包（runner 在容器內讀），需在 T18 確認 package-data 設定（目前自 src 樹讀取可用）。
 - 殘餘：完整性鏈是「自我證明」的（協調改動 lock＋常數＋manifest 不會被離線測試抓到，真正的獨立驗證是 gated live `--check` 以鎖定 archive 重新推導，加上程式審查）；單人審查；清單對準 lab、不追求 Nuclei 全面覆蓋；預算對 Nuclei 的分配在 M4 後續依量測調整（§16.4）。
+
+### 23.6 使用者的簽核（2026-11-04）
+- **模板選擇與排除清單：接受**，條件是補充 42 個模板的適用範圍 → `TOOLS.md` §2.1.1：結論只限這 42 個檢查、對準 lab 的通用與技術棧模板（不含特定產品的 CVE）、只做匿名的 HTTP 掃描；沒有命中不代表沒有弱點；主動探測受 grant 與 guard 限制（例如 strict-1 擋掉帶 % 的 path 探測），被擋下的是「平台阻擋」而不是「沒有弱點」。
+- **`-ni` 與證據保存：有條件接受**，條件是補充安全控制與資料管理 → `TOOLS.md` §2.1.2：`-ni`、`-duc`、`-dut` 與 vendored 模板逐檔 sha256 的作用與限制（`open-redirect-generic` 的 payload 字串含 `oast.me`，但 guard 只放行 target origin，即使不加 `-ni` 也連不出去）；證據在哪裡、誰看得到、遮罩到什麼程度（只遮罩憑證形狀的值，email、卡號等偵測目標以原文存在 `evidence` 與 runs volume）、保存期限與加密留在 T23，以及 lab 的資料都是合成的種子資料。
+- 單人審查的效度威脅以這次簽核為準，記在這裡與 `TASKS.md` T17。
 
 ## 24. T18：Nuclei Adapter、JSONL parser 與引擎整合（2026-11-01）
 
@@ -2139,6 +2144,9 @@ observation 仍是不可變的單次觀察；T19 在它之上加上 target 層�
 - **連結表，不在 observations 加欄位**（推翻 `ARCHITECTURE.md` §6「observations 加 finding_id、rule_group」）：observations 有 append-only 的 trigger、連結在入庫之後另外計算，而且每個連結要記下當時的 taxonomy 版本。`finding_observations` 以 observation_id 為主鍵：每個觀察最多連結一次。
 
 ### 25.3 rule_groups.yaml（人工審查、有版本、執行期釘選）
+
+> 2026-11-04 使用者簽核之後改為 schema 2：跨引擎只經同一次 scan 的佐證、CORS 只標示相關、加上 category 與技術識別，見 §25.14。以下是 v1 的紀錄。
+
 - 以 specs 的嚴格 YAML 解析（拒絕 anchor、alias、tag、重複的 key），欄位逐一檢查，錯誤是 `TaxonomyError`。`RULE_GROUPS_SHA256` 在執行期核對：檔案被改動就 fail closed；`FindingLinker` 建立時載入，所以 worker 啟動就失敗，不是每個 run 才失敗。
 - 每個群組：`id`（不含 `:`，不會和 fallback 撞名）、`title`、`kind`、審查後的 `cwe`、`granularity`（`parameter` 預設／`endpoint`：參數本身是群組身分，例如缺的 header 名）、`resource_scoped`、curated 的 `owasp_api_2023`（每筆要有 rationale）、`review`（`reviewed`／`provisional`＋`evidence`）、`members`（`engine`、`rule`、`variant`）。
 - **「不可信的映射不跨工具合併」的機制**：成員跨引擎的群組必須 `reviewed` 並寫下 evidence；`provisional` 只能單一引擎、標 `needs_review`。
@@ -2148,7 +2156,7 @@ observation 仍是不可變的單次觀察；T19 在它之上加上 target 層�
   - 單一引擎：其餘出現過的 ZAP 規則與 nuclei 的 header／資訊類模板。
   - 刻意留給 fallback：動態的 variant（`tech-detect` 的技術名、`fingerprinthub-web-fingerprints` 的指紋名）、需要人工判斷嚴重程度的 `werkzeug-debugger-detect`。計畫中「凍結的 42 個模板都建群組」取消：沒有真實輸出、variant 未知，fallback 才是保守的預設。
 - 群組審查後的 CWE 必須是成員工具自己回報的 CWE 之一（契約測試核對 nuclei 的模板分類與 ZAP golden fixture 的 cweid），不為了對應 OWASP 改 CWE。
-- **最終簽核屬使用者（單人審查，列為效度威脅，比照 §23.4）**。
+- **最終簽核屬使用者（單人審查，列為效度威脅，比照 §23.4）**；使用者已於 2026-11-04 簽核並要求修正（§25.14）。
 
 ### 25.4 正規化（`NORMALIZATION_VERSION = "1"`）
 - severity：ZAP riskcode 0–3 → info／low／medium／high；Nuclei 的值一對一（去空白、不分大小寫）；其他（含 `unknown`）→ info＋`needs_review`。
@@ -2201,6 +2209,44 @@ observation 仍是不可變的單次觀察；T19 在它之上加上 target 層�
 ### 25.13 審查（2026-11-03）
 - security-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、6 LOW。已修：MEDIUM（身分判定只看 `lost`，§25.6）；LOW 的大括號 path 與樣板撞名（`route_templated`）、清單的等級語意（`scan_severity`）、連結時讀整個觀察與逐一比對 operation（只讀需要的欄位、`RouteIndex`）、worker 的 `findings` 預設 None（改成必填）、新增時可以直接寫入非初始的 triage（trigger）。記入限制：跨表的 target 一致性、finding 的數量上限。
 - code-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、4 LOW（APPROVE）。已修：MEDIUM（沒有 cwe 的審查群組會吃到工具的 CWE，§25.3）；測試的缺口（併發測試改成確定性的：第一個連結在 commit 之前停住、確認第二個在等鎖再放行；`BATCH_SIZE` 改成 2 的跨批次測試；`RouteIndex` 的 Hypothesis property test）。記入取捨或限制：fallback 的 kind 由等級推導（§25.3）、清單的衝突與排序是 finding 層級（§25.9）、身分判定與 scan 層級揭露的門檻不同（§25.6）、連結持有鎖的時間（§25.12）。
+
+### 25.14 使用者的簽核與修正（2026-11-04；rule groups v2、migration v0014）
+
+| 審查範圍 | 簽核 | 處理 |
+|---|---|---|
+| CORS 去重 | 建議修改：增加相同根因的判斷條件 | 使用者選「同一次 scan＋證據行為也相同」才合併。ZAP 10098 偵測的是沒有 Origin 時回 `*`，nuclei `cors-misconfig:arbitrary-origin` 是反射任意 Origin 並允許 credentials：行為不同，所以拆成 `zap-cors-wildcard-origin`（misconfiguration、保留 ZAP 的 CWE-264）與 `nuclei-cors-arbitrary-origin-with-credentials`（vulnerability、CWE-942），以 `related` 標示相關，同一次 scan 同一個位置互相列出 `related_finding_ids`，不合併 |
+| CSP／XCTO／XFO 去重 | 原則接受：確認相同回應與防護條件 | 使用者選「以 ZAP 為準＋同一次 scan 佐證」。群組的語意是 ZAP 的條件（10020-1 是既沒有 XFO 也沒有 CSP frame-ancestors）；nuclei 的成員（`corroborated_by`）只有在同一次 scan、同一個 method 與 path 有 ZAP 的觀察時才併入，否則留在自己的群組。nuclei 單獨的 XFO（不看 frame-ancestors，防護條件不完整）是 informational／hardening、CWE-693，不標 clickjacking |
+| Security／Info | 有條件接受：明確定義分類準則 | 準則見下；security 再分 vulnerability 與 misconfiguration，避免把設定問題當成已驗證的漏洞 |
+| OWASP 2025／API8 | 接受：保留原始 CWE、交代未對應項目 | 群組的 CWE 一律是成員工具自己回報的值（ZAP 的 CORS 改回 CWE-264）；API 另輸出 `tool_cwe_ids`（這個 scan 的來源工具回報的原始 CWE）與 `top10_2025_unmapped_reason`（`no_cwe`／`cwe_not_listed`）、`api_2023_unmapped_reason`（`not_curated`）。未對應的清單在 `TOOLS.md` §8.5 |
+| 動態技術識別 | 建議補強：與 security finding 分開統計 | 使用者選「審查成技術識別類別」：`nuclei-tech-detect`、`nuclei-fingerprinthub` 的成員是 `*`，finding 以 `群組/技術名` 保留技術名，category 是 technology |
+
+**分類準則**（使用者選「依受測情境的可利用性」並補充兩點）：
+- **security**：依規則自己的偵測條件，顯示可被利用的行為或具有安全意義的防護缺失。再分：
+  - `vulnerability`：偵測條件本身顯示可被利用的行為（主動探測得到的回應證據），例如注入、XSS、開放轉址、path traversal、CRLF、反射任意 Origin 並允許 credentials。
+  - `misconfiguration`：缺少或設定不當的防護、資訊外洩，本身不足以證明可被利用，例如缺 CSP／XCTO／anti-clickjacking、ACAO `*`、版本資訊與內部 IP 外洩、缺 anti-CSRF token。
+  - 兩者在人工 triage（T21）之前都只是工具的告警，**不是已驗證的漏洞**；報告與統計不得把 security 的數量說成已驗證的漏洞數。
+- **informational**：`technology`（技術識別）、`detection`（檔案或功能存在：robots.txt、security.txt、OpenAPI 文件、OPTIONS、驗證請求）、`hardening`（在受測情境不適用的強化建議，例如 HTTP lab 的 HSTS、COOP／COEP／CORP、Permissions-Policy、Referrer-Policy；或防護條件不完整的檢查，例如 nuclei 單獨的 XFO）。
+- **fallback**：kind 暫時依工具的等級，category 一律 `unclassified`、`needs_review`；在人工確認之前和審查過的 finding **分開統計**（API 可以 `?category=unclassified`、`?needs_review=true` 篩選）。
+- 工具標 info 不等於低風險：`werkzeug-debugger-detect`（除錯器外露可能允許執行程式碼）審查為 security／misconfiguration、provisional（`needs_review`），等級仍保留工具的原值（不捏造等級）。
+- kind 與 category 在 taxonomy 載入時與 DB 的 CHECK 都核對一致。
+
+**佐證的實作**：連結 nuclei 的 run 時，查同一次 scan 中錨點群組成員的觀察（`(群組, method, path)`）；有的話改屬錨點群組，否則照自己的群組。為了讓連結看得到錨點，worker 依 sequence 解析同一個 scan 的 run：前面還有 run 在 collected 或 normalizing（`PARSING_RUN_STATUSES`）時不認領後面的 run（`scans/queue.py`；code review 發現 ZAP 解析失敗重試或多個 worker 時，nuclei 可能先連結）。ZAP 的 run 失敗或沒有觀察時，nuclei 就留在自己的群組（保守，不會誤合併）。ZAP 的 run 沒有佐證成員，連結時不查錨點。跨 scan 不佐證：前一次 scan 的 ZAP 不讓這次的 nuclei 併入。「相同回應」無法直接證明（兩個工具各送各的請求），以「同一次 scan、同一個 method 與 path」作為最接近的條件，並記為限制。
+
+**資料表**：migration v0014 為 findings 加上 `category`（CHECK：值合法、和 kind 一致；既有的列以 ADD COLUMN 的預設值填成 unclassified、不經 UPDATE，再移除預設值）；category 和身分一樣不可修改，所以回填的列一併標成 `needs_review`（只會往上），人工確認之前和 v2 審查過的 finding 分開統計。要乾淨的分類就重建開發 DB（既有的 finding 都是開發與測試的資料）。fingerprint 的公式不變（`FINGERPRINT_VERSION` 仍是 1），群組改名讓 fingerprint 改變，以 `mapping_version`（`rules-2…`）區分。
+
+**影響**：fixture 弱點版的 CORS 從「一個有兩個來源的 finding」變成「兩個相關的 finding」；M4 的「同一問題多來源」改由 header 群組的佐證合併展示，CORS 以相關標示呈現。T19 之前（v1）的 finding 都是開發與測試的資料。
+
+**taxonomy 的驗證**（code review 補強，壞檔讓 worker 起不來）：佐證成員必須是另一個群組的精確成員、只能佐證一個錨點，而且它自己的群組不能也是錨點（合併只有一層）；`*` 不能和精確成員放在同一個群組；技術識別群組不能有 related，也不能被 related 指到（它的 rule_group 帶技術名，相關查詢對不到）。`KIND_CATEGORIES` 目前只有 security 與 informational：M6 加入 contract、robustness 的群組時要先定義它們的 category（現在載入時就會被拒絕）。
+
+**限制**：
+- 佐證以「同一次 scan、同一個 method 與 path」近似「相同回應」：兩個工具各送各的請求，回應可能不同（例如依 header 或 cookie 變化的頁面）。
+- 同一個問題在不同 scan 可能有不同的身分：這次 scan 沒有跑 ZAP、ZAP 的 run 失敗，或 ZAP 沒有走到那個 URL 時，nuclei 的 header 告警留在 `nuclei-*` 群組；下一次 ZAP 有命中就併入 ZAP 的群組。這是保守的（不會誤合併，複掃也只會標 `not_observed`），但會讓複掃比較出現「一個消失、一個新增」，T22 比較時要對照 related／佐證的群組與覆蓋度（安全審查 L2）。
+- nuclei 單獨的 XFO 是 hardening：ZAP 沒有走到的 URL 上真的缺 anti-clickjacking 時也只標 hardening，報告要揭露（安全審查 I1；符合簽核，CSP `frame-ancestors` 可能存在）。
+- 技術名來自目標的回應（受目標控制），只接受規則的字元集、最多 64 個字元，否則走 fallback；T21 的報告輸出 title 與 rule_group 時要做安全編碼。
+
+**審查**（簽核分支）：
+- security-reviewer：0 CRITICAL、0 HIGH；項目 M1、L1–L4、I1。已修：M1（同一個等級內 security 排在 informational 之前，清單不會被大量的技術識別蓋過）、L1（v0014 回填的列標 `needs_review`）、L3（related 只查本頁的位置）、L4（技術名的字元集與長度）、L2（worker 依 sequence 解析同一個 scan 的 run，剩下的情況記入限制）。I1 記入限制。
+- code-reviewer：0 CRITICAL、0 HIGH、1 MEDIUM、3 LOW（APPROVE）。已修：MEDIUM（解析順序，同上，並加上依序認領的整合測試）；LOW 的 taxonomy 驗證（佐證只有一層、`*` 不混精確成員、related 不指向技術識別群組）、效能（related 只查本頁的位置、ZAP 的 run 不查錨點）、測試與遷移（帶資料的 0013 → 0014 升級測試、回填的列標 `needs_review`、`KIND_CATEGORIES` 的 M6 註記）。
 
 ## 來源
 

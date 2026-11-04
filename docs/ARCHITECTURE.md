@@ -338,7 +338,7 @@ ExecutionPlan 只能包含：
 | scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code、container_name、image_ref、用量（requests_allotted、requests_sent、requests_denied、traffic_seconds）、preflight_result、coverage_recorded、解析的結果（T15）、plan_hash 與 profile_definition_sha256（T16）；同時是 runner 與 worker 的工作佇列（T09 已建立；容器名稱與映像在 T10 加入，用量、preflight 與 coverage 在 T12，解析的結果與 engine_version 在 T15，實際執行的 plan 在 T16；不自動重跑，所以沒有 attempt） |
 | runner_instances | id、role（runner/worker）、owner（唯一）、software_version、capabilities（引擎、映像與不可用的原因）、heartbeat_at、created_at；每個程序一列，30 秒內有心跳才算存活（T10 新增） |
 | scan_operations | scan_id、ordinal、method、path、operation_id、ineligible_reason；建立 scan 時凍結的 inventory 與 grant 的判斷，coverage 的分母（T09 新增） |
-| findings | id、target_id、fingerprint（`(target_id, fingerprint)` 唯一）、kind、rule_group、title、method、route 與 route_source、參數位置與名稱、resource、auth_role、auth_verified、normalized_severity、severity_conflict、needs_review、cwe_id 與 cwe_source、owasp_top10_2025 與來源、owasp_api_2023 與來源、mapping_version、taxonomy_sha256、triage_state、lifecycle_state、first/last seen 的 run 與 scan、last_seen_at（T19 新增） |
+| findings | id、target_id、fingerprint（`(target_id, fingerprint)` 唯一）、kind、category（v0014）、rule_group、title、method、route 與 route_source、參數位置與名稱、resource、auth_role、auth_verified、normalized_severity、severity_conflict、needs_review、cwe_id 與 cwe_source、owasp_top10_2025 與來源、owasp_api_2023 與來源、mapping_version、taxonomy_sha256、triage_state、lifecycle_state、first/last seen 的 run 與 scan、last_seen_at（T19 新增） |
 | finding_observations | observation_id（主鍵：每個觀察最多連結一次）、finding_id、連結時的 normalized_severity、normalized_confidence、needs_review、taxonomy_sha256（T19 新增；append-only） |
 | observations | id、scan_id、scanner_run_id、ordinal、source_event_id、source_index、source_rule、rule_variant、title、raw_severity、severity_label、raw_confidence、confidence_label、CWE、WASC、method、path、query、parameter 與位置、attack、evidence、other_info（遮罩並截斷）、auth_role、report_artifact_id、parser_version（T15 新增；T19 不加欄位，連結在 finding_observations，`DECISIONS.md` §25.2） |
 | artifacts | id、scanner_run_id、scan_id、kind（input/output）、path、sha256、size、redactions、classification、encrypted、storage_key（T15 新增；保留期限在 T23） |
@@ -475,7 +475,7 @@ T09 已實作（`DECISIONS.md` §13.4）：
 - 建立 scan 時，在同一個 transaction 裡寫入 scans，以及每個引擎的 scanner_runs（queued）。commit 之後工作就已經存在，不需要另外派送訊息，所以不會出現「DB 已寫入但工作沒派出去」的情況。
 - runner 以 `SELECT … FOR UPDATE SKIP LOCKED` 認領下一個可執行的 run [S28]，同一個 scan 依 sequence 依序執行。
 - 認領時寫入 lease_owner 與 lease_expires_at，並先查既有的 container label 與 run 狀態，不重複啟動。
-- worker 用同樣的方式認領 collected 的 run 與 pending 的 report。
+- worker 用同樣的方式認領 collected 的 run 與 pending 的 report。同一個 scan 的 run 也依 sequence 解析：前面還有 run 在 collected 或 normalizing 時不認領後面的 run，連結 nuclei 時才看得到同一次 scan 的 ZAP 觀察（佐證，`DECISIONS.md` §25.14）。
 - 初版以 1–2 秒輪詢，需要時再加 LISTEN/NOTIFY。
 
 **心跳與對帳**：
@@ -569,7 +569,7 @@ SHA256(canonical_json({
 
 - `reviewed_semantic_rule_group` 來自 `findings/taxonomy/rule_groups.yaml`。這份表經過人工審查並有版本號，把 (scanner, rule_id) 對到語意群組；不是用 CWE 代替。
 - 對不到群組的規則，以 `scanner:rule_id`（有 variant 時是 `scanner:rule_id:variant`）作為群組，保持獨立，不跨工具合併。
-- T19 的查找只做精確比對；成員跨引擎的群組必須經過審查並寫下同時命中的證據（`DECISIONS.md` §25.3、`TOOLS.md` §8）。
+- T19 的查找只做精確比對（技術識別以 `群組/技術名` 保留動態的技術名）；一個群組只有一個引擎。跨引擎只經審查過的佐證：以錨點引擎（ZAP）的條件為準，另一個引擎的觀察在同一次 scan、同一個 method 與 path 有錨點時才併入；偵測行為不同的（例如 CORS）只標示相關（`DECISIONS.md` §25.14、`TOOLS.md` §8）。
 
 **路徑與參數**：
 
