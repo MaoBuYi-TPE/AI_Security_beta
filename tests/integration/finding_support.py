@@ -97,16 +97,24 @@ def parsed_run(
     observations: Sequence[ObservationInput],
     *,
     traffic: GuardTraffic | None = None,
+    worker: bool = True,
 ) -> Lease:
-    """runner 收集完、worker 認領並寫入觀察（normalizing 的 lease）。"""
+    """runner 收集完、worker 認領並寫入觀察（normalizing 的 lease）。
+
+    worker=False：以 runner 的 lease（running）直接寫入，不經 worker 的認領：只用來驗證 DB 層的
+    併發（worker 依 sequence 解析同一個 scan 的 run，正常流程不會同時連結）。
+    """
     runner = queue.claim("runner-1", frozenset({engine}))
     assert runner is not None
     queue.prepare_launch(runner, image_ref=str(ENGINE_IMAGES[engine]))
-    queue.record_usage(runner, RunUsage(requests_sent=1, requests_denied=0, traffic_seconds=1))
-    queue.advance(runner, RunStatus.COLLECTING)
-    queue.advance(runner, RunStatus.COLLECTED)
-    lease = queue.claim_collected("worker-1", frozenset({engine}))
-    assert lease is not None
+    lease = runner
+    if worker:
+        queue.record_usage(runner, RunUsage(requests_sent=1, requests_denied=0, traffic_seconds=1))
+        queue.advance(runner, RunStatus.COLLECTING)
+        queue.advance(runner, RunStatus.COLLECTED)
+        claimed = queue.claim_collected("worker-1", frozenset({engine}))
+        assert claimed is not None
+        lease = claimed
     parsed = ParsedRun(
         parser_version="test-1",
         outcome=RunOutcome(RunStatus.SUCCEEDED),

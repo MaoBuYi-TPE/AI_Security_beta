@@ -4,7 +4,7 @@
 - 畢業專題，1 人開發，2026/10/16 – 2027/06/30；只做後端，不建立 React、Vue、Next.js 或其他前端。
 - 題目：Web 與 API 多引擎動態安全檢測暨結果整合後端系統之設計與實作。
 - 以 REST API、內建 API 文件及 JSON/Markdown 報告展示；不開發互動式儀表板。
-- **目前進度：M0、M1、M2、M3 完成；M4 進行中（T17 凍結模板、T18 Nuclei Adapter／JSONL parser／引擎整合／真實 e2e、T19 Observation→Finding／rule groups／OWASP 對應／保守的 fingerprint 完成，見 `docs/DECISIONS.md` §23–§25；T20 未開始）。T33 guard 編碼放寬暫緩，屬實驗性加項（§21、§22）。** 每完成一個里程碑就更新這一行。
+- **目前進度：M0、M1、M2、M3 完成；M4 進行中（T17 凍結模板、T18 Nuclei Adapter／JSONL parser／引擎整合／真實 e2e、T19 Observation→Finding／rule groups／OWASP 對應／保守的 fingerprint 完成，2026-11-04 依使用者簽核修正為 rule groups v2，見 `docs/DECISIONS.md` §23–§25；T20 未開始）。T33 guard 編碼放寬暫緩，屬實驗性加項（§21、§22）。** 每完成一個里程碑就更新這一行。
 - 先檢查實際檔案，不得假設程式、指令或測試已存在。
 - 沒有真實掃描數據前，不得杜撰成功紀錄、效能、版本號或測試結果。
 

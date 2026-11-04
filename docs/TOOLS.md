@@ -55,7 +55,24 @@
 - 內容閘門與移除：`-pt http` 擋不住多協定模板，因此產生時以 `selection.template_violations` 讀全文把關；初版移除 `cookies-without-httponly`／`-secure`（含 `javascript:`）、`directory-listing`（含 `flow:` 與 `fuzz` tag）與 `host-header-injection`（改 Host，guard 一律 `ORIGIN_MISMATCH`）。
 - 多來源（M4）：T18 的 fixture e2e 已**實證** CORS 由 nuclei `cors-misconfig` 與 ZAP 10098 同時偵測（FX-06，弱點版命中、修補版不命中）。其餘疊同一問題（SQLi/XSS/CRLF/open-redirect）仍是候選：strict-1 的 guard 擋掉多數帶 % 的 path 探測（見 `DECISIONS.md` §23.4、§24.5）。
 - 重現性：`make nuclei-templates-check`（或 `ENABLE_LIVE_LAB_TESTS=1` 下的 `tests/live/test_nuclei_templates_live.py`）重跑列舉並與已提交的 lock 逐位元組比對。
-- 範圍限制：只收對準 lab 的通用＋技術棧模板，不含本 lab 不存在的特定產品模板；最終類別簽核由使用者確認（效度威脅，見 `DECISIONS.md` §23.4）。
+- 範圍限制：只收對準 lab 的通用＋技術棧模板，不含本 lab 不存在的特定產品模板；使用者已於 2026-11-04 簽核（`DECISIONS.md` §23.6）。
+
+#### 2.1.1 適用範圍（簽核的條件）
+
+- **能下的結論**：只限這 42 個檢查在 lab 靶機上的結果（暴露的設定檔與文件、常見的設定問題、技術識別，以及 6 個通用的主動探測：CORS、CRLF、錯誤型 SQLi、URI 反射 XSS、開放轉址、env 檔外洩）。不代表 Nuclei 的完整能力，也不含特定產品的 CVE 模板。
+- **沒有命中不代表沒有弱點**：模板只在它自己的條件成立時回報；42 個之外的弱點類型不在偵測範圍。
+- **只做匿名的 HTTP 掃描**：目標 secret 的注入延後（`DECISIONS.md` §24.1）；需要登入才看得到的問題不在範圍。HTTPS 的 profile 在 P0 不支援。
+- **平台阻擋不是沒有弱點**：主動探測受 grant（method、path）與 guard（strict-1 擋下 path 中的百分比編碼）限制，被擋下的探測記為平台阻擋（例如 `xss-uri-reflected` 全部被擋、`open-redirect-generic` 94 個中 82 個被擋），不計入漏報或乾淨的結果。
+- **與 ZAP 的關係**：部分檢查與 ZAP 的規則重疊（安全 header、CORS），合併規則見 §8。
+
+#### 2.1.2 安全控制與資料管理（簽核的條件）
+
+- **不對外連線**：`-ni` 關閉 interactsh（OAST）、`-duc` 關閉更新檢查、不加任何上傳旗標；更重要的是掃描容器只能經 egress guard 連到 grant 核准的 target origin，即使模板送出外部網域的字串（`open-redirect-generic` 的 payload 含 `oast.me`，只是參數的值），也連不到外部。
+- **只跑凍結、簽章的模板**：`-dut` 只執行有簽章的模板；42 個模板 vendored 在 repo，runner 掛載前逐檔核對 sha256（`policy.load_template_files`），admission 以 `ContentDigest` 再驗一次；掃描期間不更新模板。
+- **證據存在哪裡**：nuclei 的 JSONL（含 request／response）在 runs volume 的 `<run_id>/out/`；解析後的觀察在 DB 的 `observations`（`evidence` 是 extracted-results，`other_info` 是 matched-at）。runner 收集時以位元組遮罩這個 run 的 secret 與 proxy token；parser 另以文字遮罩憑證形狀的值。
+- **遮罩的限制**：`email-extractor`、`credit-card-number-detect` 擷取到的 email 與卡號本身是偵測目標，目前以原文存在 `evidence` 與 runs volume。lab 的資料都是靶機的合成種子資料（Juice Shop、VAmPI、fixture app），不掃描真實的個人資料。
+- **誰看得到**：`GET /scans/{id}/observations` 只給同一個 project 的 key（其他 project 與不存在的一樣 404）；finding 的 API 不輸出 `evidence`（只有來源的規則、等級與 CWE）；報告（T21）要遮罩與編碼證據。
+- **保存期限與加密**：runs volume 的目錄目前不會刪除；原始證據的加密保存、保存期限與刪除流程在 T23（DoD：原始證據以加密方式保存）。在那之前只用於 lab，不放真實資料。
 
 ## 3. 網路拓撲與隔離（DoD：直連必須失敗）
 
@@ -362,45 +379,59 @@ M2 的 `make test-live-runner`：42 passed（5 分 41 秒），撤銷授權的 s
 - **contract/robustness（C1–C6）**：ZAP 不評契約；以 `tests/contract/test_fixture_cases.py` 與人工確認弱點版回 500、修補版回 400／405。
 - **對照（弱點 vs 修補）**：同一組掃描在弱點版有主動注入與設定告警、修補版清零，構成乾淨的正例／負例對照；strict-1 下 path 參數注入一律平台阻擋，與 §20.7 的 VAmPI 一致。
 
-## 8. T19：語意規則群組的審查紀錄（2026-11-03）
+## 8. T19：語意規則群組的審查紀錄（2026-11-03，2026-11-04 簽核後改為 v2）
 
-`src/secscan/findings/taxonomy/rule_groups.yaml`（`version: "1"`、sha256 釘在 `taxonomy.RULE_GROUPS_SHA256`）。原則與機制見 `DECISIONS.md` §25.3：只收真實輸出出現過的規則；成員跨引擎的群組必須 reviewed、寫下同時命中的 evidence；對不到的觀察走單一引擎的 fallback。**單人審查，最終簽核屬使用者（效度威脅）。**
+`src/secscan/findings/taxonomy/rule_groups.yaml`（`schema: 2`、`version: "2"`、sha256 釘在 `taxonomy.RULE_GROUPS_SHA256`）。原則與機制見 `DECISIONS.md` §25.3、§25.14：只收真實輸出出現過的規則；一個群組只有一個引擎，跨引擎只經同一次 scan 的佐證；對不到的觀察走單一引擎、unclassified 的 fallback。**使用者已於 2026-11-04 簽核**（條件與修正見 §25.14）。
 
 ### 8.1 依據的真實輸出
 - 已提交的 golden fixture：`tests/fixtures/zap/{findings,timeout,unanswered}/report.json`、`zap-juice-shop.json`、`zap-vampi-vuln.json`、`tests/fixtures/nuclei/nuclei-{juice-shop,vampi-vuln}.jsonl`。
-- gitignore 的錄製（人工審查過的 live 輸出）：`recordings/lab/`（T16 的 Juice Shop、VAmPI）、`recordings/fixture/`（T30）、`recordings/fixture-nuclei/`（T18）。
-- 契約測試（`tests/contract/test_taxonomy_contract.py`）核對：nuclei 成員是凍結的 42 個模板、variant 是模板中具名的 matcher／extractor；群組的 CWE 是成員工具自己回報的（nuclei 的模板分類、ZAP golden 的 cweid）；golden fixture 出現的規則都有群組，或在刻意留給 fallback 的清單中。只在錄製中出現的 ZAP 規則（10055-13、20019-1、40003、40012、40018、6-5），CWE 依下表的錄製值。
+- gitignore 的錄製（人工審查過的 live 輸出）：`recordings/lab/`（T16 的 Juice Shop、VAmPI）、`recordings/fixture/`（T30）、`recordings/fixture-nuclei/`（T18）、`recordings/fixture-findings/`（T19）。
+- 契約測試（`tests/contract/test_taxonomy_contract.py`）核對：nuclei 的成員與佐證成員是凍結的 42 個模板、variant 是模板中具名的 matcher／extractor（技術識別的 `*` 除外）；群組的 CWE 是成員工具自己回報的（nuclei 的模板分類、ZAP golden 的 cweid）；錨點是 golden fixture 中出現過的 ZAP 規則；golden fixture 的每個規則都有群組。只在錄製中出現的 ZAP 規則（10055-13、20019-1、40003、40012、40018、6-5），CWE 依下表的錄製值。
 
-### 8.2 跨引擎（4 個；evidence：T18 fixture 弱點版 GET / 的同一個回應）
-| 群組 | ZAP | Nuclei | CWE（審查） | 粒度 | 理由 |
+### 8.2 以 ZAP 為準、Nuclei 佐證（3 個；evidence：T30-FX-05，fixture 弱點版同一次 scan 的 GET /）
+| 群組（錨點） | ZAP 的條件 | 佐證的 nuclei 成員與它的條件 | 單獨命中時 | CWE | 粒度 |
 |---|---|---|---|---|---|
-| `cors-permissive-policy` | 10098（CWE-264，Medium） | `cors-misconfig:arbitrary-origin`（CWE-346、942，info） | 942 | endpoint | 同一個 CORS 政策：沒有 Origin 時回 `*`（ZAP 看到）、有 Origin 時反射並帶 credentials（nuclei 看到）。264 是 CWE 的分類節點；取 nuclei 分類中最具體的 942 |
-| `csp-header-missing` | 10038-1（693，Medium） | `http-missing-security-headers:content-security-policy`（693，info） | 693 | endpoint | 同一個回應缺 CSP；修補版補上之後兩者都消失 |
-| `x-content-type-options-missing` | 10021（693，Low；參數是 header 名） | `…:x-content-type-options`（693，info；沒有參數） | 693 | endpoint | 同一個回應缺 XCTO；兩個工具對參數的回報不同，所以參數不入 fingerprint |
-| `anti-clickjacking-header-missing` | 10020-1（1021，Medium；參數是 header 名） | `…:x-frame-options`（693，info） | 1021 | endpoint | 同一個回應缺 X-Frame-Options（也沒有 frame-ancestors）；1021 比 693 具體 |
+| `csp-header-missing` | 10038-1：回應沒有 CSP header | `http-missing-security-headers:content-security-policy`：沒有 CSP header（不看 301／302） | `nuclei-csp-header-missing`（security／misconfiguration） | 693 | endpoint |
+| `x-content-type-options-missing` | 10021：沒有 XCTO（參數是 header 名） | `…:x-content-type-options`：沒有 XCTO（沒有參數） | `nuclei-x-content-type-options-missing`（security／misconfiguration） | 693 | endpoint |
+| `anti-clickjacking-header-missing` | 10020-1：既沒有 X-Frame-Options 也沒有 CSP frame-ancestors | `…:x-frame-options`：只看 X-Frame-Options | `nuclei-x-frame-options-missing`（informational／hardening：不看 frame-ancestors，不能證明缺防護） | 1021 | endpoint |
 
-四個群組的 API 2023 對應都是 curated 的 API8:2023（官方頁列出 CORS 設定不當、缺 security directives、應加上 Security Headers）。Top 10:2025 依官方清單：942 → A02；693、1021 → A06。
+合併的條件：同一次 scan、同一個 method 與 path 有錨點的觀察。兩個工具各送各的請求，「相同回應」以這個條件近似（限制）。三個錨點群組與 nuclei 單獨的 CSP、XCTO 群組都是 curated 的 API8:2023（官方頁：缺 security directives、應加上 Security Headers）。Top 10:2025 依官方清單：693、1021 → A06。
 
-### 8.3 單一引擎
-| 群組 | 成員 | kind | CWE | 依據 |
+### 8.3 CORS：只標示相關、不合併
+| 群組 | 成員 | 偵測的行為 | kind／category | CWE（原始） | Top 10:2025 |
+|---|---|---|---|---|---|
+| `zap-cors-wildcard-origin` | ZAP 10098 | 沒有 Origin 的請求得到 `Access-Control-Allow-Origin: *` | security／misconfiguration | 264（ZAP 回報；CWE 的分類節點） | 無（`cwe_not_listed`） |
+| `nuclei-cors-arbitrary-origin-with-credentials` | `cors-misconfig:arbitrary-origin` | 主動送出隨機 Origin，回應反射它並帶 `Access-Control-Allow-Credentials: true` | security／vulnerability | 942（模板分類；parser 記下的是第一個 346，見 `tool_cwe_ids`） | A02 |
+
+兩者互為 `related`：同一次 scan、同一個位置時，API 的 `related_finding_ids` 互相列出。兩者都是 curated 的 API8:2023（CORS policy improperly set）。
+
+### 8.4 單一引擎
+| 群組 | 成員 | kind／category | CWE | 依據 |
 |---|---|---|---|---|
-| `zap-server-version-disclosure` | 10036-2 | security | 497 | Juice Shop、VAmPI |
-| `zap-csp-directive-without-fallback` | 10055-13 | security | 693（API8:2023） | T30 修補版 |
-| `zap-modern-web-application` | 10109 | informational | — | Juice Shop（riskcode 0、沒有 CWE） |
-| `zap-authentication-request-identified` | 10111 | informational | — | VAmPI、T30（riskcode 0） |
-| `zap-anti-csrf-tokens-absent` | 10202 | security | 352 | golden findings、T30 |
-| `zap-private-ip-disclosure` | 2 | security | 497 | golden unanswered |
-| `zap-external-redirect` | 20019-1 | security | 601 | T30-FX-08 |
-| `zap-crlf-injection` | 40003 | security | 113 | T30 弱點版 |
-| `zap-reflected-xss` | 40012 | security | 79 | T30-FX-02 |
-| `zap-sql-injection` | 40018 | security | 89 | T30-FX-01／03、Juice Shop |
-| `zap-path-traversal` | 6-5 | security | 22 | T30 弱點版 |
-| `nuclei-{hsts,permissions-policy,referrer-policy,coep,coop,corp,x-permitted-cross-domain-policies}-missing` | `http-missing-security-headers` 的對應 matcher | informational | 693 | T18；nuclei 標 info、ZAP 不回報，在 HTTP 的 lab 中不是可利用的弱點（例如 HSTS 只對 HTTPS 有意義） |
-| `nuclei-robots-txt`、`nuclei-robots-txt-endpoints`、`nuclei-security-txt`、`nuclei-options-method` | 同名模板 | informational | — | golden nuclei |
-| `nuclei-openapi-document` | `openapi` | informational | 200（模板分類） | golden nuclei-vampi-vuln |
+| `zap-server-version-disclosure` | 10036-2 | security／misconfiguration | 497 | Juice Shop、VAmPI |
+| `zap-csp-directive-without-fallback` | 10055-13 | security／misconfiguration | 693（API8:2023） | T30 修補版 |
+| `zap-modern-web-application` | 10109 | informational／technology | — | Juice Shop（riskcode 0、沒有 CWE） |
+| `zap-authentication-request-identified` | 10111 | informational／detection | — | VAmPI、T30（riskcode 0） |
+| `zap-anti-csrf-tokens-absent` | 10202 | security／misconfiguration | 352 | golden findings、T30（被動的啟發式判斷） |
+| `zap-private-ip-disclosure` | 2 | security／misconfiguration | 497 | golden unanswered |
+| `zap-external-redirect` | 20019-1 | security／vulnerability | 601 | T30-FX-08 |
+| `zap-crlf-injection` | 40003 | security／vulnerability | 113 | T30 弱點版 |
+| `zap-reflected-xss` | 40012 | security／vulnerability | 79 | T30-FX-02 |
+| `zap-sql-injection` | 40018 | security／vulnerability | 89 | T30-FX-01／03、Juice Shop |
+| `zap-path-traversal` | 6-5 | security／vulnerability | 22 | T30 弱點版 |
+| `nuclei-{hsts,permissions-policy,referrer-policy,coep,coop,corp,x-permitted-cross-domain-policies}-missing` | `http-missing-security-headers` 的對應 matcher | informational／hardening | 693 | T18；nuclei 標 info、ZAP 不回報，在 HTTP 的 lab 中不適用或不是可利用的弱點（例如 HSTS 只對 HTTPS 有意義） |
+| `nuclei-robots-txt`、`nuclei-robots-txt-endpoints`、`nuclei-security-txt`、`nuclei-options-method` | 同名模板 | informational／detection | — | golden nuclei |
+| `nuclei-openapi-document` | `openapi` | informational／detection | 200（模板分類） | golden nuclei-vampi-vuln |
+| `nuclei-tech-detect` | `tech-detect:*` | informational／technology | — | golden（python、google-font-api）；finding 是 `nuclei-tech-detect/<技術名>` |
+| `nuclei-fingerprinthub` | `fingerprinthub-web-fingerprints:*` | informational／technology | 200（模板分類） | golden nuclei-juice-shop |
+| `nuclei-werkzeug-debugger-detected` | `werkzeug-debugger-detect` | security／misconfiguration（provisional，needs_review） | — | golden nuclei-vampi-vuln；模板標 info，但除錯器外露可能允許執行程式碼，不因工具等級當成低風險 |
 
-刻意不建群組（fallback、`needs_review`）：`tech-detect`、`fingerprinthub-web-fingerprints`（variant 是動態的技術／指紋名）、`werkzeug-debugger-detect`（模板標 info，但除錯器外露的嚴重程度需要人工判斷）。
+### 8.5 未對應的項目（保留原始 CWE、交代原因）
+- **沒有 Top 10:2025**：
+  - `cwe_not_listed`：ZAP 10098 的 CWE-264（分類節點）。T30 案例的 CWE-530（FX-09 backup 檔）與 CWE-213（FX-12）也不在清單（`DECISIONS.md` §25.10）。
+  - `no_cwe`：10109、10111、robots.txt、robots.txt endpoints、security.txt、OPTIONS、tech-detect、werkzeug 的群組，以及工具沒有回報 CWE 的 fallback。
+- **沒有 API Security Top 10:2023**（`not_curated`）：注入類（SQLi、XSS、CRLF）、path traversal、開放轉址、anti-CSRF、資訊外洩（版本、內部 IP）、informational 的群組與所有 fallback。API 2023 沒有對應的注入分類，不硬湊；API6、API10 是 DAST 的限制。
 
-### 8.4 給審查者的提醒
-- `endpoint` 粒度只用在「參數就是群組身分」的 header 類群組；注入類（SQLi、XSS、CRLF、redirect、path traversal）維持 `parameter` 粒度，不同參數是不同的 finding。
-- kind 的判斷（security／informational）是審查結果，不由工具的等級決定；等級的聚合見 `DECISIONS.md` §25.4、§25.7。
+### 8.6 給審查者的提醒
+- `endpoint` 粒度只用在「參數就是群組身分」的 header 類群組；注入類維持 `parameter` 粒度，不同參數是不同的 finding。
+- kind 與 category 是審查結果，不由工具的等級決定；等級的聚合見 `DECISIONS.md` §25.4、§25.7。security 的數量不是已驗證的漏洞數（人工 triage 在 T21）。

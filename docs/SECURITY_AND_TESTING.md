@@ -301,9 +301,9 @@ T15 已涵蓋（真的 DB）：
 
 T19 已涵蓋（真的 DB；`DECISIONS.md` §25）：
 - **schema**（`test_findings_schema.py`）：findings 的每類 CHECK（OWASP 的格式與來源一致、CWE 與來源一致、參數位置與名稱、列舉）、`(target_id, fingerprint)` 唯一、first／last seen 的複合 FK；trigger 讓身分、對應、triage 與 lifecycle 不可修改，聚合只會往上，不能 DELETE／TRUNCATE；finding_observations append-only、每個觀察最多一次。
-- **連結**（`test_finding_linker.py`）：同一個 scan 的 ZAP 與 Nuclei 在同一個位置命中審查過的群組 → 一個 finding（最高等級、衝突、對應）；fallback 單一引擎；冪等；複掃沿用同一個 finding、聚合只往上；不同 target 不共用；有規格時 route 樣板化；身分失效（`auth.lost`）或 preflight 沒有通過 → 另一個未驗證的 finding；lease 失效不連結；兩個 run 同時連結不死鎖、不重複。
+- **連結**（`test_finding_linker.py`）：同一次 scan、同一個位置有 ZAP 的錨點時 nuclei 的 header 觀察併入 → 一個 finding（最高等級、衝突、對應）；別的 scan、別的位置、錨點規則的其他 variant 都不佐證；CORS 兩個 finding；技術識別保留技術名；fallback 單一引擎、unclassified；冪等；複掃沿用同一個 finding、聚合只往上；不同 target 不共用；有規格時 route 樣板化；身分失效（`auth.lost`）或 preflight 沒有通過 → 另一個未驗證的 finding；lease 失效不連結；兩個 run 同時連結不死鎖、不重複；ZAP 還在 collected 或 normalizing 時 worker 不認領同一個 scan 的 nuclei（依 sequence 解析）。
 - **worker**：解析入庫之後連結（ZAP golden 的 11 個觀察都連結到審查過的群組；nuclei 的 fallback 標 needs_review）；中斷之後重試只補上沒有連結的觀察。
-- **API（SEC-16）**（`test_findings_api.py`）：`GET /scans/{id}/findings` 的欄位、來源彙總、排序、篩選、分頁、不合法的值 422；只列這個 scan 的 finding、sources 只算這個 scan；其他 project 與不存在的一樣 404，沒有 key 是 401。
+- **API（SEC-16）**（`test_findings_api.py`）：`GET /scans/{id}/findings` 的欄位（category、原始 CWE、未對應的原因、相關的 finding）、來源彙總、排序、篩選（含 category、needs_review）、分頁、不合法的值 422；只列這個 scan 的 finding、sources 只算這個 scan；其他 project 與不存在的一樣 404，沒有 key 是 401。
 
 ### 4.4 Live E2E
 
@@ -432,7 +432,7 @@ T18 另以真的 nuclei 掃同一個 fixture app（`make test-live-fixture-nucle
 
 OWASP 標記（T19 更正，`DECISIONS.md` §25.10）：Top 10:2025 由案例的 CWE 查官方的 CWE 清單（`findings/taxonomy/owasp_top10_2025.json`）而來，`test_fixture_cases.py` 核對一致；清單中沒有的 CWE 不標分類，不改 CWE 去湊。API Security Top 10:2023 是 curated。T30 初稿誤用了 2021 的編號（例如「A03:2025 Injection」），正負例與量測結果不受影響。
 
-T19 以同一個 scan 同時跑 ZAP 與 Nuclei（`make test-live-fixture-findings`）：worker 把觀察連結到 finding，弱點版 FX-06 的 CORS 是一個有兩個引擎來源的 finding（等級取最高值、標衝突），修補版沒有 CORS 的 finding（`DECISIONS.md` §25）。
+T19 以同一個 scan 同時跑 ZAP 與 Nuclei（`make test-live-fixture-findings`）：worker 把觀察連結到 finding。依使用者的簽核（`DECISIONS.md` §25.14），弱點版 FX-05 的缺 header 以 ZAP 為準、nuclei 在同一次 scan 同一個位置佐證時併入一個 finding（等級取最高值、標衝突）；FX-06 的 CORS 兩個工具偵測的行為不同，是兩個互相標示相關的 finding；修補版沒有 CORS 的 finding。
 
 安全案例（12 個正例＋12 個修補負例）：
 

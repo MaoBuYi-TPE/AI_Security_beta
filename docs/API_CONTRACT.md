@@ -246,26 +246,28 @@ T09 已實作狀態、引擎與凍結的 operation 數（§17.2）；T12 加上 
 
 ## 9. Finding 回應
 
-T19 已實作清單（§17.9）；以下是實際的形狀，數字與規則不是實驗結果：
+T19 已實作清單（§17.9）；以下是實際的形狀（2026-11-04 簽核之後的 v2），數字與規則不是實驗結果：
 
 ```json
 {
   "id": "66666666-6666-4666-8666-666666666666",
   "target_id": "…",
   "kind": "security",
-  "rule_group": "cors-permissive-policy",
-  "title": "Permissive cross-origin resource sharing (CORS) policy",
-  "normalized_severity": "medium",
-  "scan_severity": "medium",
+  "category": "misconfiguration",
+  "rule_group": "x-content-type-options-missing",
+  "title": "X-Content-Type-Options header missing",
+  "normalized_severity": "low",
+  "scan_severity": "low",
   "severity_conflict": true,
   "needs_review": false,
-  "cwe_ids": ["CWE-942"],
+  "cwe_ids": ["CWE-693"],
   "cwe_source": "rule_group",
+  "tool_cwe_ids": ["CWE-693"],
   "location": {"method": "GET", "route": "/", "route_source": "literal", "parameter_location": null, "parameter_name": null, "resource": null},
   "auth_role": "anonymous",
   "auth_verified": true,
-  "owasp": {"top10_2025": "A02:2025", "top10_2025_source": "official", "api_2023": "API8:2023", "api_2023_source": "curated"},
-  "mapping_version": "rules-1+owasp2025-57db8ec5ddbc+norm-1+fp-1",
+  "owasp": {"top10_2025": "A06:2025", "top10_2025_source": "official", "top10_2025_unmapped_reason": null, "api_2023": "API8:2023", "api_2023_source": "curated", "api_2023_unmapped_reason": null},
+  "mapping_version": "rules-2+owasp2025-57db8ec5ddbc+norm-1+fp-1",
   "triage_state": "unreviewed",
   "lifecycle_state": "open",
   "first_seen_scan_id": "…",
@@ -273,13 +275,16 @@ T19 已實作清單（§17.9）；以下是實際的形狀，數字與規則不�
   "created_at": "…",
   "last_seen_at": "…",
   "sources": [
-    {"engine": "zap", "source_rule": "10098", "rule_variant": "10098", "raw_severity": "2", "severity_label": "Medium", "normalized_severity": "medium", "raw_confidence": "2", "confidence_label": "Medium", "normalized_confidence": "medium", "cwe_id": 264, "observations": 5},
-    {"engine": "nuclei", "source_rule": "cors-misconfig", "rule_variant": "arbitrary-origin", "raw_severity": "info", "severity_label": "Informational", "normalized_severity": "info", "raw_confidence": "unknown", "confidence_label": "Unknown", "normalized_confidence": "unknown", "cwe_id": 346, "observations": 1}
-  ]
+    {"engine": "zap", "source_rule": "10021", "rule_variant": "10021", "raw_severity": "1", "severity_label": "Low", "normalized_severity": "low", "raw_confidence": "2", "confidence_label": "Medium", "normalized_confidence": "medium", "cwe_id": 693, "observations": 5},
+    {"engine": "nuclei", "source_rule": "http-missing-security-headers", "rule_variant": "x-content-type-options", "raw_severity": "info", "severity_label": "Informational", "normalized_severity": "info", "raw_confidence": "unknown", "confidence_label": "Unknown", "normalized_confidence": "unknown", "cwe_id": 693, "observations": 1}
+  ],
+  "related_finding_ids": []
 }
 ```
 
-- API 資料由真實輸出產生；title、分類與對應有版本（`mapping_version`），缺乏 CWE 時 `cwe_ids` 是空陣列，不從文字硬猜。
+- API 資料由真實輸出產生；title、分類與對應有版本（`mapping_version`），缺乏 CWE 時 `cwe_ids` 是空陣列，不從文字硬猜。`cwe_ids` 是群組審查後的值，`tool_cwe_ids` 是這個 scan 的來源工具回報的原始 CWE。
+- `category`：security 是 `vulnerability`（偵測條件顯示可被利用的行為）或 `misconfiguration`（缺少或設定不當的防護）；informational 是 `technology`、`detection` 或 `hardening`；`unclassified` 是沒有審查的 fallback（人工確認前分開統計）。人工 triage 之前都不是已驗證的漏洞（`DECISIONS.md` §25.14）。
+- 沒有 OWASP 對應時另給原因：`top10_2025_unmapped_reason` 是 `no_cwe`（沒有 CWE）或 `cwe_not_listed`（CWE 不在官方清單，例如 CWE-264）；`api_2023_unmapped_reason` 是 `not_curated`。
 - 沒有 CVE／CVSS 的資料來源，所以不輸出這兩個欄位（原規劃的 `cve_ids`、`cvss` 取消，不放空值假裝有）。
 - 來源 observation → artifact 的追溯、遮罩證據與 `verification`（人工確認）在 T20、T21。
 
@@ -1210,9 +1215,11 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 
 ### 17.9 Finding（T19）
 
-`GET /api/v1/scans/{scan_id}/findings?kind=security&severity=high&engine=zap&triage_state=unreviewed&page=1&limit=25`（200，同專案；其他 project 的 scan 與不存在的一樣回 404）：這個 scan 的觀察連結到的 finding（形狀見 §9），等級由高到低、再依 rule group、route、id；分頁（`limit` 上限 100）。篩選都可省略；不合法的值回 422（`INVALID_REQUEST`）。
+`GET /api/v1/scans/{scan_id}/findings?kind=security&category=vulnerability&severity=high&engine=zap&triage_state=unreviewed&needs_review=false&page=1&limit=25`（200，同專案；其他 project 的 scan 與不存在的一樣回 404）：這個 scan 的觀察連結到的 finding（形狀見 §9），等級由高到低，同一個等級內 security 排在 informational 之前（大量的技術識別不會蓋過安全告警），再依 rule group、route、id；分頁（`limit` 上限 100）。篩選都可省略；不合法的值回 422（`INVALID_REQUEST`）。
 
-- finding 是 target 層級、跨掃描的議題（`DECISIONS.md` §25）：語意規則群組、method、route、參數與 auth role（含身分是否驗證過）都相同才是同一個；不能只靠相同的 CWE、URL 或相似的標題合併。對不到審查過的群組時，rule_group 是 `engine:rule[:variant]`（fallback），永遠只有一個引擎、`needs_review` 是 true。
+- finding 是 target 層級、跨掃描的議題（`DECISIONS.md` §25）：語意規則群組、method、route、參數與 auth role（含身分是否驗證過）都相同才是同一個；不能只靠相同的 CWE、URL 或相似的標題合併。一個群組只有一個引擎；跨引擎只有審查過的 header 群組：以 ZAP 的條件為準，nuclei 在同一次 scan、同一個 method 與 path 有 ZAP 的觀察時才併入（§25.14）。對不到審查過的群組時，rule_group 是 `engine:rule[:variant]`（fallback），永遠只有一個引擎、category 是 `unclassified`、`needs_review` 是 true；技術識別是 `群組/技術名`。
+- `related_finding_ids`：同一次 scan、同一個位置、taxonomy 標示為相關的 finding（例如偵測行為不同的兩個 CORS 告警），只標示、不合併。
+- `category`、`needs_review` 可以篩選：fallback 在人工確認之前和審查過的 finding 分開統計。
 - `normalized_severity` 是 finding 所有掃描的來源正規化之後的最高值（只會往上），來源數本身不加分；來源不一致時 `severity_conflict`。`severity_conflict`、排序與 `severity` 篩選都用這個 finding 層級的值；`scan_severity` 是這個 scan 的來源中的最高值（同一個 finding 在別的 scan 可能更高），這個 scan 自己的來源是否一致看 `sources`。兩個工具同時命中只代表有多個來源，**不是人工確認**，也不提高信心（confidence 不聚合，只在各來源保留）。
 - `sources` 只有這個 scan 中的來源（同一個引擎、規則、variant 與原值的觀察數）；`engine` 篩選的是「這個引擎在這個 scan 有來源」的 finding，sources 仍列出全部來源。
 - `location.route`：scan 有規格時，剛好一個最具體的 operation 才用它的樣板（`openapi`），否則是字面的 path（`literal`）；query 不在 finding 的身分中。

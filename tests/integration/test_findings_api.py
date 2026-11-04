@@ -27,12 +27,14 @@ INSERT_OBSERVATION = (
     ":confidence, 'Medium', :cwe, 'GET', '/', 'unknown', 'anonymous', 'test/1') RETURNING id"
 )
 INSERT_FINDING = (
-    "INSERT INTO findings (target_id, fingerprint, kind, rule_group, title, method, route, "
+    "INSERT INTO findings (target_id, fingerprint, kind, category, rule_group, title, method, "
+    "route, "
     "route_source, auth_role, auth_verified, normalized_severity, severity_conflict, "
     "needs_review, cwe_id, cwe_source, owasp_top10_2025, owasp_top10_2025_source, "
     "owasp_api_2023, owasp_api_2023_source, mapping_version, taxonomy_sha256, "
     "first_seen_run_id, first_seen_scan_id, last_seen_run_id, last_seen_scan_id) VALUES "
-    "(:target, :fingerprint, :kind, :group, :title, 'GET', '/', 'literal', 'anonymous', true, "
+    "(:target, :fingerprint, :kind, :category, :group, :title, 'GET', :route, 'literal', "
+    "'anonymous', true, "
     ":severity, :conflict, :review, :cwe, :cwe_source, :top10, :top10_source, :api, "
     ":api_source, 'rules-1', :sha, :run, :scan, :run, :scan) RETURNING id"
 )
@@ -85,6 +87,8 @@ class Scan:
             "target": self.target_id,
             "fingerprint": uuid4().hex * 2,
             "kind": "security",
+            "category": "misconfiguration",
+            "route": "/",
             "group": group,
             "title": f"title of {group}",
             "severity": severity,
@@ -119,25 +123,29 @@ def _list(client: TestClient, caller: Caller, scan_id: object, query: str = "") 
     return client.get(f"{SCANS}/{scan_id}/findings{query}", headers=caller.headers)
 
 
-def _cors(scan: Scan) -> UUID:
-    """真實同時命中的形狀：ZAP 10098 兩次（Medium）與 nuclei cors-misconfig（info）。"""
+def _xcto(scan: Scan) -> UUID:
+    """同一次 scan 的佐證合併（§25.14）：ZAP 10021 兩次（Low）與 nuclei 的 XCTO（info）。"""
     finding = scan.finding(
-        "cors-permissive-policy",
-        "medium",
+        "x-content-type-options-missing",
+        "low",
         conflict=True,
-        cwe=942,
+        cwe=693,
         cwe_source="rule_group",
-        top10="A02:2025",
+        top10="A06:2025",
         top10_source="official",
         api="API8:2023",
         api_source="curated",
     )
     for _ in range(2):
-        scan.link(
-            finding, scan.observe("zap", "10098", "10098", "2", "Medium", 264), "medium", "medium"
-        )
+        observed = scan.observe("zap", "10021", "10021", "1", "Low", 693)
+        scan.link(finding, observed, "low", "medium")
     nuclei = scan.observe(
-        "nuclei", "cors-misconfig", "arbitrary-origin", "info", "Informational", 346
+        "nuclei",
+        "http-missing-security-headers",
+        "x-content-type-options",
+        "info",
+        "Informational",
+        693,
     )
     scan.link(finding, nuclei, "info", "unknown")
     return finding
@@ -147,7 +155,7 @@ def test_findings_are_listed_with_mapping_and_sources(
     api_client: TestClient, seed: Seeder, world: World
 ) -> None:
     scan = Scan(seed, world)
-    finding = _cors(scan)
+    finding = _xcto(scan)
 
     response = _list(api_client, world.viewer_a, scan.id)
 
@@ -161,14 +169,16 @@ def test_findings_are_listed_with_mapping_and_sources(
         "id": str(finding),
         "target_id": str(scan.target_id),
         "kind": "security",
-        "rule_group": "cors-permissive-policy",
-        "title": "title of cors-permissive-policy",
-        "normalized_severity": "medium",
-        "scan_severity": "medium",
+        "category": "misconfiguration",
+        "rule_group": "x-content-type-options-missing",
+        "title": "title of x-content-type-options-missing",
+        "normalized_severity": "low",
+        "scan_severity": "low",
         "severity_conflict": True,
         "needs_review": False,
-        "cwe_ids": ["CWE-942"],
+        "cwe_ids": ["CWE-693"],
         "cwe_source": "rule_group",
+        "tool_cwe_ids": ["CWE-693"],
         "location": {
             "method": "GET",
             "route": "/",
@@ -180,10 +190,12 @@ def test_findings_are_listed_with_mapping_and_sources(
         "auth_role": "anonymous",
         "auth_verified": True,
         "owasp": {
-            "top10_2025": "A02:2025",
+            "top10_2025": "A06:2025",
             "top10_2025_source": "official",
+            "top10_2025_unmapped_reason": None,
             "api_2023": "API8:2023",
             "api_2023_source": "curated",
+            "api_2023_unmapped_reason": None,
         },
         "mapping_version": "rules-1",
         "triage_state": "unreviewed",
@@ -194,31 +206,32 @@ def test_findings_are_listed_with_mapping_and_sources(
         "sources": [
             {
                 "engine": "zap",
-                "source_rule": "10098",
-                "rule_variant": "10098",
-                "raw_severity": "2",
-                "severity_label": "Medium",
-                "normalized_severity": "medium",
+                "source_rule": "10021",
+                "rule_variant": "10021",
+                "raw_severity": "1",
+                "severity_label": "Low",
+                "normalized_severity": "low",
                 "raw_confidence": "2",
                 "confidence_label": "Medium",
                 "normalized_confidence": "medium",
-                "cwe_id": 264,
+                "cwe_id": 693,
                 "observations": 2,
             },
             {
                 "engine": "nuclei",
-                "source_rule": "cors-misconfig",
-                "rule_variant": "arbitrary-origin",
+                "source_rule": "http-missing-security-headers",
+                "rule_variant": "x-content-type-options",
                 "raw_severity": "info",
                 "severity_label": "Informational",
                 "normalized_severity": "info",
                 "raw_confidence": "unknown",
                 "confidence_label": "Medium",
                 "normalized_confidence": "unknown",
-                "cwe_id": 346,
+                "cwe_id": 693,
                 "observations": 1,
             },
         ],
+        "related_finding_ids": [],
     }
 
 
@@ -236,29 +249,58 @@ def test_findings_are_ordered_by_severity_then_group(
     assert [item["rule_group"] for item in body["data"]] == ["c-group", "a-group", "b-group"]
 
 
-def _three(scan: Scan) -> None:
-    _cors(scan)
-    sqli = scan.finding("zap-sql-injection", "high")
-    scan.link(sqli, scan.observe("zap", "40018", "40018", "3", "High", 89), "high", "low")
-    tech = scan.finding("nuclei:tech-detect:python", "info", kind="informational", review=True)
-    scan.link(
-        tech,
-        scan.observe("nuclei", "tech-detect", "python", "info", "Info", None),
-        "info",
-        "unknown",
+def test_within_a_severity_security_comes_first(
+    api_client: TestClient, seed: Seeder, world: World
+) -> None:
+    """工具標 info 的高風險項目（Werkzeug debugger）不排在技術識別之後（安全審查）。"""
+    scan = Scan(seed, world)
+    tech = scan.finding(
+        "nuclei-tech-detect/python", "info", kind="informational", category="technology"
     )
+    observed = scan.observe("nuclei", "tech-detect", "python", "info", "Info", None)
+    scan.link(tech, observed, "info", "unknown")
+    debugger = scan.finding("nuclei-werkzeug-debugger-detected", "info", review=True)
+    observed = scan.observe("nuclei", "werkzeug-debugger-detect", None, "info", "Info", None)
+    scan.link(debugger, observed, "info", "unknown")
+
+    body = _list(api_client, world.viewer_a, scan.id).json()
+
+    assert [item["rule_group"] for item in body["data"]] == [
+        "nuclei-werkzeug-debugger-detected",
+        "nuclei-tech-detect/python",
+    ]
+
+
+def _three(scan: Scan) -> None:
+    _xcto(scan)
+    sqli = scan.finding("zap-sql-injection", "high", category="vulnerability")
+    scan.link(sqli, scan.observe("zap", "40018", "40018", "3", "High", 89), "high", "low")
+    unknown = scan.finding(
+        UNKNOWN, "info", kind="informational", category="unclassified", review=True
+    )
+    observed = scan.observe("nuclei", "unknown-template", None, "info", "Info", None)
+    scan.link(unknown, observed, "info", "unknown")
+
+
+UNKNOWN = "nuclei:unknown-template"
+XCTO = "x-content-type-options-missing"
 
 
 @pytest.mark.parametrize(
     ("query", "groups"),
     [
-        ("?kind=informational", ["nuclei:tech-detect:python"]),
+        ("?kind=informational", [UNKNOWN]),
         ("?severity=high", ["zap-sql-injection"]),
         # 引擎：這個引擎在這個 scan 中有來源的 finding（sources 仍列出全部來源）。
-        ("?engine=nuclei", ["cors-permissive-policy", "nuclei:tech-detect:python"]),
-        ("?engine=zap", ["zap-sql-injection", "cors-permissive-policy"]),
-        ("?triage_state=unreviewed&severity=medium", ["cors-permissive-policy"]),
+        ("?engine=nuclei", [XCTO, UNKNOWN]),
+        ("?engine=zap", ["zap-sql-injection", XCTO]),
+        ("?triage_state=unreviewed&severity=low", [XCTO]),
         ("?triage_state=confirmed", []),
+        # 分類與需要確認：fallback（unclassified）在人工確認前分開統計（使用者簽核）。
+        ("?category=vulnerability", ["zap-sql-injection"]),
+        ("?category=unclassified", [UNKNOWN]),
+        ("?needs_review=true", [UNKNOWN]),
+        ("?needs_review=false", ["zap-sql-injection", XCTO]),
     ],
 )
 def test_filters(
@@ -277,7 +319,7 @@ def test_the_engine_filter_keeps_every_source(
     api_client: TestClient, seed: Seeder, world: World
 ) -> None:
     scan = Scan(seed, world)
-    _cors(scan)
+    _xcto(scan)
 
     [item] = _list(api_client, world.viewer_a, scan.id, "?engine=nuclei").json()["data"]
 
@@ -291,7 +333,7 @@ def test_pages(api_client: TestClient, seed: Seeder, world: World) -> None:
     body = _list(api_client, world.viewer_a, scan.id, "?page=2&limit=2").json()
 
     assert body["meta"] == {"page": 2, "limit": 2, "total": 3}
-    assert [item["rule_group"] for item in body["data"]] == ["nuclei:tech-detect:python"]
+    assert [item["rule_group"] for item in body["data"]] == [UNKNOWN]
 
 
 @pytest.mark.parametrize(
@@ -303,6 +345,8 @@ def test_pages(api_client: TestClient, seed: Seeder, world: World) -> None:
         "?severity=severe",
         "?engine=burp",
         "?triage_state=x",
+        "?category=fixed",
+        "?needs_review=maybe",
     ],
 )
 def test_invalid_queries_are_rejected(
@@ -321,11 +365,10 @@ def test_only_this_scans_findings_and_sources(
 ) -> None:
     """另一個 scan 的觀察連結到的 finding 不列出；同一個 finding 的來源只算這個 scan 的。"""
     first, second = Scan(seed, world), Scan(seed, world)
-    shared = _cors(first)
-    second.link(
-        shared, second.observe("zap", "10098", "10098", "2", "Medium", 264), "medium", "medium"
-    )
-    _cors(second)
+    shared = _xcto(first)
+    observed = second.observe("zap", "10021", "10021", "1", "Low", 693)
+    second.link(shared, observed, "low", "medium")
+    _xcto(second)
 
     first_body = _list(api_client, world.viewer_a, first.id).json()
     second_body = _list(api_client, world.viewer_a, second.id).json()
@@ -352,6 +395,63 @@ def test_scan_severity_is_this_scans_highest_source(
     assert [source["raw_severity"] for source in item["sources"]] == ["2"]
 
 
+def test_related_findings_are_listed_but_not_merged(
+    api_client: TestClient, seed: Seeder, world: World
+) -> None:
+    """CORS 兩個工具偵測的行為不同（使用者簽核）：同一個位置各自一個 finding，互相列出 id。"""
+    scan = Scan(seed, world)
+    cors = {"api": "API8:2023", "api_source": "curated"}
+    zap = scan.finding(
+        "zap-cors-wildcard-origin", "medium", cwe=264, cwe_source="rule_group", **cors
+    )
+    scan.link(zap, scan.observe("zap", "10098", "10098", "2", "Medium", 264), "medium", "medium")
+    nuclei_group = "nuclei-cors-arbitrary-origin-with-credentials"
+    mapped = {"top10": "A02:2025", "top10_source": "official", **cors}
+    nuclei = scan.finding(
+        nuclei_group, "info", category="vulnerability", cwe=942, cwe_source="rule_group", **mapped
+    )
+    observed = scan.observe("nuclei", "cors-misconfig", "arbitrary-origin", "info", "Info", 346)
+    scan.link(nuclei, observed, "info", "unknown")
+    # 不同位置的相關群組不列出。
+    elsewhere = scan.finding(nuclei_group, "info", category="vulnerability", route="/api")
+    observed = scan.observe("nuclei", "cors-misconfig", "arbitrary-origin", "info", "Info", 346)
+    scan.link(elsewhere, observed, "info", "unknown")
+
+    body = _list(api_client, world.viewer_a, scan.id).json()
+    items = {item["id"]: item for item in body["data"]}
+
+    assert items[str(zap)]["related_finding_ids"] == [str(nuclei)]
+    assert items[str(nuclei)]["related_finding_ids"] == [str(zap)]
+    assert items[str(elsewhere)]["related_finding_ids"] == []
+    # 保留原始 CWE、交代未對應的原因：CWE-264 不在 Top 10:2025 的清單。
+    assert items[str(zap)]["owasp"]["top10_2025_unmapped_reason"] == "cwe_not_listed"
+    assert (items[str(nuclei)]["cwe_ids"], items[str(nuclei)]["tool_cwe_ids"]) == (
+        ["CWE-942"],
+        ["CWE-346"],
+    )
+
+
+def test_unmapped_items_say_why(api_client: TestClient, seed: Seeder, world: World) -> None:
+    scan = Scan(seed, world)
+    finding = scan.finding(
+        "zap-modern-web-application", "info", kind="informational", category="technology"
+    )
+    observed = scan.observe("zap", "10109", "10109", "0", "Info", None)
+    scan.link(finding, observed, "info", "medium")
+
+    [item] = _list(api_client, world.viewer_a, scan.id).json()["data"]
+
+    assert (item["cwe_ids"], item["tool_cwe_ids"]) == ([], [])
+    assert item["owasp"] == {
+        "top10_2025": None,
+        "top10_2025_source": "none",
+        "top10_2025_unmapped_reason": "no_cwe",
+        "api_2023": None,
+        "api_2023_source": "none",
+        "api_2023_unmapped_reason": "not_curated",
+    }
+
+
 def test_a_scan_without_findings_is_an_empty_list(
     api_client: TestClient, seed: Seeder, world: World
 ) -> None:
@@ -367,7 +467,7 @@ def test_another_projects_scan_is_not_found(
 ) -> None:
     """SEC-16：B 的 key 讀 A 的 scan 的 finding，和不存在的 scan 一樣 404、沒有資訊洩漏。"""
     scan = Scan(seed, world)
-    _cors(scan)
+    _xcto(scan)
     other = seed.member(world.admin, world.project_b.id, Role.VIEWER)
 
     foreign = _list(api_client, other, scan.id)

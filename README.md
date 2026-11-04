@@ -317,11 +317,12 @@ M4 的第一步 T17 只凍結「清單與執行設定」；**T18 已把 Nuclei �
 
 observation 是不可變的單次觀察；finding 是 target 層級、跨掃描的議題（`src/secscan/findings/`）。worker 解析入庫之後，在一個 transaction 中把觀察連結到 finding（冪等，中斷之後重試只補上沒有連結的）。
 
-- **語意規則群組**：`src/secscan/findings/taxonomy/rule_groups.yaml`（人工審查、有版本、sha256 執行期釘選）。只有審查過、寫下同時命中證據的群組能跨引擎合併（v1 有 4 個：permissive CORS、CSP、X-Content-Type-Options、anti-clickjacking）；對不到的觀察是單一引擎的 `engine:rule[:variant]`，標 `needs_review`。審查紀錄見 `docs/TOOLS.md` §8。
+- **語意規則群組**：`src/secscan/findings/taxonomy/rule_groups.yaml`（人工審查、有版本、sha256 執行期釘選；2026-11-04 使用者簽核後是 v2）。一個群組只有一個引擎；跨引擎只有 CSP、X-Content-Type-Options、anti-clickjacking 三個 header 群組：以 ZAP 的條件為準，nuclei 在同一次 scan、同一個位置有 ZAP 的觀察時才併入。CORS 兩個工具偵測的行為不同，只標示相關。對不到的觀察是單一引擎的 `engine:rule[:variant]`、`unclassified`、標 `needs_review`。審查紀錄見 `docs/TOOLS.md` §8。
+- **分類**：security 分 vulnerability 與 misconfiguration，informational 分 technology、detection、hardening；人工 triage 之前都不是已驗證的漏洞。技術識別以 `群組/技術名` 各自一個 finding，和 security 分開統計。
 - **fingerprint**：target、kind、群組、method、route（有規格時剛好一個最具體的 operation 才用樣板）、參數位置與名稱、auth role 與身分是否驗證過；標題、證據、等級、query、工具的 CWE 都不影響。
 - **等級**：各來源正規化之後的最高值，來源數本身不加分；來源不一致時 `severity_conflict`。兩個工具同時命中不是人工確認。
 - **OWASP**：Top 10:2025 依官方的 CWE 清單（`make owasp-top10` 從鎖定 commit 的官方分類頁凍結成 `findings/taxonomy/owasp_top10_2025.json`，`make owasp-top10-check` 逐位元組重現；不連網）；API Security Top 10:2023 是 curated。每個 finding 記下對應的來源與版本。
-- **API**：`GET /api/v1/scans/{scan_id}/findings`（分頁，可依 kind、severity、engine、triage_state 篩選；sources 只有這個 scan 的來源）。`GET /findings/{id}` 的來源追溯在 T20，triage 在 T21。
+- **API**：`GET /api/v1/scans/{scan_id}/findings`（分頁，可依 kind、category、severity、engine、triage_state、needs_review 篩選；sources 只有這個 scan 的來源；另給原始 CWE、未對應的原因與相關的 finding）。`GET /findings/{id}` 的來源追溯在 T20，triage 在 T21。
 - **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-findings`（同一個 scan 跑 ZAP 與 Nuclei，掃 fixture app 的弱點版與修補版，約 20 分鐘）。
 - 設計見 `docs/DECISIONS.md` §25；API 見 `docs/API_CONTRACT.md` §9、§17.9。
 
