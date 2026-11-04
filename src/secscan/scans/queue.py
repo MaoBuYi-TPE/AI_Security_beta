@@ -74,6 +74,8 @@ __all__ = [
 ]
 
 HEARTBEAT_INTERVAL = timedelta(seconds=5)
+# 還沒解析完的 run（worker 依 sequence 解析同一個 scan 的 run）。
+PARSING_RUN_STATUSES = frozenset({RunStatus.COLLECTED, RunStatus.NORMALIZING})
 # 鎖到的 scan 已經不符合條件（別人剛改了它）時，以新的快照再找幾次。
 MAX_CLAIM_ATTEMPTS = 3
 MAX_RECONCILED_PER_CALL = 100
@@ -572,7 +574,9 @@ def _claimable(
     waiting: RunStatus, engines: Collection[Engine], run_id: UUID | None
 ) -> list[ColumnElement[bool]]:
     """可以認領的 run：狀態、引擎、scan 還沒終止；runner 認領時 scan 也沒有被要求取消、
-    前面的 run 都不再送出流量。
+    前面的 run 都不再送出流量；worker 認領時前面的 run 都已經解析完（不在 collected 或
+    normalizing）：同一個 scan 依序解析，nuclei 連結 finding 時一定看得到 ZAP 的觀察（佐證，
+    docs/DECISIONS.md §25.14；code review 發現，原本 ZAP 解析重試時 nuclei 可能先連結）。
 
     已終止的 scan 不會有等待中的 run（trigger 只允許在建立 scan 時新增 run）；萬一有，也不能
     認領：之後的 settle 會被 scans_guard 擋下，FIFO 每次又選到同一個 run，卡住佇列（審查發現）。
@@ -595,6 +599,15 @@ def _claimable(
             )
         )
         reasons.append(stopped.cancel_requested_at.is_not(None))
+    else:
+        earlier = aliased(ScannerRunModel)
+        conditions.append(
+            ~exists().where(
+                earlier.scan_id == ScannerRunModel.scan_id,
+                earlier.sequence < ScannerRunModel.sequence,
+                earlier.status.in_(_values(PARSING_RUN_STATUSES)),
+            )
+        )
     conditions.append(~exists().where(stopped.id == ScannerRunModel.scan_id, or_(*reasons)))
     return conditions
 

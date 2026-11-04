@@ -478,3 +478,37 @@ def test_a_taxonomy_without_anchors_links_without_corroboration(
 
     assert linker.link(parsed_run(queue, ZAP, (ZAP_SQLI, ZAP_XCTO))) == 2
     assert set(_findings(queue_seed, target.id)) == {"zap-sql-injection", "zap:10021"}
+
+
+def test_the_worker_parses_a_scans_runs_in_order(
+    queue: ScanQueue, queue_seed: Seeder, world: World
+) -> None:
+    """ZAP 還在 collected 或 normalizing 時不認領 nuclei：連結時看得到 ZAP 的觀察。"""
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP, NUCLEI))
+    zap_runner = queue.claim("runner-1", frozenset({ZAP}))
+    assert zap_runner is not None
+    queue.prepare_launch(zap_runner, image_ref=str(ENGINE_IMAGES[ZAP]))
+    queue.record_usage(zap_runner, RunUsage(requests_sent=1, requests_denied=0, traffic_seconds=1))
+    queue.advance(zap_runner, RunStatus.COLLECTING)
+    queue.advance(zap_runner, RunStatus.COLLECTED)
+    nuclei_runner = queue.claim("runner-1", frozenset({NUCLEI}))
+    assert nuclei_runner is not None
+    queue.prepare_launch(nuclei_runner, image_ref=str(ENGINE_IMAGES[NUCLEI]))
+    queue.record_usage(
+        nuclei_runner, RunUsage(requests_sent=1, requests_denied=0, traffic_seconds=1)
+    )
+    queue.advance(nuclei_runner, RunStatus.COLLECTING)
+    queue.advance(nuclei_runner, RunStatus.COLLECTED)
+
+    # ZAP collected：nuclei 不能先被解析。
+    assert queue.claim_collected("worker-1", frozenset({NUCLEI})) is None
+    zap = queue.claim_collected("worker-1", frozenset({ZAP, NUCLEI}))
+    assert zap is not None
+    assert zap.engine is ZAP
+    # ZAP normalizing：仍然要等。
+    assert queue.claim_collected("worker-2", frozenset({NUCLEI})) is None
+    queue.advance(zap, RunStatus.SUCCEEDED)
+    nuclei = queue.claim_collected("worker-2", frozenset({NUCLEI}))
+    assert nuclei is not None
+    assert nuclei.run_id == nuclei_runner.run_id
