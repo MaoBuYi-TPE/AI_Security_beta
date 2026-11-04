@@ -65,7 +65,7 @@ class FindingRepository:
         links = self._related(scan_id, models, related)
         return Page(
             items=tuple(
-                _finding(model, sources.get(model.id, ()), links.get(model.id, ()))
+                finding_of(model, sources.get(model.id, ()), links.get(model.id, ()))
                 for model in models
             ),
             total=total or 0,
@@ -172,8 +172,10 @@ def _conditions(scan_id: UUID, filters: FindingFilters) -> list[ColumnElement[bo
     return conditions
 
 
-def _finding(
-    model: FindingModel, sources: tuple[FindingSource, ...], related: tuple[UUID, ...]
+def finding_of(
+    model: FindingModel,
+    sources: tuple[FindingSource, ...] = (),
+    related: tuple[UUID, ...] = (),
 ) -> Finding:
     return Finding(
         id=model.id,

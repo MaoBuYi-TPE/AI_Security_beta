@@ -5,8 +5,8 @@ auth role（含身分是否經過驗證）與必要時的 resource。每個欄�
 證據、等級、query、工具的 CWE 都不在裡面（不能只靠相似的文字或 CWE 合併）。
 - route：scan 有規格時，把觀察的 (method, path) 以 coverage 的規則對到凍結、範圍內的 operation；剛好
   一個最具體的才用它的樣板（openapi），否則用字面的 path（literal）。不 decode、不改大小寫。
-- 粒度是 endpoint 的群組（參數是群組身分的一部分）不含參數；resource_scoped 的群組加上字面 path，
-  同一個樣板的不同物件不合併。
+- 粒度是 endpoint 的群組（參數是群組身分的一部分）不含參數；resource_scoped 的群組，以及 route 是
+  樣板的 fallback（沒有審查過的規則，T20、v2）加上字面 path，同一個樣板的不同物件不合併。
 """
 
 import hashlib

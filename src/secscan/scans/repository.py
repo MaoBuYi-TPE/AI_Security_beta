@@ -240,7 +240,7 @@ class ScanRepository:
             .limit(page.limit)
         ).all()
         return Page(
-            items=tuple(_observation(model, engine_name) for model, engine_name in rows),
+            items=tuple(observation_of(model, engine_name) for model, engine_name in rows),
             total=total or 0,
             request=page,
         )
@@ -434,7 +434,8 @@ def _result(model: ScannerRunModel) -> RunResult | None:
     )
 
 
-def _observation(model: ObservationModel, engine: str) -> Observation:
+def observation_of(model: ObservationModel, engine: str) -> Observation:
+    """入庫的觀察（遮罩、截斷之後的欄位）；finding 的來源追溯也用它（T20）。"""
     return Observation(
         id=model.id,
         scan_id=model.scan_id,

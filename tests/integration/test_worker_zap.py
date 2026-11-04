@@ -9,7 +9,7 @@ guard 的 summary 與 telemetry 的明細寫進 result_details.guard_traffic（�
 import json
 import shutil
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -46,11 +46,13 @@ from secscan.scans.domain.observation import (
 )
 from secscan.scans.domain.request import BudgetRequest, ScanRequest
 from secscan.scans.queue import Heartbeat, LeaseLostError, RunUsage, ScanQueue
+from secscan.scans.run_records import MissingReportError
 from secscan.targets.domain import TargetKind
 from secscan.worker.artifacts import ArtifactReader
 from secscan.worker.service import Worker
 from secscan.worker.telemetry import TelemetryReader
 from tests.integration.api_support import LAB, Seeder, World
+from tests.integration.finding_support import observation
 
 pytestmark = pytest.mark.integration
 
@@ -640,6 +642,23 @@ def test_the_results_are_written_together(
 
     with pytest.raises(Exception, match="sha256_valid"):
         queue.record_results(parsing, _parsed(), (bad,), exit_code=0)
+
+    assert _run(queue_seed, parsing.run_id).results_recorded is False
+    assert _artifacts(queue_seed, parsing.run_id) == []
+
+
+def test_observations_without_a_report_artifact_are_not_written(
+    queue: ScanQueue, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    """T20：觀察都來自報告，manifest 沒有這個 run 的報告就無法追溯：整筆不寫入（之後重試）。"""
+    _collected(queue, queue_seed, world, dirs, "clean")
+    parsing = queue.claim_collected("worker-1", ZAP)
+    assert parsing is not None
+    parsed = replace(_parsed(), observations=(observation("10021", parameter="x"),))
+    log = ArtifactRecord(ArtifactKind.OUTPUT, "zap.log", "ab" * 32, 1)
+
+    with pytest.raises(MissingReportError):
+        queue.record_results(parsing, parsed, (log,), exit_code=0, report_path="zap-report.json")
 
     assert _run(queue_seed, parsing.run_id).results_recorded is False
     assert _artifacts(queue_seed, parsing.run_id) == []

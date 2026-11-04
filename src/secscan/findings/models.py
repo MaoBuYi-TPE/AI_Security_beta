@@ -5,17 +5,19 @@
   first／last seen 以複合 FK 引用 scanner_runs，不直接引用 scans：worker 持有 run 的鎖時檢查
   scans 的 FK（KEY SHARE）會和對帳的 scans FOR UPDATE → run 形成死鎖（同 observations）。
 - finding_observations：觀察連結到哪個 finding（每個觀察最多一次），以及連結時的正規化值與 taxonomy
-  的 sha256；append-only。觀察本身不修改（它有 append-only 的 trigger）。
+  的 sha256；append-only。觀察本身不修改（它有 append-only 的 trigger）。v0015：連結有序號（在
+  finding 上保留、commit 時核對），觀察與 finding 必須屬於同一個 target（first／last seen 的 scan
+  也是）。
 """
 
 from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
-    Index,
     String,
     UniqueConstraint,
     func,
@@ -145,6 +147,7 @@ class FindingModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
         CheckConstraint(f"triage_state IN ({_TRIAGE})", name="triage_state_valid"),
         CheckConstraint(f"lifecycle_state IN ({_LIFECYCLE})", name="lifecycle_state_valid"),
         CheckConstraint("last_seen_at >= created_at", name="times"),
+        CheckConstraint("observations_linked >= 0", name="observations_linked_valid"),
     )
 
     target_id: Mapped[UUID] = mapped_column(ForeignKey("targets.id", ondelete="RESTRICT"))
@@ -185,6 +188,9 @@ class FindingModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     last_seen_run_id: Mapped[UUID]
     last_seen_scan_id: Mapped[UUID]
     last_seen_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # 已連結的觀察數（v0015）：linker 持有列鎖時一次保留一批序號，commit 時 DB 核對它等於連結的
+    # 筆數。讀取時以 link_sequence <= observations_linked 取得一致的快照（追溯 API 的分頁）。
+    observations_linked: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
 
 
 class FindingObservationModel(Base):
@@ -192,7 +198,8 @@ class FindingObservationModel(Base):
 
     __tablename__ = "finding_observations"
     __table_args__ = (
-        Index("ix_finding_observations_finding_id", "finding_id"),
+        UniqueConstraint("finding_id", "link_sequence"),
+        CheckConstraint("link_sequence > 0", name="link_sequence_valid"),
         CheckConstraint(f"normalized_severity IN ({_SEVERITIES})", name="severity_valid"),
         CheckConstraint(f"normalized_confidence IN ({_CONFIDENCES})", name="confidence_valid"),
         CheckConstraint(f"taxonomy_sha256 ~ '{_SHA256_HEX}'", name="taxonomy_sha256_valid"),
@@ -207,3 +214,5 @@ class FindingObservationModel(Base):
     needs_review: Mapped[bool]
     taxonomy_sha256: Mapped[str] = mapped_column(String(SHA256_HEX_LENGTH))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # 這個 finding 的第幾個連結（v0015）：必須是這個 transaction 在 finding 上保留的序號。
+    link_sequence: Mapped[int] = mapped_column(BigInteger)

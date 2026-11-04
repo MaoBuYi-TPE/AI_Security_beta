@@ -246,6 +246,26 @@ def test_a_spec_templates_the_route() -> None:
     assert len(draft.links) == 2
 
 
+def test_fallback_keeps_distinct_literal_objects_under_the_same_template() -> None:
+    """未審查規則無法證明兩個物件相同，樣板 route 不能把它們誤合併。"""
+    context = replace(CONTEXT, operations=(FrozenOperation(0, "GET", "/api/orders/{id}"),))
+    first = _row(Engine.ZAP, "90022", "90022", path="/api/orders/1001")
+    second = replace(first, id=uuid4(), path="/api/orders/1002")
+
+    drafts = _plan(first, second, context=context)
+
+    assert len(drafts) == 2
+    assert {draft.inputs.rule_group for draft in drafts} == {"zap:90022"}
+    assert {draft.inputs.route for draft in drafts} == {"/api/orders/{id}"}
+    assert {draft.inputs.resource for draft in drafts} == {first.path, second.path}
+    assert all(draft.route_source is RouteSource.OPENAPI for draft in drafts)
+    assert {link.observation_id for draft in drafts for link in draft.links} == {
+        first.id,
+        second.id,
+    }
+    assert all(len(draft.links) == 1 and draft.aggregate.needs_review for draft in drafts)
+
+
 def test_a_literal_path_with_braces_does_not_join_the_template() -> None:
     """安全審查：工具保留大括號的字面 path，和規格樣板的文字相同，仍是不同的 finding。"""
     context = replace(CONTEXT, operations=(FrozenOperation(0, "GET", "/api/orders/{id}"),))

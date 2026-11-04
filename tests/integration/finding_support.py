@@ -9,6 +9,8 @@ from secscan.scans.domain.catalog import ScanProfile
 from secscan.scans.domain.lifecycle import RunStatus
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.observation import (
+    ArtifactKind,
+    ArtifactRecord,
     ObservationInput,
     ParameterLocation,
     ParsedRun,
@@ -20,6 +22,8 @@ from secscan.scans.domain.traffic import GuardTraffic
 from secscan.scans.queue import RunUsage, ScanQueue
 from secscan.targets.domain import Target, TargetKind
 from tests.integration.api_support import Seeder, World
+
+REPORT = ArtifactRecord(ArtifactKind.OUTPUT, "report.json", "ab" * 32, 2048)
 
 
 def observation(
@@ -98,6 +102,7 @@ def parsed_run(
     *,
     traffic: GuardTraffic | None = None,
     worker: bool = True,
+    outcome: RunOutcome | None = None,
 ) -> Lease:
     """runner 收集完、worker 認領並寫入觀察（normalizing 的 lease）。
 
@@ -117,9 +122,44 @@ def parsed_run(
         lease = claimed
     parsed = ParsedRun(
         parser_version="test-1",
-        outcome=RunOutcome(RunStatus.SUCCEEDED),
+        outcome=outcome or RunOutcome(RunStatus.SUCCEEDED),
         observations=tuple(observations),
         traffic=traffic,
     )
-    queue.record_results(lease, parsed, (), exit_code=0)
+    # 和 worker 相同：觀察引用這個 run 的報告 artifact（manifest 的一個 output）。
+    queue.record_results(lease, parsed, (REPORT,), exit_code=0, report_path=REPORT.path)
     return lease
+
+
+# 以 SQL 直接連結（不經 linker）：和 linker 一樣先在 finding 上保留序號，再帶著序號寫入（v0015）。
+RESERVE_LINK = (
+    "UPDATE findings SET observations_linked = observations_linked + 1 WHERE id = :finding"
+)
+INSERT_LINK = (
+    "INSERT INTO finding_observations (observation_id, finding_id, normalized_severity, "
+    "normalized_confidence, needs_review, taxonomy_sha256, link_sequence) VALUES (:observation, "
+    ":finding, :severity, :confidence, :review, :sha, "
+    "(SELECT observations_linked FROM findings WHERE id = :finding))"
+)
+
+
+def link_by_sql(
+    seed: Seeder,
+    finding: object,
+    observation: object,
+    *,
+    severity: str,
+    confidence: str,
+    sha: str,
+    review: bool = False,
+) -> None:
+    seed.execute_together(
+        RESERVE_LINK,
+        INSERT_LINK,
+        finding=finding,
+        observation=observation,
+        severity=severity,
+        confidence=confidence,
+        review=review,
+        sha=sha,
+    )

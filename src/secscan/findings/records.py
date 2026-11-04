@@ -1,10 +1,13 @@
-"""linker 的寫入（docs/DECISIONS.md §25.7）：在 FindingLinker 的 transaction 中執行。
+"""linker 的寫入（docs/DECISIONS.md §25.7、§26.4）：在 FindingLinker 的 transaction 中執行。
 
 鎖序固定：先以 lease 的 fencing 鎖住 run，再依 fingerprint 的順序新增（ON CONFLICT DO NOTHING）與
-鎖住既有的 finding；不鎖 scans（對帳是 scans → runs）。
+鎖住既有的 finding；不鎖 scans（對帳是 scans → runs）。連結的序號在持有 finding 的列鎖時保留：
+新的 finding 以連結數建立，既有的以一次 `observations_linked + k` 更新，連結帶著
+(保留之前的連結數, 之後] 的序號寫入（DB 在寫入與 commit 時核對）。
 """
 
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -48,6 +51,14 @@ _OBSERVATION_COLUMNS = (
     ObservationModel.parameter_location,
     ObservationModel.auth_role,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class LockedFinding:
+    id: UUID
+    aggregate: Aggregate
+    # 鎖住時的連結數：這個 transaction 保留的序號從它之後開始。
+    linked: int
 
 
 class FindingRecords:
@@ -172,9 +183,9 @@ class FindingRecords:
 
     def lock_findings(
         self, target_id: UUID, fingerprints: Sequence[str]
-    ) -> dict[str, tuple[UUID, Aggregate]]:
+    ) -> dict[str, LockedFinding]:
         """既有的 finding 依 fingerprint 的順序鎖住（呼叫端傳入排序過的 fingerprint）。"""
-        locked: dict[str, tuple[UUID, Aggregate]] = {}
+        locked: dict[str, LockedFinding] = {}
         for batch in _batches(list(fingerprints)):
             rows = self._session.execute(
                 select(
@@ -183,6 +194,7 @@ class FindingRecords:
                     FindingModel.normalized_severity,
                     FindingModel.severity_conflict,
                     FindingModel.needs_review,
+                    FindingModel.observations_linked,
                 )
                 .where(FindingModel.target_id == target_id, FindingModel.fingerprint.in_(batch))
                 .order_by(FindingModel.fingerprint)
@@ -192,11 +204,14 @@ class FindingRecords:
                 aggregate = Aggregate(
                     Severity(row.normalized_severity), row.severity_conflict, row.needs_review
                 )
-                locked[row.fingerprint] = (row.id, aggregate)
+                locked[row.fingerprint] = LockedFinding(row.id, aggregate, row.observations_linked)
         return locked
 
-    def update_finding(self, finding_id: UUID, aggregate: Aggregate, lease: Lease) -> None:
-        """已鎖住的 finding：新的聚合與最後看到的 run（時間不倒退，trigger 也檢查）。"""
+    def update_finding(
+        self, finding_id: UUID, aggregate: Aggregate, lease: Lease, *, links: int
+    ) -> None:
+        """已鎖住的 finding：新的聚合、最後看到的 run（時間不倒退，trigger 也檢查），並保留 links 個
+        連結的序號。"""
         self._session.execute(
             update(FindingModel)
             .where(FindingModel.id == finding_id)
@@ -207,24 +222,30 @@ class FindingRecords:
                 last_seen_run_id=lease.run_id,
                 last_seen_scan_id=lease.scan_id,
                 last_seen_at=func.greatest(FindingModel.last_seen_at, func.clock_timestamp()),
+                observations_linked=FindingModel.observations_linked + links,
             )
             .execution_options(synchronize_session=False)
         )
 
     def insert_links(
-        self, drafts: Sequence[FindingDraft], finding_ids: Mapping[str, UUID], taxonomy_sha256: str
+        self,
+        drafts: Sequence[FindingDraft],
+        targets: Mapping[str, tuple[UUID, int]],
+        taxonomy_sha256: str,
     ) -> None:
+        """targets：fingerprint → (finding id, 保留之前的連結數)；序號接在後面、依 draft 的順序。"""
         rows = [
             {
                 "observation_id": link.observation_id,
-                "finding_id": finding_ids[draft.fingerprint],
+                "finding_id": targets[draft.fingerprint][0],
+                "link_sequence": targets[draft.fingerprint][1] + offset,
                 "normalized_severity": link.severity.value,
                 "normalized_confidence": link.confidence.value,
                 "needs_review": link.needs_review,
                 "taxonomy_sha256": taxonomy_sha256,
             }
             for draft in drafts
-            for link in draft.links
+            for offset, link in enumerate(draft.links, start=1)
         ]
         for batch in _batches(rows):
             self._session.execute(insert(FindingObservationModel), batch)
@@ -264,6 +285,8 @@ def _new_finding(draft: FindingDraft, lease: Lease, mapping: tuple[str, str]) ->
         "first_seen_scan_id": lease.scan_id,
         "last_seen_run_id": lease.run_id,
         "last_seen_scan_id": lease.scan_id,
+        # 建立時就保留這一批連結的序號（1..k）。
+        "observations_linked": len(draft.links),
     }
 
 

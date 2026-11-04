@@ -207,8 +207,18 @@ def _inputs(
         parameter_name=row.parameter if by_parameter else None,
         auth_role=row.auth_role,
         auth_verified=context.auth_verified,
-        resource=row.path if classification.resource_scoped else None,
+        resource=row.path if _object_scoped(classification, located) else None,
     )
+
+
+def _object_scoped(classification: Classification, located: Position) -> bool:
+    """字面 path 是身分的一部分：resource_scoped 的群組，以及樣板 route 下的 fallback（T20）。
+
+    fallback 是沒有審查過的規則，不知道問題在端點還是在物件上；規格的樣板把 `/orders/1001`、
+    `/orders/1002` 變成同一個 route，不能證明是同一個問題，所以保留字面的物件（不誤合併優先）。
+    沒有規格（字面 route）時 path 本來就在 route 裡，不重複加入。
+    """
+    return classification.resource_scoped or (classification.fallback and located.templated)
 
 
 def _draft(
