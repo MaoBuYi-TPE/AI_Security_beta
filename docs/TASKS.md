@@ -1480,12 +1480,32 @@
     - 審查：security-reviewer 0 CRITICAL、0 HIGH（M1、L1、L3、L4 已修，L2 以依序解析修正、剩下的情況與 I1 記入限制）；code-reviewer APPROVE（MEDIUM 的解析順序與 3 個 LOW 已修）。
     - 限制：佐證以「同一次 scan、同一個 method 與 path」近似「相同回應」；沒有跑 ZAP、ZAP 失敗或沒有走到那個 URL 時，nuclei 的 header 告警留在自己的群組，同一個問題在不同 scan 的身分可能不同（T22 比較時要對照）；nuclei 單獨的 XFO 只標 hardening；既有的 v1 finding 是 unclassified，要乾淨的分類就重建開發 DB。
   - 給 T20／T21／T22：T20 做去重的反例套件與 `GET /findings/{id}` 的來源追溯（observation → artifact → run → plan_hash），一併處理跨表的 target 一致性；T21 以新的 migration 開放 triage 的修改並留 audit；T22 讀 `auth_verified`，不據未驗證的 finding 標 `not_observed`。
-- [ ] T20 建立去重的反例測試與來源追溯查詢。
+- [x] T20 建立去重的反例測試與來源追溯查詢。（設計與取捨見 `docs/DECISIONS.md` §26）
   - DoD：
     - 這些情況都不會誤合併：同 CWE 但參數不同、同 route 但身分或物件不同、不同的弱點。
     - 所有證據都能追溯到來源。
+  - 使用者本輪決定（2026-11-04）：未審查的規則在規格樣板下保留物件、`FINGERPRINT_VERSION` 升到 2；追溯 API 是「明細＋觀察分頁」，歷史也分頁、明細有上限、只給遮罩證據與 artifact metadata、穩定排序與 scan_id／engine 篩選、資料成長時不重複不遺漏；T30 的錄製升為 golden、擴充既有的 live；live 加一個部分失敗情境，先校準再定斷言。
+  - 交付：
+    - 去重：`findings/domain/linking.py` 的 `_object_scoped`（fallback＋樣板 route → resource 是字面 path）；`tests/dedup_support.py`（共用的不變式）；`tests/unit/findings/test_dedup_counterexamples.py`（DEDUP-01–18、MERGE-01–06、三個 Hypothesis 性質）；`tests/contract/test_dedup_recorded_outputs.py`；golden fixture `tests/fixtures/zap/fixture-vuln-{web,api}/`（`manifest.json` 登錄錄製時的 grant；`tests/contract/zap_recordings.py` 共用重建）；`TOOLS.md` §8.7 的物件層級審查。
+    - 來源追溯：`GET /api/v1/findings/{id}`、`/scans`、`/observations`（`findings/domain/provenance.py`、`findings/provenance.py`、`findings/provenance_schemas.py`、`FindingService`、`core` 的 `SnapshotEnvelope`）；`API_CONTRACT.md` §17.10。
+    - DB：migration v0015（連結序號＋commit 時核對、跨表的 target 一致性、升級前核對與回填）；寫入端的 `MissingReportError`（有觀察就必須有這個 run 的報告 artifact）。
+    - live：`tests/live/test_fixture_findings_live.py` 加上追溯的驗證與 `TestFixturePartial`。
+  - 實際執行：
+    - 離線（最終版本）：`make test` 5798 passed、2 skipped，coverage 99.74%（findings 的 domain、provenance、service 與 v0015 都是 100%）；`make lint`、`make typecheck`（493 檔）、`make test-contract`（199 passed、1 skipped）、`make owasp-top10-check`、`pre-commit run --all-files` 皆通過。
+    - RED：DEDUP-08、18、同一個 run 的拆分與不變式的性質測試在舊的 linking 下失敗（`git stash` 暫時還原驗證），改了之後通過。schema 與追溯 API 的測試和實作同時撰寫，不是嚴格先寫（如實記錄）。
+    - 量測（一次性，不是效能基準）：同一個 run 的 N 個觀察連到一個 finding，`FindingLinker.link` 1,500／5,000／20,000 個：第一版（逐列更新）0.47／1.81／16.65 秒，採用的版本（每個 finding 一次保留）0.15／0.46／1.68 秒（§26.4）。
+    - live 校準（`make test-live-fixture-findings LIVE_PYTEST_ARGS="-s -k partial"`，預算 240 秒，3 次，各約 4 分鐘）：三次都是 scan timed_out、ZAP timed_out／ENGINE_TIMEOUT／time_limit_reached（22 個觀察）、nuclei failed／BUDGET_EXHAUSTED（沒有 plan、沒有容器），流量 193–194 秒，沒有殘留（§26.8 的表）。
+    - live（`make test-live-fixture-findings`，2026-11-04，最終版本，3 passed、21 分 59 秒，跑完沒有殘留的容器與網路）：
+      - 弱點版：scan completed（588 秒）；ZAP 23 個觀察（轉送 700）、nuclei 11 個（轉送 312），共享預算未耗盡；34 個觀察 → 30 個 finding（security 22、informational 8），和 T19 相同（沒有規格，v2 不改變分群）。每個觀察都恰好出現在一個 finding 的追溯中，artifact 的 sha256 與大小等於 runs volume 的檔案，run 的 plan_hash、映像與版本和 scan 一致；POST /login 的 SQLi 在 username、password 上是兩個 finding；GET / 的 CSP、XCTO、anti-clickjacking 各是 ZAP＋nuclei 兩個來源的 finding。
+      - 修補版：scan completed（491 秒）；10 個觀察 → 10 個 finding，追溯完整。
+      - 部分失敗：scan timed_out（`results_complete` false）、199 秒；ZAP timed_out／ENGINE_TIMEOUT、22 個觀察都可追溯；nuclei failed／BUDGET_EXHAUSTED、0 個觀察；流量 196 秒 ≤ 240、轉送 345、拒絕 10。錄製在 `recordings/fixture-findings/`（gitignore）。
+  - 審查：architect（設計階段，分頁論證不成立 → 序號＋高水位）；security-reviewer 0 CRITICAL、0 HIGH（MEDIUM 的逐列更新已改成一次保留並實測；L1、L4、L8、L9、L2 已修或記入文件，其餘記入限制）；code-reviewer 0 CRITICAL、0 HIGH、APPROVE（3 個 MEDIUM 與 LOW 已修）。細節見 `DECISIONS.md` §26.11。
+  - 限制：query 中的物件與語意 query 不在身分中；審查過的 endpoint 粒度群組在樣板 route 下跨物件合併；同一個 role label 的不同 auth profile 合併；v1 的 finding 保留為 open；讀取成本隨連結數線性增加、沒有 rate limit；live 中沒有 `partially_completed`（時間窗不可重現，由整合測試涵蓋）。
+  - 給 T21／T22／T23：T21 的 artifact 下載以 artifact id 走 artifact → run → scan → target → project 的授權，不接受 client 給的 path 或 storage_key（storage_key 不是秘密）；triage 一個 finding 會涵蓋它所有的物件，報告揭露 finding 內不同 path 的數量。T22 比較時 fingerprint 或 mapping 的版本不同要判成 `inconclusive`，不能判成 `not_observed`。T23 決定 finding 的數量上限、連結的保存期限、追溯的彙總表與 API 的 rate limit。
 
 里程碑證據：兩個引擎能在同一個 API 流程中取得真實結果，並展示共享預算、部分失敗，以及同一問題有多個來源。
+
+- 達成（M4，2026-11-04）：T17–T20 都符合 DoD。同一個 API 流程以真的 ZAP 與 Nuclei 掃 fixture app：兩個引擎依序共用 scan 的預算（弱點版、修補版都沒有耗盡；小預算時 nuclei 因剩下的時間不夠而不執行，流量不超過預算）；部分失敗（ZAP 時間上限、nuclei 預算不足）在 API 中是 `timed_out`、`results_complete=false`，已取得的觀察都可追溯；同一個問題有多個來源（GET / 的 CSP、XCTO、anti-clickjacking 各是 ZAP＋nuclei 兩個來源的 finding，等級取最高值並標衝突）。去重的反例與來源追溯完成（Gate D 的去重部分；複掃的反例在 T22）。`make test` 與 `make test-live-fixture-findings` 全部通過；code-reviewer 與 security-reviewer 在 M4 結束時都是 0 CRITICAL、0 HIGH（MEDIUM 已修正）。
 
 ## M5｜04/05 – 04/25：報告、複掃與 P0 驗收
 

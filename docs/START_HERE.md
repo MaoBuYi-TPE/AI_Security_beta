@@ -116,7 +116,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make test-live-fixture-nuclei | M4（T18 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：以真的 nuclei 掃自製 fixture app 的弱點版與修補版（弱點版 `cors-misconfig` 命中、修補版不命中），驗證端到端整合；跑在 guard 映像上，錄製到 `recordings/fixture-nuclei/`（gitignore） |
 | make owasp-top10 | M4（T19 已建立） | 從手動下載、鎖定 commit 的 10 個 OWASP Top 10:2025 官方分類頁（`runs/t19-owasp/<commit>/`，逐檔驗 sha256）產生 `src/secscan/findings/taxonomy/owasp_top10_2025.json`；不連網、不需要 Docker。設計見 `docs/DECISIONS.md` §25.5 |
 | make owasp-top10-check | M4（T19 已建立） | 重新產生並與已提交的對應表逐位元組比對（不覆寫） |
-| make test-live-fixture-findings | M4（T19 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個 scan 以真的 ZAP 與 Nuclei 掃 fixture app 的弱點版與修補版，驗證 worker 連結 finding（CORS 跨引擎合併、最高等級與衝突、每個觀察連結一次）；錄製到 `recordings/fixture-findings/`（gitignore） |
+| make test-live-fixture-findings | M4（T19 已建立，T20 擴充） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個 scan 以真的 ZAP 與 Nuclei 掃 fixture app 的弱點版與修補版，驗證 worker 連結 finding（佐證合併、CORS 只標示相關、最高等級與衝突、每個觀察連結一次）；T20 加上追溯 API 的驗證與小時間預算的部分失敗情境；錄製到 `recordings/fixture-findings/`（gitignore） |
 | make record-fixtures | M3（T15 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：只在 live lab 網路重新錄製 ZAP 的輸出到 `recordings/zap/`（gitignore），人工審查之後才搬進 `tests/fixtures/zap/`；約 8 分鐘 |
 | make bench | M5 起 | 透過自己的 API 執行實驗，結果輸出到 benchmarks/results/ |
 

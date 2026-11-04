@@ -435,3 +435,13 @@ M2 的 `make test-live-runner`：42 passed（5 分 41 秒），撤銷授權的 s
 ### 8.6 給審查者的提醒
 - `endpoint` 粒度只用在「參數就是群組身分」的 header 類群組；注入類維持 `parameter` 粒度，不同參數是不同的 finding。
 - kind 與 category 是審查結果，不由工具的等級決定；等級的聚合見 `DECISIONS.md` §25.4、§25.7。security 的數量不是已驗證的漏洞數（人工 triage 在 T21）。
+
+### 8.7 T20：物件層級的審查（fingerprint v2，2026-11-04）
+scan 有規格時，`/api/orders/1001`、`/api/orders/1002` 的 route 都是 `/api/orders/{id}`。審查的問題是：同一個樣板的不同物件，同一個群組的告警是不是同一個問題（`resource_scoped` 要不要開）。
+- **header 與回應設定**（CSP、XCTO、anti-clickjacking、CORS、nuclei 的 hardening header、10036 版本、10055-13）：回應的 header 由端點的程式或框架的設定產生，和物件無關 → 端點層級。
+- **注入類與參數的行為**（40018、40012、40003、20019-1、6-5）：同一個參數走同一段程式 → 參數層級（不同參數仍是不同的 finding）。
+- **偵測與技術識別**（10109、10111、robots.txt、security.txt、openapi、OPTIONS、tech-detect、fingerprinthub）：固定的 path 或以技術名區分 → 不受物件影響。
+- **10202 anti-CSRF、2 內部 IP 外洩**：前者是表單的產生方式（端點層級）；後者的內部位址來自回應的內容，不同物件的回應可能不同。真實輸出只在固定 path 出現過，依「審查過的群組不變」（使用者決定）維持參數層級，列為效度威脅：有規格的 API 若在不同物件洩漏不同位址，會被合併成一個 finding（每個觀察仍各自可追溯）。
+- **werkzeug debugger**（provisional）：固定 path 的偵測 → 不受物件影響。
+- **fallback**（沒有審查過）：無法判斷 → 一律保留字面 path（T20 的 v2 規則）。
+- 結論：34 個群組的 `resource_scoped` 都維持 false；單人審查，列為效度威脅（比照 §8 其他的審查）。
