@@ -19,8 +19,8 @@ from secscan.findings.domain.linking import (
     merge,
     plan_links,
 )
-from secscan.findings.domain.normalization import Confidence, Severity
-from secscan.findings.domain.taxonomy import CweSource, FindingKind, load_taxonomy
+from secscan.findings.domain.normalization import Severity
+from secscan.findings.domain.taxonomy import CweSource, FindingCategory, FindingKind, load_taxonomy
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import FrozenOperation
 from secscan.scans.domain.observation import ParameterLocation
@@ -57,32 +57,85 @@ def _plan(*rows: ObservationRow, context: LinkContext = CONTEXT) -> tuple[Findin
     return plan_links(context, rows, load_taxonomy())
 
 
-def test_co_located_hits_of_a_reviewed_group_are_one_finding() -> None:
-    [draft] = _plan(ZAP_CORS, NUCLEI_CORS)
+def test_cors_hits_of_both_engines_stay_separate() -> None:
+    """使用者簽核（2026-11-04）：ZAP 看到 `*`、nuclei 看到反射任意 Origin 並允許 credentials，
+    偵測的行為不同，同一個位置也不合併（只在 API 標示相關）；同時命中不提高等級或信心。"""
+    drafts = {draft.inputs.rule_group: draft for draft in _plan(ZAP_CORS, NUCLEI_CORS)}
 
-    assert draft.inputs.rule_group == "cors-permissive-policy"
-    assert [link.observation_id for link in draft.links] == [ZAP_CORS.id, NUCLEI_CORS.id]
-    # 最高值是 ZAP 的 Medium；等級不一致是衝突；兩個工具同時命中不提高等級或信心。
-    assert draft.aggregate == Aggregate(Severity.MEDIUM, severity_conflict=True, needs_review=False)
-    assert [link.confidence for link in draft.links] == [Confidence.MEDIUM, Confidence.UNKNOWN]
-    # 群組審查後的 CWE（不是 ZAP 的 264 或 nuclei 的 346）→ 官方的 A02:2025；API 2023 是 curated。
-    assert (draft.cwe_id, draft.cwe_source) == (942, CweSource.RULE_GROUP)
-    assert (draft.owasp_top10_2025, draft.owasp_api_2023) == ("A02:2025", "API8:2023")
-    assert draft.title == "Permissive cross-origin resource sharing (CORS) policy"
-    assert draft.route_source is RouteSource.LITERAL
+    assert set(drafts) == {
+        "zap-cors-wildcard-origin",
+        "nuclei-cors-arbitrary-origin-with-credentials",
+    }
+    zap, nuclei = (
+        drafts["zap-cors-wildcard-origin"],
+        drafts["nuclei-cors-arbitrary-origin-with-credentials"],
+    )
+    assert zap.aggregate == Aggregate(Severity.MEDIUM, severity_conflict=False, needs_review=False)
+    assert nuclei.aggregate == Aggregate(Severity.INFO, severity_conflict=False, needs_review=False)
+    # ZAP 保留原始的 CWE-264（分類節點，沒有 Top 10:2025）；nuclei 的群組取模板分類中的 CWE-942。
+    assert (zap.cwe_id, zap.owasp_top10_2025, zap.category) == (
+        264,
+        None,
+        FindingCategory.MISCONFIGURATION,
+    )
+    assert (nuclei.cwe_id, nuclei.owasp_top10_2025, nuclei.category) == (
+        942,
+        "A02:2025",
+        FindingCategory.VULNERABILITY,
+    )
+    assert {zap.owasp_api_2023, nuclei.owasp_api_2023} == {"API8:2023"}
+    assert zap.route_source is RouteSource.LITERAL
 
 
-def test_header_groups_ignore_the_tools_differing_parameters() -> None:
-    """ZAP 把缺的 header 名放在參數、nuclei 沒有參數：endpoint 粒度的群組照樣合併。"""
-    zap = _row(Engine.ZAP, "10021", "10021", raw_severity="1", parameter="x-content-type-options")
-    nuclei = _row(Engine.NUCLEI, "http-missing-security-headers", "x-content-type-options")
+ZAP_XCTO = _row(Engine.ZAP, "10021", "10021", raw_severity="1", parameter="x-content-type-options")
+NUCLEI_XCTO = _row(Engine.NUCLEI, "http-missing-security-headers", "x-content-type-options")
+ANCHORED = replace(CONTEXT, anchors=frozenset({("x-content-type-options-missing", "GET", "/")}))
 
-    [draft] = _plan(zap, nuclei)
+
+def test_a_corroborated_nuclei_hit_joins_the_zap_finding() -> None:
+    """同一次 scan、同一個 method 與 path 有 ZAP 的錨點：nuclei 併入，參數的差異不影響。"""
+    [draft] = _plan(ZAP_XCTO, NUCLEI_XCTO, context=ANCHORED)
 
     assert draft.inputs.rule_group == "x-content-type-options-missing"
     assert (draft.inputs.parameter_location, draft.inputs.parameter_name) == (None, None)
-    assert draft.aggregate.severity is Severity.LOW
+    assert draft.aggregate == Aggregate(Severity.LOW, severity_conflict=True, needs_review=False)
     assert draft.owasp_top10_2025 == "A06:2025"
+
+
+def test_a_nuclei_hit_without_a_zap_anchor_stays_in_its_own_group() -> None:
+    """沒有佐證（別的 scan、別的位置、ZAP 沒命中）：留在 nuclei 自己的群組，不合併。"""
+    elsewhere = replace(
+        CONTEXT, anchors=frozenset({("x-content-type-options-missing", "GET", "/a")})
+    )
+    other_method = replace(
+        CONTEXT, anchors=frozenset({("x-content-type-options-missing", "POST", "/")})
+    )
+
+    for context in (CONTEXT, elsewhere, other_method):
+        [draft] = _plan(NUCLEI_XCTO, context=context)
+        assert draft.inputs.rule_group == "nuclei-x-content-type-options-missing"
+
+
+def test_a_lone_nuclei_x_frame_options_hit_is_hardening() -> None:
+    """nuclei 只看 X-Frame-Options、不看 CSP frame-ancestors：單獨命中不標 clickjacking。"""
+    xfo = _row(Engine.NUCLEI, "http-missing-security-headers", "x-frame-options", cwe_id=693)
+    anchored = replace(
+        CONTEXT, anchors=frozenset({("anti-clickjacking-header-missing", "GET", "/")})
+    )
+
+    [alone] = _plan(xfo)
+    [joined] = _plan(xfo, context=anchored)
+
+    assert (alone.inputs.rule_group, alone.inputs.kind, alone.category) == (
+        "nuclei-x-frame-options-missing",
+        FindingKind.INFORMATIONAL,
+        FindingCategory.HARDENING,
+    )
+    assert (joined.inputs.rule_group, joined.cwe_id, joined.category) == (
+        "anti-clickjacking-header-missing",
+        1021,
+        FindingCategory.MISCONFIGURATION,
+    )
 
 
 def test_a_reviewed_group_without_a_cwe_ignores_the_tools_cwe() -> None:
@@ -94,7 +147,7 @@ def test_a_reviewed_group_without_a_cwe_ignores_the_tools_cwe() -> None:
 
 
 def test_a_different_endpoint_is_a_different_finding() -> None:
-    drafts = _plan(ZAP_CORS, replace(NUCLEI_CORS, path="/api/users"))
+    drafts = _plan(ZAP_CORS, replace(ZAP_CORS, id=uuid4(), path="/api/users"))
 
     assert len(drafts) == 2
     assert all(len(draft.links) == 1 for draft in drafts)
@@ -131,18 +184,40 @@ def test_parameters_separate_findings_of_parameter_groups() -> None:
     assert names == {"q", "username"}
 
 
-def test_fallback_keeps_the_variant_and_the_tools_title() -> None:
+def test_technology_detections_keep_the_name_and_are_counted_apart() -> None:
     python = _row(Engine.NUCLEI, "tech-detect", "python", title="Wappalyzer Technology Detection")
     fonts = replace(python, id=uuid4(), rule_variant="google-font-api")
 
     drafts = _plan(python, fonts)
 
     assert {draft.inputs.rule_group for draft in drafts} == {
-        "nuclei:tech-detect:python",
-        "nuclei:tech-detect:google-font-api",
+        "nuclei-tech-detect/python",
+        "nuclei-tech-detect/google-font-api",
     }
-    assert {draft.title for draft in drafts} == {"Wappalyzer Technology Detection"}
-    assert {draft.inputs.kind for draft in drafts} == {FindingKind.INFORMATIONAL}
+    assert {draft.title for draft in drafts} == {
+        "Technology detected: python",
+        "Technology detected: google-font-api",
+    }
+    assert {(draft.inputs.kind, draft.category) for draft in drafts} == {
+        (FindingKind.INFORMATIONAL, FindingCategory.TECHNOLOGY)
+    }
+    assert not any(draft.aggregate.needs_review for draft in drafts)
+
+
+def test_fallback_keeps_the_variant_and_the_tools_title() -> None:
+    first = _row(Engine.NUCLEI, "unknown-template", "a", title="Unknown Template")
+    second = replace(first, id=uuid4(), rule_variant="b")
+
+    drafts = _plan(first, second)
+
+    assert {draft.inputs.rule_group for draft in drafts} == {
+        "nuclei:unknown-template:a",
+        "nuclei:unknown-template:b",
+    }
+    assert {draft.title for draft in drafts} == {"Unknown Template"}
+    assert {(draft.inputs.kind, draft.category) for draft in drafts} == {
+        (FindingKind.INFORMATIONAL, FindingCategory.UNCLASSIFIED)
+    }
 
 
 def test_an_unknown_tool_severity_needs_review() -> None:

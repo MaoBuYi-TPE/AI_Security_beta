@@ -14,7 +14,8 @@ from sqlalchemy import Engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.core.db import create_db_engine
-from secscan.findings import repository
+from secscan.findings import records
+from secscan.findings.domain.taxonomy import parse_taxonomy
 from secscan.findings.service import FindingLinker
 from secscan.runner.plans import ENGINE_IMAGES
 from secscan.scans.domain.catalog import Engine as ScanEngine
@@ -73,9 +74,11 @@ def _findings(seed: Seeder, target_id: UUID) -> dict[str, dict[str, object]]:
     return {row.rule_group: dict(row._mapping) for row in rows}
 
 
-def test_co_located_hits_of_both_engines_are_one_finding(
+def test_only_corroborated_header_hits_merge_across_engines(
     queue: ScanQueue, linker: FindingLinker, queue_seed: Seeder, world: World
 ) -> None:
+    """使用者簽核（2026-11-04）：同一次 scan、同一個位置有 ZAP 的錨點時 nuclei 的 XCTO 併入；
+    CORS 兩個工具偵測的行為不同，各自一個 finding（只標示相關）；技術識別保留技術名。"""
     target, grant_id = web_target(queue_seed, world)
     scan_id = web_scan(queue_seed, world, target, grant_id, (ZAP, NUCLEI))
     zap = parsed_run(queue, ZAP, (ZAP_CORS, ZAP_XCTO, ZAP_SQLI))
@@ -87,38 +90,88 @@ def test_co_located_hits_of_both_engines_are_one_finding(
     findings = _findings(queue_seed, target.id)
 
     assert set(findings) == {
-        "cors-permissive-policy",
+        "zap-cors-wildcard-origin",
+        "nuclei-cors-arbitrary-origin-with-credentials",
         "x-content-type-options-missing",
         "zap-sql-injection",
-        "nuclei:tech-detect:python",
+        "nuclei-tech-detect/python",
     }
-    cors = findings["cors-permissive-policy"]
-    # 最高值是 ZAP 的 medium，等級不一致；兩個工具同時命中不提高等級。
-    assert (cors["normalized_severity"], cors["severity_conflict"], cors["links"]) == (
-        "medium",
+    xcto = findings["x-content-type-options-missing"]
+    # 最高值是 ZAP 的 low，等級不一致；兩個工具同時命中不提高等級。
+    assert (xcto["normalized_severity"], xcto["severity_conflict"], xcto["links"]) == (
+        "low",
         True,
         2,
     )
-    assert (cors["cwe_id"], cors["cwe_source"]) == (942, "rule_group")
-    assert (cors["owasp_top10_2025"], cors["owasp_top10_2025_source"]) == ("A02:2025", "official")
-    assert (cors["owasp_api_2023"], cors["owasp_api_2023_source"]) == ("API8:2023", "curated")
-    assert (cors["first_seen_run_id"], cors["last_seen_run_id"]) == (zap.run_id, nuclei.run_id)
-    assert (cors["first_seen_scan_id"], cors["last_seen_scan_id"]) == (scan_id, scan_id)
-    assert (cors["triage_state"], cors["lifecycle_state"]) == ("unreviewed", "open")
-    assert (cors["route"], cors["route_source"], cors["auth_verified"]) == ("/", "literal", True)
-    xcto = findings["x-content-type-options-missing"]
-    assert (xcto["normalized_severity"], xcto["links"], xcto["parameter_name"]) == ("low", 2, None)
+    assert (xcto["category"], xcto["parameter_name"]) == ("misconfiguration", None)
+    assert (xcto["first_seen_run_id"], xcto["last_seen_run_id"]) == (zap.run_id, nuclei.run_id)
+    assert (xcto["first_seen_scan_id"], xcto["last_seen_scan_id"]) == (scan_id, scan_id)
+    assert (xcto["triage_state"], xcto["lifecycle_state"]) == ("unreviewed", "open")
+    assert (xcto["route"], xcto["route_source"], xcto["auth_verified"]) == ("/", "literal", True)
+    zap_cors = findings["zap-cors-wildcard-origin"]
+    assert (zap_cors["links"], zap_cors["severity_conflict"], zap_cors["cwe_id"]) == (1, False, 264)
+    assert (zap_cors["owasp_top10_2025"], zap_cors["owasp_top10_2025_source"]) == (None, "none")
+    nuclei_cors = findings["nuclei-cors-arbitrary-origin-with-credentials"]
+    assert (nuclei_cors["links"], nuclei_cors["category"], nuclei_cors["cwe_id"]) == (
+        1,
+        "vulnerability",
+        942,
+    )
+    assert (nuclei_cors["owasp_top10_2025"], nuclei_cors["owasp_api_2023"]) == (
+        "A02:2025",
+        "API8:2023",
+    )
     sqli = findings["zap-sql-injection"]
     assert (sqli["parameter_location"], sqli["parameter_name"], sqli["needs_review"]) == (
         "query",
         "q",
         False,
     )
-    tech = findings["nuclei:tech-detect:python"]
-    assert (tech["needs_review"], tech["kind"], tech["cwe_id"]) == (True, "informational", None)
+    tech = findings["nuclei-tech-detect/python"]
+    assert (tech["needs_review"], tech["kind"], tech["category"]) == (
+        False,
+        "informational",
+        "technology",
+    )
     # 每個觀察恰好連結一次。
     [row] = queue_seed.query("SELECT count(*) AS n FROM finding_observations")
     assert row.n == 6
+
+
+def test_a_nuclei_hit_is_not_corroborated_by_another_scan(
+    queue: ScanQueue, linker: FindingLinker, queue_seed: Seeder, world: World
+) -> None:
+    """佐證只看同一次 scan：前一次 scan 的 ZAP 命中不讓這次的 nuclei 併入。"""
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP,))
+    zap = parsed_run(queue, ZAP, (ZAP_XCTO,))
+    linker.link(zap)
+    queue.advance(zap, RunStatus.SUCCEEDED)
+    web_scan(queue_seed, world, target, grant_id, (NUCLEI,))
+    linker.link(parsed_run(queue, NUCLEI, (NUCLEI_XCTO,)))
+
+    assert set(_findings(queue_seed, target.id)) == {
+        "x-content-type-options-missing",
+        "nuclei-x-content-type-options-missing",
+    }
+
+
+def test_a_nuclei_hit_elsewhere_is_not_corroborated(
+    queue: ScanQueue, linker: FindingLinker, queue_seed: Seeder, world: World
+) -> None:
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP, NUCLEI))
+    zap = parsed_run(queue, ZAP, (replace(ZAP_XCTO, path="/search"),))
+    linker.link(zap)
+    queue.advance(zap, RunStatus.SUCCEEDED)
+    linker.link(parsed_run(queue, NUCLEI, (NUCLEI_XCTO,)))
+
+    findings = _findings(queue_seed, target.id)
+
+    assert {(name, row["route"]) for name, row in findings.items()} == {
+        ("x-content-type-options-missing", "/search"),
+        ("nuclei-x-content-type-options-missing", "/"),
+    }
 
 
 def test_linking_again_adds_nothing(
@@ -302,7 +355,8 @@ def test_a_second_run_waits_for_the_first_and_merges_without_duplicates(
     target, grant_id = web_target(queue_seed, world)
     web_scan(queue_seed, world, target, grant_id, (ZAP, NUCLEI))
     zap = parsed_run(queue, ZAP, (ZAP_CORS, ZAP_XCTO, ZAP_SQLI))
-    nuclei = parsed_run(queue, NUCLEI, (NUCLEI_CORS, NUCLEI_XCTO, NUCLEI_TECH))
+    # worker 依序解析同一個 scan 的 run；這裡以 nuclei 的 runner lease 直接寫入，驗證 DB 層的鎖序。
+    nuclei = parsed_run(queue, NUCLEI, (NUCLEI_CORS, NUCLEI_XCTO, NUCLEI_TECH), worker=False)
     paused, release = threading.Event(), threading.Event()
     errors: list[Exception] = []
 
@@ -338,9 +392,10 @@ def test_a_second_run_waits_for_the_first_and_merges_without_duplicates(
 
     assert errors == []
     findings = _findings(queue_seed, target.id)
-    assert findings["cors-permissive-policy"]["links"] == 2
-    assert findings["cors-permissive-policy"]["severity_conflict"] is True
-    assert findings["cors-permissive-policy"]["last_seen_run_id"] == nuclei.run_id
+    # 佐證來自同一次 scan 已寫入的 ZAP 觀察：nuclei 的 XCTO 併入，等它的列鎖。
+    shared = findings["x-content-type-options-missing"]
+    assert (shared["links"], shared["severity_conflict"]) == (2, True)
+    assert shared["last_seen_run_id"] == nuclei.run_id
     assert sum(finding["links"] for finding in findings.values()) == 6  # type: ignore[misc]
 
 
@@ -352,24 +407,24 @@ def test_batches_cover_every_finding_and_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """跨批次的新增、鎖定與連結（BATCH_SIZE 改成 2，7 個 finding、8 個觀察）。"""
-    monkeypatch.setattr(repository, "BATCH_SIZE", 2)
+    monkeypatch.setattr(records, "BATCH_SIZE", 2)
     target, grant_id = web_target(queue_seed, world)
     web_scan(queue_seed, world, target, grant_id, (ZAP, NUCLEI))
     paths = [f"/p{index}" for index in range(5)]
     zap = parsed_run(
         queue,
         ZAP,
-        [replace(ZAP_CORS, source_event_id=f"{i:064x}", path=path) for i, path in enumerate(paths)]
-        + [ZAP_XCTO],
+        [replace(ZAP_XCTO, source_event_id=f"{i:064x}", path=path) for i, path in enumerate(paths)]
+        + [ZAP_SQLI],
     )
     linker.link(zap)
     queue.advance(zap, RunStatus.SUCCEEDED)
-    # 第二個 run 命中既有的 5 個（跨批次鎖定）與一個新的。
+    # 第二個 run 的 5 個有同一次 scan 的 ZAP 佐證、併入既有的 finding（跨批次鎖定），一個是新的。
     nuclei = parsed_run(
         queue,
         NUCLEI,
         [
-            replace(NUCLEI_CORS, source_event_id=f"{i:064x}", path=path)
+            replace(NUCLEI_XCTO, source_event_id=f"{i:064x}", path=path)
             for i, path in enumerate(paths)
         ]
         + [NUCLEI_TECH],
@@ -381,9 +436,45 @@ def test_batches_cover_every_finding_and_link(
     assert row.n == 12
     rows = queue_seed.query(
         "SELECT route, severity_conflict, last_seen_run_id FROM findings "
-        "WHERE target_id = :t AND rule_group = 'cors-permissive-policy' ORDER BY route",
+        "WHERE target_id = :t AND rule_group = 'x-content-type-options-missing' ORDER BY route",
         t=target.id,
     )
     assert [(r.route, r.severity_conflict, r.last_seen_run_id) for r in rows] == [
         (path, True, nuclei.run_id) for path in paths
     ]
+
+
+def test_another_variant_of_the_anchor_rule_does_not_corroborate(
+    queue: ScanQueue, linker: FindingLinker, queue_seed: Seeder, world: World
+) -> None:
+    """錨點是精確的 (規則, variant)：ZAP 10038 的其他 variant 不讓 nuclei 的 CSP 併入。"""
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP, NUCLEI))
+    zap = parsed_run(queue, ZAP, (observation("10038", "10038-2"),))
+    linker.link(zap)
+    queue.advance(zap, RunStatus.SUCCEEDED)
+    nuclei_csp = observation(
+        "http-missing-security-headers", "content-security-policy", severity="info", nuclei=True
+    )
+    linker.link(parsed_run(queue, NUCLEI, (nuclei_csp,)))
+
+    assert set(_findings(queue_seed, target.id)) == {
+        "zap:10038:10038-2",
+        "nuclei-csp-header-missing",
+    }
+
+
+def test_a_taxonomy_without_anchors_links_without_corroboration(
+    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World
+) -> None:
+    taxonomy = parse_taxonomy(
+        b'schema: 2\nversion: "1"\ngroups:\n  - id: zap-sql-injection\n    title: SQL injection\n'
+        b"    kind: security\n    category: vulnerability\n    review:\n      status: reviewed\n"
+        b'    members:\n      - engine: zap\n        rule: "40018"\n'
+    )
+    linker = FindingLinker(sessionmaker(queue_engine, expire_on_commit=False), taxonomy=taxonomy)
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP,))
+
+    assert linker.link(parsed_run(queue, ZAP, (ZAP_SQLI, ZAP_XCTO))) == 2
+    assert set(_findings(queue_seed, target.id)) == {"zap-sql-injection", "zap:10021"}

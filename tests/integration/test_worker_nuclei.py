@@ -208,11 +208,13 @@ def test_the_worker_links_the_observations_to_findings(
 
     assert report.run_status is RunStatus.SUCCEEDED
     rows = _linked(queue_seed, lease.run_id)
+    # 沒有 ZAP 的佐證：XFO 留在 nuclei 自己的群組（不看 frame-ancestors，不標 clickjacking）；
+    # 技術識別保留技術名（使用者簽核，§25.14）。
     assert [(row.rule_group, row.route, row.n) for row in rows] == [
-        ("anti-clickjacking-header-missing", "/", 1),
-        ("nuclei:tech-detect:python", "/", 1),
+        ("nuclei-tech-detect/python", "/", 1),
+        ("nuclei-x-frame-options-missing", "/", 1),
     ]
-    assert [row.needs_review for row in rows] == [False, True]
+    assert [row.needs_review for row in rows] == [False, False]
 
 
 class _FailingOnce:

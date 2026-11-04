@@ -1,13 +1,15 @@
 """T19：同一個 scan 以真的 ZAP 與 Nuclei 掃自製的 fixture app，worker 把觀察連結到 finding
 （docs/DECISIONS.md §25；make test-live-fixture-findings）。
 
-fixture app 在 live 自己的 lab 網路上、一次一個（lab_support.start_fixture）。T18 的實證：弱點版的
-GET / 上，ZAP 10098 與 nuclei cors-misconfig 對同一個 CORS 政策同時命中，等級不一致（Medium 對
-info）。這裡驗證整條路徑（API → 兩個引擎依序共用預算 → worker 解析與連結 → GET findings）：
-- 弱點版：CORS 是一個 finding、有兩個引擎的來源，等級是兩者正規化之後的最高值並標衝突，對應
-  A02:2025（official）與 API8:2023（curated）。
-- 每個觀察恰好連結一次；只有審查過的跨引擎群組會有兩個引擎的來源；fallback 永遠單一引擎。
-- 修補版：沒有 CORS 的 finding。
+fixture app 在 live 自己的 lab 網路上、一次一個（lab_support.start_fixture）。這裡驗證整條路徑
+（API → 兩個引擎依序共用預算 → worker 解析與連結 → GET findings），規則依使用者的簽核
+（2026-11-04，docs/DECISIONS.md §25.14）：
+- 弱點版：缺 CSP／XCTO／anti-clickjacking 的 header 以 ZAP 為準，nuclei 在同一次 scan 的同一個位置
+  佐證時併入同一個 finding，等級是兩者正規化之後的最高值並標衝突。CORS 兩個工具偵測的行為不同
+  （ZAP 看到 `*`、nuclei 看到反射任意 Origin 並允許 credentials），同一個位置各自一個 finding、互相
+  標示相關。
+- 每個觀察恰好連結一次；只有佐證的 header 群組會有兩個引擎的來源；fallback 永遠單一引擎。
+- 修補版：沒有任何 CORS 的 finding。
 量測機制與 T16／T18 相同（plan_hash、和 /scan-profiles 相同的定義、observed ⊆ forwarded、guard 只
 看到 target），每個引擎各檢查一次。SECSCAN_RECORD_DIR 有設定時錄製到 recordings/fixture-findings/。
 """
@@ -34,15 +36,11 @@ pytestmark = [pytest.mark.live, pytest.mark.enable_socket]
 WEB_METHODS = ["GET", "HEAD", "POST"]
 ENGINES = ("zap", "nuclei")
 PROFILE = "web_active_lab"
-CORS_GROUP = "cors-permissive-policy"
+ZAP_CORS = "zap-cors-wildcard-origin"
+NUCLEI_CORS = "nuclei-cors-arbitrary-origin-with-credentials"
 # 審查過的跨引擎群組（rule_groups.yaml；只有它們可能有兩個引擎的來源）。
 CROSS_ENGINE_GROUPS = frozenset(
-    {
-        CORS_GROUP,
-        "csp-header-missing",
-        "x-content-type-options-missing",
-        "anti-clickjacking-header-missing",
-    }
+    {"csp-header-missing", "x-content-type-options-missing", "anti-clickjacking-header-missing"}
 )
 SEVERITY_ORDER = ("info", "low", "medium", "high", "critical")
 TERMINAL_SCANS = {"completed", "partially_completed", "failed", "timed_out", "cancelled"}
@@ -202,7 +200,8 @@ def _print(combined: Combined) -> None:
         )
         lines.append(
             f"  {item['normalized_severity']:<6} conflict={item['severity_conflict']!s:<5} "
-            f"{item['rule_group']} {item['location']['method']} {item['location']['route']} "
+            f"{item['category']:<16} {item['rule_group']} "
+            f"{item['location']['method']} {item['location']['route']} "
             f"{item['owasp']['top10_2025']} [{sources}]"
         )
     for line in lines:
@@ -243,7 +242,7 @@ def _assert_common(combined: Combined, target: Target, definitions: dict[str, st
         assert item["severity_conflict"] is (len(severities) > 1), item
         if len(_engines(item)) > 1:
             assert item["rule_group"] in CROSS_ENGINE_GROUPS, item
-        if ":" in item["rule_group"]:
+        if item["category"] == "unclassified":
             assert len(_engines(item)) == 1, item
             assert item["needs_review"] is True, item
 
@@ -255,7 +254,7 @@ class TestFixtureVulnerable:
         yield target
         stop_target(target)
 
-    def test_co_located_hits_become_one_finding(
+    def test_corroborated_hits_merge_and_cors_stays_related(
         self, admin: Api, definitions: dict[str, str], vuln: Target
     ) -> None:
         item = _web_lab(admin, vuln)
@@ -263,28 +262,36 @@ class TestFixtureVulnerable:
         combined = _run("fixture-findings-vuln", item)
 
         _assert_common(combined, vuln, definitions)
-        cors = combined.finding(CORS_GROUP)
-        assert cors is not None, [f["rule_group"] for f in combined.findings]
-        assert _engines(cors) == {"zap", "nuclei"}, cors["sources"]
-        # 兩個工具同時命中不提高等級：最高值是 ZAP 的 medium（nuclei 是 info），標成衝突。
-        assert (cors["normalized_severity"], cors["severity_conflict"]) == ("medium", True)
-        assert cors["cwe_ids"] == ["CWE-942"]
-        assert cors["owasp"] == {
-            "top10_2025": "A02:2025",
-            "top10_2025_source": "official",
-            "api_2023": "API8:2023",
-            "api_2023_source": "curated",
-        }
-        assert (cors["kind"], cors["auth_role"], cors["auth_verified"]) == (
-            "security",
-            "anonymous",
-            True,
+        zap_cors, nuclei_cors = combined.finding(ZAP_CORS), combined.finding(NUCLEI_CORS)
+        assert zap_cors is not None, [f["rule_group"] for f in combined.findings]
+        assert nuclei_cors is not None, [f["rule_group"] for f in combined.findings]
+        # 偵測的行為不同：各自一個 finding、只有自己的引擎，互相標示相關，不合併也不升級。
+        assert (_engines(zap_cors), _engines(nuclei_cors)) == ({"zap"}, {"nuclei"})
+        assert zap_cors["related_finding_ids"] == [nuclei_cors["id"]]
+        assert nuclei_cors["related_finding_ids"] == [zap_cors["id"]]
+        assert (zap_cors["normalized_severity"], zap_cors["severity_conflict"]) == ("medium", False)
+        assert (nuclei_cors["normalized_severity"], nuclei_cors["category"]) == (
+            "info",
+            "vulnerability",
         )
-        # 缺安全 header 的群組：兩個工具都在 GET / 回報時是同一個 finding。
-        for group in CROSS_ENGINE_GROUPS - {CORS_GROUP}:
+        # 保留原始 CWE：ZAP 的 CWE-264 不在 Top 10:2025 的清單；nuclei 群組取模板分類的 CWE-942。
+        assert (zap_cors["cwe_ids"], zap_cors["owasp"]["top10_2025_unmapped_reason"]) == (
+            ["CWE-264"],
+            "cwe_not_listed",
+        )
+        assert (nuclei_cors["cwe_ids"], nuclei_cors["tool_cwe_ids"]) == (["CWE-942"], ["CWE-346"])
+        assert nuclei_cors["owasp"]["top10_2025"] == "A02:2025"
+        assert {zap_cors["owasp"]["api_2023"], nuclei_cors["owasp"]["api_2023"]} == {"API8:2023"}
+        assert (zap_cors["auth_role"], zap_cors["auth_verified"]) == ("anonymous", True)
+        # 缺安全 header 的群組：兩個工具都在 GET / 回報時，nuclei 的佐證併入 ZAP 的 finding。
+        merged = 0
+        for group in CROSS_ENGINE_GROUPS:
             finding = combined.finding(group)
             if finding is not None and _hit_by_both(combined, group):
                 assert _engines(finding) == {"zap", "nuclei"}, (group, finding["sources"])
+                assert finding["severity_conflict"] is True
+                merged += 1
+        assert merged >= 1
 
 
 class TestFixtureSecure:
@@ -302,7 +309,7 @@ class TestFixtureSecure:
         combined = _run("fixture-findings-secure", item)
 
         _assert_common(combined, secure, definitions)
-        assert not [f for f in combined.findings if f["rule_group"] == CORS_GROUP]
+        assert not [f for f in combined.findings if f["rule_group"] in {ZAP_CORS, NUCLEI_CORS}]
 
 
 _MEMBERS = {

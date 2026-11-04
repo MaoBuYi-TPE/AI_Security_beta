@@ -26,9 +26,11 @@ from secscan.findings.domain.owasp import top10_category
 from secscan.findings.domain.taxonomy import (
     Classification,
     CweSource,
+    FindingCategory,
     Granularity,
     Taxonomy,
     classify,
+    group_classification,
 )
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import FrozenOperation, operation_routes
@@ -63,6 +65,9 @@ class LinkContext:
     auth_verified: bool
     # scan 有規格時範圍內的 operation（route 樣板化）；沒有規格是空的。
     operations: tuple[FrozenOperation, ...] = ()
+    # 同一次 scan 中錨點群組的觀察：(群組 id, method, path)。佐證成員只有在這裡找得到同一個位置的
+    # 錨點時才併入錨點群組（使用者簽核，§25.14）。
+    anchors: frozenset[tuple[str, str, str]] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +91,7 @@ class FindingDraft:
     inputs: FingerprintInputs
     route_source: RouteSource
     title: str
+    category: FindingCategory
     cwe_id: int | None
     cwe_source: CweSource | None
     owasp_top10_2025: str | None
@@ -154,14 +160,7 @@ def plan_links(
     sources: dict[str, RouteSource] = {}
     for row in observations:
         normalized = normalize(row.engine, row.raw_severity, row.raw_confidence)
-        classification = classify(
-            taxonomy,
-            row.engine,
-            row.source_rule,
-            row.rule_variant,
-            tool_cwe=row.cwe_id,
-            severity=normalized.severity,
-        )
+        classification = _classify(context, row, taxonomy, normalized.severity)
         located = position(routes, row.method, row.path)
         inputs = _inputs(context, row, classification, located)
         link = Link(
@@ -174,6 +173,23 @@ def plan_links(
         grouped.setdefault(key, []).append((row, classification, inputs, link))
         sources.setdefault(key, located.source)
     return tuple(_draft(key, grouped[key], sources[key]) for key in sorted(grouped))
+
+
+def _classify(
+    context: LinkContext, row: ObservationRow, taxonomy: Taxonomy, severity: Severity
+) -> Classification:
+    """群組（或 fallback）；佐證成員在同一次 scan、同一個 method 與 path 有錨點時改屬錨點群組。"""
+    anchor = taxonomy.anchor_for(row.engine, row.source_rule, row.rule_variant)
+    if anchor is not None and (anchor.id, row.method, row.path) in context.anchors:
+        return group_classification(anchor)
+    return classify(
+        taxonomy,
+        row.engine,
+        row.source_rule,
+        row.rule_variant,
+        tool_cwe=row.cwe_id,
+        severity=severity,
+    )
 
 
 def _inputs(
@@ -211,6 +227,7 @@ def _draft(
         inputs=inputs,
         route_source=source,
         title=classification.title or first.title,
+        category=classification.category,
         cwe_id=cwe_id,
         cwe_source=cwe_source,
         owasp_top10_2025=top10_category(cwe_id),

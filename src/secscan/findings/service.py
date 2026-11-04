@@ -16,7 +16,8 @@ from secscan.core.pagination import Page, PageRequest
 from secscan.findings.domain.linking import merge, plan_links
 from secscan.findings.domain.model import Finding, FindingFilters
 from secscan.findings.domain.taxonomy import Taxonomy, load_taxonomy, mapping_identity
-from secscan.findings.repository import FindingRecords, FindingRepository
+from secscan.findings.records import FindingRecords
+from secscan.findings.repository import FindingRepository
 from secscan.scans.domain.model import Lease
 from secscan.scans.service import ScanService
 from secscan.targets.domain import LabNetwork
@@ -39,7 +40,11 @@ class FindingLinker:
             observations = records.unlinked(lease)
             if not observations:
                 return 0
-            context = records.context(lease, details)
+            # 這個引擎沒有佐證成員（例如 ZAP）：不必查同一次 scan 的錨點觀察。
+            anchors = (
+                self._taxonomy.anchor_members if self._taxonomy.corroborates(lease.engine) else {}
+            )
+            context = records.context(lease, details, anchors)
             drafts = plan_links(context, observations, self._taxonomy)
             finding_ids = records.insert_findings(drafts, lease, self._mapping)
             existing = records.lock_findings(
@@ -64,4 +69,4 @@ class FindingService:
         self, principal: Principal, scan_id: UUID, filters: FindingFilters, page: PageRequest
     ) -> Page[Finding]:
         self._scans.get(principal, scan_id)
-        return self._findings.for_scan(scan_id, filters, page)
+        return self._findings.for_scan(scan_id, filters, page, load_taxonomy().related)

@@ -29,9 +29,11 @@ from secscan.findings.domain.fingerprint import RouteSource
 from secscan.findings.domain.model import LifecycleState, MappingSource, TriageState
 from secscan.findings.domain.normalization import Confidence, Severity
 from secscan.findings.domain.taxonomy import (
+    KIND_CATEGORIES,
     RULE_GROUP_MAX_LENGTH,
     TITLE_MAX_LENGTH,
     CweSource,
+    FindingCategory,
     FindingKind,
 )
 from secscan.scans.domain.observation import (
@@ -58,6 +60,16 @@ def _in_list(values: list[str]) -> str:
 
 
 _KINDS = _in_list([kind.value for kind in FindingKind])
+_CATEGORIES = _in_list([category.value for category in FindingCategory])
+# kind 與 category 一致（unclassified 是 fallback，任何 kind 都可以；docs/DECISIONS.md §25.14）。
+_KIND_CATEGORY = " OR ".join(
+    [f"category = '{FindingCategory.UNCLASSIFIED.value}'"]
+    + [
+        f"(kind = '{kind.value}' AND category IN "
+        f"({_in_list(sorted(category.value for category in categories))}))"
+        for kind, categories in KIND_CATEGORIES.items()
+    ]
+)
 _SEVERITIES = _in_list([severity.value for severity in Severity])
 _CONFIDENCES = _in_list([confidence.value for confidence in Confidence])
 _ROUTE_SOURCES = _in_list([source.value for source in RouteSource])
@@ -92,6 +104,9 @@ class FindingModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
         ),
         CheckConstraint(f"fingerprint ~ '{_SHA256_HEX}'", name="fingerprint_valid"),
         CheckConstraint(f"kind IN ({_KINDS})", name="kind_valid"),
+        CheckConstraint(
+            f"category IN ({_CATEGORIES}) AND ({_KIND_CATEGORY})", name="category_valid"
+        ),
         CheckConstraint("char_length(btrim(rule_group)) > 0", name="rule_group_not_blank"),
         CheckConstraint("char_length(btrim(title)) > 0", name="title_not_blank"),
         CheckConstraint(f"method IN ({_METHODS})", name="method_valid"),
@@ -136,6 +151,8 @@ class FindingModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     # 由下面的身分欄位算出（FingerprintInputs）；欄位都在表中，可以重算，不另存一份 JSON。
     fingerprint: Mapped[str] = mapped_column(String(SHA256_HEX_LENGTH))
     kind: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    # kind 之下的分類（v0014）；和身分一樣不可修改。
+    category: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
     rule_group: Mapped[str] = mapped_column(String(RULE_GROUP_MAX_LENGTH))
     title: Mapped[str] = mapped_column(String(TITLE_MAX_LENGTH))
     method: Mapped[str] = mapped_column(String(METHOD_MAX_LENGTH))

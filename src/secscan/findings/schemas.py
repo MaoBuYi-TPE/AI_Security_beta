@@ -5,7 +5,11 @@
   （不是人工 triage 的結果）。
 - sources 只有查詢的那個 scan 中的來源：同一個引擎、規則、variant 與原值的觀察數，並列工具的原值；
   scan_severity 是這些來源的最高值（同一個 finding 在別的 scan 可能更高）。
-- 沒有 CVE／CVSS 的資料來源：不輸出這些欄位，不捏造。OWASP 對應帶來源（official、curated、none）。
+- 沒有 CVE／CVSS 的資料來源：不輸出這些欄位，不捏造。OWASP 對應帶來源（official、curated、none）與
+  沒有對應的原因；tool_cwe_ids 保留這個 scan 的來源工具回報的原始 CWE。
+- category 區分 vulnerability／misconfiguration（security）、technology／detection／hardening
+  （informational）與 unclassified（fallback，人工確認前分開統計）；人工 triage 之前都不是已驗證的
+  漏洞。
 """
 
 from datetime import datetime
@@ -21,9 +25,12 @@ from secscan.findings.domain.model import (
     LifecycleState,
     MappingSource,
     TriageState,
+    UnmappedReason,
+    api_unmapped_reason,
+    top10_unmapped_reason,
 )
 from secscan.findings.domain.normalization import Confidence, Severity, highest
-from secscan.findings.domain.taxonomy import CweSource, FindingKind
+from secscan.findings.domain.taxonomy import CweSource, FindingCategory, FindingKind
 from secscan.scans.domain.catalog import Engine
 
 
@@ -47,8 +54,10 @@ class OwaspMappingOut(BaseModel):
 
     top10_2025: str | None
     top10_2025_source: MappingSource
+    top10_2025_unmapped_reason: UnmappedReason | None
     api_2023: str | None
     api_2023_source: MappingSource
+    api_2023_unmapped_reason: UnmappedReason | None
 
 
 class FindingSourceOut(BaseModel):
@@ -77,6 +86,7 @@ class FindingOut(BaseModel):
     id: UUID
     target_id: UUID
     kind: FindingKind
+    category: FindingCategory
     rule_group: str
     title: str
     normalized_severity: Severity
@@ -85,6 +95,8 @@ class FindingOut(BaseModel):
     needs_review: bool
     cwe_ids: list[str]
     cwe_source: CweSource | None
+    # 這個 scan 的來源工具回報的原始 CWE（cwe_ids 是群組審查後的值）。
+    tool_cwe_ids: list[str]
     location: FindingLocationOut
     auth_role: str
     # 身分在觀察的 run 中確實有效（anonymous 一律 true）；false 的不會併入已驗證身分的 finding。
@@ -98,6 +110,8 @@ class FindingOut(BaseModel):
     created_at: datetime
     last_seen_at: datetime
     sources: list[FindingSourceOut]
+    # 同一次 scan、同一個位置、taxonomy 標示為相關的 finding（例如偵測行為不同的兩個 CORS 告警）。
+    related_finding_ids: list[UUID]
 
     @classmethod
     def of(cls, finding: Finding) -> Self:
@@ -105,6 +119,7 @@ class FindingOut(BaseModel):
             id=finding.id,
             target_id=finding.target_id,
             kind=finding.kind,
+            category=finding.category,
             rule_group=finding.rule_group,
             title=finding.title,
             normalized_severity=finding.normalized_severity,
@@ -114,6 +129,10 @@ class FindingOut(BaseModel):
             needs_review=finding.needs_review,
             cwe_ids=[f"CWE-{finding.cwe_id}"] if finding.cwe_id is not None else [],
             cwe_source=finding.cwe_source,
+            tool_cwe_ids=[
+                f"CWE-{cwe}"
+                for cwe in sorted({s.cwe_id for s in finding.sources if s.cwe_id is not None})
+            ],
             location=FindingLocationOut(
                 method=finding.method,
                 route=finding.route,
@@ -127,8 +146,12 @@ class FindingOut(BaseModel):
             owasp=OwaspMappingOut(
                 top10_2025=finding.owasp_top10_2025,
                 top10_2025_source=finding.owasp_top10_2025_source,
+                top10_2025_unmapped_reason=top10_unmapped_reason(
+                    finding.cwe_id, finding.owasp_top10_2025
+                ),
                 api_2023=finding.owasp_api_2023,
                 api_2023_source=finding.owasp_api_2023_source,
+                api_2023_unmapped_reason=api_unmapped_reason(finding.owasp_api_2023),
             ),
             mapping_version=finding.mapping_version,
             triage_state=finding.triage_state,
@@ -138,4 +161,5 @@ class FindingOut(BaseModel):
             created_at=finding.created_at,
             last_seen_at=finding.last_seen_at,
             sources=[FindingSourceOut.of(source) for source in finding.sources],
+            related_finding_ids=list(finding.related_finding_ids),
         )

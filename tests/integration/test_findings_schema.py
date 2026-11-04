@@ -10,11 +10,13 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from alembic import command
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.findings.models import FindingModel
 from secscan.findings.service import FindingLinker
+from secscan.migrations import alembic_config
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.queue import ScanQueue
 from tests.integration.api_support import LAB, Seeder
@@ -77,6 +79,7 @@ def _update(session: Session, finding: UUID, assignment: str) -> str:
         "rule_group = 'zap:40018'",
         "route = '/other'",
         "fingerprint = repeat('c', 64)",
+        "category = 'unclassified'",
         "auth_verified = false",
         "owasp_top10_2025 = NULL, owasp_top10_2025_source = 'none'",
         "cwe_id = 79",
@@ -191,6 +194,10 @@ def _copy(session: Session, linked: Linked, **overrides: object) -> str:
         {"parameter_name": None},
         {"parameter_location": "body"},
         {"kind": "finding"},
+        {"category": "exploit"},
+        # kind 與 category 不一致（unclassified 是 fallback，任何 kind 都可以）。
+        {"category": "technology"},
+        {"kind": "informational", "category": "vulnerability"},
         {"normalized_severity": "severe"},
         {"route": "search"},
         {"route_source": "guess"},
@@ -215,6 +222,23 @@ def test_new_findings_start_unreviewed_and_open(
     BEFORE INSERT 的 trigger 在 CHECK 之前執行，所以不合法的 triage 值（例如 fixed）也在這裡擋下。
     """
     assert _copy(session, linked, **overrides) == INTEGRITY_CONSTRAINT_VIOLATION
+
+
+def test_v0014_marks_existing_findings_unclassified_and_needing_review(
+    queue_engine: Engine, linked: Linked
+) -> None:
+    """升級時既有的列沒有經過 v2 的分類：unclassified，並標 needs_review（安全審查）。"""
+    with queue_engine.begin() as connection:
+        config = alembic_config(connection=connection)
+        command.downgrade(config, "0013")
+        command.upgrade(config, "head")
+    with Session(queue_engine) as session:
+        row = session.execute(
+            text("SELECT category, needs_review FROM findings WHERE id = :id"),
+            {"id": linked.finding},
+        ).one()
+
+    assert (row.category, row.needs_review) == ("unclassified", True)
 
 
 def test_a_target_has_one_finding_per_fingerprint(session: Session, linked: Linked) -> None:
