@@ -1509,22 +1509,37 @@
 
 ## M5｜04/05 – 04/25：報告、複掃與 P0 驗收
 
-前置：M4。
+前置：M4。核准順序：**T22 → T21 → T31 → T23a–T23d**（`DECISIONS.md` §27.1）。T22 已完成（2026-11-07）；其他項目開始前另提細部計畫確認。
 
+- [x] T22 實作比較快照、coverage 判斷與差異分類。
+  - DoD：scope、auth、工具或 spec 不一致時顯示理由；漏掃不會顯示成已修補；舊 scan 與比較快照保留。三層證據缺任一層時保守處理；not_observed 不等於 resolved。
+  - 進度（2026-11-05）：比較 domain、位置摘要、v0016、建立／查詢／分頁 API 與併發／回滾測試已實作。S1–S4 實測無法證明逐規則完整覆蓋，採 `rule_completed=false` 的退路；不保存參數名稱／值。mapping 換版後的連結重試已取得真實 DB RED/GREEN。完整 `make test` 6,173 passed、2 skipped，整體 coverage 99.6402%，指定核心 branch 皆 ≥90%；靜態／契約／分類資料與 pre-commit 檢查通過。完整 code/security review 沒有確認的新缺陷。新版第一輪 Live 在執行前遭工具權限以 `Unverifiable Deletion Scope` 拒絕，有效新版校準仍為 0 次。重新執行計畫時，311 個凍結檔案與 Live 資源前置核對符合預期，但可查設定仍未找到三條限定允許規則，因此本次未送出 Live 指令；未修改權限、環境或繞過限制。之後 Nuclei fixture 的 M4 回歸實際執行並通過（2 passed；兩個 run 都是條件式接受的 `ENGINE_REPORTED_ERRORS`），但留下 2 個匿名 volume（fixture 跑在宣告 VOLUME 的 guard 映像上）。已停止後續 Live，並以 tmpfs 修正測試輔助（RED/GREEN）；2026-11-06 依使用者決定以精確名稱刪除這 2 個未使用的 volume（回到 269 個）。之後修正後三次有效校準、最終執行與 findings 的 M4 live 回歸都通過，見下方交付紀錄（§27.12–§27.14）。
+  - 交付（2026-11-07，done）：
+    - 比較：`src/secscan/comparisons/`（domain 的三層證據評估與分類、不可變快照、`POST/GET /api/v1/scan-comparisons`、逐 finding 分頁）；位置摘要 `scans/domain/locations.py`、`scans/location_models.py`、`worker/locations.py`（只存 path 的 SHA-256）；`scanners/domain/rule_set.py`（scan 當時的引擎／規則身分）；migration v0016（快照、位置、版本與 provenance，不回填舊 run）。
+    - 修正：mapping 換版後的連結重試（`findings/errors.py` 的 `MappingChangedError`）；`X-ZAP-Scan-ID` 列為保留 header（`core/headers.py`），舊 profile 可讀、換金鑰、修復但不能掃描；Nuclei `-ms` 與 `nuclei-jsonl/3`，模板 error 使 run 成為 `failed/ENGINE_REPORTED_ERRORS`。
+    - live：`tests/live/test_fixture_rescan_live.py`（同 target 的弱點→弱點、弱點→修補、小預算）、`rescan_assertions.py`（保守比較、修補案例核對、`assert_calibrated_structure`）、`engine_assertions.py`、`recordings.py`（禁止覆寫）；fixture 以 tmpfs 蓋住 guard 映像的 VOLUME，不留匿名 volume。
+  - 實際執行：
+    - 離線（最終版本）：`make test` **6,188 passed、2 skipped、77 deselected（519.46 秒）**，整體 coverage 99.64%；branch：comparisons/domain 97/98（98.98%）、guard 342/344（99.42%）、auth_profiles/domain、grants/domain、findings/domain、security、worker/locations 皆 100%、Nuclei results 79/86（91.86%）。`make lint`、`make typecheck`（547 檔）、pre-commit 通過。
+    - live（皆在隔離的 `secscan-live`，每次前後核對凍結的 311 個產品檔、資源與敏感樣式）：Nuclei fixture 的 M4 回歸 2 passed；修正後複掃校準 `post-fix-1`、`post-fix-2-rerun`、`post-fix-3` 與固定斷言後的 `final` 都是 1 passed（約 32 分鐘）；雙引擎 findings 的 M4 回歸 3 passed。四次複掃：unchanged comparable（persistent 29、inconclusive 2）、patched comparable（persistent 8、inconclusive 24）、partial different／需人工（inconclusive 30–31）；new、not_observed、not_comparable 都是 0；已自動對應的 6 個修補案例（20 個 finding）都是 inconclusive，另 6 個沒有自動對應。另一次 `post-fix-2` 因主機闔蓋睡眠、Docker 停止回應而失敗（環境故障，不計次數，沒有建立比較快照）。
+    - 殘留：Nuclei 回歸留下 2 個匿名 volume（fixture 跑在宣告 VOLUME 的 guard 映像上），依使用者決定以精確名稱刪除並以 tmpfs 修正；之後每次 Live 前後匿名 volume 都是 269 個。
+  - 審查：完整 code review 與 security review 沒有確認的缺陷；增量 code review（opus）APPROVE、0 CRITICAL／HIGH，MEDIUM 的文件矛盾與「已修補案例」的措辭已修正，同類殘留風險交接 T23c，LOW 的斷言訊息與數字出處已補（§27.14）。
+  - 未執行：`make test-live-zap`、`make test-live-lab` 未在 T22 重跑，留給 T23c 在最終版本執行。
+  - 限制：實際 producer 的 `rule_completed` 一律 false，Live 的單側 finding 都是 inconclusive，這一版不能計算「自動驗證修補成功率」；不保存參數名稱或值；Nuclei 在這個 fixture 每次都有 1–2 個模板 error，雙引擎 scan 都是 partially_completed。
+  - 給 T21／T31／T23：T21 的 resolved 要引用 T22 的比較（同 target、finding 為 not_observed、版本相同、之後沒有新觀察），目前實測不會出現 not_observed，因此 resolved 只能靠人工並留理由；T31 的複掃指標以比較快照計算，「誤判已修補」次數由 not_observed 的 ground truth 核對；T23c 重跑 `test-live-zap`、`test-live-runner`、`record-fixtures` 前先替 `zap_support.start_site` 與 `guard_support.start_receiver` 補上 tmpfs。
 - [ ] T21 完成人工 triage、audit 與 JSON/Markdown 報告。
-  - DoD：未確認的告警有清楚標記；artifact 的權限、遮罩、下載都安全；不執行 HTML，也不載入遠端資源。
-- [ ] T22 實作比較快照、coverage 判斷與差異分類。
-  - DoD：scope、auth、工具或 spec 不一致時顯示理由；漏掃不會顯示成已修補；舊的 scan 保留。
-- [ ] T23 完成所有 P0 的安全、故障、整合測試，並在乾淨環境重建。
-  - DoD：
-    - 安全負向測試全部通過。
-    - 整體 coverage ≥ 80%，核心模組 branch coverage ≥ 90%。
-    - 原始證據以加密方式保存。
-    - 文件與實際的 API 一致。
+  - DoD：未確認的告警清楚標記；只有平台產生的報告可下載，不提供工具 raw output 下載；worker 佇列、DB 保存、上限 8 MiB 與截斷標示；權限、遮罩、下載、安全編碼通過測試，不執行 HTML 或載入遠端資源。
+  - resolved 必須有可支持結論的修復／覆蓋證據；accepted_risk 不等於修復；只有 resolved 之後建立的新 scan 的有效再現才能自動重開，舊觀察延遲入庫不得重開；版本不相容要人工確認；版本號併發控制與完整稽核。
 - [ ] T31 建立 benchmark harness。
-  - DoD：透過自己的 API 執行各實驗組別，保存 manifest 與 guard 計數；`evaluate.py` 是純函式，並且有測試。
+  - DoD：透過自己的 API 執行各實驗組別，保存 manifest 與 guard 計數；`evaluate.py` 是純函式並有測試。組合組的子預算凍結或偏差揭露須在細部計畫決定，不冒稱現有共用預算已符合公平實驗。
+- [ ] T23 完成所有 P0 的安全、故障、整合測試，並在乾淨環境重建。
+  - 因資料保護、部署與最終驗收涉及不同界線，拆成以下四項，各自細化後實作：
+  - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）。
+  - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
+  - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
+  - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。
+  - DoD：安全負向測試全通過；整體 coverage ≥ 80%、核心模組 branch coverage ≥ 90%；原始證據加密；文件與 API 一致；乾淨環境重建通過。
 
-放行規則：M5 通過（Gate A–D）後，才能啟動 M6 的第三引擎；沒通過時，M6 改為補強期。
+放行規則：M5 通過（Gate A–D 與 T23 DoD，含 Gate E）後，才能啟動 M6 的第三引擎；沒通過時，M6 改為補強期。
 
 ## M6｜04/26 – 05/23：Schemathesis 與 SARIF（或補強）
 
