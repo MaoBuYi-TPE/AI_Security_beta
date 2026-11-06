@@ -327,6 +327,18 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-findings`（同一個 scan 跑 ZAP 與 Nuclei，掃 fixture app 的弱點版與修補版，並以追溯 API 驗證每個觀察的來源；另跑小時間預算的部分失敗情境，約 25 分鐘）。
 - 設計見 `docs/DECISIONS.md` §25、§26；API 見 `docs/API_CONTRACT.md` §9、§17.9、§17.10。
 
+#### 複掃比較（T22）
+
+- `POST /api/v1/scan-comparisons`：operator/admin 提交 `baseline_scan_id`、`current_scan_id`。兩次 scan 必須屬於同一 target、已終止且依建立序號排列；新快照回 201，重複建立回 200。兩側都做 project 授權。
+- `GET /api/v1/scan-comparisons/{comparison_id}`：摘要、差異理由、分類數量、人工確認提示；同專案 viewer 可讀。
+- `GET /api/v1/scan-comparisons/{comparison_id}/findings`：不可變逐 finding 證據摘要，支援 `classification`、`page`、`limit`；後續 scan 不改變舊比較。
+- **not_observed 不等於已修補**，比較不修改生命週期。位置有回應、規則完整執行、身分／參數可比缺一不可；目前實測尚無足夠的規則完成證據，因此真正的單側未命中維持 inconclusive 或 not_comparable，而非假稱驗證修補；也因此這一版不計算「自動驗證修補成功率」。
+- 新位置表只保存 path 的 SHA-256 相等性索引，不是加密；不保存參數名稱或值，比較 API 不輸出 path/digest 或 raw evidence。舊觀察與原始 artifact 的資料保護仍待 T23。
+- `X-ZAP-Scan-ID` 是內部保留 header，不接受新的目標認證設定；舊 profile 可讀取、換金鑰及修復，但不能用來掃描。Nuclei matcher error 會標示引擎失敗，不把零告警當成完整成功。
+- `ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-rescan LIVE_PYTEST_ENV="SECSCAN_RECORD_DIR=$PWD/recordings/fixture-rescan/run-name"`：同一隔離 target 的弱點→弱點、弱點→修補、小預算複掃。每次把 `run-name` 換成尚未存在的目錄；既有目錄或檔案會被拒絕，不覆寫歷史量測。不與其他 live 指令同時執行。結果在 gitignore 的 `recordings/fixture-rescan/`。三次有效校準與最終執行都通過（每次約 32 分鐘）：弱點→弱點、弱點→修補皆 comparable，小預算需人工確認；new／not_observed 一律為 0；已自動對應的 6 個修補案例（20 個 finding）都是 inconclusive，另 6 個案例沒有自動對應、未逐一驗證。細節見 `DECISIONS.md` §27.14。
+- v0016 升級保留既有 run 的未知 provenance，不回填；downgrade 會刪除新快照／位置／版本資料，僅供已備份的開發測試 DB。
+- 契約見 `docs/API_CONTRACT.md` §17.11，決策與實測見 `docs/DECISIONS.md` §27，反例見 `docs/SECURITY_AND_TESTING.md` §4.3 的 RESCAN 表。
+
 #### 隔離 lab 靶場（T03）
 
 需要先啟動 OrbStack（`orb start`）。lab 只接 internal network、不發布任何 port：

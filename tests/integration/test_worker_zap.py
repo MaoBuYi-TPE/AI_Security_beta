@@ -6,6 +6,7 @@ guard 的 summary 與 telemetry 的明細寫進 result_details.guard_traffic（�
 每個測試用自己的資料庫（queue_database）。
 """
 
+import hashlib
 import json
 import shutil
 from collections.abc import Callable
@@ -769,3 +770,55 @@ def test_a_lost_lease_leaves_the_run_to_the_reconciler(
     run = _run(queue_seed, lease.run_id)
     assert run.status == "normalizing"
     assert run.results_recorded is False
+
+
+def test_worker_persists_only_complete_comparison_telemetry(
+    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    request = ForwardedRequest(1, 1.0, "GET", "/search", False, rule="40018")
+    telemetry = encode_line(request) + encode_line(UpstreamResponse(1, 1.1, 200))
+    lease = _collected(queue, queue_seed, world, dirs, "findings", telemetry=telemetry)
+    linker = FindingLinker(sessionmaker(queue_engine, expire_on_commit=False))
+
+    [report] = _worker(queue, dirs, findings=linker).drain()
+
+    assert report.run_status is RunStatus.SUCCEEDED
+    [run] = queue_seed.query(
+        "SELECT locations_recorded FROM scanner_runs WHERE id = :run", run=lease.run_id
+    )
+    assert run.locations_recorded is True
+    [location] = queue_seed.query(
+        "SELECT path_sha256, discovery_answered FROM run_locations WHERE scanner_run_id = :run",
+        run=lease.run_id,
+    )
+    assert (location.path_sha256, location.discovery_answered) == (
+        hashlib.sha256(b"/search").hexdigest(),
+        False,
+    )
+    [rule] = queue_seed.query(
+        "SELECT rule, parameters_unknown FROM run_rule_locations WHERE scanner_run_id = :run",
+        run=lease.run_id,
+    )
+    assert (rule.rule, rule.parameters_unknown) == ("40018", True)
+
+
+def test_worker_does_not_store_locations_when_summary_count_disagrees(
+    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    telemetry = _telemetry([("/search", 200)])
+    lease = _collected(queue, queue_seed, world, dirs, "findings", telemetry=telemetry)
+    _summary(dirs, lease, forwarded=2, denied={})
+    linker = FindingLinker(sessionmaker(queue_engine, expire_on_commit=False))
+
+    [report] = _worker(queue, dirs, findings=linker).drain()
+
+    assert report.run_status is RunStatus.SUCCEEDED
+    [run] = queue_seed.query(
+        "SELECT locations_recorded, link_mapping_version FROM scanner_runs WHERE id = :run",
+        run=lease.run_id,
+    )
+    assert run.locations_recorded is False
+    assert run.link_mapping_version is not None
+    assert not queue_seed.query(
+        "SELECT 1 FROM run_locations WHERE scanner_run_id = :run", run=lease.run_id
+    )

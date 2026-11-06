@@ -399,3 +399,126 @@ def test_a_forged_guard_marker_does_not_hide_a_target_finding(response: str) -> 
 def test_any_bytes_only_produce_an_outcome(data: bytes) -> None:
     parsed = interpret(_output(data))
     assert parsed.outcome.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.TIMED_OUT}
+
+
+def test_failed_matcher_events_are_not_observations() -> None:
+    no_match = _finding(**{"matcher-status": False})
+    actual_match = _finding(**{"matcher-status": True})
+    result = parse_report(_jsonl(no_match, actual_match))
+    assert not isinstance(result, JsonlProblem)
+    assert len(result) == 1
+
+
+@pytest.mark.parametrize("status", [None, "false", 0, 1])
+def test_non_boolean_matcher_status_is_invalid(status: object) -> None:
+    result = parse_report(_jsonl(_finding(**{"matcher-status": status})))
+    assert result is JsonlProblem.NOT_JSONL
+
+
+def test_failed_matcher_events_are_counted_against_the_report_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("secscan.scanners.domain.nuclei.results.MAX_RESULTS", 2)
+    no_match = _finding(**{"matcher-status": False})
+    assert parse_report(_jsonl(no_match, no_match, no_match)) is JsonlProblem.LIMITS
+
+
+def test_malformed_failed_matcher_event_does_not_hide_invalid_output() -> None:
+    assert parse_report(_jsonl({"matcher-status": False})) is JsonlProblem.NOT_JSONL
+
+
+def test_parser_version_changes_when_matcher_failures_are_filtered() -> None:
+    assert PARSER_VERSION == "nuclei-jsonl/3"
+
+
+def test_false_matcher_events_are_exposed_without_becoming_findings() -> None:
+    from secscan.scanners.domain.nuclei.results import NucleiReport, parse_report_with_executions
+
+    failed_match = _finding(**{"matcher-status": False, "matched-at": None})
+    matched = _finding(**{"matcher-status": True})
+    report = parse_report_with_executions(_jsonl(failed_match, matched))
+    assert isinstance(report, NucleiReport)
+    assert len(report.findings) == 1
+    assert len(report.executions) == 1
+    assert report.executions[0].template_id == failed_match["template-id"]
+    assert report.executions[0].base_url == failed_match["url"]
+    assert report.executions[0].matched_at is None
+    assert report.executions[0].has_error is False
+    assert failed_match["url"] not in repr(report.executions[0])
+
+
+def test_false_matcher_error_is_not_evidence_of_rule_completion() -> None:
+    from secscan.scanners.domain.nuclei.results import NucleiReport, parse_report_with_executions
+
+    event = _finding(**{"matcher-status": False, "error": "connection failed"})
+    report = parse_report_with_executions(_jsonl(event))
+    assert isinstance(report, NucleiReport)
+    assert report.findings == ()
+    assert report.executions[0].has_error is True
+    assert "connection failed" not in repr(report.executions[0])
+
+
+def test_legacy_finding_without_matcher_status_has_no_execution_event() -> None:
+    from secscan.scanners.domain.nuclei.results import NucleiReport, parse_report_with_executions
+
+    report = parse_report_with_executions(_jsonl(_finding()))
+    assert isinstance(report, NucleiReport)
+    assert len(report.findings) == 1
+    assert report.executions == ()
+
+
+def test_matcher_errors_report_failure_and_preserve_positive_observations() -> None:
+    from secscan.scans.domain.observation import result_details
+
+    error = "private-error-canary-should-not-be-returned"
+    results = _jsonl(
+        _finding(**{"matcher-status": False, "error": error}),
+        _finding(**{"matcher-status": False, "error": "another error"}),
+        _finding(**{"matcher-status": False}),
+        _finding(**{"matcher-status": True}),
+    )
+    exchanges = (Exchange("GET", "/", authenticated=False, status=200),)
+
+    parsed = interpret(_output(results, forwarded=1, exchanges=exchanges))
+
+    assert parsed.outcome == RunOutcome(RunStatus.FAILED, RunErrorCode.ENGINE_REPORTED_ERRORS)
+    assert parsed.engine_errors == 2
+    assert len(parsed.observations) == 1
+    details = result_details(parsed)
+    assert details["engine_errors"] == 2
+    assert error not in repr(parsed)
+    assert error not in repr(details)
+
+
+def test_unmatched_events_without_errors_do_not_fail_the_engine() -> None:
+    event = _finding(**{"matcher-status": False})
+    exchanges = (Exchange("GET", "/", authenticated=False, status=200),)
+    parsed = interpret(_output(_jsonl(event), forwarded=1, exchanges=exchanges))
+    assert parsed.outcome == SUCCEEDED
+    assert parsed.engine_errors == 0
+    assert parsed.observations == ()
+
+
+@pytest.mark.parametrize(
+    ("forwarded", "exchanges", "time_limit", "expected"),
+    [
+        (0, (), False, NO_TARGET_TRAFFIC),
+        (1, (Exchange("GET", "/", False, 200),), True, TIMED_OUT),
+    ],
+)
+def test_matcher_errors_do_not_override_existing_no_traffic_or_timeout_semantics(
+    forwarded: int, exchanges: tuple[Exchange, ...], time_limit: bool, expected: RunOutcome
+) -> None:
+    event = _finding(**{"matcher-status": False, "error": "connection failed"})
+    parsed = interpret(
+        _output(
+            _jsonl(event), forwarded=forwarded, exchanges=exchanges, time_limit_reached=time_limit
+        )
+    )
+    assert parsed.outcome == expected
+    assert parsed.engine_errors == 1
+
+
+def test_nonzero_exit_without_report_keeps_engine_failure_despite_matcher_changes() -> None:
+    parsed = interpret(_output(None, exit_code=1, report_listed=False))
+    assert parsed.outcome == ENGINE_FAILED

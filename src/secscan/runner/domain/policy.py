@@ -187,7 +187,7 @@ _NUCLEI_URL = ArgumentPattern(r"http://[a-z0-9][a-z0-9.\-]{0,251}(?::[0-9]{1,5})
 _NUCLEI_BOUNDED_INT = ArgumentPattern(r"[1-9][0-9]{0,3}")
 # nuclei 的指令參數（順序與 scanners.domain.nuclei.plan.plan_nuclei_run 一致；逐旗標比對）。
 _NUCLEI_ARGUMENTS: tuple[ArgumentRule, ...] = (
-    "-ni", "-duc", "-pt", "http", "-jsonl", "-silent",
+    "-ni", "-duc", "-pt", "http", "-jsonl", "-silent", "-ms",
     "-dut",
     "-t", "/scan/in",
     "-p", "/scan/secret/proxy-url",

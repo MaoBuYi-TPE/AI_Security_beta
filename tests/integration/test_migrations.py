@@ -31,10 +31,14 @@ APP_TABLES = {
     "scan_operations",
     "runner_instances",
     "run_coverage",
+    "run_locations",
+    "run_rule_locations",
     "artifacts",
     "observations",
     "findings",
     "finding_observations",
+    "scan_comparisons",
+    "scan_comparison_findings",
 }
 TRIGGER_FUNCTIONS = (
     "audit_events_reject_mutation",
@@ -47,6 +51,11 @@ TRIGGER_FUNCTIONS = (
     "scan_records_guard",
     "scan_operations_insert_guard",
     "scanner_runs_container_guard",
+    "scanner_runs_comparison_once",
+    "run_locations_insert_guard",
+    "scan_comparison_guard",
+    "scan_comparison_finding_insert_guard",
+    "scan_comparison_sealed_check",
     "findings_guard",
 )
 

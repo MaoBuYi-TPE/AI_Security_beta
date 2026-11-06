@@ -335,6 +335,31 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 - **寫入端**（`test_worker_zap.py`）：有觀察但 manifest 沒有這個 run 的報告 artifact 時整筆不寫入。
 - **追溯 API（SEC-16）**（`test_finding_provenance_api.py`，真的佇列與 linker）：明細有上限、不含 storage_key；每個觀察追到報告 artifact（sha256、大小）與 run（映像、plan_hash、版本）；連結的值是寫入時的值（舊的 taxonomy_sha256 原樣回傳）；沒有引用報告的舊觀察 artifact 是 null、不丟掉；跨 3 次 scan 的歷史與觀察在翻頁之間新增 scan 也不重複、不遺漏（同一個 as_of）；1,500 個觀察的 finding 15 頁完整，1 筆與 100 筆的頁 SQL 數相同、明細與歷史也都在 12 個以內（沒有 N+1）；明細帶舊的 as_of 時 seen、engines、recent_scans 是快照的值；近期只留 5 次 scan；部分失敗（ZAP timed_out 或 succeeded、nuclei 預算不足 failed）時已取得的觀察可追溯、歷史列出 0 個觀察的失敗引擎、scan 不是 completed；中斷之後重試沒有重複；scan_id、engine 篩選；不合法的值 422；其他 project 與不存在的一樣 404（帶 as_of、scan_id、engine 也一樣，參數的檢查在權限之後），沒有 key 是 401。
 
+**複掃的反例（RESCAN；T22，Gate D 的複掃部分）**：純分類、scan 可比性及實際事實建構分開測試；`tests/unit/comparisons/` 不連網，`test_comparison_facts.py`／`test_comparisons_api.py` 以真的佇列與 linker 驗證。人工 triage 與報告的完成度仍屬 T21。
+
+| 編號 | 情境／必要結果 | 層級與測試位置 |
+|---|---|---|
+| RESCAN-01 | 引擎 succeeded 但沒到原位置 → inconclusive | unit：classification、evaluation |
+| RESCAN-02 | 位置有回應但無規則完整執行證明 → inconclusive | unit：evaluation（實際 producer 維持 rule_completed=false） |
+| RESCAN-03 | role 不同 → not_comparable；role 未知／preflight 失效／rejected → inconclusive | unit：classification、evaluation；integration：comparison_facts |
+| RESCAN-04 | 一個來源失敗、逾時或時間上限未知，不能由另一個成功來源遮掩 → inconclusive | unit：classification、evaluation |
+| RESCAN-05 | fingerprint／mapping／taxonomy hash 不同或未知 → inconclusive＋人工確認，兩側有告警也一樣 | unit：classification、comparability、evaluation；integration：comparison_facts |
+| RESCAN-06 | scope 排除原位置／origin 改變 → not_comparable；無法解析或缺 path → inconclusive | unit：evaluation |
+| RESCAN-07 | spec 新增、移除、內容改變或有 spec 卻缺 hash → 不接受負面結論 | unit：comparability、classification |
+| RESCAN-08 | 規則集／模板、映像、components 或 profile 定義改變／未知 → 不接受負面結論 | unit：provenance、input_validation、evaluation |
+| RESCAN-09 | 有參數但無法證明參數可比 → inconclusive；不擷取名稱或值充數 | unit：classification、evaluation、worker/location_summary；schema 約束 parameters_unknown |
+| RESCAN-10 | telemetry 缺漏、缺明細檔的零流量、重複序號或錯配 → locations_recorded=false，不據此判漏報為修補 | unit：worker/telemetry_reader；integration：worker_zap、comparison_facts |
+| RESCAN-11 | current-only 但 baseline 無覆蓋 → inconclusive，不猜 new；零 finding 是空快照，不等於完整掃描 | unit：classification；integration：comparisons_api |
+| RESCAN-12 | 同位置 related／佐證群組換身分 → reidentified＋人工確認，不自動合併 | unit：reidentification、evaluation；integration：comparisons_api（真的雙引擎 linker） |
+| RESCAN-13 | baseline finding 身分未驗證 → inconclusive；不能以 current 的健康身分補正 | unit：classification、evaluation |
+| RESCAN-14 | 同 OpenAPI 樣板但只請求另一個物件 → inconclusive，逐一核對原始字面 path digest | unit：evaluation；integration：comparison_facts（只讀 digest） |
+| RESCAN-15 | fixture／profile 不同 → not_comparable；同 scan、逆序、跨 target、未終止各有明確錯誤 | unit：comparability、evaluation；integration：comparisons_api |
+| RESCAN-16 | 觀察已寫入但尚未連結 → observations_complete=false，不當作零告警 | integration：comparison_facts |
+| RESCAN-17 | 同一對同時建立／先到者回滾、audit 故障、未封存 commit → 單一完整快照或全部回滾 | integration：comparison_transactions，真實多連線／等鎖／commit |
+| RESCAN-18 | 無權 scan、viewer 寫入、偽造證據、跨 target FK、封存後改寫／追加／TRUNCATE → 拒絕 | API 與 schema／transactions；SEC-16 的比較部分 |
+
+正例保留：兩側有觀察且版本可靠 → persistent；純函式所有層證據完整時可得到 new/not_observed，移除必要證據就不再成立。這些人工構造的正例不是工具完成證據。實際 producer 的負面分類不放寬；端點請求與工具退出碼均不能代替完整性。
+
 ### 4.4 Live E2E
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。
@@ -416,6 +441,17 @@ T16 的小型案例表（ground truth 的初稿；完整的 12＋12、6＋6 在 
 | T16-VA-04 | VAmPI 弱點版 | GET `/books/v1/{book_title}` | standard_user | security：BOLA | 正例 | 不在 ZAP 能力範圍 | 不在範圍 | 以另一個使用者的 token 讀別人的書 |
 | T16-VA-05 | VAmPI 弱點版 | POST `/users/v1/register`（`admin`） | anonymous | security：mass assignment | 正例 | 不在 ZAP 能力範圍 | 不在範圍 | 註冊之後 `/me` 的 `admin` 是 true |
 | T16-VA-06 | VAmPI 弱點版 | GET `/users/v1/_debug` | anonymous | security：過度資料暴露 | 正例 | 不在 ZAP 能力範圍（白名單沒有） | 不在範圍 | 回應含所有使用者的密碼 |
+
+T22 的複掃 live 流程（`make test-live-fixture-rescan`，`tests/live/test_fixture_rescan_live.py`）已完成三次有效校準與固定斷言後的最終執行（2026-11-07，`DECISIONS.md` §27.14）：
+- 使用同一個 target、grant、host、IP 與 port，依序重建 fixture 弱點 baseline、弱點 control、修補版及 240 秒小預算弱點版；不是比較兩個不同 target。
+- 真實 ZAP → Nuclei 經 guard 與 worker，讀取比較 API。核對 findings 聯集、觀察方向、分類數量、重複建立 200、後續 scan 不改變舊快照。每個量測 run 核對 profile 定義、plan_hash、觀察位置屬於 guard 轉送集合、實際收包不含規則 header、終止後掃描容器清理。
+- 修補對照逐一檢查 baseline 中已對應的 finding，不以任何一筆 SQLi 代替整組；涵蓋 fixture 實際補上的 CSP、XCTO、anti-clickjacking、Referrer-Policy、CORS 與指定參數案例。每個案例另記 `checked`、`baseline_not_observed` 或 `no_automatic_mapping`，未命中與未對應不算驗證通過。
+- 校準至少三次後才固定穩定的實測斷言，然後完整執行一次。錄製在 gitignore 的 `recordings/fixture-rescan/`，結果記 `DECISIONS.md` §27.14。
+- 實測（`post-fix-1`、`post-fix-2-rerun`、`post-fix-3`、`final`，四次都 1 passed；另一次因主機闔蓋睡眠導致 Docker 停止回應，屬環境故障、不計次數）：弱點→弱點 comparable、不需人工（persistent 29、inconclusive 2）；弱點→修補 comparable、不需人工（persistent 8、inconclusive 24）；小預算 different、需人工（inconclusive 30–31）。四次的 new、not_observed、not_comparable 都是 0；12 個修補案例 6 個 checked（都是 inconclusive）、6 個 no_automatic_mapping，「誤判已修補」為 0。
+- 固定斷言 `assert_calibrated_structure`：三組的 comparability、是否需要人工、snapshot 是否帶理由與 not_comparable=0；數量只記範圍，不寫死。
+- S1–S4 只是前期證據可行性實測；兩次 180 秒 run 都 timed_out 的 S4 不能冒充完整複掃驗收。目前採 rule_completed=false 的保守退路，三種比較都直接斷言 `new == 0`、`not_observed == 0`，每個 finding 的來源證據亦不得宣稱規則完成；包含沒有 ground truth 對應的 finding，不只核對已知修補案例。
+- Nuclei `/3` 的模板 error 保留正向 observations，但 run 是 `failed/ENGINE_REPORTED_ERRORS`。live 僅在 `engine_errors > 0`、scan `results_complete=false` 且其餘流量／來源／修補不變式皆通過時接受此特定部分失敗；其他失敗碼、取消、中斷及 ZAP failed 不放寬。成功 run 的錯誤數必須為零。
+- 每輪用新的 `LIVE_PYTEST_ENV="SECSCAN_RECORD_DIR=$PWD/recordings/fixture-rescan/run-name"`；測試開始前拒絕已存在目錄，寫檔使用 exclusive create。修補案例核對另存 `ground-truth.json`，不混稱比較快照。
 
 ### 4.5 故障注入
 
@@ -561,6 +597,10 @@ P0 組別：A=ZAP、B=Nuclei、C=ZAP+Nuclei。P1 完成第三引擎才加入 D=S
 
 用已知未修補、已修補、auth 失效、工具失敗、scope 減少、模板變動等情境，檢查 persistent/not_observed/inconclusive/not_comparable 是否正確。尤其統計「誤判已修補」的情形；第一版不自動關閉，因此需確認 API/報告也不暗示已修補。
 
+T22 的量測需分開列出 persistent、inconclusive、not_comparable 與需人工確認筆數，並保留 new/not_observed 為零的結果，不拿 inconclusive 當「驗證修補成功」。弱點→弱點是工具變異對照，弱點→修補是已知修補案例，小預算 current 是不完整覆蓋的反例；三組都必須沿用同一 target 與 scope。
+
+校準至少三次且最後另跑完整驗證；每次保存四個 scan 的工具／模板／profile 身分、狀態、預算與比較快照。仍存在的 ground truth 被判 not_observed 的筆數必須為零；已修補案例允許 inconclusive，不能以增加「修補率」為由放寬證據。現有工具訊號不能證明完整規則執行，因此不能以這一版計算「自動驗證修補成功率」。T22 實測（§4.4）：四次有效 live 執行中仍存在的 ground truth 判 not_observed 為 0；已自動對應的 6 個修補案例（20 個 finding）全部是 inconclusive，另 6 個案例沒有自動對應、未逐一驗證。後續正式 benchmark（T31/T28）另報可信分母與限制。
+
 ### 7.5 人工工作量（可選）
 
 讓 3–5 名具基礎開發背景者對相同輸出，完成辨識獨立議題、定位證據與指出未完成引擎的任務。比較未整合與整合呈現的時間/正確率，交錯先後順序降低學習效應。樣本小，只當探索性可用性結果，不宣稱代表全產業。
@@ -579,7 +619,7 @@ Gate B：SEC-01 至 SEC-20 適用測試有結果；未支援能力明確關閉�
 
 Gate C：取消/故障/重送/partial 狀態測試通過。
 
-Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重的反例已通過，§4.3 的 DEDUP 表；複掃的反例在 T22。）
+Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告驗證未開始，所以 Gate D 整體尚未通過。不得把局部通過當作整個 Gate 已通過。）
 
 Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 

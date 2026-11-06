@@ -92,7 +92,14 @@ class TelemetryRecorder:
         self._runs[run_id].ledger.release()
 
     def forwarded(
-        self, run_id: UUID, *, method: str, path: str, authenticated: bool, at: float
+        self,
+        run_id: UUID,
+        *,
+        method: str,
+        path: str,
+        authenticated: bool,
+        at: float,
+        rule: str | None = None,
     ) -> int:
         """確定轉送：寫入 summary 與一行，回傳這個請求的序號。失敗時釋放名額並拋出例外。"""
         record = self._runs[run_id]
@@ -105,6 +112,7 @@ class TelemetryRecorder:
                     method=method,
                     path=path,
                     authenticated=authenticated,
+                    rule=rule,
                 )
             )
         except TelemetryError:

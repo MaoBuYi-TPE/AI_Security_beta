@@ -94,6 +94,9 @@ POLICY_NAMES: Mapping[ScanProfile, str] = MappingProxyType(
 # 起始值（T16 依量測調整）：低強度讓更多規則在預算內跑得完。
 DEFAULT_STRENGTH = "low"
 RULE_THRESHOLD = "medium"
+INJECT_RULE_HEADER = True
+PASSIVE_MAX_ALERTS_PER_RULE = 0
+PASSIVE_MAX_BODY_BYTES = 0
 
 
 # 會把請求改成另一個 method 的規則（ZAP 的原始碼；T14 的審查 L5）：grant 不允許那個 method 時

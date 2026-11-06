@@ -5,7 +5,8 @@
 2. 報告讀不到、過大、或任一行不是合法的 JSONL 記錄 → failed（OUTPUT_INVALID）。
 3. guard 沒有轉送任何請求 → failed（NO_TARGET_TRAFFIC）。
 4. 達共享預算/時間上限（guard summary）→ timed_out（ENGINE_TIMEOUT），已解析的觀察仍入庫。
-5. 其他 → succeeded；沒有觀察就是乾淨的結果（零告警，和失敗明確可分）。
+5. false 事件帶 error → failed（ENGINE_REPORTED_ERRORS），保留正向觀察與錯誤數，不保存錯誤原文。
+6. 其他 → succeeded；沒有觀察就是零告警，和失敗明確可分。
 
 guard 的合成 403（negative-matcher 模板會誤報成目標缺陷）以回應的 X-Secscan-Guard header 權威排除：
 guard 會剝除上游偽造的同名 header，所以這個 header 出現就代表是 guard 合成的回應。沒有 telemetry 時
@@ -49,7 +50,7 @@ from secscan.scans.domain.observation import (
 from secscan.security.redaction import redact_text, redact_url, sensitive_query_values
 from secscan.targets.domain import DEFAULT_HTTP_PORT, Origin
 
-PARSER_VERSION = "nuclei-jsonl/1"
+PARSER_VERSION = "nuclei-jsonl/3"
 _SUCCESS = 0
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 MAX_RESULTS = 20_000
@@ -98,6 +99,22 @@ class NucleiFinding:
 
 
 @dataclass(frozen=True, slots=True)
+class TemplateExecution:
+    """未命中事件的最小記憶體資料；即使沒有 error，也不代表位置或規則完整。"""
+
+    template_id: str
+    base_url: str = field(repr=False)
+    matched_at: str | None = field(repr=False)
+    has_error: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NucleiReport:
+    findings: tuple[NucleiFinding, ...]
+    executions: tuple[TemplateExecution, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class NucleiOutput:
     """一個 run 的輸出與判斷需要的範圍。
 
@@ -131,10 +148,10 @@ def interpret(output: NucleiOutput) -> ParsedRun:
         return ParsedRun(PARSER_VERSION, RunOutcome(RunStatus.FAILED, RunErrorCode.ENGINE_FAILED))
     if output.report is None:
         return _invalid(_REPORT_UNREADABLE)
-    findings = parse_report(output.report)
-    if isinstance(findings, JsonlProblem):
-        return _invalid(findings.value)
-    return _parsed(output, findings)
+    report = parse_report_with_executions(output.report)
+    if isinstance(report, JsonlProblem):
+        return _invalid(report.value)
+    return _parsed(output, report)
 
 
 def _invalid(problem: str) -> ParsedRun:
@@ -144,7 +161,13 @@ def _invalid(problem: str) -> ParsedRun:
 
 
 def parse_report(raw: bytes) -> tuple[NucleiFinding, ...] | JsonlProblem:
-    """嚴格解析 JSONL：每行是合法 JSON 的 http 記錄，否則整份不用（corrupted 不做部分解析）。"""
+    """相容的 finding 入口；需要未命中事件的呼叫端使用 parse_report_with_executions。"""
+    report = parse_report_with_executions(raw)
+    return report if isinstance(report, JsonlProblem) else report.findings
+
+
+def parse_report_with_executions(raw: bytes) -> NucleiReport | JsonlProblem:
+    """每行都須是合法 HTTP 事件；不保存 error、request 或 response 到執行摘要。"""
     if len(raw) > MAX_REPORT_BYTES:
         return JsonlProblem.TOO_LARGE
     try:
@@ -152,17 +175,35 @@ def parse_report(raw: bytes) -> tuple[NucleiFinding, ...] | JsonlProblem:
     except UnicodeDecodeError:
         return JsonlProblem.NOT_JSONL
     findings: list[NucleiFinding] = []
+    executions: list[TemplateExecution] = []
+    count = 0
     try:
         # 只以 \n 切行（JSONL 的分隔）：不可用 splitlines()，否則目標回應裡的 U+0085／U+2028／
         # U+2029 會把一行切成兩段、讓整份報告變成不合法（來自目標的位元組，不做 Unicode 斷行）。
         for line in text.split("\n"):
             if line.strip():
-                findings.append(_finding(_strict_json(line)))
+                count += 1
+                if count > MAX_RESULTS:
+                    return JsonlProblem.LIMITS
+                event = _object(_strict_json(line))
+                status = event.get("matcher-status", True)
+                if type(status) is not bool:
+                    raise _RejectedError
+                finding = _finding(event)
+                if status:
+                    findings.append(finding)
+                else:
+                    executions.append(
+                        TemplateExecution(
+                            template_id=finding.template_id,
+                            base_url=_text(event, "url"),
+                            matched_at=_optional_text(event.get("matched-at")),
+                            has_error=event.get("error") is not None,
+                        )
+                    )
     except _RejectedError:
         return JsonlProblem.NOT_JSONL
-    if len(findings) > MAX_RESULTS:
-        return JsonlProblem.LIMITS
-    return tuple(findings)
+    return NucleiReport(tuple(findings), tuple(executions))
 
 
 class _RejectedError(Exception):
@@ -213,27 +254,33 @@ def _finding(document: object) -> NucleiFinding:
     )
 
 
-def _parsed(output: NucleiOutput, findings: Sequence[NucleiFinding]) -> ParsedRun:
+def _parsed(output: NucleiOutput, report: NucleiReport) -> ParsedRun:
     answers = _answers(output.forwarded, output.exchanges)
-    collected = _collect(findings, output.origin, output.rules, answers)
+    collected = _collect(report.findings, output.origin, output.rules, answers)
+    engine_errors = sum(execution.has_error for execution in report.executions)
     return ParsedRun(
         parser_version=PARSER_VERSION,
-        outcome=_outcome(answers, time_limit=output.time_limit_reached),
+        outcome=_outcome(
+            answers, time_limit=output.time_limit_reached, engine_errors=engine_errors
+        ),
         engine_version=NUCLEI_VERSION,
         observations=collected.observations,
         excluded=dict(collected.excluded),
         duplicates=collected.duplicates,
         truncated_fields=collected.truncated_fields,
+        engine_errors=engine_errors,
         time_limit_reached=output.time_limit_reached,
         traffic_verified=answers is not None,
     )
 
 
-def _outcome(answers: _Answers | None, *, time_limit: bool) -> RunOutcome:
+def _outcome(answers: _Answers | None, *, time_limit: bool, engine_errors: int) -> RunOutcome:
     if answers is not None and not answers:
         return RunOutcome(RunStatus.FAILED, RunErrorCode.NO_TARGET_TRAFFIC)
     if time_limit:
         return RunOutcome(RunStatus.TIMED_OUT, RunErrorCode.ENGINE_TIMEOUT)
+    if engine_errors:
+        return RunOutcome(RunStatus.FAILED, RunErrorCode.ENGINE_REPORTED_ERRORS)
     return RunOutcome(RunStatus.SUCCEEDED)
 
 

@@ -76,7 +76,9 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/findings/{finding_id}/scans | 同專案 | 200；完整的掃描歷史（由舊到新，分頁、`as_of` 快照）；每個 scan 列出所有 run 與它們的觀察數（T20 已實作，§17.10） |
 | GET | /api/v1/findings/{finding_id}/observations | 同專案 | 200；來源追溯：連結當時的值、遮罩後的觀察、報告 artifact 的 metadata 與 run（依連結序號分頁、`as_of` 快照，可依 scan_id／engine 篩選；T20 已實作，§17.10） |
 | PATCH | /api/v1/findings/{finding_id}/triage | operator/admin | 200；需 reason；敏感變更留 audit |
-| POST | /api/v1/scan-comparisons | 同專案 | 200；只比較有權限且相同 target 的 scans |
+| POST | /api/v1/scan-comparisons | operator/admin | 201 建立不可變快照；同一對與演算法版本已存在回 200；兩個 scan 都先做讀取授權（T22，§17.11） |
+| GET | /api/v1/scan-comparisons/{comparison_id} | 同專案 | 200；封存的可比性、差異理由、分類數量與限制說明（T22） |
+| GET | /api/v1/scan-comparisons/{comparison_id}/findings | 同專案 | 200；封存的逐 finding 分類與證據摘要；classification/page/limit，依 finding UUID 穩定排序（T22） |
 | POST | /api/v1/scans/{scan_id}/reports | operator/admin | 201；建立 JSON/Markdown 遮罩報告 artifact（P1 加 SARIF） |
 | GET | /api/v1/artifacts/{artifact_id}/download | 同專案 | 200；P0 僅遮罩報告/證據；不提供 raw secret artifact |
 | GET | /api/v1/projects/{project_id}/audit-events | platform_admin | 200；遮罩且分頁，由新到舊（T05 已實作） |
@@ -306,7 +308,7 @@ Triage request：
 
 將 lifecycle_state 設為 resolved 時必須提供驗證理由；accepted_risk 不等於已修補。所有變更保留舊值與 actor。
 
-Compare request：baseline_scan_id、current_scan_id。回傳 comparability、差異理由、new/persistent/not_observed/inconclusive 及每個 finding 的覆蓋證據。不同 target 直接 422；工具版本、scope 或 auth role 差異回 not_comparable/inconclusive，不捏造修復率。
+Compare request 只接受 `baseline_scan_id`、`current_scan_id`；不能由 client 指定分類或聲稱覆蓋完成。回傳 scan 層級的 `comparable / different / not_comparable`、差異理由，以及逐 finding 的 `new / persistent / not_observed / inconclusive / not_comparable`。不同 target 回 422；其餘依版本、scope、auth 與覆蓋逐項判斷，見 §17.11。**not_observed 不等於已修補**；T22 不修改 triage 或 lifecycle。
 
 ## 11. 報告
 
@@ -339,10 +341,10 @@ Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 �
 | 404 | RESOURCE_NOT_FOUND |
 | 405 | METHOD_NOT_ALLOWED |
 | 408 | REQUEST_TIMEOUT |
-| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、AUTH_ROLE_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED |
+| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、AUTH_ROLE_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED、SCAN_NOT_TERMINAL |
 | 413 | SPEC_TOO_LARGE、REQUEST_TOO_LARGE、ARTIFACT_TOO_LARGE |
 | 415 | UNSUPPORTED_MEDIA_TYPE |
-| 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、INVALID_SPEC、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE |
+| 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、INVALID_SPEC、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE、TARGET_MISMATCH、QUOTA_EXCEEDED（比較輸入／證據超限） |
 | 429 | API_RATE_LIMITED |
 | 500 | INTERNAL_ERROR |
 | 503 | RUNNER_UNAVAILABLE、DEPENDENCY_UNAVAILABLE |
@@ -839,7 +841,7 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 | `api_key_header` | `<header_name>: <secret>` | ASCII 可見字元，中間可以有空白；開頭與結尾不可是空白，不可有 tab 與其他控制字元 |
 | `cookie` | `Cookie: <secret>` | RFC 6265 的 cookie-string，例如 `session=abc; theme=dark`：多個以 `; `（分號加一個空白）分隔，最多 32 個，名稱不可重複；值不可有空白、雙引號、逗號、分號與反斜線（可以整個加上雙引號） |
 
-`header_name` 一律拒絕下列名稱，不分大小寫：
+新建與更新 profile 的 `header_name` 一律拒絕下列名稱，不分大小寫；另保留內部規則標記 `X-ZAP-Scan-ID`。歷史版本仍可讀取與進行金鑰換版，但不能以該保留名稱建立新 scan；須以合法 header 與新 secret PATCH 修復。已排隊的舊 scan 在 runner 啟動前回 `PLAN_REJECTED`，不送出請求：
 
 | 類別 | 名稱 |
 |---|---|
@@ -1056,7 +1058,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `CREATOR_KEY_REVOKED` | 建立 scan 的平台 key 已被撤銷：外洩的 key 排進佇列的 scan 也不會開始，執行中的也停止（T13；key 到期不算） |
 | `ENGINE_FAILED` | 引擎失敗（fake 的失敗腳本；容器版是退出碼不在該引擎收集輸出的清單中：fake、preflight 只收 0，zap 收 0、1、2；ZAP 退出碼 1 而且沒有報告也是這個碼，退出碼的語意由 T15 的 parser 判斷，`DECISIONS.md` §18.1） |
 | `LEASE_EXPIRED` | runner 沒有在期限內心跳，無法證明工作已正常停止；已要求取消的 scan 也是 `interrupted`，不是 `cancelled`（沒有確認停止）。有容器的 run 由 runner 的對帳先封鎖 guard、確認容器已刪除之後才標成 `interrupted`（T13，`DECISIONS.md` §17.2）；用量不明，之後的引擎以 `BUDGET_EXHAUSTED` 失敗。容器刪不掉（Docker 不可用或那個容器出錯）時 run 保持 `running`，policy 保持 blocked |
-| `PLAN_REJECTED` | ExecutionPlan 或建立容器的設定不符合政策；沒有呼叫 Docker（T10）。也用於：plan 的引擎或映像和 run 不一致、zap 的規格不能交給工具（servers 不是 target、參照指向被刪的 operation，T14） |
+| `PLAN_REJECTED` | ExecutionPlan 或建立容器的設定不符合政策；沒有呼叫 Docker（T10）。也用於：目標認證 header 與內部規則標記衝突、plan 的引擎或映像和 run 不一致、zap 的規格不能交給工具（servers 不是 target、參照指向被刪的 operation，T14） |
 | `RUNTIME_UNAVAILABLE` | 啟動容器之前 Docker 出錯（例如 socket-proxy 拒絕、映像不見了）、容器在執行中消失，或執行中連續查不到容器的狀態、已確認刪除容器（`interrupted`）（T10） |
 | `SECRET_UNAVAILABLE` | runner 解不開綁定版本的密文（金鑰不對或沒有設定）；沒有啟動容器（T10） |
 | `TIME_LIMIT_EXCEEDED` | 超過 scan 的時間上限，容器已停止（`timed_out`，T10） |
@@ -1068,7 +1070,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0，或不夠 ZAP 執行（剩下的時間、請求數 ÷ 速率、grant 到期前的秒數三者取最小，減去 60 秒之後不到 60 秒，T14；grant 快到期時也是這個代碼，延長 grant 而不是增加預算）→ `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out` |
 | `PARSE_ATTEMPTS_EXHAUSTED` | 解析 3 次都沒有在 lease 內完成（worker 中斷或卡住）→ `failed`（T13，`DECISIONS.md` §17.6） |
 | `OUTPUT_INVALID` | 工具的輸出不能用：報告或 log 缺少、不合法、版本不是鎖定的版本、超過上限，或 AF 的結尾摘要不存在、和退出碼矛盾 → `failed`（T15，`DECISIONS.md` §19.2）；原因在 `engines[].result.problem` |
-| `ENGINE_REPORTED_ERRORS` | 工具回報錯誤（AF 退出碼 1），報告有效 → `failed`；部分結果仍然入庫（T15） |
+| `ENGINE_REPORTED_ERRORS` | 工具回報錯誤但報告有效 → `failed`，部分觀察仍入庫：ZAP 為 AF 退出碼 1（T15）；Nuclei 為模板事件帶 error，即使退出碼 0 也不算成功（T22，`nuclei-jsonl/3`）。只保存 `engine_errors` 計數、不回傳原始 error；Nuclei 的無流量或逾時判定優先。scan 不因保留觀察而成為完整結果 |
 | `NO_TARGET_TRAFFIC` | 未掃到端點 → `failed`：guard 沒有轉送任何請求，或沒有任何請求得到上游的回應（T15）；和零告警的 `succeeded` 不同 |
 | `ENGINE_TIMEOUT` | 工具在自己的時間上限停止（ZAP 的 plan `maxDuration`）→ `timed_out`；已有的觀察照常入庫（T15）。和 runner 強制停止的 `TIME_LIMIT_EXCEEDED` 不同 |
 
@@ -1271,6 +1273,40 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 - `observation` 和 `GET /scans/{id}/observations` 相同：遮罩、截斷之後的目標內容，仍是不可信的資料，顯示時要編碼。
 - `artifact` 是觀察引用的報告的 metadata（`sha256` 是遮罩後檔案的雜湊，不是原始報告或簽章）；**不輸出 storage_key 與檔案內容**。storage_key 不是秘密（由 run id、kind 與 path 組成），不能當成存取控制：T21 的下載必須以 artifact id 走 artifact → run → scan → target → project 的授權，不接受 client 給的 path 或 storage_key。T20 起新的觀察一定引用自己 run 的報告（寫入端拒絕沒有報告的觀察）；更早的資料可能是 null，如實回傳、不補造。
 - `run`：`plan_hash` 是準備執行的 ExecutionPlan 的雜湊（含映像、參數與上限），不代表執行成功；沒有建立容器的 run 沒有 plan（null）。版本不明時是 null，不以目前的設定補上。
+
+### 17.11 不可變複掃比較（T22）
+
+**建立**：`POST /api/v1/scan-comparisons`，JSON 只有兩個 UUID：`baseline_scan_id` 與 `current_scan_id`。
+
+- 兩個 scan 都先驗證 project/object 讀取權限，不存在或無權一律 404。兩者可讀之後才檢查寫入角色：viewer 回 403；operator/admin 可建立。
+- 必須同一個 project/target、不同 scan，baseline 的 `queue_position` 小於 current；不使用 transaction 開始時間 `created_at` 排先後。不同 target/project 回 422 `TARGET_MISMATCH`；同一 scan 或先後錯誤回 422 `INVALID_REQUEST`。
+- 兩者都須是終止狀態，否則 409 `SCAN_NOT_TERMINAL`；失敗、逾時、取消仍可比較，但不代表有足夠覆蓋。
+- 新建回 201，既有 `(baseline_scan_id, current_scan_id, algorithm_version)` 回 200。`algorithm_version=1` 由平台決定，client 不能覆寫。重複或併發建立只有一份快照與一筆 `scan_comparison.create` audit。
+- header、逐 finding 明細、封存及 audit 在同一個 request transaction 提交；任何步驟失敗全部回滾。封存後不可修改、刪除、TRUNCATE 或追加明細。T22 的單次輸入上限為 100,000 個不同的 finding/source/path/link-version 組合，單筆證據 JSON 上限 16 KiB；超過時回 422 `QUOTA_EXCEEDED`，不儲存截斷的比較。
+
+**摘要**：建立與 `GET /api/v1/scan-comparisons/{comparison_id}` 回相同 `data`；同專案 viewer 也能讀，無權與不存在皆 404。
+
+| 欄位 | 語意 |
+|---|---|
+| id、project_id、target_id | 快照與所屬資源 UUID |
+| baseline_scan_id、current_scan_id | 固定的比較方向 |
+| algorithm_version | 平台的比較演算法版本，目前 1 |
+| comparability | `comparable`：已知設定相同；`different`：有設定差異／未知；`not_comparable`：fixture 或 profile 不相容。不是安全結論 |
+| reasons | 有固定順序的 scan 差異理由：fixture/profile/scope/spec/auth role/engine definitions/fingerprint/mapping |
+| manual_review_required | scan 版本或逐 finding 的身分重新識別需人工確認 |
+| counts | 五種逐 finding 分類的整數筆數；零筆 finding 不等於零風險或完整掃描 |
+| created_at | 快照建立時間，UTC；不是弱點發現或修補時間 |
+| notice | 固定說明：`not_observed 不等於已修補；缺少覆蓋證據時不推論安全。` |
+
+**明細**：`GET /api/v1/scan-comparisons/{comparison_id}/findings?classification=&page=1&limit=20`。
+
+- `classification` 可省略；提供時只能是五種分類。page 從 1 起、limit 1–100，錯誤回 422。回傳 envelope 的 `data` 陣列與 `meta={page, limit, total}`，依 finding UUID 穩定排序，後續 scan 不改變集合或內容。
+- 每筆有 `finding_id`、`classification`、`reasons`、`manual_review_required`、`evidence`。不複製可變的 severity、triage 或 lifecycle，也不包含 path、path digest、參數名稱／值、完整請求或憑證。
+- `evidence` 保存 `baseline_observed`、`current_observed`、`fingerprint_comparable`、`mapping_comparable`、`finding_identity_verified`、`reidentified`，及可為 null 的 `other_scan_coverage`。只有單側出現時，coverage 指另一個 scan；current-only 查 baseline，baseline-only 查 current。
+- coverage 包含 `in_scope`／`role_comparable`（未知可為 null）、`identity_verified`、`spec_comparable`、`telemetry_complete`、`required_sources` 與 `sources`。每個來源的 `source` 是 engine/rule_id/variant；結論為 `engine_succeeded`、`time_limit_reached`（未知為 null）、`definition_comparable`、`has_location_response`、`rule_completed`、`parameter_comparable`。
+- 版本已知且可比時兩側都有觀察才是 persistent；版本不可靠時即使兩側都有也 inconclusive 並要求人工確認。同位置的 related 或佐證群組換身分是 `reidentified`，不自動合併。
+- new 與 not_observed 都要求所有覆蓋層成立。位置或 role 明確不相容是 not_comparable；未知、引擎失敗、時間上限、漏掃、未連結觀察、身分／參數未驗證都不能形成負面結論。
+- **目前實際資料的 rule_completed 一律 false**（S1–S3 的訊號不足，`DECISIONS.md` §27.5–§27.9）；因此未再命中不會輸出 not_observed，新出現也不直接判 new。純函式的完整證據正例是分類測試，不是已量測的工具完整覆蓋。
 
 ## 18. Runner、worker 與掃描器（T10 已實作）
 

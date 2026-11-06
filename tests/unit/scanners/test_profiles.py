@@ -72,6 +72,9 @@ def test_the_definition_changes_with_the_rules() -> None:
                 "40045": "POST",
                 "40048": "POST",
             },
+            "inject_rule_header": True,
+            "passive_max_alerts_per_rule": 0,
+            "passive_max_body_bytes": 0,
             "rule_threshold": "medium",
             "rules": sorted(API_RULES),
             "strength": "low",
@@ -99,3 +102,20 @@ def test_only_available_engines_are_listed(profile: ScanProfile) -> None:
     views = {view.profile: view for view in profile_views(statuses)}
 
     assert [engine.engine for engine in views[profile].engines] == [Engine.FAKE]
+
+
+def test_zap_definition_includes_rule_attribution_and_passive_settings() -> None:
+    from secscan.scanners.domain.profiles import zap_definition_sha256
+    from secscan.scanners.domain.zap.policy import METHOD_SWITCHING_RULES
+
+    previous = {
+        "method_switching_rules": {
+            str(rule): method.value for rule, method in METHOD_SWITCHING_RULES.items()
+        },
+        "rule_threshold": "medium",
+        "rules": sorted(API_RULES),
+        "strength": "low",
+    }
+    canonical = json.dumps(previous, separators=(",", ":"), sort_keys=True)
+    old_hash = hashlib.sha256(canonical.encode("ascii")).hexdigest()
+    assert zap_definition_sha256(ScanProfile.API_ACTIVE_LAB) != old_hash

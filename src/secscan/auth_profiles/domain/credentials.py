@@ -16,6 +16,7 @@ from enum import StrEnum
 from types import MappingProxyType
 
 from secscan.auth_profiles.domain.errors import InvalidAuthProfileError
+from secscan.core.headers import ZAP_RULE_HEADER
 from secscan.security.api_key_tokens import contains_platform_key
 
 MAX_SECRET_LENGTH = 4096
@@ -112,6 +113,11 @@ class Credential:
         elif self.header_name is not None:
             raise InvalidAuthProfileError("header_name 只能搭配 api_key_header")
 
+    def require_usable(self) -> None:
+        """歷史中繼資料可讀取及修復；新版本與出站用途不得使用保留 header。"""
+        if self.wire_header.lower() == ZAP_RULE_HEADER:
+            raise InvalidAuthProfileError("header_name 不可使用內部規則標記 X-ZAP-Scan-ID")
+
     @property
     def wire_header(self) -> str:
         """送出 secret 的 header 名稱（只有 api_key_header 有 header_name，__post_init__ 保證）。"""
@@ -125,18 +131,15 @@ def header_line(credential: Credential, secret: SecretValue) -> SecretValue:
 
     secret 已通過 check_secret：字元集排除 CR、LF 與 NUL，不會注入其他 header。
     """
-    if any(character in secret.value for character in "\r\n\x00"):
-        # 縱深防禦（審查建議）：不論值怎麼存進去，都不能變成第二行 header。
-        raise InvalidAuthProfileError("secret 不可有換行或 NUL")
-    prefix = "Bearer " if credential.type is AuthType.BEARER else ""
-    return SecretValue(f"{credential.wire_header}: {prefix}{secret.value}")
+    credential.require_usable()
+    return SecretValue(f"{credential.wire_header}: {_header_value(credential, secret)}")
 
 
 def masking_values(credential: Credential, secret: SecretValue) -> tuple[str, ...]:
     """工具的輸出中要遮掉的值（docs/DECISIONS.md §19.5）：secret、加了前綴的 header 值，以及
     cookie 中夠長的每個值（短的值會把一般的文字遮掉，整串 cookie 另外列出）。
     """
-    wire_value = header_line(credential, secret).value.partition(": ")[2]
+    wire_value = _header_value(credential, secret)
     values = [secret.value]
     if wire_value != secret.value:
         values.append(wire_value)
@@ -148,8 +151,17 @@ def masking_values(credential: Credential, secret: SecretValue) -> tuple[str, ..
     return tuple(values)
 
 
+def _header_value(credential: Credential, secret: SecretValue) -> str:
+    if any(character in secret.value for character in "\r\n\x00"):
+        # 縱深防禦（審查建議）：不論值怎麼存進去，都不能變成第二行 header。
+        raise InvalidAuthProfileError("secret 不可有換行或 NUL")
+    prefix = "Bearer " if credential.type is AuthType.BEARER else ""
+    return f"{prefix}{secret.value}"
+
+
 def check_secret(credential: Credential, secret: SecretValue) -> None:
     """secret 符合這種送出方式的格式；不符合時拋出 InvalidAuthProfileError（不含 secret）。"""
+    credential.require_usable()
     value = secret.value
     if not value:
         raise InvalidAuthProfileError("secret 不可為空")

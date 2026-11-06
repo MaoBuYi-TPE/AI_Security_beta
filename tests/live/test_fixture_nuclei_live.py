@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from tests.live.engine_assertions import assert_engine_outcome
 from tests.live.lab_support import Target, start_fixture, stop_target
 from tests.live.support import Api, admin_key, scan_containers, wait_for
 from tests.live.test_lab_zap_live import Measured, _assert_invariants
@@ -211,7 +212,7 @@ class TestFixtureVulnerable:
 
         measured = _run_scan("fixture-nuclei-vuln", item, vuln, "web_active_lab")
 
-        assert measured.engine["status"] in {"succeeded", "timed_out"}, measured.engine
+        assert_engine_outcome(measured.engine, measured.scan)
         _assert_invariants(measured, vuln, definition["web_active_lab"])
         # 正例：insecure 反射 Origin → cors-misconfig 命中；缺安全 header → headers 模板也命中。
         assert CORS_RULE in _rules(measured), measured.rules
@@ -233,7 +234,7 @@ class TestFixtureSecure:
 
         measured = _run_scan("fixture-nuclei-secure", item, secure, "web_active_lab")
 
-        assert measured.engine["status"] in {"succeeded", "timed_out"}, measured.engine
+        assert_engine_outcome(measured.engine, measured.scan)
         _assert_invariants(measured, secure, definition["web_active_lab"])
         # 負例：修補版補了安全 header、沒有 CORS → cors-misconfig 不命中。
         assert CORS_RULE not in _rules(measured), measured.rules

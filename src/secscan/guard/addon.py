@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network, ip_address
 from uuid import UUID
 
+from secscan.core.headers import ZAP_RULE_HEADER
 from secscan.guard.domain.addresses import pick_upstream
 from secscan.guard.domain.budget import RateLimiter, max_pending
 from secscan.guard.domain.credentials import (
@@ -80,6 +81,7 @@ class Pending:
     method: str
     path: str
     authenticated: bool
+    rule: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +278,7 @@ class GuardAddon:
             method=view.method,
             path=split_target(view.target)[0],
             authenticated=_carries(view, policy.auth_header),
+            rule=_rule_id(view),
         )
         try:
             await self._pace(policy)
@@ -311,6 +314,7 @@ class GuardAddon:
                 path=pending.path,
                 authenticated=pending.authenticated,
                 at=self._clock(),
+                rule=pending.rule,
             )
         except TelemetryWriteError as exc:
             self._log.refused("telemetry_write_failed", error=str(exc))
@@ -376,6 +380,7 @@ class GuardAddon:
             name.decode("latin-1").lower()
             for name, _ in request.headers.fields
             if header_key(name.decode("latin-1")).startswith(_PROXY_HEADER_PREFIX)
+            or header_key(name.decode("latin-1")) == ZAP_RULE_HEADER
         }
         for name in names:
             del request.headers[name]
@@ -481,3 +486,12 @@ def _view(request: Request) -> RequestView:
 def _carries(view: RequestView, header: str | None) -> bool:
     """請求是否帶著 policy 指定的認證 header（名稱不分大小寫；_ 與 - 視為相同）。"""
     return header is not None and any(header_key(name) == header for name, _ in view.headers)
+
+
+def _rule_id(view: RequestView) -> str | None:
+    """歸屬僅是請求攜帶的訊號，不能單獨證明規則已完成。"""
+    values = view.values(ZAP_RULE_HEADER)
+    if len(values) != 1:
+        return None
+    value = values[0]
+    return value if 1 <= len(value) <= 6 and value.isascii() and value.isdigit() else None

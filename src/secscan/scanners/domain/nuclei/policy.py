@@ -43,10 +43,10 @@ TEMPLATE_ARCHIVE_SHA256 = "80fbabceca095fac40afecc7f023748df22b9576b9ff10a4422bd
 TYPE_FILTER: tuple[str, ...] = ("-ni", "-duc", "-pt", "http")
 LIST_TYPE_FILTER: tuple[str, ...] = TYPE_FILTER
 # 凍結的執行設定（T18 的 ExecutionPlan 以此組裝；ARCHITECTURE §5、SOURCES S23）：
-# 型別過濾加 JSONL 輸出、只印發現。每個 run 另加 -id（凍結清單）、
+# 型別過濾加 JSONL 輸出與 matcher status。每個 run 另加 -id（凍結清單）、
 # -sf（bearer，domains 完全比對 host:port，S36）、-p（指向 guard）、-o、-u，
 # 以及凍結的速率/並行（-rl/-c，T18 依 guard 預算設定）。
-FROZEN_FLAGS: tuple[str, ...] = (*TYPE_FILTER, "-jsonl", "-silent")
+FROZEN_FLAGS: tuple[str, ...] = (*TYPE_FILTER, "-jsonl", "-silent", "-ms")
 
 # 凍結清單允許的 http 類別（lock 檔每個路徑的第二段都必須落在這裡；test_policy.py 核對）。
 ALLOWED_CATEGORIES: frozenset[str] = frozenset(

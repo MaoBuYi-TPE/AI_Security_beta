@@ -14,7 +14,7 @@ from secscan.scanners.domain.nuclei.selection import reconcile
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # 凍結的執行旗標：以相等斷言鎖死，任何新增的旗標（含 -code/-headless/-cloud-upload/-dashboard 等）
 # 都會讓測試失敗（docs/ARCHITECTURE.md §5「必須關閉」）。
-_EXPECTED_FROZEN_FLAGS = ("-ni", "-duc", "-pt", "http", "-jsonl", "-silent")
+_EXPECTED_FROZEN_FLAGS = ("-ni", "-duc", "-pt", "http", "-jsonl", "-silent", "-ms")
 
 
 def test_lock_loads_and_matches_include_count() -> None:
@@ -107,3 +107,8 @@ def test_nuclei_definition_sha256_is_stable_hex() -> None:
     first = policy.nuclei_definition_sha256()
     assert _SHA256_RE.match(first)
     assert first == policy.nuclei_definition_sha256()
+
+
+def test_matcher_status_is_part_of_the_frozen_output_flags() -> None:
+    assert "-ms" in policy.FROZEN_FLAGS
+    assert "-ms" not in policy.LIST_TYPE_FILTER

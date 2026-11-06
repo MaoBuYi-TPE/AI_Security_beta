@@ -16,6 +16,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, Select, and_, exists, func, or_, select, update
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
+from secscan.auth_profiles.domain.errors import InvalidAuthProfileError
 from secscan.auth_profiles.domain.model import StoredSecret
 from secscan.auth_profiles.domain.preflight import Preflight
 from secscan.auth_profiles.repository import AuthProfileRepository
@@ -409,7 +410,12 @@ class QueueOperations:
             return None, None
         profile_id, version = scan.auth_profile_id, scan.auth_profile_version
         if read_secret:
-            secret = self._profiles.sealed_secret(profile_id, version=version)
+            try:
+                secret = self._profiles.sealed_secret(profile_id, version=version)
+                if secret is not None:
+                    secret.credential.require_usable()
+            except InvalidAuthProfileError:
+                return RunErrorCode.PLAN_REJECTED, None
             if secret is None:
                 return RunErrorCode.AUTH_PROFILE_SUPERSEDED, None
             return None, secret
@@ -447,11 +453,21 @@ class ScanQueue:
             return self._operations(session).heartbeat(lease, clock=self._clock)
 
     def record_plan(
-        self, lease: Lease, *, plan_hash: str, profile_definition_sha256: str | None
+        self,
+        lease: Lease,
+        *,
+        plan_hash: str,
+        profile_definition_sha256: str | None,
+        rule_set: tuple[str, ...] | None = None,
+        rule_set_sha256: str | None = None,
     ) -> None:
         with self._sessions.begin() as session:
             RunRecords(session).record_plan(
-                lease, plan_hash=plan_hash, profile_definition_sha256=profile_definition_sha256
+                lease,
+                plan_hash=plan_hash,
+                profile_definition_sha256=profile_definition_sha256,
+                rule_set=rule_set,
+                rule_set_sha256=rule_set_sha256,
             )
 
     def record_usage(

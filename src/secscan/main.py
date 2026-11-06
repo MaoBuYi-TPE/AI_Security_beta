@@ -13,6 +13,7 @@ from secscan.api_keys.dependencies import authenticated_router
 from secscan.api_keys.middleware import BearerKeyFormatMiddleware
 from secscan.api_keys.router import router as api_keys_router
 from secscan.auth_profiles.router import router as auth_profiles_router
+from secscan.comparisons.router import router as comparisons_router
 from secscan.core.api import API_V1_PREFIX
 from secscan.core.body_limit import BodyLimitMiddleware
 from secscan.core.config import Settings
@@ -89,6 +90,7 @@ def _api_v1() -> APIRouter:
     api_v1.include_router(auth_profiles_router)
     api_v1.include_router(scans_router)
     api_v1.include_router(findings_router)
+    api_v1.include_router(comparisons_router)
     api_v1.include_router(scanners_router)
     api_v1.include_router(scan_profiles_router)
     return api_v1

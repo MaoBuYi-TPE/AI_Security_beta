@@ -1,8 +1,8 @@
 """GET /scan-profiles 的內容（docs/DECISIONS.md §19.10）：現在可以用的 profile 與引擎。
 
 只列可用的引擎；沒有可用引擎的 profile 不列出。definition_sha256 是這個 profile 實際執行的規則定義的
-canonical JSON（規則白名單、會改 method 的規則、強度與門檻）的 sha256：報告以它揭露 profile
-（CLAUDE.md §8：調整預算或規則要記錄 profile hash）。
+canonical JSON（規則白名單、會改 method 的規則、強度、門檻及覆蓋相關設定）的 sha256；報告以它揭露
+profile（CLAUDE.md §8：調整預算或規則要記錄 profile hash）。
 """
 
 import hashlib
@@ -19,7 +19,10 @@ from secscan.scanners.domain.nuclei.policy import (
 from secscan.scanners.domain.zap.policy import (
     ACTIVE_SCAN_RULES,
     DEFAULT_STRENGTH,
+    INJECT_RULE_HEADER,
     METHOD_SWITCHING_RULES,
+    PASSIVE_MAX_ALERTS_PER_RULE,
+    PASSIVE_MAX_BODY_BYTES,
     RULE_THRESHOLD,
 )
 from secscan.scans.domain.catalog import (
@@ -103,6 +106,9 @@ def zap_definition_sha256(profile: ScanProfile) -> str:
         "method_switching_rules": {
             str(rule): method.value for rule, method in METHOD_SWITCHING_RULES.items()
         },
+        "inject_rule_header": INJECT_RULE_HEADER,
+        "passive_max_alerts_per_rule": PASSIVE_MAX_ALERTS_PER_RULE,
+        "passive_max_body_bytes": PASSIVE_MAX_BODY_BYTES,
         "rule_threshold": RULE_THRESHOLD,
         "rules": sorted(ACTIVE_SCAN_RULES[profile]),
         "strength": DEFAULT_STRENGTH,

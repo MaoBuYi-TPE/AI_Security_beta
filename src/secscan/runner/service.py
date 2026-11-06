@@ -50,6 +50,7 @@ from secscan.scanners.domain.fake import FakeScript
 from secscan.scanners.domain.nuclei.policy import nuclei_definition_sha256
 from secscan.scanners.domain.plan import ExecutionPlan, plan_hash
 from secscan.scanners.domain.profiles import zap_definition_sha256
+from secscan.scanners.domain.rule_set import frozen_rule_set
 from secscan.scanners.domain.zap.plan import PlanWindowTooSmallError
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
@@ -230,10 +231,15 @@ class ContainerRunner:
 
     def _record_plan(self, lease: Lease, launch: Launch, plan: ExecutionPlan) -> None:
         """建立容器之前記下實際執行的內容（§20.2）：之後不收集的 run 也查得到版本。"""
+        if launch.egress is None:
+            raise ValueError("記錄 plan 時缺少核准的 egress scope")
+        rules = frozen_rule_set(lease.engine, launch.scan_profile, launch.egress.scope.methods)
         self._queue.record_plan(
             lease,
             plan_hash=plan_hash(plan),
             profile_definition_sha256=_definition_sha256(lease.engine, launch.scan_profile),
+            rule_set=rules.rules if rules is not None else None,
+            rule_set_sha256=rules.sha256 if rules is not None else None,
         )
 
     def _never_started(self, lease: Lease, error_code: RunErrorCode) -> RunReport:

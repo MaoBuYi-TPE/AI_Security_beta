@@ -9,6 +9,7 @@ FROM mitmproxy/mitmproxy:12.2.3@sha256:00b77b5d8804c8ad18cb6caefbf9d5849e895e898
 COPY deploy/guard/run_guard.py /opt/secscan-guard/run_guard.py
 COPY src/secscan/__init__.py /opt/secscan-guard/secscan/__init__.py
 COPY src/secscan/core/__init__.py /opt/secscan-guard/secscan/core/__init__.py
+COPY src/secscan/core/headers.py /opt/secscan-guard/secscan/core/headers.py
 COPY src/secscan/core/network.py /opt/secscan-guard/secscan/core/network.py
 COPY src/secscan/core/text.py /opt/secscan-guard/secscan/core/text.py
 COPY src/secscan/grants/__init__.py /opt/secscan-guard/secscan/grants/__init__.py

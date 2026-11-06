@@ -181,6 +181,7 @@ def plan_version(current: ProfileDefinition, change: VersionChange) -> VersionPl
             "至少要修改一個欄位（type、header_name、secret 或 preflight）"
         )
     credential = _next_credential(current.credential, change)
+    credential.require_usable()
     if credential != current.credential and change.secret is None:
         raise InvalidAuthProfileError("secret：改變 type 或 header_name 時，必須附上新的 secret")
     if change.secret is not None:

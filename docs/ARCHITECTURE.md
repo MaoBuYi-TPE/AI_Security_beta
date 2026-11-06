@@ -336,6 +336,10 @@ ExecutionPlan 只能包含：
 | auth_profile_versions | profile_id、version、type、header_name、preflight（method、path、expected_status、expected_json）、encrypted_secret（Fernet token，被取代就清除）、secret_erased_at、建立的 key 與時間（T08 已建立；原規劃的單一資料表改成兩張，理由見 `DECISIONS.md` §12.3） |
 | scans | id、queue_position（identity，佇列的先後）、project_id、target_id、凍結的 target_origin、scope_grant_id、api_spec_id、auth_profile_id 與版本、auth_role、scan_profile、預算、status、idempotency_key 與 request_sha256、cancel_requested_at、建立的 key 與時間、finished_at（T09 已建立；快照以複合 FK 引用不可變的資料，不另存 snapshot JSON，理由見 `DECISIONS.md` §13.1；manifest 在 M2） |
 | scanner_runs | id、scan_id、engine、sequence（執行順序）、status、lease_owner、lease_expires_at、heartbeat_at、started_at、finished_at、error_code、container_name、image_ref、用量（requests_allotted、requests_sent、requests_denied、traffic_seconds）、preflight_result、coverage_recorded、解析的結果（T15）、plan_hash 與 profile_definition_sha256（T16）；同時是 runner 與 worker 的工作佇列（T09 已建立；容器名稱與映像在 T10 加入，用量、preflight 與 coverage 在 T12，解析的結果與 engine_version 在 T15，實際執行的 plan 在 T16；不自動重跑，所以沒有 attempt） |
+| run_locations | `(scanner_run_id, method, path_sha256)`；scan_id、answered/discovery_answered/authenticated/unanswered；path 是 UTF-8 SHA-256 相等性索引，不是加密（T22；append-only） |
+| run_rule_locations | `(scanner_run_id, method, path_sha256, rule)`；answered、parameters_unknown=true、parameters_truncated；只表示歸屬訊號，不表示完成（T22；append-only） |
+| scan_comparisons | id、project/target、baseline/current、algorithm_version、comparability、reasons、manual_review_required、sealed、created_at；pair/version 唯一、同交易封存（T22） |
+| scan_comparison_findings | `(comparison_id, finding_id)`、target、classification、reasons、evidence、manual_review_required；封存後不可追加或修改（T22） |
 | runner_instances | id、role（runner/worker）、owner（唯一）、software_version、capabilities（引擎、映像與不可用的原因）、heartbeat_at、created_at；每個程序一列，30 秒內有心跳才算存活（T10 新增） |
 | scan_operations | scan_id、ordinal、method、path、operation_id、ineligible_reason；建立 scan 時凍結的 inventory 與 grant 的判斷，coverage 的分母（T09 新增） |
 | findings | id、target_id、fingerprint（`(target_id, fingerprint)` 唯一）、kind、category（v0014）、rule_group、title、method、route 與 route_source、參數位置與名稱、resource、auth_role、auth_verified、normalized_severity、severity_conflict、needs_review、cwe_id 與 cwe_source、owasp_top10_2025 與來源、owasp_api_2023 與來源、mapping_version、taxonomy_sha256、triage_state、lifecycle_state、first/last seen 的 run 與 scan、last_seen_at（T19 新增） |
@@ -621,6 +625,17 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 - 工具版本或策略的變動會影響可比性，必須顯示差異與信心上的限制。
 - 沒有足夠的 rule/operation telemetry 時，「這次沒再命中」標為 inconclusive，不假設工具有檢查到該處。
 - 即使可比且是 not_observed，也不能自動當成安全的證明。
+
+### 11.1 T22 的實作界線
+
+- 比較模組是 `comparisons/`；domain 只有 frozen dataclass 與純函式，受 import-linter 約束。API 先授權兩側 scan，再檢查寫入角色與先後；viewer 可讀封存結果，不能建立。
+- runner 與 plan 同次凍結 `rule_set` 和 `rule_set_sha256`；linker 在連結交易凍結 `link_mapping_version`、`link_taxonomy_sha256`、`locations_recorded`。版本、映像 tag+digest、parser、profile 定義、components、規則集構成引擎可比身分。缺失不從目前設定回填。
+- worker 位置摘要只在 telemetry 和 summary 嚴格一致時保存，和 mapping/finding links 同一個 fenced transaction；parser 的 observation/artifact 交易在它之前。終止前所有資料都應完成；比較另核對 observation_count、實際觀察數及已連結數，避免把連結不完整當成零告警。
+- linker 重試仍先驗證 lease 並鎖 run：已凍結 mapping 且無未連結觀察時，直接沿用原版本與位置，不因部署換版失敗；若仍有未連結觀察而 mapping/version/hash 不同，拋 `MappingChangedError`，不以新版補寫。首次零觀察仍記錄 mapping，重試不能補上先前未知的位置證據。
+- 位置表不存明文 path，只有 SHA-256；低熵 path 仍可被猜測，不能視為加密。比對時用既有 observation 的字面 path 計算摘要，核對每一個原始物件；不以同樣板另一個物件代替。原 observation/raw artifact 的加密與保留期限仍在 T23。
+- 三層證據分開：位置回應、規則完成、身分／參數可比。ZAP 規則 header 在 guard 中剝除後只作歸屬；不帶 header 不等於探索。Nuclei false 事件無法證明模板對位置完成，不建立 observation、不保存 URL 到覆蓋表。目前 rule_completed=false，採核准的 inconclusive 退路；不保存參數名稱或值。
+- `scan_comparisons` 以 ON CONFLICT 唯一鍵處理重複建立；建立者寫所有明細、seal 與 audit 才提交。deferred constraint trigger 拒絕未封存提交；父列不可見時明細插入立即拒絕。後續 finding 聚合不改變快照，T22 不變更 finding 生命週期。
+- 重新識別含 related 及 corroborated_by 成員原群組；只有保存的 mapping/hash 和目前分類表一致時才使用該表的關係，不拿新表重解釋舊 scan。位置＋群組索引及每個 run 的回應集合只建立一次，避免 finding 之間的平方比對與重掃全部位置。
 
 ## 12. Artifact 與報告
 

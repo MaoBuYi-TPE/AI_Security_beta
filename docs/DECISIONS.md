@@ -2341,3 +2341,141 @@ T20 是 M4 的最後一項：DoD 是「同 CWE 但參數不同、同 route 但�
 ## 來源
 
 `[Sxx]` 對照見 `docs/SOURCES.md`。
+
+## 27. T22：以覆蓋證據進行保守複掃比較（2026-11-04；完成 2026-11-07）
+
+### 27.1 範圍與待驗證事項
+
+核准的 M5 順序是 T22 → T21 → T31 → T23a–T23d。T21 的生命週期驗證依賴比較證據，T31 的複掃指標也依賴 T22，因此先處理複掃；T23 分成資料保護、API／部署、最終測試與乾淨重建，避免單一驗收項目跨太多界線。T21、T31 與 T23 各項開始前仍須細化並請使用者確認。
+
+T22 先於 T21 實作：比較以同一 target 的不可變 scan 為基礎；`not_observed` 不等於已修補。缺少位置、身分、規則或版本的可比證據時不得推論已修補。逐位置摘要不得保存參數值、憑證或完整請求。
+
+離線以鎖定的 Nuclei v3.11.1 映像（`--network=none`、`--pull=never`）檢查 `nuclei -h`：存在 `-ms`、`-tlog` 和 `-omit-raw`。初始需實測 `-ms` 的模板／位置事件、ZAP 歸屬、passive 完成與固定 target 換版；結果見 §27.5–§27.7，未取得逐規則完整性的證明。規則產生過一次請求不代表該規則對該位置與參數的完整檢測已完成，現行實作採 `inconclusive` 退路（§27.9），不是將初始假設當事實。
+
+### 27.2 初步安全限制（後續定案見 §27.8–§27.9）
+
+- 僅靠參數名稱的字元或長度限制，不能保證名稱中沒有 token 等敏感值；在確定可信來源或不可逆比對方式前，不從實際請求擷取名稱，也不宣稱此部分已完成。
+- 現有 operation coverage 容許 summary 比請求明細多一筆，且原本配對邏輯沒有檢查 request 序號唯一。T22 不可直接以該完整性條件證明負面比較；必須另外驗證數量與配對，並對缺失採保守判斷。
+- 覆蓋欄位受 2048 bytes 行長限制；實際擷取接線時須依編碼後的 byte budget 截斷並保留不完整狀態，不可假裝完整。
+
+### 27.3 測試中的 ZAP 設定
+
+開發分支先啟用 `injectPluginIdInHeader`，guard 在轉送之前移除該 header 並記錄單一合格數字 ID；任何歸屬都仍只是未驗證的請求訊號。passive 設定的 `maxAlertsPerRule` 和 `maxBodySizeInBytesToScan` 暫以 0 寫明不限。這三項一併納入 ZAP profile definition hash，避免新舊設定共用雜湊。S1／S3 的鎖定映像實測見 §27.5；訊號存在仍不代表規則或被動掃描對位置／參數的完整性。
+
+### 27.4 Nuclei 失敗事件的防誤判準備
+
+鎖定版原始碼的 `WriteFailure` 會寫出 `matcher-status: false`，而且可能帶有 `error`；這種事件不等於成功完成檢測。parser 版本改為 `nuclei-jsonl/2`；初版先要求 false 事件符合原有 finding 格式，S2 後依實際 failure 事件形狀調整為 §27.7 的只讀記憶體結構。非布林狀態與不符各自格式的事件仍拒絕，false 不產生 observation；所有事件都計入數量上限。開發分支已加入 `-ms`，定義雜湊由 T17 的 `504ac80c34da54738903d4937d770cc618d4514f53b2d05cd7ed1579ac061469` 變為 `53eb59977f128f38e8771fa0f686f6c08828a75a138af0fe5a92639c48919fc5`；manifest 保留 T17 原值，另記開發分支的當前值，不變更既有 golden。真實輸出形狀見 §27.7 的 S2 實測；沒有取得完成證據，不以 false 事件判 `not_observed`。
+
+### 27.5 S1／S3 的首次 fixture 實測（2026-11-04）
+
+使用獨立 live 專案、隔離 fixture 弱點版的 web scan；`test_fixture_zap_live.py::TestFixtureVulnerable::test_web_scan_finds_query_injection` 通過（1 passed，3 deselected，1 warning；pytest 404.08 秒，scan 自身約 384 秒）。此次 guard telemetry 有 700 個 request，其中 690 筆帶歸屬、10 筆未歸屬；出現 29 個不同的 ID，全部在該 profile 的 active 白名單內。`zap.log` 顯示被動設定兩個值為 0、`passiveScan-wait` started 並 finished（2 秒）。這些只確認訊號與作業日誌存在，**不證明規則對個別位置與參數已完整執行**，也未單憑 finished 證明每個 response 都完成所有被動規則。
+
+和既有 T30 fixture 弱點版 web 錄製的單次結果相比，兩次各有 23 筆 observation、11 種 source rule；按規則、method 與 path 的計數有 2 個差異項。因此不能據此宣稱行為逐項一致或量測到穩定變異。錄製位於 gitignore 的 `recordings/t22-spike-20261104/`，尚須 S4 在 fixture 端確認內部 header 未送達，以及 S1 對照組、S2、S3 的完成性條件；未確認部分維持 inconclusive。
+
+### 27.6 S4 同 target 換版與 header 去除（2026-11-04）
+
+`test_fixture_rescan_live.py::test_fixture_switch_preserves_the_authorized_target` 在獨立 live 專案通過（1 passed，298.06 秒）。以同一 host、IP、port、target 與 grant，先掃弱點版再換為修補版：guard 分別轉送 228 與 233 次；fixture 的收包紀錄中都沒有 `X-ZAP-Scan-ID`。兩次 run 均因 180 秒總預算下的引擎時間上限而 `timed_out`，因此只證明這次換版後仍有受控流量、header 沒有送到 fixture，**不證明完整規則覆蓋，也不是複掃分類驗收**。測試結束後專用 live 容器與網路已清理。
+
+### 27.7 S2 的 Nuclei matcher-status 實測（2026-11-04）
+
+首次實測等待容器 300 秒後失敗，未取得輸出；離線 admission 測試隨後重現新 plan 因 runner 的固定參數白名單尚未加入 `-ms` 而遭拒。已在 runner **獨立核准序列**精確加入該旗標，測試確認缺旗標、移動位置及額外旗標仍被拒絕；首次 live 的實際終止狀態未被測試記錄，不能斷言其原因。測試改為從 scan event 取得 run ID、以終止狀態結束等待，之後重跑隔離 fixture 弱點版，1 passed（231.52 秒）。
+
+第二次實測引擎回報 succeeded、輸出 919,391 bytes；共 51 筆事件：11 筆 `matcher-status=true`、40 筆 `false`。11 筆 true 有 template-id、matched-at；40 筆 false 都有 template-id 但沒有 matched-at，其中 1 筆有 error。測試以 template-id 和 matched-at 的原始組合數得 42，但 false 的 matched-at 是空值，**不能把這個數字當作 42 個有效位置或完整模板覆蓋**。這次沒有驗證每個模板對每個位置和參數都完成；error 事件也顯示整體 succeeded 不排除個別模板出錯。
+
+parser 保留既有 `parse_report` 的 findings 契約，新增 `parse_report_with_executions`，把 false 事件提供為只存模板 ID、base URL、可選 matched-at 與是否有 error 的記憶體結構，不保存原始 error/request/response；這些 URL 是不可信資料且不寫進日誌。這只是事件訊號，尚未接到持久化或比較；沒有實證的規則完成性、位置與參數關聯時，一律 inconclusive。輸出大小僅代表這一次量測，不能推論其他目標或預算下必定小於上限。
+
+S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-runner LIVE_TESTS=tests/live/test_nuclei_matcher_spike_live.py LIVE_PYTEST_ARGS=-s`。沿用 live 的 LAB_ONLY、grant、internal network 與清理檢查；不與其他 live 指令並行。只輸出事件形狀與計數，不列印原始 error、請求或回應。這是訊號量測，不取代三次完整複掃校準。
+
+### 27.8 比較證據的持久化基礎（開發中，2026-11-04）
+
+- v0016 目前新增 run 的規則清單與 hash、連結時的 mapping 版本與 taxonomy hash、`locations_recorded`，以及 `run_locations`／`run_rule_locations`。既有 run 的新欄位保持未知，沒有從目前設定回填過去的執行結果。規則清單與 plan 一起寫入且不可後補；mapping 與位置標記只能寫一次；位置列不可更新、刪除或在標記完成後追加。升降級與 ORM drift 已有整合測試。v0016 也新增比較快照表：以複合外鍵約束兩次 scan 與 finding 屬於同一個 target，快照與明細在建立交易中封存，封存後不可修改或追加；未封存的快照不能提交。先後順序與 terminal 狀態在 service 驗證。比較 API 與事實建構已實作（§27.9–§27.10），完整 live 校準與最後審查仍未完成，**T22 尚未完成**。
+- ZAP 凍結依 grant method 過濾的 active ID 與 `pscanrules` add-on 版本；Nuclei 凍結模板 ID，清單按字典序去重，hash 使用無空白的 ASCII JSON。這些只記錄允許的設定，**不是實際執行完成的證明**。
+- worker 只有在 guard summary 的 scan 與 run 吻合、轉送數和明細數完全相等、序號與配對合格時，才可在連結 finding 的同一 transaction 保存摘要與 mapping；沒有觀察也保存 mapping。缺 summary、缺明細或不一致時不寫位置、`locations_recorded=false`。零流量但沒有明細檔亦維持未知。交易失敗時位置、mapping 和 finding 連結一併回滾。
+- 不保存任何參數名稱或值，`parameters_unknown` 強制為 true；非歸屬請求不一定是 discovery，所以 `discovery_answered` 目前一律 false。初版以 `redact_url` 遮罩 path，但它無法辨識任意敏感值；因此改採 §27.9 的 path digest，不保存明文。仍先拒絕遮罩後會改變的 path，避免遮罩碰撞冒充精確位置。證據不足的來源不能據此判定 `not_observed`。
+
+### 27.9 比較 API 的安全摘要與交易界線（實作中，2026-11-04）
+
+- 調整 §27.8 的位置儲存：`redact_url` 不可能辨識任意 path 秘密，因此新位置表只保存 UTF-8 path 的 SHA-256，不保存原文字串。這是相等性索引，不是加密，也不能阻止對低熵 path 的猜測；一般 API 不輸出這些摘要。比較以既有遮罩 observation 的 path 計算摘要，逐一核對原 scan 觀察過的字面物件，不以同樣板另一物件代替；遮罩後對不上就視為沒有證據。舊 observation 與原始 artifact 的資料保護仍依既定 T23 工作，這次不宣稱一併完成。
+- parser 的 observations/artifacts/outcome 維持既有的原子交易，位置摘要、link mapping 與 finding 連結則在下一個 fenced transaction 一起提交。這取代計畫中「和觀察同交易」的要求，避免把工具解析與連結重試綁成大型交易；run 在兩個交易都完成前仍是 normalizing。比較只接受終止 scan，未連結的觀察或缺 mapping 一律視為證據不完整，不把「沒有 finding 連結」當零告警。重試不覆寫既有版本或位置。
+- S1–S3 沒有取得規則對位置及參數的完整執行證明，所以實際資料的 `rule_completed` 仍是 false。Nuclei false 事件不持久化 URL，也不升格為模板完成；ZAP header 與 passive job 完成同樣不能支持負面結論。保留三層缺口的布林摘要與來源識別，不記請求、token、參數名稱或值。這是核准的保守退路，不修改掃描範圍或放寬 guard。
+- 比較快照使用同一請求交易、唯一 `(baseline, current, algorithm_version)` 與 `ON CONFLICT DO NOTHING`；只有建立者插入明細、寫 audit 並封存。重複請求讀同一快照；兩次 scan 皆先做 object-level 讀取授權，再檢查寫入角色，避免 viewer 透過錯誤差異辨識另一專案資源。封存後父子列不可改寫或追加；明細 trigger 連父列都不可見時也拒絕，不能先放行再依賴 FK。
+
+### 27.10 API、版本身分與真實交易驗證（2026-11-04）
+
+- 已建立 POST 與兩支 GET API（`API_CONTRACT.md` §17.11）；新建 201、重複 200、viewer 可讀但不能建立。兩個 scan 都先做讀取授權；任一無權或不存在回 404，之後才檢查寫入角色。比較不修改 triage/lifecycle，不把 new/not_observed 當成新增／已修補的人工確認。
+- 引擎身分納入 engine、映像 tag+digest、工具版本、parser、profile definition、rule_set hash 與排序後 components。明確空 components 是已知無額外元件；缺少、格式錯誤或未 pin 的映像都不能形成可信定義。rule_set 必須排序去重並與 hash 相符。不得以目前映像、profile 或 taxonomy 回填舊 run。
+- 同位置的重新識別納入 taxonomy 的 related 與 corroborated_by 成員原群組，雙向標示人工確認而不合併。只有兩個 scan 的 mapping/hash 皆與已載入分類表一致時使用這些關係；沒有舊分類表時，不拿新版關係推論舊 scan。使用位置＋群組索引與每 run 一次建立的回答位置集合，避免 N * M 配對與每 finding 重掃位置；回歸測試以操作次數驗證，不依賴耗時門檻。
+- 兩個真實連線的交易測試已通過：唯一鍵競爭者確實等待鎖；先到者 commit 時讀同一份結果，rollback 時後到者接手，最終只有一份快照／明細與一筆 audit。audit 故障時 header 與明細整筆回滾。未封存真實 commit、不可見父列、兩側 scan／finding 複合 FK、UPDATE／DELETE／TRUNCATE／封存後追加都有反例；不是只在單一外層測試交易中模擬 commit。
+- `run_locations` 的 INSERT guard 同樣立即拒絕不可見的父 run，不先放行再依賴 FK 等待；完成或已記錄覆蓋後不允許追加。v0016 downgrade 會刪除比較快照、位置摘要與新增 provenance，僅限已備份的開發／測試 DB，不是歷史證據保留方案。
+- 已增加零觀察、未連結觀察、來源漏失、認證不健康、同樣板不同物件、規格未知／增減、篩選／分頁、client 偽造證據及輸入／證據超限的測試。100,000 個來源組合與每 finding 16 KiB 是拒絕整筆建立的邊界，不是悄悄截斷後回傳完整比較。
+- 完整離線測試首次跑到 6,030 passed、4 failed（新增三支 API 尚未列入端點契約清單）；補齊清單後，該認證測試檔 50 passed。`make lint`、`make typecheck`、`make test-contract`（200 passed、1 skipped）、`make owasp-top10-check` 通過。完整重跑與 live 三次校準／最終驗證仍進行中，這些中途結果不是 T22 完成證明。
+
+### 27.11 比較模組的補強測試（2026-11-04）
+
+- 用真實 queue 的 prepare → record_plan → collect → worker claim → record_results → linker → terminal，分別驗證 ZAP 與 Nuclei 的凍結規則、映像、工具／parser／component 版本可以由比較 reader 原樣建立可比身分。測試的版本字串明確為 `test-*`，不冒充工具 live 量測。
+- 補上任一側舊 mapping／taxonomy 不借用目前關係表的反例，以及 Hypothesis 的證據任意退化、可比版本的雙側觀察、單側分類必有理由等性質。
+- 獨立 `COVERAGE_FILE=recordings/.coverage-comparisons` 的比較模組檢查：176 passed（53.36 秒）；774 statements 與 156 branches 中各缺 5，合計約 98.92%。核心 domain 的 classification、comparability、evaluation、provenance、reidentification 均為 line/branch 100%。未覆蓋是 reader/service 的不可能正常缺列與 repository 的防禦性分支，不以排除程式碼提高數字。這是比較模組量測，不代替整體或 live 驗收。
+
+- 完整離線重跑已通過：`make test` 6,047 passed、2 skipped、77 deselected，coverage 99.63%，543.53 秒。這次收集早於後補的 9 個 property／完整來源讀回／舊 mapping 測試；它們已另在上述 176 個 focused 測試中通過，最後交付前仍須以同一最終工作樹重跑全部。
+- 本輪當時的 `make lint` 與 `make typecheck` 通過（534 source files）；提交前 hooks 已檢查當時全部 tracked/untracked 檔。當時完整程式品質與安全審查、第一輪完整 live 校準尚在執行；後續結果、審查修正與仍未驗證的項目見 §27.12–§27.13。
+
+### 27.12 審查後的認證 header 與 parser 修正（驗證中，2026-11-04）
+
+- 安全審查重現自訂目標認證 header 與 `X-ZAP-Scan-ID` 衝突時，短數字 secret 可能被當成規則 ID 寫入 telemetry；這是合成憑證的離線重現，不表示已查證真實憑證外洩。guard policy 必須拒絕此衝突，包含舊磁碟 policy；新 profile、PATCH 後的版本、新 scan 綁定及 runner 啟動都應拒絕不可執行的設定。
+- 初版直接加入 `Credential` 建構子的拒絕清單，相關離線測試 745 passed，但獨立複查發現會連歷史版本查詢、修復 PATCH 與金鑰換版一併阻斷。因此調整為「歷史中繼資料仍可表示、使用前明確驗證」：既有 profile 可讀、可透過合法 header 與新 secret 修復，密文 context 不變，金鑰換版不送出任何目標請求；不允許以原衝突設定建立新版本或開始掃描。這不是放寬出站規則。
+- Nuclei 的 `interpret()` 原先只取 findings 而遺漏 false/error 事件，導致 exit 0 可能被誤報完整。修正讀完整解析結果，僅保存有界錯誤數；優先保留無流量／逾時等既有失敗語意，否則為 `failed/ENGINE_REPORTED_ERRORS`，正向 observations 保留，不保存原始 error。parser 升為 `nuclei-jsonl/3`，不能把 `/2` 的成功狀態當成修正後驗收。
+- 比較摘要已納入 taxonomy hash：即使零 finding，hash 不同或未知仍標記 mapping 差異與人工確認。連結後、terminal 前遇到 mapping 換版的重試問題另已補整合回歸，但尚未取得實際 DB RED/GREEN，暫不宣稱修復。
+
+### 27.13 第一輪校準與審查後離線結果（尚未完成 T22，2026-11-04）
+
+第一輪完整校準 `calibration-1` 結束，pytest **1 passed，1897.94 秒**；沿用同一 target 的四次 scan，錄製在 `recordings/fixture-rescan/calibration-1/`。此輪使用安全修正前的版本，不能當作 `nuclei-jsonl/3` 或新認證限制的最終驗收：
+
+| 比較 | comparability | persistent | inconclusive | new / not_observed / not_comparable | manual review |
+|---|---|---:|---:|---|---|
+| 弱點 → 弱點 | comparable | 29 | 2 | 0 / 0 / 0 | false |
+| 弱點 → 修補 | comparable | 8 | 24 | 0 / 0 / 0 | false |
+| 弱點 → 小預算 | different | 0 | 30 | 0 / 0 / 0 | true |
+
+- 執行輸出確認專屬 live app 容器、DB volume 與 compose 網路完成清理；沒有操作其他專案容器。未啟動第二輪，須以修正後版本重新取得三次有效校準及最後完整驗證。
+- 原修補斷言漏掉 CSP/XCTO 等已知修補案例。新增純函式 `tests/live/rescan_assertions.py`：全域安全 header／CORS 依 fixture 的 `_decorate` 實際作用範圍逐 finding 核對；SQLi、XSS、redirect 則以 method、route、參數位置與名稱對應。每個 baseline 已命中案例都必須是 `not_observed` 或 `inconclusive`，缺少比較明細也失敗。所有案例另列 `checked`／`baseline_not_observed`／`no_automatic_mapping`，未對應 finding 亦另列，不能把缺項當驗證通過。新增 33 個單元測試通過。
+- 以新版斷言**離線讀取舊錄製**：6 個案例有對應（共 20 個 baseline findings），6 個案例沒有自動對應；另 10 個 finding 未對應。這不是重新 live，也不代表 inconclusive 已證明修補；沒有建立假的新校準紀錄或改寫原錄製。
+- Header 初版 RED 為 10 failed、264 passed，涵蓋新設定、舊 policy、數字與非數字合成 secret，以及 runner 綁定。相容性修正另先重現舊中繼資料、修復與金鑰換版的失敗；測試替身一處錯誤已先修正再取得有效 RED。修正後認證／guard／綁定的 focused 檢查 917 passed；新增新 scan 拒絕與舊設定回歸亦通過。保留原有遮罩換行拒絕，不為相容而降低安全檢查。
+- 最新不需 DB 的 `tests/unit tests/contract tests/api`：**4,604 passed、2 skipped，57.55 秒**。獨立 coverage 檔只量測此次指定核心，不是全專案 coverage：auth profile domain branch 118/118、comparison domain 97/98、guard 342/344、Nuclei results 79/86，皆高於 90%；四組合計 line 2675/2685、branch 636/646。未更改排除規則。新增 guard 測試的型別收斂之後，`make lint`（5 個 import contracts）、`make typecheck`（540 source files）、`make owasp-top10-check` 均通過。
+- 新增 profile 真實 DB 查詢／版本歷史／換金鑰／修復、Nuclei error 持久化與 mapping 換版重試測試，僅確認相關檔 **75 tests collected**，不算測試通過。既有整合 fixture 會讀取 repo `.env`，目前未重新執行，以維持不讀該檔的限制；需要明確確認測試程序可自行載入（不顯示內容），或提供不依賴該檔的測試環境。沒有擷取秘密、改權限或讀取 `.env`。
+- mapping 換版後「links 已提交、terminal 前中斷」的重試問題尚未修正；對應 6 個 DB 回歸仍待執行。先前 6,047 個完整測試通過是歷史結果，不能代表這些新增案例與目前工作樹已全綠。T22 保持未完成，不 commit／PR。
+- 提交前檢查已對全部 tracked/untracked 工作檔重跑，排除 `.env` 類秘密檔（保留 `.env.example`）：格式、YAML/TOML、檔案大小、合併標記、private key／平台 API key、ruff、mypy、import-linter 均通過；`.env` 禁止提交 hook 因此次沒有匹配檔案而 skipped。沒有 stage、commit 或改動權限。
+- 本次 code-reviewer 增量複查未發現確定缺陷。security-reviewer 對先前 HIGH #1 的唯讀複查也已完成：指定的認證用途驗證、歷史相容、runner 綁定及 guard 防護範圍內，沒有未解的 CRITICAL／HIGH。審查者未自行重跑測試、未使用 DB／Docker／live，亦未建置 guard 映像；修正仍須經真實 DB 與新版部署驗證。這些增量結論不取代 T22 最終完整審查。
+
+### 27.14 剩餘修正與驗收（2026-11-05 – 2026-11-07）
+
+- 使用者明確允許既有 make／pytest 測試程式依原機制載入 `.env`，解除 §27.13 的授權歧義；不得主動查看、搜尋、輸出或修改秘密。僅連 `cluster_name=secscan-test` 的 db-test 暫時 DB 與隔離 live Lab，不改測試環境設定、不碰開發／正式 DB 或其他專案資源。日誌只回報安全摘要；無法確認隔離或授權時停止 Live。
+- 使用者選擇維持 Nuclei `/3` 的嚴格判定，不新增「成功但不完整」狀態。共用 live 檢查僅接受 Nuclei 的 `failed/ENGINE_REPORTED_ERRORS`、正整數 `engine_errors` 與不完整 scan；仍須符合原有來源、scope、流量及 ground truth 不變式，ZAP failed 不放寬。
+- mapping 重試先以六個真實 DB 回歸取得 **4 failed、2 passed** 的 RED；不是環境錯誤。修正後先持有有效 lease 的 run 列鎖，再讀 frozen mapping 與未連結觀察。已凍結且沒有未連結觀察時回傳 0，保留舊 mapping、位置、連結與聚合；仍有未連結觀察且版本／hash 不同時拋 `MappingChangedError`。首次零觀察仍凍結證據，晚期連結失敗仍整筆回滾。
+- 六個 linker／comparison DB 測試檔最終 **73 passed（47.77 秒）**；其中 fingerprint、mapping、taxonomy hash 三種換版，各驗證直接完成及新版本重試沿用舊證據。比較均要求人工確認、分類為 inconclusive，沒有 new／not_observed／persistent；不借用目前 taxonomy 重解釋舊 scan。重試測試拆到 `test_finding_linker_retry.py`，避免原測試檔超過上限。
+- 認證與 Nuclei 三檔真實 DB 回歸 **50 passed（9.44 秒）**：歷史 profile 讀取／版本／換金鑰／修復、新 scan 拒絕、舊排隊快照在分配容器與交出 secret 前以 PLAN_REJECTED 拒絕，以及 Nuclei matcher error 入庫與不完整狀態。新增歷史佇列測試曾因測試建構誤讀 `Scope.budget` 失敗，改讀 grant 的 budget 後通過；未修改產品的安全判定。
+- live 輔助函式 **63 passed**：所有比較（含未對應案例）禁止 new／not_observed，來源的 rule_completed 必須為 false；錄製 root 與檔案皆禁止覆寫，修補核對另存 ground-truth.json。新函式實作前為三個缺模組／缺匯入的 collection errors，不冒稱重現了舊 runtime 缺陷。
+- `make lint` 通過（554 個格式檔、5 個 import contracts）；`make typecheck` 通過（547 source files）；`make test-contract` **200 passed、1 skipped**；`make owasp-top10-check` 逐位元組一致。這些日誌及認證／Nuclei DB 日誌的指定敏感樣式掃描沒有命中，不代表可證明任意秘密皆不存在。
+- 本次完整 `make test` **6,173 passed、2 skipped、77 deselected（592.79 秒）**，整體 line＋branch coverage **99.6402%**。指定核心 branch：comparisons/domain **97/98（98.98%）**、guard **342/344（99.42%）**、auth_profiles/domain **118/118（100%）**、Nuclei results **79/86（91.86%）**、worker/locations **4/4（100%）**。沒有變更 coverage 排除規則；JSON 留在 gitignore 的 `recordings/t22-completion-20261105/coverage-pre-review.json`。
+- 全部 tracked/untracked 工作檔的 pre-commit 通過；秘密設定檔不列入檢查輸入（僅允許 `.env.example`）。全量與 hook 日誌的指定敏感樣式均無命中。
+- 完整靜態安全審查已完成，沒有確認的新增 CRITICAL／HIGH／MEDIUM／LOW 缺陷；涵蓋雙側物件授權、快照封存／交易、lease fencing、mapping 換版、三層 coverage、telemetry、parser 與保留 header 憑證邊界。審查者未自行執行 DB／Docker／Live，不將主線測試數或靜態結果當成安全證明。
+- 完整 code review 在 API 逾時後從原進度完成，結論 APPROVE，沒有確認的新增 CRITICAL／HIGH／MEDIUM／LOW 缺陷；完整閱讀修改／新增來源與測試，另以無出網入口執行 **569 個離線測試通過（2.14 秒）**。沒有修改 production 或將核准限制當成完成證據；DB／Docker／Live 未由審查者重跑。
+- 校準前凍結 311 個產品／部署／fixture 檔案，聚合 SHA-256 為 `23427ec43c8d57959111ba6ee024596a208f282db6c5b73bbc7e4a3f9532bddc`；manifest 在 gitignore 的 `recordings/t22-completion-20261105/live-production-freeze.json`。此時沒有其他 Live／掃描容器，專屬網路與 volume 不存在，8765／55434 可用；既有 db-test 保留。
+- 第一輪 `post-fix-1` 的既有 `make test-live-fixture-rescan` 指令在執行前被工具權限檢查以 **Unverifiable Deletion Scope** 拒絕。既有 Live 入口的 cleanup 依兩個專屬網路列出容器後刪除，並拆除 compose volumes；本次未修改該流程、未繞過權限或改派代理。這是執行權限阻塞，不是 Live 測試失敗；修正後有效校準仍為 **0 次**。
+- 拒絕後重新核對：`post-fix-1` 的目錄與日誌都不存在，沒有 Live／scan 容器、Live 網路或 Live volume；唯一既有容器仍是 `secscan-db-test-1`。311 個凍結檔案均未改變，因此沒有偽造本輪量測或未記錄的產品變更。
+- 修正後三次有效 live 校準、固定斷言後最終執行與 M4 live 回歸仍未完成；在既有指令取得適當執行許可前停止 Live。T22 保持未勾選，尚未 commit／PR。
+- 同日重新開始執行剩餘計畫，於 13:28 UTC 完成唯讀前置核對：311 個凍結檔案無缺漏、無變更；只有健康的 `secscan-db-test-1`，沒有 Live／掃描容器、Live 網路，以及 Live 名稱或 compose project label 的 volume。既有 269 個 volume 未讀內容、未清理，不能稱整台 Docker 沒有 volume。IPv4 的 8765／55434 沒有監聽程序；另有非本專案程序監聽 `[::1]:8765`，未停止或修改。
+- 使用者設定的 `permissions.allow` 未找到三個限定 Live 指令；專案與專案本機設定檔不存在，亦未能確認 session 層的有效允許規則。依核准計畫停在權限前置，不自行新增規則、修改環境或改用其他執行方法。本次沒有送出 Live 指令，不能稱為新的工具拒絕或測試失敗；六個預定錄製目錄皆未建立。去識別化前置摘要保存在 `recordings/t22-completion-20261105/live-preflight-permissions-summary.json`；後續執行前須重新檢查，不沿用本次環境快照作永久保證。
+- 13:3x UTC 重新核對前置條件（同上，皆成立）後，既有 `make test-live-fixture-nuclei` 通過權限並實際執行（錄製在新的 `recordings/fixture-nuclei/post-t22-1`）：**2 passed（446.39 秒）**，production 凍結的 311 檔前後不變。兩個 run 都是 `failed/ENGINE_REPORTED_ERRORS`：弱點版 `engine_errors=1`、轉送 312、觀察 11（`cors-misconfig` 1、`http-missing-security-headers` 10）；修補版 `engine_errors=2`、轉送 314、觀察 6（沒有 `cors-misconfig`）。兩者都沒有用盡預算、沒有超時。這是使用者選擇的嚴格判定下的條件式接受，不是「成功」；CORS 的正例與負例、plan_hash、定義、guard 只看到 target 等不變式都成立。pytest 另有 2 個既有的 class-scoped fixture 棄用警告，與本次修改無關。摘要在 `post-t22-nuclei-1-summary.json`，日誌與錄製的指定敏感樣式掃描沒有命中。
+- 執行後檢查發現**殘留**：沒有 Live 容器、網路或 Live 名稱的 volume，但匿名 volume 從 269 個變成 271 個。新增的兩個建立時間（13:34:04Z、13:37:37Z）分別對上弱點版與修補版 fixture 的啟動；guard 映像宣告 `VOLUME /home/mitmproxy/.mitmproxy`，而 `start_fixture` 以 `docker run -d` 啟動、`docker rm -f`（沒有 `-v`）刪除，Docker 因此留下匿名 volume。既有 269 個也全是匿名 volume、建立於 10-28 之後，推測是過去 Live 以同樣方式累積，但未讀內容、無法逐一證明。依使用者條件立即停止後續 Live，**未刪除**任何 volume，交由使用者決定。
+- 修正（只改測試輔助，不在 production 凍結清單內，不作廢校準）：`start_fixture` 和 compose 的 guard 一樣以 tmpfs 蓋住該路徑，讓 Docker 不建立匿名 volume，而不是擴大刪除範圍。先以單元測試取得 RED（fixture 容器沒有掛 tmpfs），修正後 Live 輔助的單元測試 **69 passed**、ruff 與 mypy 通過。tmpfs 是否真的阻止匿名 volume，要在下一次 Live 的執行後檢查以 volume 數不變實際驗證。
+- 殘留處理（2026-11-06，使用者決定）：先確認兩個 volume 只有匿名標籤、沒有任何容器引用，再以精確名稱 `docker volume rm` 刪除這兩個（`8f435f65…`、`8e4cac7a…`）；匿名 volume 回到 269 個，只剩 `secscan-db-test-1` 在執行。這兩個 volume 沒有用途：fixture 只借用映像的 python，mitmproxy 沒有執行，guard 也以 tmpfs 蓋住該路徑。既有 269 個不處理（可能含其他專案的資料，不用 `volume prune`）。
+- 修正後複掃校準 `post-fix-1`（2026-11-06）：**1 passed（1,888.26 秒）**，凍結 311 檔不變、日誌與錄製無敏感樣式、沒有殘留，匿名 volume 前後都是 269 個（tmpfs 修正實測有效）。baseline／control／secure 皆為 `partially_completed`：ZAP succeeded，Nuclei `failed/ENGINE_REPORTED_ERRORS`（engine_errors 1／1／2，條件式接受）；小預算 scan 為 `timed_out`（ZAP `ENGINE_TIMEOUT`、Nuclei `BUDGET_EXHAUSTED`）。比較：unchanged comparable／不需人工（persistent 29、inconclusive 2，理由 rule_incomplete）；patched comparable／不需人工（persistent 8、inconclusive 24，理由 rule_incomplete 24、parameter_unverified 7、engine_incomplete 5）；partial-comparison different／需人工（inconclusive 30；snapshot 理由是引擎定義、fingerprint 與 mapping 版本不一致或未知，逐 finding 理由是 fingerprint 與 mapping 版本不一致）。三組皆 new=0、not_observed=0、not_comparable=0，與修正前 calibration-1 相同。修補核對 12 案：6 checked（20 個 finding）、6 no_automatic_mapping。
+- `post-fix-2`（2026-11-06）**無效，屬環境故障，不計次數**：baseline 完成後，control scan 進行中 Mac 於 21:30:44（+08:00）以電池闔蓋睡眠，OrbStack 停止回應；`docker ps`（等待 scan 容器）與 fixture 的 `docker rm -f` 各逾時 120 秒，1 failed。失敗發生在任何比較之前，沒有建立比較快照。02:33 接上電源喚醒後清理完成，沒有殘留、凍結檔案不變、無敏感樣式。證據為 `post-fix-2-env-failure.log` 與 `-summary.json`；確認隔離後以新目錄 `post-fix-2-rerun` 重跑。
+- `post-fix-2-rerun`（2026-11-07，接 AC 電源，執行期間沒有睡眠）：**1 passed（1,900.72 秒）**，凍結 311 檔不變、無敏感樣式、沒有殘留，匿名 volume 維持 269 個。四個 scan 的狀態、錯誤碼與 engine_errors 與 `post-fix-1` 相同；unchanged 與 patched 的 comparability、manual_review 與各分類數量完全相同。partial-comparison 仍為 different／需人工、new=0、not_observed=0，inconclusive 為 31（`post-fix-1` 為 30）：小預算 scan 被截斷的位置每次不同，數量不寫死。修補核對同為 6 checked（20 個 finding）、6 no_automatic_mapping。
+- `post-fix-3`（2026-11-07）：**1 passed（1,908.71 秒）**，凍結 311 檔不變、無敏感樣式、沒有殘留、匿名 volume 維持 269 個、執行期間沒有睡眠。四個 scan 與 unchanged、patched 兩組比較的結果與前兩輪完全相同；partial-comparison inconclusive 30。修正後的有效校準達 **3 次**（`post-fix-1`、`post-fix-2-rerun`、`post-fix-3`）。
+- 固定斷言（只改測試，不作廢校準）：三次都相同的結構寫成 `CALIBRATED_STRUCTURE` 與 `assert_calibrated_structure`（`tests/live/rescan_assertions.py`），在每次比較時檢查——unchanged 與 patched 為 comparable、不需人工、snapshot 沒有理由；partial-comparison 為 different、需人工、snapshot 帶理由；三組 not_comparable 皆為 0；未校準的比較名稱一律失敗。各分類數量（persistent 29／8、inconclusive 2／24／30–31）與 Nuclei 的 engine_errors 只記錄範圍，不寫死。先以單元測試取得 RED（缺少函式），修正後 54 passed；以 calibration-1 與三次有效校準共 12 個實際比較快照離線重放，全數通過。`make lint`、`make typecheck`、pre-commit 通過。
+- 固定斷言後的最終執行 `final`（2026-11-07）：**1 passed（1,893.36 秒）**，`assert_calibrated_structure` 在三組比較都成立；凍結 311 檔不變、無敏感樣式、沒有殘留、匿名 volume 維持 269 個、執行期間沒有睡眠。四個 scan 的狀態與三次校準相同；unchanged comparable（persistent 29、inconclusive 2）、patched comparable（persistent 8、inconclusive 24）、partial-comparison different／需人工（inconclusive 30）；三組 new=0、not_observed=0、not_comparable=0。修補核對 6 checked（20 個 finding）、6 no_automatic_mapping。
+- 雙引擎 findings 的 M4 回歸（2026-11-07，錄製在新的 `recordings/fixture-findings/post-t22-1`）：**3 passed、3 warnings（1,321.62 秒）**；warnings 是既有的 `PytestRemovedIn10Warning`（class-scoped fixture 定義為 instance method）。弱點版 `partially_completed`：ZAP succeeded（觀察 23）、Nuclei `failed/ENGINE_REPORTED_ERRORS`（engine_errors 1，觀察 11），finding 30（security 22、informational 8）；修補版 `partially_completed`：ZAP 觀察 4、Nuclei engine_errors 2、觀察 6，finding 10；小預算 240 秒：scan `timed_out`、results_complete false，ZAP `ENGINE_TIMEOUT`（觀察 22、time_limit_reached true）、Nuclei `BUDGET_EXHAUSTED`（小預算的數字取自日誌的 `[量測]` 行；該 scan 的錄製依設計只保存 provenance.json）。每個觀察恰好連結一次、預算未用盡。凍結 311 檔不變、無敏感樣式、沒有殘留、匿名 volume 維持 269 個。`test-live-zap`、`test-live-lab` 未在 T22 重跑，留給 T23c 在最終版本執行。
+- 增量審查後補上：`assert_calibrated_structure` 失敗時，訊息一併帶出 snapshot 的 reasons 與 counts（Live 結束會拆除 DB，偏離時仍能從日誌分析）；只改訊息、不改判斷，不重跑 Live。
+- 交接給 T23c（不在 T22 範圍，未修改）：`tests/live/zap_support.py` 的 `start_site` 與 `tests/live/guard_support.py` 的 `start_receiver` 同樣以 `docker run -d` 跑 guard 映像、沒有 tmpfs，再以 `docker rm -f`（不帶 `-v`）刪除，會和本節的 fixture 一樣留下匿名 volume。`make test-live-zap`、`make record-fixtures`、`make test-live-runner` 會用到；T23c 重跑這些 Live 前應把 tmpfs 常數移到 `tests/live/support.py` 共用並補單元測試，否則會觸發「有殘留就停止」的條件。
+- 限制：實際 producer 的 `rule_completed` 一律為 false，所以 Live 的單側 finding 都是 inconclusive；這一版不能計算「自動驗證修補成功率」，not_observed 只在離線 RESCAN 正反例中出現。Nuclei 在本 fixture 每次都有 1–2 個模板 error，依嚴格判定使 scan 成為 partially_completed。

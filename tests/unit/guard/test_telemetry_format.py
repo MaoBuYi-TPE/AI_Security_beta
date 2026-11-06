@@ -153,3 +153,61 @@ def test_deeply_nested_documents_are_malformed_not_crashes() -> None:
     """RecursionError 也轉成 TelemetryError（審查建議）：summary 的上限 64 KiB 放得下很深的巢狀。"""
     with pytest.raises(TelemetryError):
         decode_summary(b"[" * 30_000 + b"]" * 30_000, run_id=RUN)
+
+
+def test_request_coverage_fields_round_trip_and_legacy_defaults() -> None:
+    extended = replace(
+        REQUEST,
+        rule="40018",
+        parameters=("id", "user.name"),
+        parameters_unknown=False,
+        parameters_truncated=False,
+    )
+    assert decode_line(encode_line(extended)) == extended
+    legacy = decode_line(encode_line(REQUEST))
+    assert isinstance(legacy, ForwardedRequest)
+    assert legacy.rule is None
+    assert legacy.parameters == ()
+    assert legacy.parameters_unknown is True
+
+
+@pytest.mark.parametrize("rule", ["", "-1", "\uff11\uff12", "1234567", "1.0"])
+def test_request_rejects_invalid_rule_attribution(rule: str) -> None:
+    with pytest.raises(TelemetryError):
+        replace(REQUEST, rule=rule)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [("bad=value",), ("a" * 65,), ("z", "a"), ("a", "a"), tuple(f"{i:02d}" for i in range(33))],
+)
+def test_request_rejects_invalid_parameter_names(names: tuple[str, ...]) -> None:
+    with pytest.raises(TelemetryError):
+        replace(REQUEST, parameters=names)
+
+
+def test_extended_request_rejects_oversized_serialized_line() -> None:
+    record = replace(
+        REQUEST,
+        parameters=tuple(f"{i:02d}" + "a" * 62 for i in range(32)),
+        parameters_unknown=False,
+    )
+    with pytest.raises(TelemetryError, match="太長"):
+        encode_line(record)
+
+
+def test_extended_request_rejects_missing_or_unexpected_fields() -> None:
+    record = replace(REQUEST, rule="40018")
+    data = json.loads(encode_line(record))
+    del data["params_unknown"]
+    with pytest.raises(TelemetryError):
+        decode_line(json.dumps(data).encode())
+    data["params_unknown"] = False
+    data["extra"] = "value"
+    with pytest.raises(TelemetryError):
+        decode_line(json.dumps(data).encode())
+
+
+def test_request_accepts_thirty_two_sorted_parameter_names() -> None:
+    names = tuple(f"{i:02d}" for i in range(32))
+    assert replace(REQUEST, parameters=names).parameters == names

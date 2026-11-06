@@ -391,3 +391,36 @@ def test_the_database_keeps_the_first_plan(
             text("UPDATE scanner_runs SET heartbeat_at = heartbeat_at WHERE id = :run"),
             {"run": run_id},
         )
+
+
+@pytest.mark.parametrize("engine", [ScanEngine.ZAP, ScanEngine.NUCLEI])
+def test_runner_freezes_a_rule_set_with_its_plan(
+    make_runner: Callable[[], ContainerRunner],
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    engine: ScanEngine,
+) -> None:
+    import hashlib
+    import json
+
+    image = ZAP_IMAGE if engine is ScanEngine.ZAP else NUCLEI_IMAGE
+    runtime.scripted[str(image)] = ScriptedContainer(seconds=5, exit_code=0)
+    _web_scan(queue_seed, world, engine=engine)
+    report = make_runner().run_once(frozenset({engine}))
+    assert report is not None
+    [row] = queue_seed.query(
+        "SELECT rule_set, rule_set_sha256, plan_hash FROM scanner_runs WHERE id = :id",
+        id=report.run_id,
+    )
+    assert row.plan_hash is not None
+    assert isinstance(row.rule_set, list)
+    assert row.rule_set == sorted(set(row.rule_set))
+    assert row.rule_set
+    encoded = json.dumps(row.rule_set, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    assert row.rule_set_sha256 == hashlib.sha256(encoded).hexdigest()
+    if engine is ScanEngine.ZAP:
+        assert "active:40018" in row.rule_set
+        assert "passive-addon:pscanrules:76" in row.rule_set
+    else:
+        assert "error-based-sql-injection" in row.rule_set

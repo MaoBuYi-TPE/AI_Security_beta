@@ -445,3 +445,17 @@ scan 有規格時，`/api/orders/1001`、`/api/orders/1002` 的 route 都是 `/a
 - **werkzeug debugger**（provisional）：固定 path 的偵測 → 不受物件影響。
 - **fallback**（沒有審查過）：無法判斷 → 一律保留字面 path（T20 的 v2 規則）。
 - 結論：34 個群組的 `resource_scoped` 都維持 false；單人審查，列為效度威脅（比照 §8 其他的審查）。
+
+## 9. T22：複掃證據的工具設定與限制（2026-11-04；live 驗收 2026-11-07）
+
+固定映像仍是既有 ZAP 20261016 與 Nuclei v3.11.1 的 tag+digest，不更新映像或模板。設定變更及原始量測見 `DECISIONS.md` §27.3–§27.7：
+
+- ZAP：`injectPluginIdInHeader=true`，guard 僅接受單一合法數字 ID，轉送前移除規則 header；`passiveScan-config` 的 `maxAlertsPerRule=0`、`maxBodySizeInBytesToScan=0` 明確不限。三項都納入 profile 定義 hash，舊設定不可假裝相同。固定 active 白名單、授權 method 過濾與出站政策不變。
+- `X-ZAP-Scan-ID` 為內部保留名稱，不得作為目標認證 header（不分大小寫）。新建／更新 profile 與新 scan 綁定會拒絕；舊排隊 run 啟動時回 `PLAN_REJECTED`，舊衝突 guard policy 也拒絕。歷史 profile 仍可讀、可換金鑰，修復須以合法 header 與新 secret 建立版本。
+- ZAP 的 header 只證明歸屬；無 header 不一定是 discovery。passiveScan-wait 結束只證明 job 結束，不證明每個 response／參數都完成所有規則。不能把任一訊號直接設成 rule_completed=true。
+- Nuclei：凍結旗標精確加入 `-ms`（matcher-status），runner admission 也只接受這組固定參數；仍保留 `-ni -duc`、停用外部回報與禁用非 HTTP 類型。JSONL parser 為 `nuclei-jsonl/3`，false 事件不成為 observation；帶 error 的事件計入 `engine_errors`，未達更優先的無流量／逾時條件時，run 為 `failed/ENGINE_REPORTED_ERRORS`，保留有效正向觀察但不保存原始 error。
+- Nuclei S2 的輸出有 false 事件，但缺 `matched-at`，且部分含 `error`；當時舊 parser 回 succeeded，這項錯誤語意已依 §27.12 修正。即使沒有 error，也不能推論每個模板／位置完成。這些事件不持久化 URL，也不作負面 finding 結論。
+- T17 歷史 fixture 的定義 hash 為 `504ac80c34da54738903d4937d770cc618d4514f53b2d05cd7ed1579ac061469`；本次 `-ms` 設定為 `53eb59977f128f38e8771fa0f686f6c08828a75a138af0fe5a92639c48919fc5`。manifest 分開標示歷史來源與現在定義，沒有改寫既有 golden 的內容。
+- rule_set 與 components 形成 scan 當時的比較身分，不表示實際執行完成；必要版本缺失保持未知。參數名稱也可能含秘密，因此目前不擷取名稱或值，parameters_unknown=true。
+- 完整同 target 的複掃指令：`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-rescan`。S1–S4 可行性量測之後，修正版已完成三次有效校準與固定斷言後的最終執行（每次約 32 分鐘，`DECISIONS.md` §27.14）；producer 維持 rule_completed=false，不能宣稱已驗證自動判定修補。每次指定全新的 `LIVE_PYTEST_ENV="SECSCAN_RECORD_DIR=$PWD/recordings/fixture-rescan/<本次名稱>"`；已存在的校準目錄會被拒絕，不能覆寫歷史證據。
+- Nuclei 的 fixture live 只額外接受 `failed/ENGINE_REPORTED_ERRORS` 且 `engine_errors > 0`、scan `results_complete=false` 的可解釋部分失敗；其餘來源、流量、scope 與 ground truth 斷言不放寬。這不是把工具失敗改成成功。實測中 Nuclei 在這個 fixture 每次都有 1–2 個模板 error，所以雙引擎 scan 都是 partially_completed。
