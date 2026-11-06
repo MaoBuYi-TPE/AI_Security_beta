@@ -154,6 +154,7 @@ class ScanModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
         ),
         # Idempotency-Key 的範圍是 project（docs/DECISIONS.md §13.2）。
         UniqueConstraint("project_id", "idempotency_key"),
+        UniqueConstraint("id", "target_id", "project_id"),
         # 一個 target 同時只有一個進行中的 scan（ARCHITECTURE.md §6.1）。
         Index(
             "uq_scans_active_target",
@@ -374,6 +375,24 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             "AND plan_hash IS NOT NULL)",
             name="profile_definition_valid",
         ),
+        CheckConstraint(
+            "(rule_set IS NULL AND rule_set_sha256 IS NULL) OR "
+            "(rule_set IS NOT NULL AND jsonb_typeof(rule_set) = 'array' "
+            "AND octet_length(rule_set::text) <= 262144 "
+            f"AND rule_set_sha256 IS NOT NULL AND rule_set_sha256 ~ '{_SHA256_HEX}' "
+            "AND plan_hash IS NOT NULL)",
+            name="rule_set_valid",
+        ),
+        CheckConstraint(
+            "(link_mapping_version IS NULL AND link_taxonomy_sha256 IS NULL) OR "
+            "(link_mapping_version IS NOT NULL AND char_length(btrim(link_mapping_version)) > 0 "
+            f"AND link_taxonomy_sha256 IS NOT NULL AND link_taxonomy_sha256 ~ '{_SHA256_HEX}')",
+            name="link_provenance_valid",
+        ),
+        CheckConstraint(
+            "NOT locations_recorded OR link_mapping_version IS NOT NULL",
+            name="locations_provenance_required",
+        ),
     )
 
     scan_id: Mapped[UUID] = mapped_column(ForeignKey("scans.id", ondelete="RESTRICT"))
@@ -403,6 +422,11 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     result_details: Mapped[JsonObject | None] = mapped_column(JSONB)
     plan_hash: Mapped[str | None] = mapped_column(String(SHA256_BYTES * 2))
     profile_definition_sha256: Mapped[str | None] = mapped_column(String(SHA256_BYTES * 2))
+    rule_set: Mapped[list[str] | None] = mapped_column(JSONB)
+    rule_set_sha256: Mapped[str | None] = mapped_column(String(SHA256_BYTES * 2))
+    link_mapping_version: Mapped[str | None] = mapped_column(String(VERSION_MAX_LENGTH))
+    link_taxonomy_sha256: Mapped[str | None] = mapped_column(String(SHA256_BYTES * 2))
+    locations_recorded: Mapped[bool] = mapped_column(server_default=text("false"))
 
 
 class ScanEventModel(Base):

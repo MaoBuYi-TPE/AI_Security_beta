@@ -92,6 +92,7 @@ class FindingModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "findings"
     __table_args__ = (
         UniqueConstraint("target_id", "fingerprint"),
+        UniqueConstraint("id", "target_id"),
         ForeignKeyConstraint(
             ["first_seen_run_id", "first_seen_scan_id"],
             ["scanner_runs.id", "scanner_runs.scan_id"],

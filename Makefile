@@ -52,7 +52,7 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 	lab-net lab-up lab-down lab-verify lab-images build images ensure-net scan-net up down \
 	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
 	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check \
-	owasp-top10 owasp-top10-check test-live-fixture-findings
+	owasp-top10 owasp-top10-check test-live-fixture-findings test-live-fixture-rescan
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -292,3 +292,10 @@ test-live-fixture-findings: LIVE_TESTS := tests/live/test_fixture_findings_live.
 test-live-fixture-findings: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture-findings
 test-live-fixture-findings: LIVE_PYTEST_ARGS := -s
 test-live-fixture-findings: test-live-runner
+
+# T22：同一個 target 依序跑弱點版、未修補對照、修補版、小預算複掃，再建立不可變比較快照。
+# host/IP/port 與 grant 不變；只掃自己的 fixture，依既有 live 流程建立並清理隔離環境。
+test-live-fixture-rescan: LIVE_TESTS := tests/live/test_fixture_rescan_live.py
+test-live-fixture-rescan: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture-rescan
+test-live-fixture-rescan: LIVE_PYTEST_ARGS := -s
+test-live-fixture-rescan: test-live-runner

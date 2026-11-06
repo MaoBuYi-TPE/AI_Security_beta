@@ -348,3 +348,10 @@ def test_anonymous_scans_have_no_auth_header() -> None:
 
 def test_the_schema_is_version_2() -> None:
     assert POLICY_SCHEMA == 2
+
+
+def test_rule_attribution_header_cannot_carry_target_credentials() -> None:
+    with pytest.raises(PolicyError, match="auth_header"):
+        _policy(auth_header="x-zap-scan-id")
+    with pytest.raises(PolicyError, match="auth_header"):
+        decode_policy(_raw(_document(auth_header="x-zap-scan-id")), run_id=RUN_ID)

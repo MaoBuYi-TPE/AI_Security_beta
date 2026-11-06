@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from uuid import UUID
 
+from secscan.core.headers import ZAP_RULE_HEADER
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import HttpMethod, InvalidScopeError, Scope
 from secscan.guard.domain.budget import BudgetError, RunBudget
@@ -97,6 +98,8 @@ class Policy:
             not isinstance(self.auth_header, str) or not _AUTH_HEADER.fullmatch(self.auth_header)
         ):
             raise PolicyError("auth_header 必須是小寫的 header 名稱，最多 64 個字元")
+        if self.auth_header == ZAP_RULE_HEADER:
+            raise PolicyError("auth_header 不可使用內部規則標記的 header")
 
     @property
     def origin(self) -> Origin:

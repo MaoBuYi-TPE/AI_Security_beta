@@ -6,6 +6,7 @@
 (保留之前的連結數, 之後] 的序號寫入（DB 在寫入與 commit 時核對）。
 """
 
+import hashlib
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -26,13 +27,16 @@ from secscan.findings.domain.linking import (
 from secscan.findings.domain.model import MappingSource
 from secscan.findings.domain.normalization import Severity
 from secscan.findings.domain.taxonomy import MemberKey, member_key
+from secscan.findings.errors import MappingChangedError
 from secscan.findings.models import FindingModel, FindingObservationModel
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import FrozenOperation
+from secscan.scans.domain.locations import LocationSummary
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.observation import ParameterLocation
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.leases import LeaseLostError, holds
+from secscan.scans.location_models import RunLocationModel, RunRuleLocationModel
 from secscan.scans.models import ObservationModel, ScanModel, ScannerRunModel, ScanOperationModel
 
 # 每個 statement 的列數：參數總數遠低於 PostgreSQL 的 65,535 上限。
@@ -76,6 +80,73 @@ class FindingRecords:
             raise LeaseLostError("lease 已過期或不屬於這個 worker：不連結 finding")
         details: JsonObject | None = row.result_details
         return details
+
+    def frozen_mapping(self, lease: Lease) -> tuple[str, str] | None:
+        """run 已持鎖；只讀連結時凍結的版本，不以目前 taxonomy 回填。"""
+        row = self._session.execute(
+            select(
+                ScannerRunModel.link_mapping_version, ScannerRunModel.link_taxonomy_sha256
+            ).where(ScannerRunModel.id == lease.run_id)
+        ).one()
+        if row.link_mapping_version is None:
+            return None
+        return row.link_mapping_version, row.link_taxonomy_sha256
+
+    def record_comparison(
+        self, lease: Lease, mapping: tuple[str, str], locations: LocationSummary | None
+    ) -> None:
+        """run 已持鎖；寫連結時一併凍結 mapping 與位置，重試不覆寫。"""
+        existing = self.frozen_mapping(lease)
+        if existing is not None:
+            if existing != mapping:
+                raise MappingChangedError("run 的 mapping 版本與目前版本不一致")
+            return
+        usable = locations is not None and not locations.has_unusable_paths
+        if usable and locations is not None:
+            self._insert_locations(lease, locations)
+        updated = self._session.execute(
+            update(ScannerRunModel)
+            .where(*holds(lease))
+            .values(
+                link_mapping_version=mapping[0],
+                link_taxonomy_sha256=mapping[1],
+                locations_recorded=usable,
+            )
+            .returning(ScannerRunModel.id)
+        ).scalar_one_or_none()
+        if updated is None:
+            raise LeaseLostError("lease 已過期或不屬於這個 worker：不記錄複掃證據")
+
+    def _insert_locations(self, lease: Lease, locations: LocationSummary) -> None:
+        rows = [
+            {
+                "scanner_run_id": lease.run_id,
+                "scan_id": lease.scan_id,
+                "method": item.method,
+                "path_sha256": hashlib.sha256(item.path.encode("utf-8")).hexdigest(),
+                "answered": item.answered,
+                "discovery_answered": item.discovery_answered,
+                "authenticated": item.authenticated,
+                "unanswered": item.unanswered,
+            }
+            for item in locations.locations
+        ]
+        rules = [
+            {
+                "scanner_run_id": lease.run_id,
+                "method": item.method,
+                "path_sha256": hashlib.sha256(item.path.encode("utf-8")).hexdigest(),
+                "rule": item.rule,
+                "answered": item.answered,
+                "parameters_unknown": item.parameters_unknown,
+                "parameters_truncated": item.parameters_truncated,
+            }
+            for item in locations.rules
+        ]
+        for batch in _batches(rows):
+            self._session.execute(insert(RunLocationModel), batch)
+        for batch in _batches(rules):
+            self._session.execute(insert(RunRuleLocationModel), batch)
 
     def unlinked(self, lease: Lease) -> tuple[ObservationRow, ...]:
         """還沒有連結的觀察，依入庫的順序；只讀連結需要的欄位（不讀 evidence 等長文字）。"""

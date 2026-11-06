@@ -197,9 +197,16 @@ def test_nuclei_frozen_list_matches_lock_file_and_policy() -> None:
     # manifest 的 lock_sha256、policy 的常數、lock 檔實際內容三者必須一致（任一改動都被抓到）。
     assert digest == frozen["lock_sha256"]
     assert digest == nuclei_policy.TEMPLATES_LOCK_SHA256
-    assert frozen["definition_sha256"] == nuclei_policy.nuclei_definition_sha256()
+    assert frozen["current_definition_sha256"] == nuclei_policy.nuclei_definition_sha256()
     assert frozen["template_count"] == len(nuclei_policy.load_templates())
     categories = frozen["selected_categories"]
     assert isinstance(categories, list)
     assert sorted(map(str, categories)) == sorted(nuclei_policy.ALLOWED_CATEGORIES)
     assert frozen["added_by"] == "T17"
+
+
+def test_previous_nuclei_definition_remains_recorded_after_flag_change() -> None:
+    frozen: dict[str, object] = _nuclei_block()["frozen_list"]  # type: ignore[assignment]
+    assert frozen["definition_sha256"] == (
+        "504ac80c34da54738903d4937d770cc618d4514f53b2d05cd7ed1579ac061469"
+    )

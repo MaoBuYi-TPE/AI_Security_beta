@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from secscan.api_keys.access import authorize
 from secscan.api_keys.domain import Permission, Principal
 from secscan.audit.service import AuditTrail
+from secscan.auth_profiles.domain.errors import InvalidAuthProfileError
 from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.core.db import ConstraintViolationError
 from secscan.core.errors import AppError, ErrorCode, not_found_error
@@ -267,6 +268,12 @@ class ScanService:
         if locked is None:
             raise not_found_error()
         current = locked.current
+        try:
+            current.definition.credential.require_usable()
+        except InvalidAuthProfileError:
+            raise _invalid_request(
+                "auth profile 目前的認證設定不可執行，請先以 PATCH 更新。"
+            ) from None
         if not current.secret_configured:
             # 只有直接改了 DB 才會發生（trigger 允許清除）：沒有 secret 就不能認證。
             raise AppError(

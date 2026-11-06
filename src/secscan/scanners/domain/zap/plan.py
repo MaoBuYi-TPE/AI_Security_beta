@@ -23,7 +23,13 @@ from secscan.core.json_types import JsonObject, JsonValue
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import HttpMethod, Scope
 from secscan.scanners.domain.plan import ExecutionPlan, InputFile, ResourceLimits
-from secscan.scanners.domain.zap.policy import ZAP_IMAGE, policy_definition
+from secscan.scanners.domain.zap.policy import (
+    INJECT_RULE_HEADER,
+    PASSIVE_MAX_ALERTS_PER_RULE,
+    PASSIVE_MAX_BODY_BYTES,
+    ZAP_IMAGE,
+    policy_definition,
+)
 from secscan.scanners.domain.zap.scope import context_paths
 from secscan.scanners.domain.zap.script import (
     ANONYMOUS_MODE,
@@ -167,7 +173,14 @@ def af_plan(
             },
         },
         "jobs": [
-            {"type": "passiveScan-config", "parameters": {"scanOnlyInScope": True}},
+            {
+                "type": "passiveScan-config",
+                "parameters": {
+                    "scanOnlyInScope": True,
+                    "maxAlertsPerRule": PASSIVE_MAX_ALERTS_PER_RULE,
+                    "maxBodySizeInBytesToScan": PASSIVE_MAX_BODY_BYTES,
+                },
+            },
             discovery,
             {"type": "passiveScan-wait", "parameters": {"maxDuration": UNLIMITED}},
             _active_scan(profile, scope),
@@ -247,7 +260,7 @@ def _active_scan(profile: ScanProfile, scope: Scope) -> JsonObject:
             "threadPerHost": 1,
             "addQueryParam": False,
             "handleAntiCSRFTokens": True,
-            "injectPluginIdInHeader": False,
+            "injectPluginIdInHeader": INJECT_RULE_HEADER,
             "scanHeadersAllRequests": False,
         },
         "policyDefinition": policy_definition(profile, methods=scope.methods),

@@ -103,6 +103,15 @@ def test_a_truncated_command_is_rejected() -> None:
     assert _rejected(replace(_nuclei(), arguments=short)) is PlanRejection.COMMAND_NOT_ALLOWED
 
 
+def test_matcher_status_flag_is_required_in_the_approved_position() -> None:
+    plan = _nuclei()
+    without_flag = tuple(arg for arg in plan.arguments if arg != "-ms")
+    assert _rejected(replace(plan, arguments=without_flag)) is PlanRejection.COMMAND_NOT_ALLOWED
+    index = plan.arguments.index("-ms")
+    reordered = (*plan.arguments[:index], *plan.arguments[index + 1 :], "-ms")
+    assert _rejected(replace(plan, arguments=reordered)) is PlanRejection.COMMAND_NOT_ALLOWED
+
+
 def test_an_extra_argument_is_rejected() -> None:
     plan = _nuclei()
     assert _rejected(replace(plan, arguments=(*plan.arguments, "-debug"))) is (

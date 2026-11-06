@@ -30,6 +30,7 @@ from secscan.findings.provenance import ProvenanceRepository
 from secscan.findings.records import FindingRecords
 from secscan.findings.repository import FindingRepository
 from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.locations import LocationSummary
 from secscan.scans.domain.model import Lease
 from secscan.scans.service import ScanService
 from secscan.targets.domain import LabNetwork
@@ -45,12 +46,18 @@ class FindingLinker:
         self._taxonomy = taxonomy if taxonomy is not None else load_taxonomy()
         self._mapping = mapping_identity()
 
-    def link(self, lease: Lease) -> int:
+    def link(self, lease: Lease, *, locations: LocationSummary | None = None) -> int:
         """連結這個 run 還沒有連結的觀察，回傳連結的數量。lease 失效時拋 LeaseLostError。"""
         with self._sessions.begin() as session:
             records = FindingRecords(session)
             details = records.lock_run(lease)
+            frozen_mapping = records.frozen_mapping(lease)
             observations = records.unlinked(lease)
+            # 已提交的連結沿用舊版本與位置；仍先持有有效 lease，不能繞過 fencing。
+            if frozen_mapping is not None and not observations:
+                return 0
+            # 第一次即使零觀察仍凍結證據；有待連結觀察時，版本不符必須拒絕補寫。
+            records.record_comparison(lease, self._mapping, locations)
             if not observations:
                 return 0
             # 這個引擎沒有佐證成員（例如 ZAP）：不必查同一次 scan 的錨點觀察。

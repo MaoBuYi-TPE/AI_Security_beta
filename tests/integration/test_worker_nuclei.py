@@ -321,3 +321,35 @@ def test_a_missing_report_is_invalid_output(
 
     run = _run(queue_seed, lease.run_id)
     assert (run.status, run.error_code) == ("failed", "OUTPUT_INVALID")
+
+
+def test_matcher_errors_are_persisted_and_scan_is_not_complete(
+    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, dirs: Dirs
+) -> None:
+    from sqlalchemy.orm import Session
+
+    from secscan.scans.repository import ScanRepository
+
+    error = "private-error-canary-should-not-be-returned"
+    results = _jsonl(
+        _finding(**{"matcher-status": False, "error": error}),
+        _finding(**{"matcher-status": False}),
+        _finding(**{"matcher-status": True}),
+    )
+    lease = _collected(queue, queue_seed, world, dirs, results)
+    linker = FindingLinker(sessionmaker(queue_engine, expire_on_commit=False))
+
+    [report] = _worker(queue, dirs, linker).drain()
+
+    assert report.run_status is RunStatus.FAILED
+    run = _run(queue_seed, lease.run_id)
+    assert (run.status, run.error_code) == ("failed", "ENGINE_REPORTED_ERRORS")
+    assert run.result_details["engine_errors"] == 1
+    assert error not in repr(run.result_details)
+    assert run.observation_count == 1
+    assert len(_observations(queue_seed, lease.run_id)) == 1
+    assert sum(row.n for row in _linked(queue_seed, lease.run_id)) == 1
+    with Session(queue_engine) as session:
+        scan = ScanRepository(session).get(lease.scan_id)
+        assert scan is not None
+        assert scan.results_complete is False

@@ -36,7 +36,9 @@ from secscan.findings.domain.taxonomy import Granularity, load_taxonomy
 from secscan.runner.plans import ENGINE_IMAGES
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from tests.dedup_support import FindingView, ObservationView, assert_no_false_merges
+from tests.live.engine_assertions import assert_engine_outcome
 from tests.live.lab_support import Target, start_fixture, stop_target
+from tests.live.recordings import write_measurement
 from tests.live.support import Api, admin_key, scan_containers, wait_for
 from tests.live.test_lab_zap_live import Measured, _assert_invariants
 from tests.live.zap_support import (
@@ -228,25 +230,18 @@ def _print(combined: Combined) -> None:
 
 
 def _record(combined: Combined) -> None:
-    root = os.environ.get("SECSCAN_RECORD_DIR")
-    if not root:
-        return
-    directory = Path(root) / combined.label
-    directory.mkdir(parents=True, exist_ok=True)
     document = {
         "scan": combined.scan,
         "observations": {engine: run.observations for engine, run in combined.runs.items()},
         "findings": combined.findings,
         "seconds": round(combined.seconds),
     }
-    (directory / "findings.json").write_text(
-        json.dumps(document, ensure_ascii=False, indent=1) + "\n"
-    )
+    write_measurement(combined.label, document, filename="findings.json")
 
 
 def _assert_common(combined: Combined, target: Target, definitions: dict[str, str]) -> None:
     for engine, measured in combined.runs.items():
-        assert measured.engine["status"] in {"succeeded", "timed_out"}, measured.engine
+        assert_engine_outcome(measured.engine, combined.scan)
         _assert_invariants(measured, target, definitions[engine])
         traffic = measured.engine["result"]["guard_traffic"]
         # 兩個引擎依序共用 scan 的預算：保守的預設值足夠跑完兩者。

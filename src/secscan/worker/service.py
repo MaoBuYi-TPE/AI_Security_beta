@@ -35,11 +35,13 @@ from secscan.scanners.domain.preflight import (
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import observed_operations, telemetry_complete
 from secscan.scans.domain.lifecycle import RunStatus
+from secscan.scans.domain.locations import LocationSummary
 from secscan.scans.domain.model import Lease
 from secscan.scans.domain.observation import RunOutcome
 from secscan.scans.domain.preflight import PreflightResult
 from secscan.scans.queue import HEARTBEAT_INTERVAL, LeaseLostError, RunReport, ScanQueue
 from secscan.worker.artifacts import ArtifactReader
+from secscan.worker.locations import read_comparison_locations
 from secscan.worker.nuclei import NucleiParser
 from secscan.worker.telemetry import TelemetryReader
 from secscan.worker.zap import ZapParser
@@ -120,7 +122,11 @@ class Worker:
             outcome = self._nuclei.parse(lease, keepalive)
         keepalive()
         if self._findings is not None:
-            self._findings.link(lease)
+            locations = self._comparison_locations(lease)
+            if locations is None:
+                self._findings.link(lease)
+            else:
+                self._findings.link(lease, locations=locations)
             keepalive()
         self._coverage(lease)
         keepalive()
@@ -152,6 +158,16 @@ class Worker:
             for name in (AUTHENTICATED_OUTPUT, ANONYMOUS_OUTPUT)
         )
         return evaluate(definition, authenticated, anonymous)
+
+    def _comparison_locations(self, lease: Lease) -> LocationSummary | None:
+        if lease.engine not in (Engine.ZAP, Engine.NUCLEI) or self._telemetry is None:
+            return None
+        inputs = self._queue.coverage_inputs(lease)
+        if inputs.requests_sent is None:
+            return None
+        return read_comparison_locations(
+            self._telemetry, lease.run_id, lease.scan_id, forwarded=inputs.requests_sent
+        )
 
     def _coverage(self, lease: Lease) -> None:
         inputs = self._queue.coverage_inputs(lease)

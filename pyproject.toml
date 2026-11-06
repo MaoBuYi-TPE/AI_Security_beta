@@ -139,6 +139,7 @@ layers = [
     "main | cli",
     "migrations",
     "health | runner | worker",
+    "comparisons",
     "scanners | findings",
     "scans",
     "specs | auth_profiles | guard",

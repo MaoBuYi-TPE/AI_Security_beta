@@ -7,6 +7,7 @@
 """
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -35,6 +36,12 @@ _SUMMARY_FIELDS = frozenset(
     }
 )
 _REQUEST_FIELDS = frozenset({"e", "seq", "t", "method", "path", "auth"})
+_EXTENDED_REQUEST_FIELDS = _REQUEST_FIELDS | frozenset(
+    {"rule", "params", "params_unknown", "params_truncated"}
+)
+_RULE = re.compile(r"[0-9]{1,6}\Z")
+_PARAMETER = re.compile(r"[A-Za-z0-9_.\-\[\]]{1,64}\Z")
+MAX_PARAMETERS = 32
 _RESPONSE_FIELDS = frozenset({"e", "seq", "t", "status"})
 _REASONS = frozenset(reason.value for reason in Reason)
 _METHODS = frozenset(method.value for method in HttpMethod)
@@ -128,6 +135,10 @@ class ForwardedRequest:
     method: str
     path: str
     authenticated: bool
+    rule: str | None = None
+    parameters: tuple[str, ...] = ()
+    parameters_unknown: bool = True
+    parameters_truncated: bool = False
 
     def __post_init__(self) -> None:
         _check_sequence(self.sequence, self.at)
@@ -137,6 +148,16 @@ class ForwardedRequest:
             raise TelemetryError("path 必須是合規則、不含 query 的 path")
         if type(self.authenticated) is not bool:
             raise TelemetryError("auth 必須是布林值")
+        if self.rule is not None and (type(self.rule) is not str or not _RULE.fullmatch(self.rule)):
+            raise TelemetryError("rule 必須是最多六位 ASCII 數字")
+        if type(self.parameters) is not tuple or len(self.parameters) > MAX_PARAMETERS:
+            raise TelemetryError("params 必須是有上限的參數名稱")
+        if any(type(name) is not str or not _PARAMETER.fullmatch(name) for name in self.parameters):
+            raise TelemetryError("params 含不合格式的參數名稱")
+        if tuple(sorted(set(self.parameters))) != self.parameters:
+            raise TelemetryError("params 必須排序且不可重複")
+        if type(self.parameters_unknown) is not bool or type(self.parameters_truncated) is not bool:
+            raise TelemetryError("params 的狀態必須是布林值")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +185,20 @@ def encode_line(record: TelemetryRecord) -> bytes:
             "path": record.path,
             "auth": record.authenticated,
         }
+        if (
+            record.rule,
+            record.parameters,
+            record.parameters_unknown,
+            record.parameters_truncated,
+        ) != (None, (), True, False):
+            document.update(
+                {
+                    "rule": record.rule,
+                    "params": list(record.parameters),
+                    "params_unknown": record.parameters_unknown,
+                    "params_truncated": record.parameters_truncated,
+                }
+            )
     else:
         document = {
             "e": "response",
@@ -171,20 +206,36 @@ def encode_line(record: TelemetryRecord) -> bytes:
             "t": record.at,
             "status": record.status,
         }
-    return dump_canonical(document) + b"\n"
+    line = dump_canonical(document)
+    if len(line) > MAX_TELEMETRY_LINE_BYTES:
+        raise TelemetryError("telemetry 的一行太長")
+    return line + b"\n"
 
 
 def decode_line(line: bytes) -> TelemetryRecord:
     raw = line.removesuffix(b"\n")
     kind = _kind(raw)
     if kind == "request":
-        document = _load_line(raw, _REQUEST_FIELDS)
+        try:
+            document = _load_line(raw, _REQUEST_FIELDS)
+        except TelemetryError:
+            document = _load_line(raw, _EXTENDED_REQUEST_FIELDS)
+            extended = True
+        else:
+            extended = False
+        rule = document.raw("rule") if extended else None
+        if rule is not None and type(rule) is not str:
+            raise TelemetryError("rule 必須是字串或 null")
         return ForwardedRequest(
             sequence=document.integer("seq"),
             at=_time(document.raw("t")),
             method=document.string("method"),
             path=document.string("path"),
             authenticated=document.boolean("auth"),
+            rule=rule,
+            parameters=document.strings("params") if extended else (),
+            parameters_unknown=document.boolean("params_unknown") if extended else True,
+            parameters_truncated=document.boolean("params_truncated") if extended else False,
         )
     if kind == "response":
         document = _load_line(raw, _RESPONSE_FIELDS)

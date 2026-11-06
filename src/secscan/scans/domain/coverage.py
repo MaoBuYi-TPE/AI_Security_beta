@@ -33,6 +33,10 @@ class Exchange:
     path: str
     authenticated: bool
     status: int | None
+    rule: str | None = None
+    parameters: tuple[str, ...] = ()
+    parameters_unknown: bool = True
+    parameters_truncated: bool = False
 
 
 def telemetry_complete(exchanges: Sized, *, forwarded: int) -> bool:

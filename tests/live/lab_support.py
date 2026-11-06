@@ -32,6 +32,9 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "fixture_app"
 _FIXTURE_LAUNCH = (
     "import sys; sys.path.insert(0, '/site'); from fixture_app.app import main; main()"
 )
+# guard 映像宣告的 VOLUME：和 compose 的 guard 一樣以 tmpfs 蓋住，
+# docker rm -f 才不會留下匿名 volume。
+_GUARD_IMAGE_VOLUME_TMPFS = "/home/mitmproxy/.mitmproxy:size=1m,mode=0700"
 # compose.lab.yaml 的預設（掃描中途不會過期）。
 LONG_TOKEN_SECONDS = 3600
 # Juice Shop 的種子使用者（data/static/users.yml，customer）；VAmPI 的種子使用者（/createdb）。
@@ -138,10 +141,10 @@ def start_vampi(*, vulnerable: bool, token_seconds: int = LONG_TOKEN_SECONDS) ->
     return target
 
 
-def start_fixture(*, vulnerable: bool) -> Target:
+def start_fixture(*, vulnerable: bool, host: str | None = None) -> Target:
     """T30 自製 fixture app（弱點版或修補版）；掛在 guard 映像的 python 上，只接 lab 網路。"""
     kind = "fixture-vuln" if vulnerable else "fixture-secure"
-    target = Target(f"{PREFIX}{kind}", _host(kind), FIXTURE_IP, FIXTURE_PORT)
+    target = Target(f"{PREFIX}{kind}", host or _host(kind), FIXTURE_IP, FIXTURE_PORT)
     docker("rm", "-f", target.container, check=False)
     docker(
         "run",
@@ -163,6 +166,8 @@ def start_fixture(*, vulnerable: bool) -> Target:
         "256",
         "--memory",
         "256m",
+        "--tmpfs",
+        _GUARD_IMAGE_VOLUME_TMPFS,
         "--entrypoint",
         "python3",
         "-v",

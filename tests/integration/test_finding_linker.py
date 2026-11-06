@@ -4,6 +4,7 @@
 每個測試用自己的資料庫（queue_database）。
 """
 
+import hashlib
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -512,3 +513,114 @@ def test_the_worker_parses_a_scans_runs_in_order(
     nuclei = queue.claim_collected("worker-2", frozenset({NUCLEI}))
     assert nuclei is not None
     assert nuclei.run_id == nuclei_runner.run_id
+
+
+def test_linker_records_mapping_and_locations_atomically_even_without_observations(
+    queue: ScanQueue, linker: FindingLinker, queue_seed: Seeder, world: World
+) -> None:
+    from secscan.findings.domain.taxonomy import mapping_identity
+    from secscan.scans.domain.coverage import Exchange
+    from secscan.worker.locations import summarize_locations
+
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP,))
+    lease = parsed_run(queue, ZAP, ())
+    summary = summarize_locations((Exchange("GET", "/items", False, 200, "40018"),))
+
+    assert linker.link(lease, locations=summary) == 0
+    [row] = queue_seed.query(
+        "SELECT link_mapping_version, link_taxonomy_sha256, locations_recorded "
+        "FROM scanner_runs WHERE id = :run",
+        run=lease.run_id,
+    )
+    assert (row.link_mapping_version, row.link_taxonomy_sha256) == mapping_identity()
+    assert row.locations_recorded is True
+    [location] = queue_seed.query(
+        "SELECT method, path_sha256, answered FROM run_locations WHERE scanner_run_id = :run",
+        run=lease.run_id,
+    )
+    assert (location.method, location.path_sha256, location.answered) == (
+        "GET",
+        hashlib.sha256(b"/items").hexdigest(),
+        True,
+    )
+    [rule] = queue_seed.query(
+        "SELECT rule, parameters_unknown FROM run_rule_locations WHERE scanner_run_id = :run",
+        run=lease.run_id,
+    )
+    assert (rule.rule, rule.parameters_unknown) == ("40018", True)
+    assert linker.link(lease, locations=summary) == 0
+
+
+def test_missing_location_data_keeps_mapping_but_not_coverage(
+    queue: ScanQueue, linker: FindingLinker, queue_seed: Seeder, world: World
+) -> None:
+    from secscan.findings.domain.taxonomy import mapping_identity
+
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP,))
+    lease = parsed_run(queue, ZAP, ())
+    assert linker.link(lease) == 0
+    [row] = queue_seed.query(
+        "SELECT link_mapping_version, link_taxonomy_sha256, locations_recorded "
+        "FROM scanner_runs WHERE id = :run",
+        run=lease.run_id,
+    )
+    assert (row.link_mapping_version, row.link_taxonomy_sha256) == mapping_identity()
+    assert row.locations_recorded is False
+
+
+def test_failed_link_rolls_back_comparison_metadata_and_locations(
+    queue: ScanQueue, linker: FindingLinker, queue_seed: Seeder, world: World
+) -> None:
+    from secscan.scans.domain.coverage import Exchange
+    from secscan.scans.domain.locations import LocationSummary
+    from secscan.worker.locations import summarize_locations
+
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP,))
+    lease = parsed_run(queue, ZAP, (ZAP_SQLI,))
+    valid = summarize_locations((Exchange("GET", "/search", False, 200, "40018"),))
+    duplicate = LocationSummary(valid.locations * 2, valid.rules, False)
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        linker.link(lease, locations=duplicate)
+    [run] = queue_seed.query(
+        "SELECT link_mapping_version, locations_recorded FROM scanner_runs WHERE id = :run",
+        run=lease.run_id,
+    )
+    assert run.link_mapping_version is None
+    assert run.locations_recorded is False
+    assert not queue_seed.query(
+        "SELECT 1 FROM run_locations WHERE scanner_run_id = :run", run=lease.run_id
+    )
+    assert not _findings(queue_seed, target.id)
+    assert linker.link(lease, locations=valid) == 1
+
+
+def test_comparison_locations_store_only_path_digests(
+    queue: ScanQueue,
+    linker: FindingLinker,
+    queue_seed: Seeder,
+    world: World,
+) -> None:
+    from secscan.scans.domain.locations import Location, LocationSummary, RuleLocation
+
+    target, grant_id = web_target(queue_seed, world)
+    web_scan(queue_seed, world, target, grant_id, (ZAP,))
+    lease = parsed_run(queue, ZAP, ())
+    path = "/private-value-which-is-not-a-known-secret-pattern"
+    summary = LocationSummary(
+        (Location("GET", path, True, False, False, False),),
+        (RuleLocation("GET", path, "40018", True, True, False),),
+        False,
+    )
+    linker.link(lease, locations=summary)
+    for table in ("run_locations", "run_rule_locations"):
+        [row] = queue_seed.query(
+            f"SELECT to_jsonb(t)::text AS data FROM {table} t WHERE scanner_run_id = :run",  # noqa: S608
+            run=lease.run_id,
+        )
+        assert path not in row.data
+        assert hashlib.sha256(path.encode()).hexdigest() in row.data

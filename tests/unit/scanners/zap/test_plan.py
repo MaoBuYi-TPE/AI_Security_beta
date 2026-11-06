@@ -188,7 +188,7 @@ def test_the_context_comes_from_the_grant() -> None:
         r"http\:\/\/lab\-web\:3000/shop/[^/?#]+(?:\?.*)?",
     ]
     assert context["excludePaths"][-1].startswith("(?!")
-    assert _job(document, "passiveScan-config")["parameters"] == {"scanOnlyInScope": True}
+    assert _job(document, "passiveScan-config")["parameters"]["scanOnlyInScope"] is True
 
 
 def test_the_spider_starts_at_the_root_with_one_thread() -> None:
@@ -406,3 +406,12 @@ def test_plan_variables_are_refused_anywhere_in_the_plan() -> None:
         reject_variables({"jobs": [{"parameters": {"url": "http://x/${ZAP_AUTH_HEADER_VALUE}"}}]})
     with pytest.raises(ZapPlanError, match="變數"):
         reject_variables({"env": {"contexts": [{"includePaths": ["a", "${HOME}"]}]}})
+
+
+def test_plan_marks_active_rule_requests_and_does_not_cap_passive_scanning() -> None:
+    document = _af(_plan())
+    active = _job(document, "activeScan")["parameters"]
+    passive = _job(document, "passiveScan-config")["parameters"]
+    assert active["injectPluginIdInHeader"] is True
+    assert passive["maxAlertsPerRule"] == 0
+    assert passive["maxBodySizeInBytesToScan"] == 0

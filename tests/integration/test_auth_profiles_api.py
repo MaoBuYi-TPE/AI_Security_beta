@@ -160,6 +160,7 @@ def test_api_key_header_and_cookie_profiles(
         ({"secret": f"Bearer {CANARY}"}, "secret"),
         ({"secret": f"{CANARY}\r\nX-Injected: 1"}, "secret"),
         ({"type": "api_key_header", "header_name": "Host"}, "header_name"),
+        ({"type": "api_key_header", "header_name": "X-ZAP-Scan-ID"}, "header_name"),
         ({"type": "api_key_header", "header_name": "X-HTTP-Method-Override"}, "header_name"),
         ({"type": "cookie", "secret": f"a={CANARY};b=2"}, "secret"),
         ({"role_label": "anonymous"}, "role_label"),

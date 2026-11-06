@@ -37,6 +37,8 @@
       "path": "src/secscan/scanners/domain/nuclei/templates.lock.txt",
       "lock_sha256": "1d97a25695a25bd5130a37beb5fb1e78988eed541456ed4be702171f1ecefc81",
       "definition_sha256": "504ac80c34da54738903d4937d770cc618d4514f53b2d05cd7ed1579ac061469",
+      "current_definition_sha256": "53eb59977f128f38e8771fa0f686f6c08828a75a138af0fe5a92639c48919fc5",
+      "definition_note": "definition_sha256 是 T17 原始定義；current_definition_sha256 是 T22 加入 -ms 的開發分支定義，不改變既有 fixture 的來源。",
       "template_count": 42,
       "selected_categories": ["exposures", "miscellaneous", "misconfiguration", "technologies", "vulnerabilities"],
       "added_by": "T17",

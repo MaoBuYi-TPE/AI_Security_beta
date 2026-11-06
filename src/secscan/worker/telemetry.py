@@ -59,6 +59,15 @@ class TelemetryReader:
 
     def exchanges(self, run_id: UUID) -> tuple[Exchange, ...] | None:
         """轉送的請求（依序）與它們的上游 status（沒有回應是 None）。"""
+        return self._exchanges(run_id, forwarded=None)
+
+    def comparison_exchanges(self, run_id: UUID, *, forwarded: int) -> tuple[Exchange, ...] | None:
+        """複掃用：請求序號完整、連續且數量和 summary 完全相同。"""
+        if type(forwarded) is not int or forwarded < 0:
+            raise ValueError("forwarded 必須是非負整數")
+        return self._exchanges(run_id, forwarded=forwarded)
+
+    def _exchanges(self, run_id: UUID, *, forwarded: int | None) -> tuple[Exchange, ...] | None:
         try:
             raw = self._read(telemetry_file_name(run_id), self._max_bytes)
         except FileNotFoundError:
@@ -71,6 +80,8 @@ class TelemetryReader:
             return None
         try:
             records = [decode_line(line) for line in raw.splitlines(keepends=True)]
+            if forwarded is not None:
+                _check_comparison_records(records, forwarded=forwarded)
             return _paired(records)
         except (TelemetryError, RecursionError) as exc:
             logger.warning("run %s 的 telemetry 格式不符（%s）", run_id, type(exc).__name__)
@@ -108,6 +119,24 @@ def _paired(records: list[TelemetryRecord]) -> tuple[Exchange, ...]:
             path=request.path,
             authenticated=request.authenticated,
             status=statuses.get(request.sequence),
+            rule=request.rule,
+            parameters=request.parameters,
+            parameters_unknown=request.parameters_unknown,
+            parameters_truncated=request.parameters_truncated,
         )
         for request in requests
     )
+
+
+def _check_comparison_records(records: list[TelemetryRecord], *, forwarded: int) -> None:
+    """複掃的負面證據不能沿用容許少一筆的 operation coverage 規則。"""
+    seen = 0
+    for record in records:
+        if isinstance(record, ForwardedRequest):
+            seen += 1
+            if record.sequence != seen:
+                raise TelemetryError("請求序號不連續")
+        elif record.sequence > seen:
+            raise TelemetryError("回應先於請求")
+    if seen != forwarded:
+        raise TelemetryError("請求數與 summary 不符")

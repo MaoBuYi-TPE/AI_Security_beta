@@ -69,6 +69,10 @@ V1_ROUTES = {
     ("GET", "/api/v1/findings/{finding_id}"),
     ("GET", "/api/v1/findings/{finding_id}/scans"),
     ("GET", "/api/v1/findings/{finding_id}/observations"),
+    # T22
+    ("POST", "/api/v1/scan-comparisons"),
+    ("GET", "/api/v1/scan-comparisons/{comparison_id}"),
+    ("GET", "/api/v1/scan-comparisons/{comparison_id}/findings"),
     # T10
     ("GET", "/api/v1/scanners"),
     ("GET", "/api/v1/scan-profiles"),

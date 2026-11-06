@@ -140,12 +140,29 @@ class RunRecords:
         )
 
     def record_plan(
-        self, lease: Lease, *, plan_hash: str, profile_definition_sha256: str | None
+        self,
+        lease: Lease,
+        *,
+        plan_hash: str,
+        profile_definition_sha256: str | None,
+        rule_set: tuple[str, ...] | None = None,
+        rule_set_sha256: str | None = None,
     ) -> None:
         """runner 在建立容器之前記下實際執行的內容（§20.2；只能一次）。"""
+        if (rule_set is None) != (rule_set_sha256 is None):
+            raise ValueError("rule_set 與 sha256 必須同時提供")
+        values: dict[str, object] = {
+            "plan_hash": plan_hash,
+            "profile_definition_sha256": profile_definition_sha256,
+            **(
+                {"rule_set": list(rule_set), "rule_set_sha256": rule_set_sha256}
+                if rule_set is not None
+                else {}
+            ),
+        }
         self._fenced_update(
             lease,
-            {"plan_hash": plan_hash, "profile_definition_sha256": profile_definition_sha256},
+            values,
             ScannerRunModel.plan_hash.is_(None),
             problem="lease 已過期、不屬於這個 runner，或已經記錄過 plan",
         )

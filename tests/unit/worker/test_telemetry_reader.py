@@ -147,3 +147,71 @@ def test_a_summary_that_is_not_a_regular_file_is_none(tmp_path: Path) -> None:
     (tmp_path / summary_file_name(RUN)).mkdir()
 
     assert TelemetryReader(tmp_path).summary(RUN) is None
+
+
+def test_request_coverage_details_are_preserved_for_the_worker(tmp_path: Path) -> None:
+    request = dataclasses.replace(
+        REQUEST,
+        rule="40018",
+        parameters=("id",),
+        parameters_unknown=False,
+        parameters_truncated=True,
+    )
+    _write(tmp_path, encode_line(request) + encode_line(UpstreamResponse(1, 1.1, 200)))
+    exchanges = TelemetryReader(tmp_path).exchanges(RUN)
+    assert exchanges is not None
+    assert exchanges[0].rule == "40018"
+    assert exchanges[0].parameters == ("id",)
+    assert exchanges[0].parameters_unknown is False
+    assert exchanges[0].parameters_truncated is True
+
+
+def test_comparison_reader_requires_exact_contiguous_request_sequences(tmp_path: Path) -> None:
+    second = dataclasses.replace(REQUEST, sequence=2)
+    response = encode_line(UpstreamResponse(sequence=1, at=1.1, status=200))
+    reader = TelemetryReader(tmp_path)
+    _write(tmp_path, encode_line(REQUEST) + response)
+    assert reader.comparison_exchanges(RUN, forwarded=2) is None
+    _write(tmp_path, encode_line(REQUEST) + encode_line(REQUEST) + response)
+    assert reader.comparison_exchanges(RUN, forwarded=2) is None
+    _write(tmp_path, encode_line(second) + encode_line(REQUEST) + response)
+    assert reader.comparison_exchanges(RUN, forwarded=2) is None
+    _write(tmp_path, encode_line(REQUEST) + encode_line(second) + response)
+    exchanges = reader.comparison_exchanges(RUN, forwarded=2)
+    assert exchanges is not None
+    assert len(exchanges) == 2
+    assert exchanges[1].status is None
+
+
+def test_comparison_reader_rejects_a_response_before_its_request(tmp_path: Path) -> None:
+    response = encode_line(UpstreamResponse(sequence=1, at=1.1, status=200))
+    _write(tmp_path, response + encode_line(REQUEST))
+    reader = TelemetryReader(tmp_path)
+    assert reader.exchanges(RUN) is not None
+    assert reader.comparison_exchanges(RUN, forwarded=1) is None
+
+
+def test_comparison_requires_matching_scan_and_exact_summary_count(tmp_path: Path) -> None:
+    from secscan.worker.locations import read_comparison_locations
+
+    _write_summary(tmp_path, encode_summary(dataclasses.replace(SUMMARY, forwarded=1)))
+    _write(tmp_path, encode_line(REQUEST) + encode_line(UpstreamResponse(1, 1.1, 200)))
+    reader = TelemetryReader(tmp_path)
+    assert read_comparison_locations(reader, RUN, SUMMARY.scan_id, forwarded=1) is not None
+    assert read_comparison_locations(reader, RUN, UUID(int=99), forwarded=1) is None
+    assert read_comparison_locations(reader, RUN, SUMMARY.scan_id, forwarded=2) is None
+    _write(tmp_path, b"")
+    assert read_comparison_locations(reader, RUN, SUMMARY.scan_id, forwarded=1) is None
+
+
+def test_zero_forwarded_requires_an_explicit_empty_detail_file(tmp_path: Path) -> None:
+    from secscan.worker.locations import read_comparison_locations
+
+    reader = TelemetryReader(tmp_path)
+    assert read_comparison_locations(reader, RUN, SUMMARY.scan_id, forwarded=0) is None
+    _write_summary(tmp_path, encode_summary(dataclasses.replace(SUMMARY, forwarded=0)))
+    assert read_comparison_locations(reader, RUN, SUMMARY.scan_id, forwarded=0) is None
+    _write(tmp_path, b"")
+    summary = read_comparison_locations(reader, RUN, SUMMARY.scan_id, forwarded=0)
+    assert summary is not None
+    assert summary.locations == ()

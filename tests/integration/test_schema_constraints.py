@@ -41,7 +41,7 @@ pytestmark = pytest.mark.integration
 # T16 的 plan_hash 與 profile 定義 2（test_run_provenance.py）；
 # T19 的 findings 18 與 finding_observations 3（test_findings_schema.py），簽核之後 findings 的
 # category 1（v0014）；T20 的 observations_linked 與 link_sequence 2（v0015）。
-EXPECTED_CHECK_COUNT = 144
+EXPECTED_CHECK_COUNT = 159
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "

@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -372,3 +373,63 @@ def test_the_pending_limit_follows_the_rate() -> None:
     budget = make_policy().budget
 
     assert max_pending(budget) == MAX_PENDING == 2 * 5 + 1
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ([("X-ZAP-Scan-ID", "40018")], "40018"),
+        ([("x-zap-scan-id", "12")], "12"),
+        ([("X_ZAP_SCAN_ID", "12")], "12"),
+        ([("X-ZAP-Scan-ID", "1"), ("X-ZAP-Scan-ID", "2")], None),
+        ([("X-ZAP-Scan-ID", "1"), ("X_ZAP_SCAN_ID", "1")], None),
+        ([("X-ZAP-Scan-ID", "1234567")], None),
+        ([("X-ZAP-Scan-ID", "bad")], None),
+    ],
+)
+def test_rule_header_is_removed_and_only_unambiguous_ids_are_recorded(
+    harness: Harness, headers: list[tuple[str, str]], expected: str | None
+) -> None:
+    flow = make_flow(headers=[("Host", "lab-target:8080"), *headers])
+    _send(harness, flow)
+    assert not flow.request.headers.get_all("X-ZAP-Scan-ID")
+    assert not flow.request.headers.get_all("X_ZAP_SCAN_ID")
+    records = _records(harness)
+    assert isinstance(records[0], ForwardedRequest)
+    assert records[0].rule == expected
+
+
+def test_rule_attribution_reaches_worker_reader(harness: Harness) -> None:
+    from secscan.worker.telemetry import TelemetryReader
+
+    flow = make_flow(headers=[("Host", "lab-target:8080"), ("X-ZAP-Scan-ID", "40018")])
+    _send(harness, flow)
+
+    exchanges = TelemetryReader(harness.telemetry).comparison_exchanges(RUN_ID, forwarded=1)
+    assert exchanges is not None
+    assert exchanges[0].rule == "40018"
+    assert exchanges[0].parameters_unknown is True
+    assert not flow.request.headers.get_all("X-ZAP-Scan-ID")
+
+
+@pytest.mark.parametrize("secret", ["123456", "synthetic-header-canary"])
+@pytest.mark.parametrize("header", ["X-ZAP-Scan-ID", "x_zap_scan_id"])
+def test_legacy_conflicting_auth_policy_is_rejected_without_telemetry(
+    harness: Harness, secret: str, header: str
+) -> None:
+    from secscan.guard.domain.policy import encode_policy, policy_file_name
+    from secscan.guard.files import write_atomic
+
+    document = {**json.loads(encode_policy(make_policy())), "auth_header": "x-zap-scan-id"}
+    write_atomic(harness.directory, policy_file_name(RUN_ID), json.dumps(document).encode())
+    flow = make_flow(headers=[("Host", "lab-target:8080"), (header, secret)])
+
+    _send(harness, flow)
+
+    assert reason_of(flow) == "PROXY_AUTH_REQUIRED"
+    assert harness.resolver.calls == []
+    assert _records(harness) == []
+    assert PENDING_KEY not in flow.metadata
+    assert secret not in harness.stream.getvalue()
+    assert isinstance(flow.response, FakeResponse)
+    assert secret.encode() not in flow.response.content
