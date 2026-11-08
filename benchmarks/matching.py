@@ -3,7 +3,14 @@
 一個 finding 同時對上兩個案例：ground truth 有歧義，停止評估（不猜它屬於哪一個）。
 """
 
-from benchmarks.ground_truth import Adjudication, Adjudications, Case, GroundTruth
+from benchmarks.ground_truth import (
+    Adjudication,
+    Adjudications,
+    Case,
+    CaseKind,
+    GroundTruth,
+    Support,
+)
 from benchmarks.models import Signature
 
 
@@ -33,4 +40,19 @@ def adjudication_for(
             and item.finding.signature() == signature
         ):
             return item
+    return None
+
+
+def case_exclusion(case: Case, auth_role: str, *, include_holdout: bool) -> str | None:
+    """案例不列入評估的原因（偵測與複掃共用）；None 是列入。"""
+    if case.support is Support.PLATFORM_BLOCKED:
+        return "platform_blocked"
+    if case.support is Support.UNSUPPORTED:
+        return "unsupported"
+    if case.kind is not CaseKind.SECURITY:
+        return "not_security_case"
+    if case.holdout and not include_holdout:
+        return "holdout"
+    if case.auth_role != auth_role:
+        return "auth_role"
     return None

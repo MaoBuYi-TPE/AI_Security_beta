@@ -8,6 +8,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from benchmarks.evaluate import (
+    RESULT_ERRORS,
     EvaluationError,
     evaluate,
     score_detection,
@@ -16,7 +17,7 @@ from benchmarks.evaluate import (
 from benchmarks.ground_truth import Adjudications
 from benchmarks.matching import AmbiguousMatchError
 from benchmarks.metrics import NotAvailable, Ratio, Score
-from benchmarks.models import Signature
+from benchmarks.models import ScanRecord, Signature
 from tests.unit.bench.records import (
     BLOCKED,
     CSP,
@@ -269,18 +270,41 @@ def test_a_fixture_scan_is_rejected() -> None:
         scan(runs=(run("zap", status="interrupted", error_code="LEASE_EXPIRED"),)),
     ],
 )
-def test_an_environment_failure_voids_the_batch(record: object) -> None:
+def test_an_environment_failure_voids_the_batch(record: ScanRecord) -> None:
     with pytest.raises(EvaluationError, match="整批作廢"):
-        evaluate([labeled(record)])  # type: ignore[arg-type]
+        evaluate([labeled(record)])
 
 
-def test_budget_and_engine_outcomes_are_valid_results() -> None:
+@pytest.mark.parametrize(
+    "code",
+    [
+        "PLAN_REJECTED",
+        "SCOPE_EXPIRED",
+        "SCOPE_REVOKED",
+        "SCOPE_NOT_YET_VALID",
+        "TARGET_DISABLED",
+        "CREATOR_KEY_REVOKED",
+        "AUTH_PROFILE_SUPERSEDED",
+        "SECRET_UNAVAILABLE",
+        "SOMETHING_NEW",
+    ],
+)
+def test_any_failure_that_is_not_a_tool_or_budget_result_voids_the_batch(code: str) -> None:
+    """允許清單：grant 在兩個引擎之間到期、plan 被拒絕這類失敗不能變成 recall 偏低的樣本。"""
     record = scan(
         status="partially_completed",
-        runs=(
-            run("zap", status="timed_out", error_code="ENGINE_TIMEOUT"),
-            run("nuclei", status="failed", error_code="ENGINE_REPORTED_ERRORS"),
-        ),
+        runs=(run("zap"), run("nuclei", status="failed", error_code=code)),
+    )
+
+    with pytest.raises(EvaluationError, match="整批作廢"):
+        evaluate([labeled(record)])
+
+
+@pytest.mark.parametrize("code", sorted(RESULT_ERRORS))
+def test_tool_and_budget_outcomes_are_valid_results(code: str) -> None:
+    record = scan(
+        status="partially_completed",
+        runs=(run("zap"), run("nuclei", status="failed", error_code=code)),
     )
 
     assert evaluate([labeled(record)]).scans[0].status == "partially_completed"

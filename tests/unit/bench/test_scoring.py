@@ -133,6 +133,7 @@ def test_compression_is_only_the_list_getting_shorter() -> None:
     assert (dedup.findings, dedup.observations) == (2, 6)
     assert dedup.compression == Ratio(4, 6)
     assert dedup.merged_findings == 1
+    assert dedup.multi_observation_findings == 2
     assert dedup.merge_precision == NotAvailable("unlabeled_merges")
     assert dedup.merge_recall == NotAvailable("pair_labels_incomplete")
 
@@ -180,7 +181,7 @@ def test_labels_for_another_target_do_not_apply() -> None:
 def test_no_merges_and_no_observations_are_not_available() -> None:
     dedup = score_dedup(labeled(scan(observation_count=0)), _labels(complete=True, merged={}))
 
-    assert dedup.merge_precision == NotAvailable("no_merges")
+    assert dedup.merge_precision == NotAvailable("no_cross_engine_merges")
     assert dedup.merge_recall == NotAvailable("nothing_to_merge")
     assert dedup.compression == NotAvailable("no_observations")
 
@@ -190,3 +191,14 @@ def test_more_findings_than_observations_is_inconsistent() -> None:
 
     with pytest.raises(InconsistentScanError, match="不一致"):
         score_dedup(labeled(record), None)
+
+
+def test_a_single_engine_merge_is_counted_but_not_judged() -> None:
+    """同一個引擎的兩個觀察合併成一個 finding（例如 T26 錄製的 /search XCTO）：不是跨引擎的合併。"""
+    record = scan(finding(XCTO, "zap", observations=2), finding(SQLI))
+
+    dedup = score_dedup(labeled(record), None)
+
+    assert (dedup.merged_findings, dedup.multi_observation_findings) == (0, 1)
+    assert dedup.merge_precision == NotAvailable("no_cross_engine_merges")
+    assert dedup.compression == Ratio(1, 3)

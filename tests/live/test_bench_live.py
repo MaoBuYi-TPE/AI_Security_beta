@@ -1,6 +1,7 @@
 """T31：依實驗規格經平台 API 跑完排程，保存 manifest 與 guard 計數（make bench；DECISIONS §29）。
 
-需要 BENCH_SPEC（實驗規格）與 BENCH_RESULTS_DIR（新的結果目錄，已存在就失敗）。流程：
+需要 BENCH_SPEC（實驗規格）與 BENCH_NAME（benchmarks/results/ 底下新的結果目錄，已存在就失敗）；
+make bench 以環境變數傳入（不經 shell 文字）。流程：
 
 1. 讀規格、排程（種子決定順序）；獨占建立結果目錄，複製規格。
 2. 等 runner 的 probe 通過；每個（組別, 靶場）一個 project，同一個靶場用同一個 host。
@@ -13,6 +14,7 @@
 全部在同一個 pytest session 中完成：make test-live-runner 結束時 down -v 會清掉 DB。
 """
 
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -33,13 +35,14 @@ from benchmarks.manifest import MANIFEST_FILE, build_manifest
 from benchmarks.models import ComparisonRecord, LabeledScan
 from benchmarks.results import reserve, seal, write_bytes, write_json
 from benchmarks.schedule import ScheduledScan, build_schedule
-from benchmarks.spec import ExperimentSpec, load_spec
+from benchmarks.spec import ExperimentSpec, check_name, parse_spec
 from tests.live.bench_support import (
     Placement,
     assert_allotments,
     create_comparison,
     create_scan,
     fetcher,
+    grant_validity,
     guard_hosts_since,
     place,
     provenance,
@@ -53,6 +56,7 @@ from tests.live.lab_support import stop_target
 from tests.live.support import Api, admin_key
 
 pytestmark = [pytest.mark.live, pytest.mark.enable_socket]
+RESULTS_ROOT = Path(__file__).resolve().parents[2] / "benchmarks" / "results"
 
 
 class Session:
@@ -98,12 +102,12 @@ def _required(name: str) -> str:
 
 @pytest.fixture(scope="module")
 def session() -> Session:
-    spec_path = Path(_required("BENCH_SPEC"))
-    results = Path(_required("BENCH_RESULTS_DIR"))
-    spec, digest = load_spec(spec_path)
-    directory = reserve(results.parent, results.name)
-    current = Session(spec, digest, directory)
-    current.files[SPEC_FILE] = write_bytes(directory, SPEC_FILE, spec_path.read_bytes())
+    # 規格只讀一次：解析、sha256 與複本都來自同一份位元組。
+    content = Path(_required("BENCH_SPEC")).read_bytes()
+    spec = parse_spec(content)
+    directory = reserve(RESULTS_ROOT, check_name(_required("BENCH_NAME")))
+    current = Session(spec, hashlib.sha256(content).hexdigest(), directory)
+    current.files[SPEC_FILE] = write_bytes(directory, SPEC_FILE, content)
     return current
 
 
@@ -147,7 +151,9 @@ def _scan(session: Session, admin: Api, item: ScheduledScan, host: str) -> Label
     try:
         key = (item.group, item.target)
         if key not in session.placements:
-            session.placements[key] = place(admin, group=item.group, target=target)
+            session.placements[key] = place(
+                admin, group=item.group, target=target, valid_for=grant_validity(spec)
+            )
             session.secrets.append(session.placements[key].operator.key)
         placement = session.placements[key]
         started = time.time()

@@ -49,7 +49,10 @@ class DedupScore:
     findings: int
     observations: int
     compression: Metric
+    # 有 2 個以上引擎來源的 finding（跨引擎的合併；merge_precision／recall 只看這些）。
     merged_findings: int
+    # 有 2 個以上觀察的 finding（包括同一個引擎的觀察合併；不另判對錯，T27 視需要擴充）。
+    multi_observation_findings: int
     merge_precision: Metric
     merge_recall: Metric
     false_merges: tuple[Signature, ...]
@@ -140,7 +143,7 @@ def score_dedup(item: LabeledScan, labels: PairLabels | None) -> DedupScore:
         complete = labels.complete
     correct = sum(1 for signature in merged if marks.get(signature) is True)
     if not merged:
-        precision: Metric = NotAvailable("no_merges")
+        precision: Metric = NotAvailable("no_cross_engine_merges")
     elif any(signature not in marks for signature in merged):
         precision = NotAvailable("unlabeled_merges")
     else:
@@ -159,6 +162,7 @@ def score_dedup(item: LabeledScan, labels: PairLabels | None) -> DedupScore:
             empty="no_observations",
         ),
         merged_findings=len(merged),
+        multi_observation_findings=sum(1 for finding in scan.findings if finding.observations >= 2),
         merge_precision=precision,
         merge_recall=recall,
         false_merges=tuple(signature for signature in merged if marks.get(signature) is False),

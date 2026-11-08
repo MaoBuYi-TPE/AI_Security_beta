@@ -123,6 +123,7 @@ def _create(path: Path, content: bytes) -> None:
         descriptor = os.open(path, flags, FILE_MODE)
     except FileExistsError:
         raise ResultsError("檔案已經存在；結果不覆寫") from None
+    # 以檔案描述子設定權限（不再經過路徑）：umask 不會讓權限和 0600 不同。
+    os.fchmod(descriptor, FILE_MODE)
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(content)
-    path.chmod(FILE_MODE)

@@ -61,9 +61,10 @@ def _check_spec(path: Path, name: str, root: Path) -> str:
     if (root / name).exists():
         raise ValueError("結果目錄已經存在；請換一個新的 BENCH_NAME")
     schedule = build_schedule(spec)
+    hours = spec.worst_case_seconds() / 3600
     return (
         f"{spec.name}（{spec.purpose.value}）：{len(schedule)} 個 scan，種子 {spec.seed}，"
-        f"規格 sha256 {digest}\n"
+        f"最壞情況約 {hours:.1f} 小時，規格 sha256 {digest}\n"
     )
 
 

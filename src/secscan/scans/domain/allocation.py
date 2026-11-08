@@ -27,6 +27,8 @@ _MIN_SECONDS: Mapping[Engine, int] = MappingProxyType(
     {Engine.ZAP: ZAP_MIN_SECONDS, Engine.NUCLEI: NUCLEI_MIN_SECONDS}
 )
 _MIN_REQUEST_SECONDS: Mapping[Engine, int] = MappingProxyType({Engine.ZAP: ZAP_MIN_REQUEST_SECONDS})
+# 可以有子預算的掃描引擎（允許清單；preflight、fake 與之後新增的非掃描引擎都不行）。
+SCANNING_ENGINES: frozenset[Engine] = frozenset({Engine.ZAP, Engine.NUCLEI, Engine.SCHEMATHESIS})
 _FIELD = "engine_budgets"
 NO_ENGINE_BUDGETS: Mapping[Engine, "EngineBudget"] = MappingProxyType({})
 
@@ -58,7 +60,7 @@ def check_allocation_shape(
     """只看請求本身：只用在兩個以上掃描引擎的 scan，每個引擎恰好列一次（取得任何鎖之前判斷）。"""
     if requested is None:
         return
-    if len(set(engines)) < 2 or Engine.FAKE in engines:
+    if len(set(engines)) < 2 or not set(engines) <= SCANNING_ENGINES:
         raise InvalidScanRequestError(f"{_FIELD} 只能用於兩個以上掃描引擎的 scan")
     listed = [item.engine for item in requested]
     if len(set(listed)) != len(listed):

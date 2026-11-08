@@ -8,6 +8,8 @@ benchmarks.collect 收集。不使用其他 live 測試的私有函式，也不�
   host（每次重建 origin 不變），每個 scan 之前重建容器，讓資料快照相同。
 - Juice Shop、VAmPI 的映像必須已經存在（make lab-images 是另外的步驟），這裡不 pull。
 - 等待的上限依 scan 的總秒數加上固定的額外時間，不沿用 zap_support.RUN_TIMEOUT 的 600 秒。
+- grant 的有效期涵蓋最壞情況的整個 session 再加一天：grant 不會在兩個引擎之間到期，ZAP 的 plan 也
+  不會被「grant 快到期」截短。
 """
 
 import hashlib
@@ -21,7 +23,7 @@ from typing import Any
 
 from benchmarks.collect import Fetch
 from benchmarks.models import ScanRecord
-from benchmarks.spec import ExperimentSpec, Group, TargetKind, Variant
+from benchmarks.spec import WAIT_OVERHEAD_SECONDS, ExperimentSpec, Group, TargetKind, Variant
 from tests.live.guard_support import guard_log
 from tests.live.lab_support import (
     FIXTURE_DIR,
@@ -36,8 +38,7 @@ from tests.live.support import GUARD_IMAGE, Api, docker, wait_for
 
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE_WAIT_SECONDS = 240
-# ZAP 的 JVM 啟動、收集、worker 的解析與每個 run 的清理都不算在 scan 的流量秒數內。
-WAIT_OVERHEAD_SECONDS = 900
+GRANT_MARGIN = timedelta(days=1)
 WEB_METHODS = ["GET", "HEAD", "POST"]
 TERMINAL_SCANS = frozenset(
     {"completed", "partially_completed", "failed", "timed_out", "cancelled", "interrupted"}
@@ -81,7 +82,11 @@ def start_target(kind: TargetKind, variant: Variant, host: str) -> Target:
     return start_juice_shop(host=host)
 
 
-def place(admin: Api, *, group: str, target: Target) -> Placement:
+def grant_validity(spec: ExperimentSpec) -> timedelta:
+    return timedelta(seconds=spec.worst_case_seconds()) + GRANT_MARGIN
+
+
+def place(admin: Api, *, group: str, target: Target, valid_for: timedelta) -> Placement:
     project = admin.data("POST", "/projects", {"name": f"bench-{group}-{uuid.uuid4().hex[:6]}"})
     issued = admin.data(
         "POST", f"/projects/{project['id']}/keys", {"name": "bench", "role": "operator"}
@@ -103,7 +108,7 @@ def place(admin: Api, *, group: str, target: Target) -> Placement:
             "excluded_paths": [],
             "allowed_methods": WEB_METHODS,
             "authorization_reference": "T31 benchmark（隔離的 live lab 網路）",
-            "valid_until": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "valid_until": (datetime.now(UTC) + valid_for).isoformat(),
         },
     )
     admin.data("POST", f"/scope-grants/{grant['id']}/approve", {"note": "隔離的 live stack"})

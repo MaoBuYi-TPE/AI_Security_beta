@@ -1,15 +1,20 @@
-"""嚴格的 YAML 讀取：safe_load 之外，拒絕重複的鍵、非字串的鍵、別名與過大的檔案。
+"""嚴格的 YAML 讀取：safe_load 之外，拒絕重複的鍵、非字串的鍵、別名、其他型別與過大的檔案。
 
 PyYAML 的 safe_load 遇到重複的鍵會靜默以後者覆蓋：實驗規格、ground truth 與標記檔中重複的鍵
-可能讓評估改用另一個值而沒有人發現，所以一律拒絕（fail closed）。
+可能讓評估改用另一個值而沒有人發現，所以一律拒絕（fail closed）。只接受字串、數字、布林、null、
+清單與 mapping：`!!set` 會靜默去掉重複的鍵、`!!omap` 會保留重複的鍵，merge key（`<<`）會合併
+別處的內容，日期與 binary 也用不到，一律拒絕（安全審查 L4）。
 """
 
 from typing import Any
 
 import yaml
-from yaml.nodes import MappingNode, Node
+from yaml.nodes import MappingNode, Node, SequenceNode
 
 MAX_YAML_BYTES = 256 * 1024
+_ALLOWED_TAGS = frozenset(
+    f"tag:yaml.org,2002:{name}" for name in ("str", "int", "float", "bool", "null", "seq", "map")
+)
 
 
 class StrictYamlError(ValueError):
@@ -21,6 +26,26 @@ class _StrictLoader(yaml.SafeLoader):
         if self.check_event(yaml.events.AliasEvent):
             raise StrictYamlError("不接受 YAML 的別名（*alias）")
         return super().compose_node(parent, index)
+
+    def construct_document(self, node: Node) -> Any:
+        _check_tags(node)
+        return super().construct_document(node)
+
+
+def _check_tags(root: Node) -> None:
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        if node.tag not in _ALLOWED_TAGS:
+            raise StrictYamlError(
+                "只接受字串、數字、布林、null、清單與 mapping"
+                "（不接受 !!set、!!omap、!!binary、日期或 merge key）"
+            )
+        if isinstance(node, SequenceNode):
+            pending.extend(node.value)
+        elif isinstance(node, MappingNode):
+            for key, value in node.value:
+                pending.extend((key, value))
 
 
 def _mapping(loader: _StrictLoader, node: MappingNode) -> dict[Any, Any]:

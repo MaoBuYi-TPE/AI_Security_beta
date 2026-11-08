@@ -4,9 +4,21 @@ import pytest
 
 from benchmarks.evaluate import EvaluationError, evaluate
 from benchmarks.metrics import NotAvailable
-from benchmarks.models import ComparisonItem, ComparisonRecord, LabeledScan
+from benchmarks.models import ComparisonItem, ComparisonRecord, LabeledScan, Signature
 from benchmarks.rescan import ComparisonMismatchError, score_comparison
-from tests.unit.bench.records import NOISE, SQLI, XCTO, finding, labeled, scan, truth
+from tests.unit.bench.records import (
+    BLOCKED,
+    ERROR,
+    NOISE,
+    SQLI,
+    XCTO,
+    finding,
+    labeled,
+    scan,
+    truth,
+)
+
+HTTP_500 = Signature("http-500", "GET", "/api/orders/{id}", "path", "id")
 
 
 def _pair(current_variant: str) -> tuple[LabeledScan, LabeledScan]:
@@ -124,3 +136,46 @@ def test_evaluate_refuses_comparisons_outside_the_batch() -> None:
 
     with pytest.raises(EvaluationError, match="不在這一批"):
         evaluate([baseline], comparisons=[(None, _record([]))])
+
+
+def _holdout_pair() -> tuple[LabeledScan, LabeledScan]:
+    baseline = labeled(
+        scan(
+            finding(ERROR, finding_id="f-err"),
+            finding(BLOCKED, finding_id="f-blocked"),
+            finding(HTTP_500, finding_id="f-500"),
+            id="base",
+        )
+    )
+    current = labeled(scan(finding(HTTP_500, finding_id="f-500"), id="curr"), position=2)
+    return baseline, current
+
+
+def test_holdout_and_other_excluded_cases_stay_out_of_the_rescan_metrics() -> None:
+    """和偵測相同的排除規則：校準階段的複掃不使用 holdout（§5.2）。"""
+    baseline, current = _holdout_pair()
+    record = _record(
+        [("f-err", "not_observed"), ("f-blocked", "not_observed"), ("f-500", "persistent")]
+    )
+
+    score = score_comparison(record, baseline, current, truth())
+
+    assert score.false_repair == 0
+    assert score.false_repair_cases == ()
+    assert score.persistent_on_patched == ()
+    assert score.excluded == {"holdout": 1, "not_security_case": 1, "platform_blocked": 1}
+
+
+def test_holdout_is_counted_only_with_a_frozen_truth_when_asked() -> None:
+    baseline, current = _holdout_pair()
+    record = _record([("f-err", "not_observed")])
+
+    result = evaluate(
+        [baseline, current],
+        truths=[truth(status="frozen")],
+        comparisons=[("c1", record)],
+        include_holdout=True,
+    )
+
+    assert result.rescans[0].false_repair == 1
+    assert result.rescans[0].false_repair_cases == ("ERR-1",)

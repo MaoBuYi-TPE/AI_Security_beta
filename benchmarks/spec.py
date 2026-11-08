@@ -36,6 +36,16 @@ MAX_SCANS_PER_TARGET = 50
 MIN_EXPERIMENT_REPETITIONS = 3
 MAX_REPETITIONS = 10
 MAX_SEED = 2**32 - 1
+# 平台 grant 的預算上限（grants/domain/scope.py；由測試核對）：超過的規格在建立 scan 時才會 422。
+MAX_REQUESTS_PER_SECOND = 2
+MAX_REQUESTS = 5_000
+MAX_DURATION_SECONDS = 1_500
+# 引擎的固定執行順序（平台的 ENGINE_ORDER）：API 的 engines[] 依這個順序列出。
+ENGINE_ORDER = ("zap", "nuclei")
+# Live 等待每個 scan 的上限：流量秒數之外，ZAP 的 JVM、收集、解析與清理的額外時間。
+WAIT_OVERHEAD_SECONDS = 900
+# 平台 grant 的最長有效期是 30 天；harness 的 grant 要涵蓋最壞情況的整個 session，留一天的餘裕。
+MAX_SESSION_SECONDS = 29 * 24 * 3600
 
 EngineName = Literal["zap", "nuclei"]
 
@@ -74,9 +84,9 @@ class _Strict(BaseModel):
 
 
 class Budget(_Strict):
-    requests_per_second: StrictInt = Field(ge=1)
-    max_requests: StrictInt = Field(ge=1)
-    max_duration_seconds: StrictInt = Field(ge=1)
+    requests_per_second: StrictInt = Field(ge=1, le=MAX_REQUESTS_PER_SECOND)
+    max_requests: StrictInt = Field(ge=1, le=MAX_REQUESTS)
+    max_duration_seconds: StrictInt = Field(ge=1, le=MAX_DURATION_SECONDS)
 
 
 class EngineShare(_Strict):
@@ -148,7 +158,16 @@ class ExperimentSpec(_Strict):
         if not self.cells and not self.comparisons:
             raise SpecError("規格至少要有一個 scan（cells 或 comparisons）")
         _check_quota(self)
+        if self.worst_case_seconds() > MAX_SESSION_SECONDS:
+            raise SpecError("最壞情況的總時間超過 grant 的有效期（29 天）：請拆成多個 session")
         return self
+
+    def scan_count(self) -> int:
+        return sum(cell.repetitions for cell in self.cells) + 2 * len(self.comparisons)
+
+    def worst_case_seconds(self) -> int:
+        """每個 scan 都用滿總秒數加上等待的額外時間（harness 的 grant 有效期依此設定）。"""
+        return self.scan_count() * (self.budget.max_duration_seconds + WAIT_OVERHEAD_SECONDS)
 
     def group(self, group_id: str) -> Group:
         return next(group for group in self.groups if group.id == group_id)
@@ -215,6 +234,8 @@ def _check_variant(kind: TargetKind, variant: Variant) -> None:
 def _check_group(group: Group, budget: Budget, purpose: Purpose) -> None:
     if len(set(group.engines)) != len(group.engines):
         raise SpecError("組別的引擎不可重複")
+    if list(group.engines) != sorted(group.engines, key=ENGINE_ORDER.index):
+        raise SpecError("組別的引擎必須依平台的執行順序（zap、nuclei）列出")
     shares = group.engine_budgets
     if len(group.engines) < 2:
         if shares is not None:

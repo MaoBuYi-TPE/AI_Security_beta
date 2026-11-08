@@ -12,7 +12,7 @@ from uuid import UUID
 from secscan.core.json_types import JsonObject
 from secscan.grants.domain.matching import IneligibleReason
 from secscan.grants.domain.scope import Budget
-from secscan.scans.domain.allocation import NO_ENGINE_BUDGETS, EngineBudget
+from secscan.scans.domain.allocation import NO_ENGINE_BUDGETS, SCANNING_ENGINES, EngineBudget
 from secscan.scans.domain.catalog import Engine, PlannedRun, ScanProfile
 from secscan.scans.domain.lifecycle import (
     ERROR_REQUIRED_RUN_STATUSES,
@@ -96,7 +96,7 @@ class ScannerRun:
             raise ValueError(f"run 的狀態 {self.status.value} 與錯誤碼不一致")
         if self.preflight_result is not None and self.engine is not Engine.PREFLIGHT:
             raise ValueError("只有 preflight 的 run 有 preflight 的結果")
-        if self.budget is not None and self.engine in {Engine.PREFLIGHT, Engine.FAKE}:
+        if self.budget is not None and self.engine not in SCANNING_ENGINES:
             raise ValueError("只有掃描引擎的 run 有子預算")
         budget, requests, seconds = self.budget, self.requests_allotted, self.seconds_allotted
         if (

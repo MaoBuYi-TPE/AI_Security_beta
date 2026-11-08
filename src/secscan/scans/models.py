@@ -36,6 +36,7 @@ from secscan.core.db import Base, CreatedAtMixin, UuidPrimaryKeyMixin
 from secscan.core.json_types import JsonObject
 from secscan.grants.domain.matching import IneligibleReason
 from secscan.grants.domain.scope import PATH_MAX_LENGTH
+from secscan.scans.domain.allocation import SCANNING_ENGINES
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import (
     ACTIVE_SCAN_STATUSES,
@@ -107,6 +108,7 @@ _TERMINAL_RUNS = _in_list(_sorted(TERMINAL_RUN_STATUSES))
 _LEASED_RUNS = _in_list(_sorted(LEASED_RUN_STATUSES))
 _ERROR_RUNS = _in_list(_sorted(ERROR_REQUIRED_RUN_STATUSES))
 _ENGINES = _in_list(engine.value for engine in Engine)
+_SCANNING_ENGINES = _in_list(engine.value for engine in Engine if engine in SCANNING_ENGINES)
 _PROFILES = _in_list(profile.value for profile in ScanProfile)
 _EVENT_TYPES = _in_list(event.value for event in EventType)
 _REASONS = _in_list(reason.value for reason in IneligibleReason)
@@ -346,7 +348,7 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             "(budget_max_requests IS NULL) = (budget_max_duration_seconds IS NULL) "
             "AND (budget_max_requests IS NULL OR (budget_max_requests > 0 "
             "AND budget_max_duration_seconds > 0 "
-            f"AND engine NOT IN ('{Engine.PREFLIGHT.value}', '{Engine.FAKE.value}')))",
+            f"AND engine IN ({_SCANNING_ENGINES})))",
             name="engine_budget_valid",
         ),
         CheckConstraint(

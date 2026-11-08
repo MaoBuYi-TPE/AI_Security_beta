@@ -17,7 +17,9 @@ from benchmarks.spec import (
     parse_spec,
 )
 from benchmarks.strict_yaml import MAX_YAML_BYTES, StrictYamlError, load_strict_yaml
+from secscan.grants.domain import scope
 from secscan.scans.domain import allocation
+from secscan.scans.domain.catalog import ENGINE_ORDER, Engine
 from secscan.scans.service import MAX_SCANS_PER_TARGET_PER_DAY
 
 SMOKE = Path(__file__).resolve().parents[3] / "benchmarks" / "experiments" / "t31-smoke.yaml"
@@ -84,6 +86,45 @@ def test_minimum_windows_and_quota_match_the_platform() -> None:
     assert bench_spec.ZAP_MIN_REQUEST_SECONDS == allocation.ZAP_MIN_REQUEST_SECONDS
     assert bench_spec.NUCLEI_MIN_SECONDS == allocation.NUCLEI_MIN_SECONDS
     assert bench_spec.MAX_SCANS_PER_TARGET == MAX_SCANS_PER_TARGET_PER_DAY
+    assert bench_spec.MAX_REQUESTS_PER_SECOND == scope.MAX_REQUESTS_PER_SECOND
+    assert bench_spec.MAX_REQUESTS == scope.MAX_REQUESTS
+    assert bench_spec.MAX_DURATION_SECONDS == scope.MAX_DURATION_SECONDS
+    assert scope.MAX_GRANT_WINDOW.total_seconds() > bench_spec.MAX_SESSION_SECONDS
+    selectable = {Engine.ZAP, Engine.NUCLEI}
+    assert tuple(e.value for e in ENGINE_ORDER if e in selectable) == bench_spec.ENGINE_ORDER
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        {"requests_per_second": 3, "max_requests": 1200, "max_duration_seconds": 600},
+        {"requests_per_second": 2, "max_requests": 5001, "max_duration_seconds": 600},
+        {"requests_per_second": 2, "max_requests": 1200, "max_duration_seconds": 1501},
+    ],
+)
+def test_the_total_budget_stays_within_the_platform_grant(budget: dict[str, int]) -> None:
+    """超過的規格在建立 scan 時才會 422、整批作廢：離線就拒絕（code review）。"""
+    _rejected(_document(budget=budget), "less than or equal")
+
+
+def test_engines_follow_the_platform_order() -> None:
+    """API 的 engines[] 依固定的順序（zap → nuclei）列出：寫反的規格在 bench-check 就拒絕。"""
+    groups = [{"id": "C", "engines": ["nuclei", "zap"]}]
+    document = _document(groups=groups, cells=[], comparisons=[])
+    document["cells"] = [
+        {"group": "C", "target": "fixture", "variant": "insecure", "repetitions": 1}
+    ]
+
+    _rejected(document, "執行順序")
+
+
+def test_the_worst_case_session_fits_in_the_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = _parse(_document())
+    assert spec.scan_count() == 3
+    assert spec.worst_case_seconds() == 3 * (600 + bench_spec.WAIT_OVERHEAD_SECONDS)
+
+    monkeypatch.setattr(bench_spec, "MAX_SESSION_SECONDS", spec.worst_case_seconds() - 1)
+    _rejected(_document(), "有效期")
 
 
 @pytest.mark.parametrize(
@@ -313,6 +354,42 @@ def test_result_names_with_paths_or_other_characters_are_rejected(name: str) -> 
 def test_strict_yaml_rejects_ambiguous_documents(content: bytes, problem: str) -> None:
     with pytest.raises(StrictYamlError, match=problem):
         load_strict_yaml(content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"a: !!set {x: , x: }\n",
+        b"a: !!omap [{x: 1}, {x: 2}]\n",
+        b"a: !!pairs [{x: 1}]\n",
+        b"a: {<<: {b: 1}, c: 2}\n",
+        b"a: !!binary aGk=\n",
+        b"a: 2026-11-08\n",
+        b"a: !!python/object:os.system {}\n",
+        b"a: !custom x\n",
+    ],
+)
+def test_strict_yaml_accepts_only_plain_types(content: bytes) -> None:
+    """!!set 會靜默去掉重複的鍵、!!omap 會保留重複的鍵（安全審查 L4）。"""
+    with pytest.raises(StrictYamlError, match="只接受"):
+        load_strict_yaml(content)
+
+
+def test_strict_yaml_accepts_explicit_plain_tags() -> None:
+    assert load_strict_yaml(b"a: !!str 1\nb: !!int '2'\nc: 1.5\nd: null\n") == {
+        "a": "1",
+        "b": 2,
+        "c": 1.5,
+        "d": None,
+    }
+
+
+def test_engines_written_as_a_set_are_rejected() -> None:
+    document = _document()
+    text = json.dumps(document).replace('["zap"]', "!!set {zap: }", 1)
+
+    with pytest.raises(SpecError, match="只接受"):
+        parse_spec(text.encode())
 
 
 def test_strict_yaml_rejects_duplicate_keys_in_nested_mappings() -> None:

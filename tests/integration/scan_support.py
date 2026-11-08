@@ -203,3 +203,27 @@ def create_scan(
 
 def with_budget(request: ScanRequest, **budget: int | None) -> ScanRequest:
     return replace(request, budget=BudgetRequest(**budget))
+
+
+def web_scan(
+    session: Session, *, engines: tuple[Engine, ...], split: object = None
+) -> tuple[ScanWorld, Scan]:
+    """web target 上的匿名 scan（總額 2 req/s、1,200 次、600 秒；split 是 engine_budgets）。
+
+    在呼叫端的 transaction 中建立：db_session 的測試之後還能在同一個 transaction 新增 run。
+    """
+    world = scan_world(session)
+    target = make_target(session, world.team.admin, world.team.project_a, kind=TargetKind.WEB)
+    grant = approved_grant(
+        session, world.team, target, paths=(), allow_all_paths=True, excluded_paths=()
+    )
+    request = world.request(
+        target_id=target.id,
+        scope_grant_id=grant.id,
+        api_spec_id=None,
+        profile=ScanProfile.WEB_ACTIVE_LAB,
+        engines=engines,
+        budget=BudgetRequest(requests_per_second=2, max_requests=1_200, max_duration_seconds=600),
+        engine_budgets=split,
+    )
+    return world, create_scan(session, world, request)

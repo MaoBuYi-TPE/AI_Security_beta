@@ -11,10 +11,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from secscan.scans.domain.allocation import EngineBudgetRequest
-from secscan.scans.domain.catalog import Engine, ScanProfile
-from secscan.scans.domain.request import BudgetRequest
-from secscan.targets.domain import TargetKind
-from tests.integration.scan_support import approved_grant, create_scan, make_target, scan_world
+from secscan.scans.domain.catalog import Engine
+from secscan.scans.repository import ScanRepository
+from tests.integration.scan_support import web_scan
 from tests.integration.sql_support import (
     CHECK_VIOLATION,
     INTEGRITY_CONSTRAINT_VIOLATION,
@@ -36,22 +35,7 @@ INSERT_RUN = (
 
 
 def _scan(session: Session, *, engines: tuple[Engine, ...], split: object = None) -> UUID:
-    """web target 上的匿名 scan（在 db_session 的 transaction 中建立：之後還能新增 run）。"""
-    world = scan_world(session)
-    target = make_target(session, world.team.admin, world.team.project_a, kind=TargetKind.WEB)
-    grant = approved_grant(
-        session, world.team, target, paths=(), allow_all_paths=True, excluded_paths=()
-    )
-    request = world.request(
-        target_id=target.id,
-        scope_grant_id=grant.id,
-        api_spec_id=None,
-        profile=ScanProfile.WEB_ACTIVE_LAB,
-        engines=engines,
-        budget=BudgetRequest(requests_per_second=2, max_requests=1_200, max_duration_seconds=600),
-        engine_budgets=split,
-    )
-    return create_scan(session, world, request).id
+    return web_scan(session, engines=engines, split=split)[1].id
 
 
 def _run(session: Session, scan_id: UUID, engine: Engine) -> UUID:
@@ -149,13 +133,32 @@ def test_a_cap_is_two_positive_integers_on_a_scanning_engine(
     assert (state, constraint) == (CHECK_VIOLATION, "ck_scanner_runs_engine_budget_valid")
 
 
-def test_a_valid_cap_can_be_inserted_while_creating_the_scan(db_session: Session) -> None:
+@pytest.mark.parametrize("engine", [Engine.NUCLEI, Engine.SCHEMATHESIS])
+def test_a_valid_cap_can_be_inserted_while_creating_the_scan(
+    db_session: Session, engine: Engine
+) -> None:
+    """允許清單：只有掃描引擎可以有上限（CHECK 是 engine IN (...)，不是排除清單）。"""
     scan_id = _scan(db_session, engines=(Engine.ZAP,))
 
     db_session.execute(
         text(INSERT_RUN),
-        {"scan_id": scan_id, "engine": "nuclei", "sequence": 2, "requests": 10, "seconds": 60},
+        {"scan_id": scan_id, "engine": engine.value, "sequence": 2, "requests": 10, "seconds": 60},
     )
+
+
+def test_a_new_run_cannot_carry_an_allotment(db_session: Session) -> None:
+    """配額只在 runner 開始執行時寫入一次：新增 run 時預填會被擋下。"""
+    scan_id = _scan(db_session, engines=(Engine.ZAP,))
+
+    state, _, message = _rejected(
+        db_session,
+        "INSERT INTO scanner_runs (scan_id, engine, sequence, status, requests_allotted) "
+        "VALUES (:scan_id, 'nuclei', 2, 'queued', 5)",
+        scan_id=scan_id,
+    )
+
+    assert state == INTEGRITY_CONSTRAINT_VIOLATION
+    assert "cannot carry an allotment" in message
 
 
 # --- CHECK 與 trigger：分到的配額 ----------------------------------------------------------
@@ -228,13 +231,31 @@ def test_an_allotment_is_recorded_only_once(
     assert "allotment can only be recorded once" in message
 
 
-def test_an_uncapped_run_keeps_the_previous_behaviour(db_session: Session) -> None:
-    """T31 之前的資料列沒有秒數：只寫請求數仍然可以（CHECK 只限制有上限的 run）。"""
+def test_an_uncapped_run_still_records_requests_alone_once(db_session: Session) -> None:
+    """T31 之前的資料列沒有秒數：沒有上限的 run 只寫請求數仍然可以，但也只能寫一次。"""
     run_id = _run(db_session, _scan(db_session, engines=(Engine.ZAP,)), Engine.ZAP)
-
     db_session.execute(
         text("UPDATE scanner_runs SET requests_allotted = 5 WHERE id = :id"), {"id": run_id}
     )
-    db_session.execute(
-        text("UPDATE scanner_runs SET requests_allotted = 6 WHERE id = :id"), {"id": run_id}
+
+    state, _, message = _rejected(
+        db_session, "UPDATE scanner_runs SET requests_allotted = 6 WHERE id = :id", id=run_id
     )
+
+    assert state == INTEGRITY_CONSTRAINT_VIOLATION
+    assert "allotment can only be recorded once" in message
+
+
+def test_a_legacy_run_reads_back(db_session: Session) -> None:
+    """T31 之前的 run：有請求數、沒有秒數、沒有上限；經 repository 讀回不違反 domain 的規則。"""
+    scan_id = _scan(db_session, engines=(Engine.ZAP,))
+    run_id = _run(db_session, scan_id, Engine.ZAP)
+    db_session.execute(
+        text("UPDATE scanner_runs SET requests_allotted = 5 WHERE id = :id"), {"id": run_id}
+    )
+
+    stored = ScanRepository(db_session).get(scan_id)
+
+    assert stored is not None
+    [run] = stored.runs
+    assert (run.budget, run.requests_allotted, run.seconds_allotted) == (None, 5, None)

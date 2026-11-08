@@ -7,7 +7,8 @@
 - precision 以議題計（§7.1：同一個真實問題由多個 finding 或兩個工具命中只算一次）：TP 是偵測到的
   案例與裁定為真的另一個議題；FP 是修補版上對上案例的 finding 與裁定為誤報的議題。finding 層級的
   precision 另列為次要數字。還有未裁定的 finding 時 precision 是 N/A。
-- 環境故障（interrupted、cancelled，或 run 的錯誤碼屬於環境）讓整批作廢：拒絕評估，不挑掉樣本。
+- 有效的樣本只能以工具或預算的結果結束（RESULT_ERRORS 的允許清單）；其他錯誤碼（環境、授權、
+  設定）與 interrupted、cancelled 的 scan 讓整批作廢：拒絕評估，不挑掉樣本。
 """
 
 from collections import defaultdict
@@ -16,31 +17,33 @@ from dataclasses import dataclass, field
 
 from benchmarks.ground_truth import (
     Adjudications,
-    Case,
-    CaseKind,
     GroundTruth,
     Label,
     PairLabels,
     Support,
     TruthStatus,
 )
-from benchmarks.matching import adjudication_for, match_case
+from benchmarks.matching import adjudication_for, case_exclusion, match_case
 from benchmarks.metrics import Derived, Metric, NotAvailable, f1, ratio
 from benchmarks.models import ComparisonRecord, FindingRecord, LabeledScan, ScanRecord, Signature
 from benchmarks.rescan import RescanScore, score_comparison
 from benchmarks.scoring import DedupScore, Resources, coverage, resources, score_dedup
 
 SECURITY = "security"
-# 環境故障：不是工具或預算的結果，樣本不能用（整批作廢、以新的名稱重跑）。
-ENVIRONMENT_ERRORS = frozenset(
+# 有效的樣本只能以工具或預算的結果結束（允許清單）。其他錯誤碼都是平台、授權、設定或環境的
+# 問題（例如 PLAN_REJECTED、SCOPE_EXPIRED、LEASE_EXPIRED、GUARD_UNAVAILABLE）：整批作廢、以新的
+# 名稱重跑。
+RESULT_ERRORS = frozenset(
     {
-        "LEASE_EXPIRED",
-        "RUNTIME_UNAVAILABLE",
-        "GUARD_UNAVAILABLE",
-        "RUNNER_STOPPED",
-        "WORKSPACE_UNAVAILABLE",
-        "SECRET_UNAVAILABLE",
-        "PARSE_ATTEMPTS_EXHAUSTED",
+        "BUDGET_EXHAUSTED",
+        "ENGINE_TIMEOUT",
+        "TIME_LIMIT_EXCEEDED",
+        "ENGINE_FAILED",
+        "ENGINE_REPORTED_ERRORS",
+        "OUTPUT_INVALID",
+        "NO_TARGET_TRAFFIC",
+        "RESOURCE_LIMIT_EXCEEDED",
+        "ARTIFACT_REJECTED",
     }
 )
 INVALID_SCAN_STATUSES = frozenset({"interrupted", "cancelled"})
@@ -127,7 +130,8 @@ def evaluate(
             for item in scans
         ),
         rescans=tuple(
-            _score_block(block, record, by_id, by_target) for block, record in comparisons
+            _score_block(block, record, by_id, by_target, include_holdout=include_holdout)
+            for block, record in comparisons
         ),
         ground_truth={target: truth.status.value for target, truth in sorted(by_target.items())},
         include_holdout=include_holdout,
@@ -230,7 +234,7 @@ def _classify(
     if case is None:
         _adjudicated(finding, item, adjudications, tally)
         return
-    reason = _case_exclusion(case, item.scan.auth_role, include_holdout=include_holdout)
+    reason = case_exclusion(case, item.scan.auth_role, include_holdout=include_holdout)
     if reason is not None:
         tally.excluded[reason] += 1
         if case.support is Support.PLATFORM_BLOCKED:
@@ -263,27 +267,13 @@ def _adjudicated(
         tally.excluded["adjudicated_not_security"] += 1
 
 
-def _case_exclusion(case: Case, auth_role: str, *, include_holdout: bool) -> str | None:
-    if case.support is Support.PLATFORM_BLOCKED:
-        return "platform_blocked"
-    if case.support is Support.UNSUPPORTED:
-        return "unsupported"
-    if case.kind is not CaseKind.SECURITY:
-        return "not_security_case"
-    if case.holdout and not include_holdout:
-        return "holdout"
-    if case.auth_role != auth_role:
-        return "auth_role"
-    return None
-
-
 def _evaluated_cases(
     truth: GroundTruth, item: LabeledScan, *, include_holdout: bool
 ) -> tuple[tuple[str, ...], Mapping[str, tuple[str, ...]]]:
     evaluated: list[str] = []
     excluded: dict[str, list[str]] = defaultdict(list)
     for case in truth.cases:
-        reason = _case_exclusion(case, item.scan.auth_role, include_holdout=include_holdout)
+        reason = case_exclusion(case, item.scan.auth_role, include_holdout=include_holdout)
         if reason is None and item.variant not in {v.value for v in case.present_in}:
             reason = "not_present_in_variant"
         if reason is None:
@@ -330,13 +320,17 @@ def _score_block(
     record: ComparisonRecord,
     by_id: Mapping[str, LabeledScan],
     by_target: Mapping[str, GroundTruth],
+    *,
+    include_holdout: bool,
 ) -> RescanScore:
     baseline = by_id.get(record.baseline_scan_id)
     current = by_id.get(record.current_scan_id)
     if baseline is None or current is None:
         raise EvaluationError("比較快照引用了不在這一批的 scan")
     truth = by_target.get(current.target_kind)
-    return score_comparison(record, baseline, current, truth, block=block)
+    return score_comparison(
+        record, baseline, current, truth, block=block, include_holdout=include_holdout
+    )
 
 
 # --- 批次的檢查 ---------------------------------------------------------------------------------
@@ -353,6 +347,13 @@ def _check_batch(scans: Sequence[LabeledScan]) -> None:
 def _check_scan(scan: ScanRecord) -> None:
     if scan.fixture:
         raise EvaluationError("fake 引擎的 scan 不能評估")
-    environment = [run.error_code for run in scan.runs if run.error_code in ENVIRONMENT_ERRORS]
-    if scan.status in INVALID_SCAN_STATUSES or environment:
-        raise EvaluationError("有環境故障或被中斷、取消的 scan：整批作廢，以新的名稱重跑")
+    invalid = [
+        run.error_code
+        for run in scan.runs
+        if run.error_code is not None and run.error_code not in RESULT_ERRORS
+    ]
+    if scan.status in INVALID_SCAN_STATUSES or invalid:
+        raise EvaluationError(
+            "有不是工具或預算結果的失敗（環境、授權、設定），或被中斷、取消的 scan："
+            "整批作廢，以新的名稱重跑"
+        )

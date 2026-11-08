@@ -131,15 +131,19 @@ class ScanService:
             created_by_key_id=principal.key_id,
             engine_budgets=engine_budgets,
         )
+        return self._write(principal, new_scan, request_id=request_id)
+
+    def _write(self, principal: Principal, new_scan: NewScan, *, request_id: str | None) -> Scan:
+        """寫入 scan、事件 scan.created 與 audit（同一個 transaction）。"""
         try:
             scan_id = self._scans.create(new_scan)
         except ConstraintViolationError as violation:
             return self._after_conflict(violation, new_scan)
-        engines = tuple(run.engine for run in runs)
+        engines = tuple(run.engine for run in new_scan.runs)
         self._scans.append_event(
             scan_id,
             EventType.SCAN_CREATED,
-            created_payload(profile=request.profile, engines=engines),
+            created_payload(profile=new_scan.profile, engines=engines),
         )
         scan = self._existing(scan_id)
         self._audit.record(
@@ -149,7 +153,7 @@ class ScanService:
             actor_key_id=principal.key_id,
             project_id=scan.project_id,
             request_id=request_id,
-            changes=_created(scan, operations),
+            changes=_created(scan, new_scan.operations),
         )
         return scan
 

@@ -30,7 +30,18 @@ FORBIDDEN_STDLIB = {
     "asyncio",
 }
 # 純的模組：只能用標準函式庫中不碰 I/O 的部分（spec 與 ground_truth 的載入函式以 Path 讀檔）。
-PURE = {"evaluate", "stats", "matching", "collect", "schedule", "models", "manifest"}
+PURE = {
+    "evaluate",
+    "stats",
+    "matching",
+    "metrics",
+    "rescan",
+    "scoring",
+    "collect",
+    "schedule",
+    "models",
+    "manifest",
+}
 PURE_FORBIDDEN = {"os", "shutil", "tempfile", "io", "pathlib", "glob"}
 
 
