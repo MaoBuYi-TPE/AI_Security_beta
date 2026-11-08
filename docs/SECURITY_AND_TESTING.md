@@ -371,7 +371,7 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 | TRIAGE-07 | 併發（G1）：同版本兩個 PATCH、人工與自動重開互搶、resolve 期間建立的 scan、比較快照與 linker 的鎖；故障注入（G2）：每一步之間拋錯整筆回滾、重試只重開一次 | integration：triage_races、triage_transactions（各連續 5 次） |
 | REPORT-01 | 不可信字串只在 code token 中、沒有連結／圖片／HTML／URL 樣式；JSON 跳脫；canary 不出現；白名單欄位與 golden JSON Schema | unit：reports/test_encoding、test_document；contract：test_report_schema |
 | REPORT-02 | 截斷以整個 finding 為單位、摘要計數不變、開頭與結尾都有說明；真實的 8 MiB 與多位元組字元；大小分布偏斜時截斷點等於逐一嘗試的結果、每個 finding 只投影與渲染一次（成本與分布無關）；比較快照只列最新的 10 份並揭露省略數；先遮罩再截斷 | unit：reports/test_document、test_render |
-| REPORT-03 | 用語：平台文字的誇大字詞只在否定說明中；需要人工確認的 resolved 不算 resolved | unit：reports/test_document；live 的報告核對 |
+| REPORT-03 | 用語：平台文字的誇大字詞只在否定說明中；需要人工確認的 resolved 不算 resolved | unit：reports/test_document；live 的報告核對；integration：reports_api（completed 與 timed_out 直接套用 live 的報告核對） |
 | REPORT-04 | 佇列：SKIP LOCKED、舊 worker 重新認領之後不能完成、最多 3 次、內容寫入後失敗整筆回滾、快照與 PATCH 隔離、同時建立的配額；報告專屬的 DB 錯誤立即釋放、其他 DB 錯誤讓 worker 結束、lease 失效留給對帳；failed 不計入每個 scan 的配額；WorkerLoop 每圈一份 | integration：report_queue、report_worker；reports_schema（狀態轉換、內容只寫一次、雙向核對） |
 | REPORT-05 | 下載：只以 report id、sha 不符不送出內容、header（nosniff、CSP sandbox 與 frame-ancestors、no-store、ASCII 檔名）、其他 project 404、viewer 不能建立 | integration：reports_api |
 
@@ -636,7 +636,7 @@ Gate B：SEC-01 至 SEC-20 適用測試有結果；未支援能力明確關閉�
 
 Gate C：取消/故障/重送/partial 狀態測試通過。
 
-Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者審閱樣本報告的結論是核心安全語意通過、有條件通過，兩個措辭已修正（§28.17）。completed 狀態只有 DB 整合測試的證據（fixture 的 Live 不會產生 completed 的 scan），使用者決定是否接受這個證據組合之前，Gate D 整體尚未通過。不得把局部通過當作整個 Gate 已通過。）
+Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者審閱樣本報告的結論是核心安全語意通過、有條件通過，兩個措辭已修正（§28.17）。**通過（2026-11-08，接受有文件記錄的替代證據，`DECISIONS.md` §28.17）**：partially_completed 與 timed_out 由兩次 Live rescan 驗證；fixture 的 Live 不會產生 completed 的 scan，completed 改以 DB 整合測試驗證，走真實的 API、worker、渲染與下載流程，並直接套用 Live 的報告核對（§4.3 的 REPORT-03）。這個替代方案只適用於 Gate D 的報告正確性與措辭驗收，不宣稱已完成 completed 的 Live 端到端驗證。Gate D 通過不代表 M5 完成：SEC-14（T23a）、權限與速率限制（T23b）、Gate E（T23d）與 T23 的 DoD 仍未完成，Gate A–C 尚未正式判定。）
 
 Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 

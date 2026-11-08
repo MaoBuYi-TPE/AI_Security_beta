@@ -4,7 +4,7 @@
 - 畢業專題，1 人開發，2026/10/16 – 2027/06/30；只做後端，不建立 React、Vue、Next.js 或其他前端。
 - 題目：Web 與 API 多引擎動態安全檢測暨結果整合後端系統之設計與實作。
 - 以 REST API、內建 API 文件及 JSON/Markdown 報告展示；不開發互動式儀表板。
-- **目前進度：M0、M1、M2、M3、M4 完成（M4：T17 凍結模板、T18 Nuclei Adapter、T19 Observation→Finding 與 rule groups v2、T20 去重反例／fingerprint v2／來源追溯 API／部分失敗的 live 證據，見 `docs/DECISIONS.md` §23–§26）；M5 的 T22 複掃比較完成（§27；三次 live 校準＋最終執行、new／not_observed 皆為 0）；T21 人工 triage、audit 與報告完成（§28；resolved 一律人工判定、不提供自動修補驗證，兩次 rescan live 與 findings 回歸通過；Gate D：樣本報告的核心語意已審查通過，待使用者決定是否接受 completed 狀態只有 DB 整合證據），T31／T23 尚未開始。T33 guard 編碼放寬暫緩，屬實驗性加項（§21、§22）。** 每完成一個里程碑就更新這一行。
+- **目前進度：M0、M1、M2、M3、M4 完成（M4：T17 凍結模板、T18 Nuclei Adapter、T19 Observation→Finding 與 rule groups v2、T20 去重反例／fingerprint v2／來源追溯 API／部分失敗的 live 證據，見 `docs/DECISIONS.md` §23–§26）；M5 的 T22 複掃比較完成（§27；三次 live 校準＋最終執行、new／not_observed 皆為 0）；T21 人工 triage、audit 與報告完成（§28；resolved 一律人工判定、不提供自動修補驗證，兩次 rescan live 與 findings 回歸通過；Gate D 通過：completed 狀態採 DB 整合測試的替代證據，§28.17；不代表 M5、SEC-14 或資料保護已完成）；下一步 T31（細部計畫待審），T23 尚未開始。T33 guard 編碼放寬暫緩，屬實驗性加項（§21、§22）。** 每完成一個里程碑就更新這一行。
 - 先檢查實際檔案，不得假設程式、指令或測試已存在。
 - 沒有真實掃描數據前，不得杜撰成功紀錄、效能、版本號或測試結果。
 
