@@ -2670,3 +2670,116 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
     - M5 的其他驗收項目：Gate A–C 尚未正式判定通過，Gate E（T23d）與 T23 的 DoD 尚未完成。
     - Gate D 通過不代表 M5 完成。報告內容與人工複測摘錄尚未加密、尚未設定保留期限，不得宣稱已完成保護。
   - **接下來**：原核准的順序不變，T21 → T31 → T23a–d。
+
+## 29. T31：benchmark harness 與引擎子預算（2026-11-08 開始）
+
+細部計畫第一版經一次獨立審查（Plan 子代理，opus）。使用者 2026-11-08 決定 C 組（ZAP＋Nuclei）的子預算採「凍結：嚴格上限」，並核准離線的實作、測試、文件、分支、PR 與合併。**核准不包含任何 Live**：第 6 節的 Live smoke 需要另外授權；T21 的授權不延伸到 T31。
+
+### 29.1 引擎子預算：嚴格上限（使用者，2026-11-08）
+
+- **為什麼需要**：T12 起每個 run 分到 scan 剩下的全部預算（§16.4），引擎順序固定 ZAP → Nuclei，所以 C 組的 ZAP 可以用掉全部，Nuclei 只拿剩餘；預算寬鬆時 C 實際用掉約 A＋B 的資源，不符合 SECURITY_AND_TESTING §6 的「組合組先分配子預算並凍結分配，總額與單工具組一致」。`ARCHITECTURE.md` §3.4 原本寫「預算預先分配給各引擎」，和 T12 的實作一直不一致，這次一併更正。
+- **語意**：建立 scan 時可以選填 `engine_budgets`，每個掃描引擎各一組 `max_requests`、`max_duration_seconds`。每個 run 開始前取「scan 剩下的」與「這個引擎的上限」的較小值（請求數與秒數各自取）。先跑的引擎沒用完的份額**作廢**，不轉給後面的引擎。沒有指定時行為完全不變。
+- **建立時的檢查**（不合回 422 `INVALID_REQUEST`，不寫入任何東西，訊息不回顯輸入的值）：
+  - 形狀（和引擎的規則一起、在取得任何鎖之前）：只用於兩個以上掃描引擎的 scan；每個引擎恰好列一次。
+  - 數值（scan 的總額確定之後）：每個份額是 1 到總額的整數；合計不超過總額；不低於引擎的最小時間窗——ZAP 至少 120 秒、請求數至少 120 秒份（120 × 速率），Nuclei 至少 60 秒。低於最小時間窗註定 `BUDGET_EXHAUSTED`，所以建立時就拒絕。
+  - 最小時間窗的常數在 `scans/domain/allocation.py` 另寫一份（`scans` 依分層不能 import `scanners`），單元測試核對和兩個 plan 的常數相同，並以 ZAP 的 `plan_seconds` 驗證邊界。
+- **只會讓配額變小**：`min(remaining, cap)` 不可能超過 scan 的總額或 grant；guard 本身不變，仍以 runner 算好的每個 run 的請求數上限與 scan 的速率強制。ZAP、Nuclei 的 plan 也不必改（它們本來就以分到的秒數與請求數計算）。合計不超過總額是公平性的規則，不是安全性的前提。
+- **Idempotency**：fingerprint 只在有指定時加入 `engine_budgets`（依引擎排序），沒有指定的請求和 T31 之前**逐位元組相同**（以改動前取得的 golden hex 測試），所以不改 `FINGERPRINT_VERSION`；改版號會讓舊 key 的重送變成 409。同一個 key、不同的子預算回 409；順序不同視為相同。
+- **DB（migration v0020）**：`scanner_runs` 新增 `budget_max_requests`、`budget_max_duration_seconds`、`seconds_allotted`。
+  - CHECK：上限同時有值或同時是 null、正整數、只屬於掃描引擎（允許清單 zap、nuclei、schemathesis；之後新增的非掃描引擎不會被默默放行）；有上限的 run 寫入請求數時，秒數也必須寫入，兩者都不超過上限——還不認得上限、只寫請求數的舊 runner 會讓整個 prepare 的 transaction 失敗，容器不會建立（fail closed）。
+  - trigger：上限不能修改（比照 v0011 的 `scanner_runs_plan_once`）；新增 run 時不能預填配額，請求數寫入之後配額不能再改（唯一的寫入點是開始執行時的那一次）。run 只能在建立 scan 的 transaction 新增、結束的 run 整列凍結，沿用 v0009。
+  - downgrade：還有未結束、帶上限的 run 時拒絕（否則舊程式會讓它們分到剩下的全部，子預算悄悄消失）。
+  - 升級時三個 CHECK 各掃一次表、持有 ACCESS EXCLUSIVE 到 commit；表很小（每個 scan 最多 4 列），依既有程序先停服務，沒有另外設定 `lock_timeout`（資料庫審查 LOW-5，接受）。
+- **揭露**：`engines[].budget` 列出凍結的上限；audit 的 `scan.create` 只在有指定時記下 `engine_budgets`（沒有指定的 scan，audit 的內容和之前相同）。
+- **仍然存在、要揭露的偏差**：
+  - 份額作廢時 C 的實際用量會少於總額（對 C 不利的保守方向）；manifest 與 `engines[].usage` 揭露實際用量。
+  - 引擎順序固定 ZAP → Nuclei（架構決定），隨機化的是 scan 之間的順序；ZAP 的主動掃描可能先改變靶機狀態，列為效度威脅。
+  - 被 runner 硬性停止時，清理的秒數算在 `traffic_seconds`，會讓後面的引擎少拿幾秒（例如 ZAP 用了 400 秒、自己的上限 380，Nuclei 只拿到 200 而不是 220），以「實際分到的秒數」揭露。
+  - Nuclei 被時間或請求上限停止時不收集輸出（§20.1），結果是 0，不是部分結果；分給 Nuclei 的份額必須夠它跑完。正式數值由 T27 依非 holdout 的校準凍結。
+  - 綁定 auth profile 時，preflight 不受上限、從總額扣除它用掉的請求數與秒數：份額合計等於總額時，最後一個引擎可能拿不到自己的上限，甚至低於最小時間窗而 `BUDGET_EXHAUSTED`。建立時的最小時間窗檢查沒有預留 preflight（資料庫審查 LOW-4）。目前多引擎只有 zap＋nuclei，而 nuclei 不能和 auth profile 一起用，所以還不會發生；harness 也只跑匿名的 scan。
+- **不改**：guard、T22 的比較（被上限截斷的 run 本來就不完整，比較會是 inconclusive）、T21 的報告（報告現在也不列總預算的上限，記為限制）。
+
+### 29.2 每個 run 的配額與用量進 API
+
+- `engines[].usage`：`requests_allotted`、`duration_allotted_seconds`、`requests_sent`、`requests_denied`、`traffic_duration_seconds`。沒有容器（in-process 的 fake、還沒開始、開始前就結束）或不明時是 null，不以 0 冒充；T31 之前的 run 沒有記下分到的秒數。欄位名稱和 `budget_usage` 一致。
+- 這不論子預算怎麼決定都需要：被 runner 停止、沒有收集的 run（例如被上限停止的 Nuclei）沒有 `result.guard_traffic`，原本只能在 DB 看到用量，DoD 的「經 API 保存 guard 計數」做不到。
+
+### 29.3 harness 的設計
+
+- **黑箱**：新的頂層套件 `benchmarks/`（不進 wheel 與映像）只吃平台 API 的 JSON 與本機的實驗檔案；AST 測試禁止它 import `secscan`、`tests`、DB、Web 框架、Docker、網路與子程序的模組，純函式的模組（評估、統計、比對、正規化、排程、規格的 schema）連檔案系統也不碰。和 `cases.py`、平台常數的核對放在測試，不放在 `benchmarks`。
+- **實驗規格**（YAML，嚴格 schema）：組別與引擎、子預算、靶場與版本、profile、總預算、重複次數、種子、比較區塊。
+  - 靶場只能是 fixture、juice_shop、vampi，位址由 `lab_support` 固定在 live 的 lab 網段；不接受 URL 或 IP，平台的 `LAB_CIDR` 與 grant 再擋一次。
+  - 所有組別共用同一份總預算，不超過平台 grant 的上限（2 req/s、5,000 次、1,500 秒）。experiment 的多引擎組別必須凍結份額，而且合計**等於**總額；每格至少重複 3 次。份額依平台相同的規則檢查（常數由測試核對）。組別的引擎必須依平台的執行順序（zap、nuclei）列出。同一個組別與靶場的 scan 數不超過平台的 quota 50。這些都在 `bench-check` 離線檢查，不會等到 stack 啟動之後才在第一個 POST 失敗。
+  - 讀 YAML 時拒絕重複的鍵、非字串的鍵、別名、多份文件與過大的檔案（`safe_load` 遇到重複的鍵會靜默以後者覆蓋），也只接受字串、數字、布林、null、清單與 mapping：`!!set` 會靜默去掉重複的鍵、`!!omap` 會保留重複的鍵，merge key、日期與 binary 也用不到（安全審查 L4）。ground truth 與標記檔用同一個讀取函式。
+  - T31 只接受 `web_active_lab`：Juice Shop、VAmPI 是否改用 `api_active_lab`（需要上傳規格）由 T27 決定。
+- **排程**：單位是一次 scan 或一個比較區塊（baseline 與 current 整塊移動、baseline 在前），以 sha256(種子, 單位) 排序；不用 `random`，可以從 manifest 重現。
+- **Live 流程**（`tests/live/test_bench_live.py`）：
+  1. 每個（組別, 靶場）一個 project，組別之間的 finding 不會合併；同一個靶場在 session 中用同一個 host（origin 不變），每個 scan 之前重建靶機，讓資料快照相同。
+  2. 經 API 建立 scan、輪詢到結束；等待上限是 scan 的總秒數加 900 秒（ZAP 的 JVM、收集、解析與清理不算在流量秒數內），不沿用 `RUN_TIMEOUT` 的 600 秒。
+  3. 經 API 收集 scan、這個 scan 的 finding（`GET /scans/{id}/findings` 只看這個 scan 的來源）、觀察數與比較快照；收集與 integration 測試走同一段程式（`benchmarks.collect` 接受一個 fetch 函式）。缺欄位、型別不符、分頁不一致、還沒結束或 fixture 的 scan 一律失敗。
+  4. 結構斷言：不是 fake、上限和規格相同、每個容器 run 分到的等於 min（剩下的, 上限）且轉送數不超過分到的、guard 只看到靶機；**不斷言偵測數**。
+  5. 不論成功或失敗都寫 manifest 與 SHA256SUMS；失敗時 `complete: false`、只記例外的種類（訊息可能含回應的內容）。
+  - 全部在同一個 pytest session 中完成：`test-live-runner` 結束時 `down -v` 會清掉 DB。
+  - 不使用其他 live 測試的私有函式，不改既有的 live 測試；`start_juice_shop`、`start_vampi` 只加選填的 `host`。Juice Shop、VAmPI 的路徑在 T31 不執行，第一次 Live 驗證在 T28。
+- **失敗與作廢**：不自動重試（重試會讓樣本有偏差）。任何一次執行失敗就停止整個 session；`bench-evaluate` 拒絕評估不完整的 session。
+  - 有效的樣本只能以工具或預算的結果結束（允許清單）：`BUDGET_EXHAUSTED`、`ENGINE_TIMEOUT`、`TIME_LIMIT_EXCEEDED`、`ENGINE_FAILED`、`ENGINE_REPORTED_ERRORS`、`OUTPUT_INVALID`、`NO_TARGET_TRAFFIC`、`RESOURCE_LIMIT_EXCEEDED`、`ARTIFACT_REJECTED`。
+  - 其他錯誤碼都是平台、授權、設定或環境的問題（例如 `PLAN_REJECTED`、`SCOPE_EXPIRED`、`LEASE_EXPIRED`、`GUARD_UNAVAILABLE`），加上 interrupted、cancelled 的 scan，讓整批作廢，以新的名稱重跑，不計次數，也不挑掉個別樣本。第一版用的是環境錯誤的排除清單，程式碼審查指出 grant 在兩個引擎之間到期、plan 被拒絕這類失敗會被當成 recall 偏低的有效樣本，改成允許清單。
+  - harness 的 grant 有效期涵蓋最壞情況的整個 session（每個 scan 都用滿總秒數加 900 秒）再加一天：grant 不會在 session 中到期，ZAP 的 plan 也不會被「grant 快到期」截短。規格的最壞情況超過 29 天（grant 最長 30 天）時，`bench-check` 就拒絕。
+- **結果目錄**（`benchmarks/results/<name>/`，已在 gitignore）：O_EXCL 獨占建立、不覆寫，目錄 0700、檔案 0600；寫入前檢查平台 key 的格式、Bearer、JWT 與這次 session 建立的 key 原值；只保存 scan、finding 與比較快照的 JSON，不保存觀察的 evidence。**沒有加密**（T23a 的範圍），manifest 一律揭露。
+- **manifest**（§8）：規格的 sha256、種子、排程與實際順序；每個 scan 的預算、上限、分到的配額、guard 計數與狀態；比較快照；每個檔案的 sha256；`complete`；固定的揭露清單。API 拿得到的身分（`GET /scanners`、`GET /scan-profiles`、每個 run 的 `plan_hash`）照原樣記下；拿不到的由 harness 記下並標明來源：commit 與是否有未提交的修改、guard 與 fixture 執行用的本機映像 ID、fixture 原始碼的雜湊、靶機映像的參照、strict-1（path 規則沒有執行期的版本代號，以 commit 與 guard 映像識別）。
+- **指令**：`make bench BENCH_SPEC=… BENCH_NAME=…` 的前置是 `ENABLE_LIVE_LAB_TESTS`、規格與結果目錄名稱（只收英數字、`-`、`_`，已存在就停止）的檢查；都通過之後，recipe 才遞迴執行 `test-live-runner`（以 `make -j` 執行也不會先啟動 stack；安全審查 L2）。建立、測試與清理完全沿用同一個隔離 stack 與範圍（Makefile 測試確認）。使用者給的值以環境變數交給 recipe、由 shell 展開，不以 make 的變數嵌進 shell 的文字（安全審查 L1）；Live 測試從環境變數讀規格的路徑與名稱，規格只讀一次（解析、sha256 與複本來自同一份位元組；安全審查 L3）。`make bench-check` 與 `make bench-evaluate` 是離線的；後者只讀結果目錄，評估以 canonical JSON 寫到 stdout，選填的 `BENCH_TRUTH`、`BENCH_ADJUDICATIONS`、`BENCH_PAIR_LABELS`、`BENCH_INCLUDE_HOLDOUT`。
+
+### 29.4 指標的定義（`benchmarks/evaluate.py` 等，純函式）
+
+- **recall 以案例計**：列入評估的是 security、supported、適用這個 scan 的 auth role、存在於這個版本的案例。holdout 預設排除；`include_holdout` 只接受凍結的 ground truth。被排除的案例依原因列出（holdout、unsupported、platform_blocked、auth_role、not_security_case、not_present_in_variant）。
+- **precision 以議題計**（計畫第一版寫「以 finding 計」，依 §7.1「同一真實問題由兩工具命中只算一個 TP」與獨立審查的意見改正）：
+  - TP 單位是偵測到的案例，加上裁定為「真的另一個問題」的議題（`issue`）；它們不進 recall 的分母。
+  - FP 單位是修補版上對上案例的 finding（負例對照），加上裁定為誤報的議題。
+  - 對上 holdout、平台阻擋、不支援或非 security 案例的 finding，以及非 security 的 finding，都不進分子與分母。
+  - finding 層級的 precision 另列為次要數字。
+- **N/A**：分母為 0；還有未裁定的 finding（precision）；precision 或 recall 為 N/A，或兩者都是 0（F1）。不填 100%。一個 finding 同時對上兩個案例就停止評估（ground truth 有歧義）；平台阻擋的案例被命中列為異常。
+- **引擎**：各引擎偵測與獨有的案例數；2 個以上引擎命中的 finding 另算 finding 層級的 precision（§7.1 的探索性分組，不作為合併或升級的規則）。
+- **資源與完成度**：guard 計數的請求數與秒數（任何一個開始過的 run 不明，總數就不明）、牆鐘時間（建立到結束）、每個 run 是被請求數（guard 回報用盡，或轉送數達到分到的）還是時間（工具或 runner 的時間上限）截斷；scan 與每個 run 的狀態分開列，不合成單一的「可用」分數。
+- **覆蓋**：只有 `coverage_measured` 時才是 observed／eligible，web 的 scan 一律 N/A。
+- **去重**（§7.2）：predicted pair 以 finding 層級表示（同一個 finding 有 2 個以上引擎的來源），由人工標記判斷合併是否正確；沒有跨引擎的合併時 precision 是 N/A（`no_cross_engine_merges`），有未標記的合併時也是 N/A；recall 只在標記宣告完整時才算。另報有 2 個以上觀察的 finding 數（包括同一個引擎的合併，例如 T26 錄製中 /search 的兩個 XCTO；不另判對錯）、誤合併、漏合併與列表壓縮比例（1 − finding 數／觀察數，不是 precision 的改善）。逐一 observation pair 的標記與單位的一致性在 T27 視需要再擴充。
+- **複掃**（§7.4）：「誤判已修補」＝ ground truth 在 current 的版本仍存在，卻被判 not_observed（必須是 0）；inconclusive 不算驗證修補；修補版上仍 persistent 的案例另外列出；對不上案例的 not_observed 另計。案例的排除規則和偵測相同（holdout 預設排除、不支援、平台阻擋、非 security、auth role），對上被排除的案例只依原因計數、不列出 id（程式碼審查指出第一版會在預設評估中列出 holdout 的案例，違反 §5.2）。
+- **跨重複**：每格（組別, 靶場, 版本）列出 n、中位數、最小值與最大值；IQR 只在可用的值有 4 個以上時才算；N/A 另計，不當成 0；每個案例的偵測頻率 x/n。smoke 與未凍結的 ground truth 都在輸出中標明不是正式結果。
+
+### 29.5 ground truth 與人工標記的格式（T27 撰寫）
+
+- T31 只定義格式、載入與檢查，測試用合成的案例；**不在 T31 撰寫正式的比對檔**。每個靶場一份：案例有 kind、支援範圍、holdout、auth role、存在於哪些版本與比對條件（rule group 必填，method、route、可接受的參數位置清單與參數名稱選填）。supported 的 security 案例必須有比對條件；兩個案例不能有相同的條件。
+- adjudications：未對上案例的 security finding 的人工裁定（`true_extra`、`false_positive` 必須有 `issue`，`not_security` 不給），同一個 finding 只能裁定一次。pair labels：合併是否正確、漏合併的 pair、是否完整。
+
+### 29.6 限制
+
+- 結果目錄沒有加密（T23a）。報告不列總預算的上限與子預算。strict-1 的 path 規則沒有執行期的版本代號。
+- harness 本身還沒有 Live 驗證：Live smoke 通過之前 T31 不標完成。Juice Shop、VAmPI 的路徑要到 T28 才第一次執行。
+- 只有匿名掃描：Nuclei 不能和 auth profile 一起用（§24.1），主要比較三組都用匿名。
+
+### 29.7 交接
+
+- **T27**：
+  - 以非 holdout 的校準凍結總預算與各引擎的份額，Nuclei 的份額要夠它跑完。
+  - 依 `cases.py` 的語意撰寫 ground truth 的比對檔並凍結，處理三個已知問題：FX-05 會分成多個 finding（recall 以案例計，不受影響）；`rescan_assertions.py` 中 `body` 的參數鍵永遠對不上（parser 只產生 query／unknown）；`cases.py` 的 FX-08 偵測欄寫 40011，文件與 rule group 是 20019。另外 10020（anti-clickjacking）在 S&T §5.1 同時列為 FX-05 的命中與「超出 12 個案例的告警」，要擇一。
+  - holdout 的偵測結果在 T30 的 Live 量測表中已經看過，列為效度威脅。
+  - Juice Shop、VAmPI 的案例改成機器可讀；決定它們的 profile。
+- **T28**：完整矩陣約 45 次 scan、數小時，需要長時間保持喚醒；guard 的 telemetry 6 小時後刪除；每個 target 24 小時最多 50 個 scan。正式的 recall／precision 與 holdout 跑分排在 T33 之後，或由使用者決定沿用 strict-1、另列平台阻擋（§21.5、§22）。
+
+### 29.8 離線驗證
+
+- 子預算：BUDGET-01 至 10（S&T §4 的新表）。harness：BENCH-01 至 12；BENCH-13 是 Live smoke（需要另外授權）。
+- 第一個 commit 時 `make test` 6,576 passed、2 skipped，coverage 99.38%；`benchmarks` 的 branch coverage 100%（`evaluate.py` 等純函式比照核心模組要求 ≥ 90%）。
+- 空轉檢查：把配額改成忽略上限有 7 個測試失敗；評估的四個 mutant（忽略未裁定、TP 以 finding 計、分母 0 當 100%、誤判已修補反向）都被測試抓到；確認之後改回，不提交。
+- 審查修正之後：`make lint`、`make typecheck` 通過；`make test` 6,905 passed、2 skipped，coverage 99.42%；`benchmarks/` 與 `scans/domain/allocation.py` 的 branch coverage 100%。沒有執行任何 Live。
+
+### 29.9 審查與處理（opus，2026-11-09）
+
+三個審查都沒有 CRITICAL 或 HIGH。
+
+- **程式碼審查（code-reviewer）**：3 個 MEDIUM、3 個 LOW，全部修正。
+  - MEDIUM：作廢的判斷改成允許清單，grant 有效期依最壞情況設定（§29.3）；複掃套用和偵測相同的排除規則（§29.4）；規格要求引擎依平台的執行順序，避免合法的規格在 Live 中途斷言失敗。
+  - LOW：去重的 N/A 原因與單一引擎的合併（§29.4）；規格離線檢查平台 grant 的預算上限；`ScanService.create` 把寫入、事件與 audit 抽成 `_write`（原本 71 行）。另外 AST 測試的純函式清單補上 rescan、scoring、metrics。
+- **安全審查（security-reviewer）**：4 個 LOW，全部修正：make 變數改以環境變數交給 shell（L1）；bench 在檢查都通過之後才遞迴執行 test-live-runner（L2）；規格只讀一次（L3）；嚴格 YAML 的 tag 允許清單（L4）。另依建議，結果檔以 `fchmod` 設定權限。附帶提到既有的 `LIVE_LAB_NET`／`LIVE_PROJECT` 可以從命令列覆寫而改變所有 live 目標的清理範圍：不是這個分支引入，不在 T31 修改，記為 T23b 可考慮的強化。
+- **資料庫審查（database-reviewer）**：6 個 LOW。
+  - 修正：配額只寫一次的條件收緊，並拒絕 INSERT 預填（LOW-1）；`engine_budget_valid` 改成允許清單（LOW-2）；downgrade 在還有未結束、帶上限的 run 時拒絕（LOW-3）；preflight 共用總額的偏差寫進 §29.1（LOW-4）；補上舊資料列經 repository 讀回、downgrade 拒絕與成功後 trigger 函式都移除的測試（LOW-6 的一部分）。
+  - 接受：升級的鎖與掃描成本（LOW-5，依既有程序先停服務）；ORM 與 migration 的 CHECK 文字沒有自動比對（LOW-6 的另一部分：審查已人工逐字核對，專案既有的測試也只比對名稱）。

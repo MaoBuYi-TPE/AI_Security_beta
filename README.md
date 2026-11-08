@@ -353,6 +353,15 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - Gate D（去重、複掃與報告的驗收）2026-11-08 通過，採用有文件記錄的替代證據：partially_completed 與 timed_out 的報告由兩次 Live 複掃驗證；completed 的報告由 DB 整合測試驗證（真實的 API、worker、渲染與下載，合成的觀察），**沒有 completed 的 Live 端到端驗證**。Gate D 通過不代表 M5 或資料保護已完成（`docs/DECISIONS.md` §28.17）。
 - migration v0017–v0019；契約見 `docs/API_CONTRACT.md` §19，決策見 `docs/DECISIONS.md` §28，反例見 `docs/SECURITY_AND_TESTING.md` §4.3 的 TRIAGE／REPORT 表。
 
+#### benchmark harness 與引擎子預算（T31，進行中）
+
+- **引擎子預算**：多引擎的 scan 可以在建立時選填 `engine_budgets`，凍結每個引擎的 `max_requests`、`max_duration_seconds`。每個 run 取「scan 剩下的」與「這個引擎的上限」的較小值，沒用完的份額作廢、不轉給後面的引擎；只會讓配額變小，總額與 guard 的強制不變。省略時行為和之前相同。`engines[].budget` 列出上限，`engines[].usage` 列出每個 run 分到的配額與 guard 計數（被 runner 停止、沒有收集的 run 也有）。migration v0020。
+- **harness**（`benchmarks/`，不進 wheel）：只吃平台 API 的 JSON。實驗規格（`benchmarks/experiments/*.yaml`）只能指定 fixture、juice_shop、vampi 三種靶場，所有組別共用同一份總預算；排程由種子決定；`evaluate.py` 是純函式（recall 以案例、precision 以議題計，分母為 0 或還有未裁定的 finding 是 N/A）。
+- `make bench-check BENCH_SPEC=… BENCH_NAME=…`：離線檢查規格與結果目錄的名稱。
+- `ENABLE_LIVE_LAB_TESTS=1 make bench BENCH_SPEC=benchmarks/experiments/t31-smoke.yaml BENCH_NAME=<新名稱>`：先做上面的檢查，再以 `test-live-runner` 的同一個隔離 stack 與清理範圍經 API 跑完排程，結果寫到 gitignore 的 `benchmarks/results/<新名稱>/`（0700／0600、不覆寫、寫入前檢查秘密，**沒有加密**）。不自動重試；環境故障整批作廢、換新名稱重跑。**T31 的 Live smoke 尚未執行（需要另外授權）**，Juice Shop、VAmPI 的路徑要到 T28 才第一次執行。
+- `make bench-evaluate BENCH_NAME=… BENCH_TRUTH=<ground truth>`：離線、只讀結果目錄，評估以 JSON 寫到 stdout（另有選填的 `BENCH_ADJUDICATIONS`、`BENCH_PAIR_LABELS`、`BENCH_INCLUDE_HOLDOUT`）。正式的 ground truth 比對檔與預算由 T27 凍結；smoke 的數字不是實驗結果。
+- 決策見 `docs/DECISIONS.md` §29，契約見 `docs/API_CONTRACT.md` §17.1，測試見 `docs/SECURITY_AND_TESTING.md` §4.3 的 BUDGET／BENCH 表。
+
 #### 隔離 lab 靶場（T03）
 
 需要先啟動 OrbStack（`orb start`）。lab 只接 internal network、不發布任何 port：

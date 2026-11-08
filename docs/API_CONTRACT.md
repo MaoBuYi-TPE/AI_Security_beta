@@ -972,6 +972,7 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 | `api_spec_id` | 必須屬於這個 target |
 | `auth_profile_id` | 必須屬於這個 target；綁定它目前的版本。preflight（GET 與 path）必須在 grant 的範圍內，否則 422（訊息附原因，例如 `PATH_EXCLUDED`，不附 path） |
 | `budget` | 可省略；省略的項目用 grant 的值，每一項不可超過 grant 的值（422） |
+| `engine_budgets` | 選填的引擎子預算（T31，`DECISIONS.md` §29.1）：`[{"engine": "zap", "max_requests": 760, "max_duration_seconds": 380}, …]`，每項的三個欄位都必填（整數，不接受 bool 與字串；未知的欄位 422）。只用於兩個以上掃描引擎的 scan，每個引擎恰好列一次；每個份額是 1 到 scan 總額的整數，合計不超過總額；不低於引擎的最小時間窗（zap 至少 120 秒、`max_requests` 至少 120 × `requests_per_second`；nuclei 至少 60 秒）。不合回 422 `INVALID_REQUEST`。每個 run 開始前取「scan 剩下的」與「這個引擎的上限」的較小值，沒用完的份額作廢、不轉給後面的引擎。綁定 auth profile 時 preflight 不受上限、從總額扣除它的用量（份額合計等於總額時，最後一個引擎可能拿不到自己的上限）。省略時每個 run 分到剩下的全部（和之前相同） |
 | `Idempotency-Key` | 16–128 個英數字、`-`、`_`（UUID 可用）；可以加上雙引號（Structured Field 的 String），兩者視為同一個 key。缺少、重複或格式不符：400 `INVALID_REQUEST` |
 
 回應（202；查詢時相同）：
@@ -990,8 +991,8 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
   "auth_role": "standard_user",
   "budget": {"requests_per_second": 2, "max_requests": 1000, "max_duration_seconds": 1500},
   "engines": [
-    {"engine": "preflight", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null},
-    {"engine": "fake", "sequence": 2, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null}
+    {"engine": "preflight", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null, "budget": null, "usage": {"requests_allotted": null, "duration_allotted_seconds": null, "requests_sent": null, "requests_denied": null, "traffic_duration_seconds": null}},
+    {"engine": "fake", "sequence": 2, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null, "budget": null, "usage": {"requests_allotted": null, "duration_allotted_seconds": null, "requests_sent": null, "requests_denied": null, "traffic_duration_seconds": null}}
   ],
   "coverage": {
     "eligible_operations": 13,
@@ -1016,6 +1017,8 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 - `auth` 是 null 時 `auth_role` 是 `anonymous`。`web_active_lab` 的 `api_spec` 與 coverage 的數字是 null，`limitations` 多一個 `NO_API_SPEC`。
 - **用量與 coverage**（T12，`DECISIONS.md` §16.4 至 §16.6；以 egress guard 的計數為準，不採用工具自報的數字）：
   - `budget_usage`：各容器 run 實際轉送與被 guard 拒絕的請求數、容器啟動到停止的秒數。開始過的 run 有任何一項不明（guard 重啟、telemetry 讀不出來、容器沒確認刪除）時，那一項是 null，不以 0 冒充。
+  - `engines[].budget`（T31）：建立時凍結的這個引擎的上限 `{"max_requests", "max_duration_seconds"}`；沒有指定子預算是 null。
+  - `engines[].usage`（T31，`DECISIONS.md` §29.2）：這個 run 開始時分到的請求數與秒數（`requests_allotted`、`duration_allotted_seconds`），以及 guard 記下的轉送、拒絕數與容器啟動到清理完成的秒數（`requests_sent`、`requests_denied`、`traffic_duration_seconds`）。沒有容器（in-process 的 fake、還沒開始、開始前就結束）或不明時是 null；T31 之前的 run 沒有記下分到的秒數。被 runner 停止、沒有收集的 run 也有這些數字（沒有 `result.guard_traffic`）。`traffic_duration_seconds` 可能略多於分到的秒數（被停止時的清理時間），會從之後的 run 扣除。
   - `auth.preflight`：`passed`、`failed`、`inconclusive`（匿名的請求也符合期望，或匿名的請求沒有有效的回應：證明不了端點有受保護）、`blocked`（guard 拒絕）、`not_executed`（沒有可用的回應；in-process 的 runner 一律如此）；還沒結束是 null。
   - `coverage_measured`：有規格、所有 run 都結束、至少一個容器 run，而且每個容器 run 的 telemetry 都已對應到 operation。`observed_operations` 是實際取得上游回應的請求對應到的 operation 數（preflight 的請求不算；不代表所有漏洞種類都測過了）；`authenticated_operations` 是其中以認證取得 401、403 以外回應的數量，而且要 preflight 是 `passed`（否則是 0），匿名的 scan 是 null。沒有量測依據時兩者都是 null。
   - `limitations`：`NO_API_SPEC`、`TRAFFIC_TELEMETRY_UNAVAILABLE`（沒有量測依據）、`AUTHENTICATION_NOT_VERIFIED`（綁定了 profile，但 preflight 不是 `passed`）、`AUTHENTICATION_LOST`（T16：綁定了 profile，解析時由 guard 的 telemetry 判定憑證在掃描中途失效，部分結果不是以這個身分取得的；這時 `authenticated_operations` 是 null。平台不重新登入，`DECISIONS.md` §20.4）、`AUTHENTICATION_HEALTH_UNKNOWN`（T16：綁定了 profile，但有解析過的 run 沒有認證的計數，看不出憑證是否整段有效）。沒有 `AUTHENTICATION_LOST` 不等於憑證整段有效：判斷依據是靶機回的 status，過期時回 302 或 200 登入頁的靶機看不出來。
@@ -1033,7 +1036,7 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 | 同時送出同一個 key | 後到的等先到的完成，再回同一個 scan（不回 409）；內容不同時是 409 `IDEMPOTENCY_CONFLICT` |
 
 - key 的範圍是 project，永久保存；不同 project 的相同 key 互不影響。
-- 內容的比對：請求內容的 canonical JSON 的 SHA-256；`engines` 的順序不影響，省略 `budget` 與每一項都是 null 相同。比對的是請求本身，不是伺服器解析出的值（profile 換過版本之後重送仍是同一個 scan）。
+- 內容的比對：請求內容的 canonical JSON 的 SHA-256；`engines` 的順序不影響，省略 `budget` 與每一項都是 null 相同。比對的是請求本身，不是伺服器解析出的值（profile 換過版本之後重送仍是同一個 scan）。`engine_budgets` 只在有指定時納入（依引擎排序，順序不影響）：沒有指定的請求和 T31 之前的內容相同，既有的 key 重送不受影響；同一個 key、子預算不同（包括一次有、一次沒有）是 409。
 - 權限檢查在查 key 之前：viewer 拿已用過的 key 重送也是 403。
 
 錯誤的先後：
@@ -1043,12 +1046,12 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 3. `Idempotency-Key` 缺少、重複或格式不符：400 `INVALID_REQUEST`。
 4. target 不存在或屬於其他 project：404；viewer：403。
 5. key 已用過：重送（202 或 200），或 409 `IDEMPOTENCY_CONFLICT`。
-6. 引擎與 profile 的規則：422 `ENGINE_UNSUPPORTED`、`PROFILE_INCOMPATIBLE`；引擎重複、fake 和其他引擎混用：422 `INVALID_REQUEST`。
+6. 引擎與 profile 的規則：422 `ENGINE_UNSUPPORTED`、`PROFILE_INCOMPATIBLE`；引擎重複、fake 和其他引擎混用、`engine_budgets` 的形狀不合（不是兩個以上的掃描引擎、缺少、重複或多列引擎）：422 `INVALID_REQUEST`。
 7. 409 `TARGET_BUSY`、409 `QUOTA_EXCEEDED`（不取任何鎖就先檢查，註定失敗的請求不和撤銷、停用搶鎖）。
 8. gate（§14.5）：grant 不存在或屬於其他 project 404；屬於其他 target 422；尚未核准、已撤銷、尚未生效 403 `SCOPE_NOT_APPROVED`；過期 403 `SCOPE_EXPIRED`；target 停用 409 `TARGET_DISABLED`；IP 不在 `LAB_CIDR` 內 422 `SCOPE_OUTSIDE_LAB`。gate 取得鎖之後再查一次 key（同第 5 步）：等鎖期間同一個 key 的請求已經 commit 時，回重送或 409，不回 `TARGET_BUSY`。
 9. 規格：不存在或屬於其他 project 404；屬於其他 target 422；沒有任何 operation 在範圍內 422 `PROFILE_INCOMPATIBLE`。
 10. auth profile：不存在或屬於其他 project 404；屬於其他 target 422；目前的版本沒有 secret 409 `INVALID_STATE_TRANSITION`（只有直接改了 DB 才會發生）；preflight 不在範圍內 422。
-11. 預算超過 grant：422 `INVALID_REQUEST`。
+11. 預算超過 grant，或 `engine_budgets` 的數值不合（超過總額、合計超過總額、低於最小時間窗）：422 `INVALID_REQUEST`。
 12. 持有鎖時再檢查一次 409 `TARGET_BUSY`、`QUOTA_EXCEEDED`（以不同的 key 同時建立時，後到的得到 `TARGET_BUSY`）。
 
 同一個 target 的建立彼此排隊（target 以 `FOR NO KEY UPDATE` 鎖住），持續送出的建立請求不會讓撤銷 grant、停用 target 一直等不到鎖（`DECISIONS.md` §13.3）。
@@ -1077,7 +1080,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `RUNNER_STOPPED` | runner 被要求停止，已停止並刪除容器（`interrupted`，T10） |
 | `WORKSPACE_UNAVAILABLE` | runner 的工作目錄不可用（權限、磁碟滿），或寫不出收集的 manifest（T10） |
 | `GUARD_UNAVAILABLE` | egress guard 不可用（T11，`DECISIONS.md` §15.8）：建立容器之前（status 過期、不再檢查、寫不出 policy）→ `failed`；執行中 guard 中斷、重啟或續約失敗 → 封鎖、停止容器 → `interrupted` |
-| `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0，或不夠 ZAP 執行（剩下的時間、請求數 ÷ 速率、grant 到期前的秒數三者取最小，減去 60 秒之後不到 60 秒，T14；grant 快到期時也是這個代碼，延長 grant 而不是增加預算）→ `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out` |
+| `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0，或不夠 ZAP 執行（剩下的時間、請求數 ÷ 速率、grant 到期前的秒數三者取最小，減去 60 秒之後不到 60 秒，T14；grant 快到期時也是這個代碼，延長 grant 而不是增加預算）→ `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out`。有子預算時（T31）「剩下的」先和這個引擎的上限取較小值；份額已依最小時間窗檢查，所以通常是前面的引擎用掉了總額或清理的秒數 |
 | `PARSE_ATTEMPTS_EXHAUSTED` | 解析 3 次都沒有在 lease 內完成（worker 中斷或卡住）→ `failed`（T13，`DECISIONS.md` §17.6） |
 | `OUTPUT_INVALID` | 工具的輸出不能用：報告或 log 缺少、不合法、版本不是鎖定的版本、超過上限，或 AF 的結尾摘要不存在、和退出碼矛盾 → `failed`（T15，`DECISIONS.md` §19.2）；原因在 `engines[].result.problem` |
 | `ENGINE_REPORTED_ERRORS` | 工具回報錯誤但報告有效 → `failed`，部分觀察仍入庫：ZAP 為 AF 退出碼 1（T15）；Nuclei 為模板事件帶 error，即使退出碼 0 也不算成功（T22，`nuclei-jsonl/3`）。只保存 `engine_errors` 計數、不回傳原始 error；Nuclei 的無流量或逾時判定優先。scan 不因保留觀察而成為完整結果 |

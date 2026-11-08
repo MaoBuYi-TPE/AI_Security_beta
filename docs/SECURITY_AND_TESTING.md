@@ -377,6 +377,39 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 
 正例保留：兩側有觀察且版本可靠 → persistent；純函式所有層證據完整時可得到 new/not_observed，移除必要證據就不再成立。這些人工構造的正例不是工具完成證據。實際 producer 的負面分類不放寬；端點請求與工具退出碼均不能代替完整性。
 
+**引擎子預算（BUDGET；T31，`DECISIONS.md` §29.1、§29.2）**：
+
+| 編號 | 檢查 | 測試 |
+|---|---|---|
+| BUDGET-01 | 沒有 `engine_budgets` 時配額和之前相同（剩下的全部），下一個引擎拿到前一個剩下的 | integration：engine_budgets（另有既有的 queue_launch 測試不變） |
+| BUDGET-02 | 有指定時每個 run 的配額取較小值（請求數與秒數各自取）；Hypothesis：不超過剩下的與上限 | unit：scans/test_allocation；integration：engine_budgets |
+| BUDGET-03 | ZAP 沒用完的份額不轉給 Nuclei；總額仍然限制有上限的 run（清理的秒數讓 Nuclei 少拿）；總額用完時開始之前就 `BUDGET_EXHAUSTED` | integration：engine_budgets |
+| BUDGET-04 | 建立時的檢查：單引擎、缺少、重複、多列、合計超過、超過總額、低於最小時間窗、0、負數、bool、字串、未知欄位、空清單 → 422，不寫入 | unit：scans/test_allocation；integration：engine_budgets（API） |
+| BUDGET-05 | 沒有子預算時 fingerprint 和 T31 之前逐位元組相同（golden hex）；順序不影響；同 key 不同子預算 → 409 | unit：scans/test_request；integration：engine_budgets |
+| BUDGET-06 | DB：上限不能修改或事後加上（trigger）；上限同時有無、正整數、只屬於掃描引擎（允許清單）；有上限時只寫請求數（舊 runner）被擋下、超過上限被擋下；新增 run 時不能預填配額、配額只寫一次；沒有上限的舊資料列經 repository 讀回不違反 domain 的規則 | integration：engine_budget_schema |
+| BUDGET-07 | API 列出每個 run 的上限、分到的配額與 guard 計數；沒有容器時是 null；audit 只在有指定時記下 | unit：scans/test_scan_out；integration：engine_budgets |
+| BUDGET-08 | migration v0020 升降級、model 與 migration 沒有漂移、CHECK 數量；還有未結束、帶上限的 run 時 downgrade 拒絕，結束之後 downgrade 成功且 trigger 函式都移除 | integration：migrations、schema_constraints |
+| BUDGET-09 | `scans` 的最小時間窗常數和 `scanners` 的 plan 相同，並以 ZAP 的 `plan_seconds` 驗證邊界；harness 的常數和平台相同 | unit：scans/test_allocation、bench/test_spec |
+| BUDGET-10 | guard policy 的 `max_requests` 與容器的時間上限都等於分到的配額 | integration：engine_budgets |
+
+**benchmark harness 與評估（BENCH；T31，`DECISIONS.md` §29.3、§29.4）**：
+
+| 編號 | 檢查 | 測試 |
+|---|---|---|
+| BENCH-01 | 實驗規格的嚴格檢查：未知欄位、靶場只能三種（不接受 URL）、總預算不超過平台 grant、引擎依平台的執行順序、子預算依平台規則、experiment 的份額凍結且合計等於總額、重複次數、quota、最壞情況的總時間在 grant 的有效期內；YAML 的重複鍵、別名、多份文件、過大、`!!set` 等其他型別 | unit：bench/test_spec |
+| BENCH-02 | 排程由種子決定；任何種子都是同一組 scan 的排列；比較區塊整塊移動、baseline 在前 | unit：bench/test_schedule（Hypothesis） |
+| BENCH-03 | 結果目錄獨占建立、0700／0600、不覆寫；秘密檢查（key 格式、Bearer、JWT、session 的原值）不回顯值；SHA256SUMS 偵測修改、多出與缺少；manifest 欄位齊全、不完整的 session 不評估 | unit：bench/test_results、test_manifest、test_cli |
+| BENCH-04 | API 的 JSON → 紀錄：缺欄位、型別不符、分頁不一致、未結束、fixture 一律失敗；樣本先通過平台真正的輸出 schema；經真的 API 收集有子預算的 scan 與比較快照 | unit：bench/test_collect；integration：bench_collection（TestClient 與 db-test） |
+| BENCH-05 | 偵測指標：recall 以案例、precision 以議題；未裁定、分母 0、holdout、平台阻擋、不支援、auth role、修補版的 FP；歧義停止評估 | unit：bench/test_evaluate、test_ground_truth（含 Hypothesis 的性質） |
+| BENCH-06 | 引擎歸屬：各引擎偵測、獨有、聯集；2 個以上引擎的 finding 另算 precision | unit：bench/test_evaluate |
+| BENCH-07 | 資源與完成度：guard 計數的加總、不明就是不明、被請求數或時間截斷、牆鐘時間；覆蓋沒有量測是 N/A；不是工具或預算結果的錯誤碼（允許清單之外）與 interrupted、cancelled 讓整批作廢 | unit：bench/test_scoring、test_evaluate |
+| BENCH-08 | 去重：跨引擎合併的 precision／recall（標記完整才算）、誤合併、漏合併、有 2 個以上觀察的 finding、列表壓縮比例 | unit：bench/test_scoring |
+| BENCH-09 | 複掃：誤判已修補（仍存在卻 not_observed）；inconclusive 不算；修補版上仍 persistent 另列；holdout 等被排除的案例只計數（和偵測相同的排除規則） | unit：bench/test_rescan |
+| BENCH-10 | 跨重複：中位數、範圍，IQR 在 n ≥ 4 時才算，N/A 另計；smoke 與未凍結的 ground truth 標明不是正式結果 | unit：bench/test_stats |
+| BENCH-11 | `benchmarks/` 不 import `secscan`、`tests`、DB、Web 框架、Docker、網路與子程序；純函式的模組不碰檔案 | unit：bench/test_black_box（AST） |
+| BENCH-12 | `make bench` 的前置是 `ENABLE_LIVE_LAB_TESTS`、規格與名稱的檢查，recipe 只遞迴執行 `test-live-runner`；使用者給的值以環境變數交給 shell；`bench-check`、`bench-evaluate` 離線 | unit：bench/test_make_targets、test_cli |
+| BENCH-13 | Live smoke：經 API 跑完 A、B、C 與一個比較區塊，manifest 與 guard 計數齊全，子預算在真實執行中有效 | live：test_bench_live（**需要使用者另外授權；尚未執行**） |
+
 ### 4.4 Live E2E
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。
@@ -578,6 +611,8 @@ P0 組別：A=ZAP、B=Nuclei、C=ZAP+Nuclei。P1 完成第三引擎才加入 D=S
 
 主要比較採每個 scan **相同總請求數與牆鐘時間上限**（由 egress guard 強制執行），不是每個工具各給完整預算後讓整合組多用 2–3 倍資源。組合組先分配子預算並凍結分配，總額與單工具組一致。額外可做累加預算情境，但需獨立展示耗費。
 
+T31 已實作子預算的凍結（`DECISIONS.md` §29.1）：建立 scan 時以 `engine_budgets` 凍結各引擎的嚴格上限，每個 run 取「剩下的」與上限的較小值，沒用完的份額作廢。實驗規格要求 experiment 的組合組凍結份額、合計等於單工具組的總額。仍然存在的偏差（份額作廢讓 C 的實際用量少於總額、引擎順序固定、清理的秒數、Nuclei 被上限停止就沒有輸出）由每個 run 的配額與 guard 計數（`engines[].usage`）與 manifest 揭露。正式的總額與份額由 T27 校準後凍結。
+
 記錄各工具自身限速與 guard 合計計數。以實際上游送出請求為基準，不只看 CLI 的 requests count。執行順序隨機化；Schemathesis 保存 seed，仍需重複執行以觀察隨機性。
 
 ## 7. 指標定義
@@ -618,6 +653,14 @@ T22 的量測需分開列出 persistent、inconclusive、not_comparable 與需�
 
 校準至少三次且最後另跑完整驗證；每次保存四個 scan 的工具／模板／profile 身分、狀態、預算與比較快照。仍存在的 ground truth 被判 not_observed 的筆數必須為零；已修補案例允許 inconclusive，不能以增加「修補率」為由放寬證據。現有工具訊號不能證明完整規則執行，因此不能以這一版計算「自動驗證修補成功率」。T22 實測（§4.4）：四次有效 live 執行中仍存在的 ground truth 判 not_observed 為 0；已自動對應的 6 個修補案例（20 個 finding）全部是 inconclusive，另 6 個案例沒有自動對應、未逐一驗證。後續正式 benchmark（T31/T28）另報可信分母與限制。
 
+### 7.4.1 T31 的實作（`benchmarks/`，`DECISIONS.md` §29.4）
+
+- precision 以議題計：偵測到的案例與裁定為真的另一個議題是 TP，修補版上對上案例的 finding 與裁定為誤報的議題是 FP；同一個議題由多個 finding 或兩個工具命中只算一次。finding 層級的 precision 列為次要。
+- recall 只算 security、supported、適用這個 scan 的 auth role、存在於這個版本的案例；holdout 預設排除，只有凍結的 ground truth 才能納入。
+- 還有未裁定的 finding 時 precision 是 N/A；分母為 0 都是 N/A。一個 finding 對上兩個案例就停止評估。
+- 去重的 predicted pair 以 finding 層級表示（同一個 finding 有 2 個以上引擎的來源）；逐一 observation pair 的標記在 T27 視需要擴充。
+- 複掃另報「誤判已修補」（仍存在卻 not_observed）；inconclusive 不算驗證修補。
+
 ### 7.5 人工工作量（可選）
 
 讓 3–5 名具基礎開發背景者對相同輸出，完成辨識獨立議題、定位證據與指出未完成引擎的任務。比較未整合與整合呈現的時間/正確率，交錯先後順序降低學習效應。樣本小，只當探索性可用性結果，不宣稱代表全產業。
@@ -625,6 +668,8 @@ T22 的量測需分開列出 persistent、inconclusive、not_comparable 與需�
 ## 8. 資料保存與公開
 
 每次實驗記錄 run_manifest、程式 commit、映像 digest、模板/spec hash、靶場 snapshot、seed、時間、預算、實際請求、狀態與標記表。原始資料只存隔離受限環境，加密且設定留存；公開附件以遮罩且去識別化資料為限。
+
+T31 的 manifest（`DECISIONS.md` §29.3）記錄規格的 sha256、種子與實際順序、每個 scan 的預算、子預算、分到的配額、guard 計數與狀態、比較快照、每個檔案的 sha256 與 session 是否完整；API 拿不到的身分（commit、本機映像 ID、fixture 原始碼的雜湊、strict-1）由 harness 記下並標明來源。結果目錄只保存 scan、finding 與比較快照的 JSON，不保存觀察的 evidence，目錄 0700、檔案 0600、寫入前檢查秘密；**目前沒有加密、沒有留存期限**（T23a），不得宣稱已完成保護。
 
 建議遮罩 fixture 至少含一組可檢查的 synthetic secret，CI 搜尋它是否出現在不允許的輸出。不能只測 Authorization header，還需測 Cookie、query、body、stack trace、重現命令。
 

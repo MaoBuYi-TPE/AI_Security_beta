@@ -1545,6 +1545,13 @@
 - [ ] T31 建立 benchmark harness。
   - DoD：透過自己的 API 執行各實驗組別，保存 manifest 與 guard 計數；`evaluate.py` 是純函式並有測試。組合組的子預算凍結或偏差揭露須在細部計畫決定，不冒稱現有共用預算已符合公平實驗。
   - 2026-11-08：Gate D 關閉後，使用者同意依原順序（T21 → T31 → T23a–d）進入 T31，先提出細部計畫；核准前不實作、不跑 benchmark 或 Live。T31 的 Live 需要另外授權，T21 的授權不延伸到 T31。
+  - 2026-11-08：使用者決定 C 組的子預算採「凍結：嚴格上限」，核准細部計畫第一版的離線範圍（程式、測試、文件、分支、PR 與合併；不含任何 Live）。決策見 `DECISIONS.md` §29。
+  - 2026-11-09：離線實作完成（分支 `feat/t31-benchmark-harness`）：
+    - 引擎子預算（`engine_budgets`，migration v0020）與每個 run 的配額、guard 計數進 API（`engines[].budget`、`engines[].usage`）。
+    - `benchmarks/`：實驗規格、排程、經 API 收集、結果目錄、manifest、ground truth 的格式、`evaluate.py` 與跨重複統計；Live harness（`tests/live/test_bench_live.py`）與 `make bench-check`、`make bench`、`make bench-evaluate`。
+    - 測試：S&T §4.3 的 BUDGET-01 至 10、BENCH-01 至 12；`benchmarks/` 的 branch coverage 100%。
+    - 審查（opus）：程式碼 3 MEDIUM＋3 LOW、安全 4 LOW、資料庫 6 LOW，沒有 CRITICAL 或 HIGH；處理見 `DECISIONS.md` §29.9（資料庫 LOW-5 與 CHECK 文字的自動比對接受、其餘都已修正）。
+    - **未完成**：BENCH-13（Live smoke：fixture app、web profile、匿名，A、B、C 各一次加一個 C 的比較區塊，約 35 分鐘）需要使用者另外授權；smoke 通過、符合 DoD 之前 T31 不標完成。正式的總預算、份額與 ground truth 比對檔是 T27。
 - [ ] T23 完成所有 P0 的安全、故障、整合測試，並在乾淨環境重建。
   - 因資料保護、部署與最終驗收涉及不同界線，拆成以下四項，各自細化後實作：
   - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）；含 T21 的人工複測摘錄與報告內容。
