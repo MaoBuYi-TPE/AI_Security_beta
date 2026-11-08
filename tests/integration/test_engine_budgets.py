@@ -6,9 +6,10 @@
 - BUDGET-03：ZAP 沒用完的份額不轉給 Nuclei。
 - BUDGET-04：建立時的檢查不合 → 422 INVALID_REQUEST，不寫入任何東西。
 - BUDGET-05：同一個 key、不同的子預算 → 409；順序不同 → 同一個 scan。
-- BUDGET-07：API 列出每個 run 的上限。
+- BUDGET-07：API 列出每個 run 的上限、分到的配額與 guard 的計數。
 """
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -18,6 +19,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, Row
 from sqlalchemy.orm import sessionmaker
 
+from secscan.main import create_app
 from secscan.scans.domain.allocation import EngineBudgetRequest
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.catalog import ScanProfile
@@ -28,6 +30,7 @@ from secscan.scans.queue import RunUsage, ScanQueue
 from secscan.scans.repository import ScanRepository
 from secscan.targets.domain import Target
 from tests.integration.api_support import LAB, Seeder, World
+from tests.integration.database import ProvisionedDatabase
 from tests.integration.finding_support import web_target
 
 pytestmark = pytest.mark.integration
@@ -419,3 +422,36 @@ def test_the_scan_reads_back_the_cap_and_the_allotment(
     assert (zap.requests_allotted, zap.seconds_allotted) == (760, 380)
     assert nuclei.budget is not None
     assert (nuclei.requests_allotted, nuclei.seconds_allotted) == (None, None)
+
+
+# --- API：每個 run 的配額與用量（BUDGET-07）-----------------------------------------------
+
+
+@pytest.fixture
+def queue_client(queue_database: ProvisionedDatabase) -> Iterator[TestClient]:
+    with TestClient(create_app(queue_database.app_settings())) as client:
+        yield client
+
+
+def test_the_api_shows_each_run_allotment_and_guard_counts(
+    queue: ScanQueue, queue_seed: Seeder, queue_client: TestClient
+) -> None:
+    world = queue_seed.world()
+    target, grant_id = web_target(queue_seed, world)
+    created = _post(queue_client, world, _body(target, grant_id)).json()["data"]
+    lease = _claim(queue, ZAP)
+    queue.prepare_launch(lease, image_ref=IMAGE)
+    queue.record_usage(lease, RunUsage(requests_sent=120, requests_denied=3, traffic_seconds=95))
+
+    response = queue_client.get(f"{SCANS}/{created['id']}", headers=world.operator_a.headers)
+
+    zap, nuclei = response.json()["data"]["engines"]
+    assert zap["usage"] == {
+        "requests_allotted": 760,
+        "duration_allotted_seconds": 380,
+        "requests_sent": 120,
+        "requests_denied": 3,
+        "traffic_duration_seconds": 95,
+    }
+    assert nuclei["usage"] == dict.fromkeys(zap["usage"])
+    assert nuclei["budget"] == {"max_requests": 440, "max_duration_seconds": 220}

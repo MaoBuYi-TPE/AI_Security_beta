@@ -199,6 +199,33 @@ class EngineBudgetOut(BaseModel):
         )
 
 
+class RunUsageOut(BaseModel):
+    """這個 run 分到的配額與 guard 的計數（T31；docs/DECISIONS.md §29）。
+
+    沒有容器（in-process 的 fake、還沒開始、開始之前就結束）或不明時是 null；
+    duration_allotted_seconds 在 T31 之前的 run 沒有記下。traffic_duration_seconds 是容器啟動到
+    清理完成的秒數，可能略多於分到的秒數（被 runner 停止時的清理時間），會從之後的 run 扣除。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    requests_allotted: int | None
+    duration_allotted_seconds: int | None
+    requests_sent: int | None
+    requests_denied: int | None
+    traffic_duration_seconds: int | None
+
+    @classmethod
+    def of(cls, run: ScannerRun) -> Self:
+        return cls(
+            requests_allotted=run.requests_allotted,
+            duration_allotted_seconds=run.seconds_allotted,
+            requests_sent=run.requests_sent,
+            requests_denied=run.requests_denied,
+            traffic_duration_seconds=run.traffic_seconds,
+        )
+
+
 class EngineRunOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -216,6 +243,7 @@ class EngineRunOut(BaseModel):
     result: RunResultOut | None
     # 引擎子預算（T31）：建立時凍結的上限；沒有指定是 null（分到剩下的全部）。
     budget: EngineBudgetOut | None
+    usage: RunUsageOut
 
     @classmethod
     def of(cls, run: ScannerRun) -> Self:
@@ -230,6 +258,7 @@ class EngineRunOut(BaseModel):
             profile_definition_sha256=run.profile_definition_sha256,
             result=RunResultOut.of(run.result) if run.result is not None else None,
             budget=EngineBudgetOut.of(run.budget) if run.budget is not None else None,
+            usage=RunUsageOut.of(run),
         )
 
 
