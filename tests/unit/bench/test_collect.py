@@ -274,3 +274,12 @@ def test_a_failed_envelope_is_rejected() -> None:
 
     with pytest.raises(CollectError, match="envelope"):
         collect_scan(api, "x")
+
+
+def test_a_parsed_run_without_guard_traffic_has_an_unknown_exhaustion() -> None:
+    scan = scan_json()
+    scan["engines"][0]["result"]["guard_traffic"] = None
+
+    zap = normalize_scan(scan, [], 0).runs[0]
+
+    assert (zap.observation_count, zap.guard_exhausted) == (12, None)
