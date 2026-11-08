@@ -86,7 +86,7 @@ def disable_profile(
 ) -> Envelope[AuthProfileOut]:
     """停用（operator、admin）：清除目前的密文；之後不能建立新版本或新的 scan。重複停用回 200。
 
-    排隊中的 scan 在交出 secret 之前失敗；執行中的 scan 不受影響（要立即停止請取消 scan）。
+    之後準備的 run 在交出 secret 之前失敗；已啟動的 run 不受影響（要立即停止請取消 scan）。
     """
     profile = AuthProfileService(session).disable(
         principal, profile_id, reason=body.reason, request_id=request_id_of(request)

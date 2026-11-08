@@ -74,7 +74,7 @@ class AuthProfileModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     created_by_key_id: Mapped[UUID] = mapped_column(ForeignKey("api_keys.id", ondelete="RESTRICT"))
     disabled_at: Mapped[datetime | None]
     disabled_by_key_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("api_keys.id", ondelete="RESTRICT")
+        ForeignKey("api_keys.id", ondelete="RESTRICT"), index=True
     )
 
 

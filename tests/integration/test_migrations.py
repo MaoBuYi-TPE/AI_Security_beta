@@ -69,6 +69,8 @@ TRIGGER_FUNCTIONS = (
     "report_contents_insert_guard",
     "reports_content_check",
     "report_contents_parent_check",
+    "auth_profiles_update_guard",
+    "auth_profiles_disabled_erased",
 )
 
 

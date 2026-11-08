@@ -2527,7 +2527,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 
 ### 28.7 交接的管理項目
 
-- 全域 audit 查詢（platform_admin，加在 projects 的 router）、全域待核准清單（platform_admin）、停用 auth profile（終止狀態；清除目前密文；新的 scan 回 409；排隊中的 scan 在交出 secret 前失敗；執行中的 scan 不受影響）。
+- 全域 audit 查詢（platform_admin，加在 projects 的 router）、全域待核准清單（platform_admin）、停用 auth profile（終止狀態；清除目前密文；新的 scan 回 409；排隊中的 scan 與執行中 scan 之後才準備的 run 在交出 secret 前失敗；已啟動的 run 不受影響）。
 - 不做：封存舊版 auth profile、刪除或封存規格（報告引用版本）、刪除報告（T23a）、上傳證據檔案、target 層級的 finding 清單、下載報告的 audit。
 
 ### 28.8 限制
@@ -2560,3 +2560,18 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
   - (a) 所有寫入 scans 的路徑都在 INSERT 之前取得 target 的列鎖（identity 在 BEFORE trigger 之前就配出，不能靠 trigger 補鎖）。
   - (b) 不會有把觀察連結到已終止 scan 的工具（backfill、relink）；有的話 R3 永遠不成立、靜默地不重開。
   - (c) PATCH 在證據檢查之前就鎖住 finding；這段期間 linker 不能寫入這個 finding 的連結。把鎖移到證據檢查之後會讓 `observed_after_comparison` 與 trigger 之間出現競態。
+
+### 28.12 階段 B、C 的資料庫審查（database-reviewer，opus，2026-11-08）
+
+- 結果：0 CRITICAL、1 HIGH（審查途中已修正）、2 MEDIUM、8 LOW；佇列 fencing、無死結、配額無競態、attempts ≤ 3、停用之後不交出 secret 等宣稱成立。全部採用：
+  - H1：v0019 第一版在共用的 `auth_profiles_guard` 中引用 `OLD.disabled_at`，這個函式也掛在 `auth_profile_versions` 的 TRUNCATE 上（PL/pgSQL 依 trigger 所屬資料表解析欄位），TRUNCATE 變成 42703 → 改成新的 `auth_profiles_update_guard` 只掛在 auth_profiles 的 UPDATE；`auth_profiles_guard` 維持 v0004 的內容（L7 一併處理）。
+  - M1：`failed_shape` 在 error_code 是 NULL 時因三值邏輯通過 → 明確要求 `IS NOT NULL`；`result_valid` 註明依賴各狀態的 shape。
+  - M2：原本 DB 只核對「內容與狀態一致」，文件卻宣稱繞過 fencing 也提交不了 → 加上 DB 層的 fencing token：`report_contents` 帶著 `attempt` 與 `lease_owner`，insert guard 要求等於父列目前的值、而且 lease 未過期；心跳不能換 owner；deferred 核對也比對 attempt。程式的 `_holds` 一併比對 attempt。
+  - L1：`queued_shape` 要求 `attempts < 3`，claim 也只認領 `attempts < MAX_ATTEMPTS`。
+  - L2：密文查不到時再查一次是否已停用，錯誤碼分清楚 `AUTH_PROFILE_DISABLED` 與 `AUTH_PROFILE_SUPERSEDED`。
+  - L3：「執行中的 scan 不受影響」改成「已啟動的 run 不受影響；同一個 scan 之後準備的 run 在交出 secret 前失敗」。
+  - L4：已停用的 profile 不能新增版本；deferred 檢查停用時不能留下任何密文。
+  - L5：worker 的 limit 以嘗試的份數計；非連線類的失敗（含這份報告專屬的 DB 錯誤：違反 CHECK、核對失敗、查詢逾時）立即以 fenced transaction 釋放這一次嘗試（退回 queued，用盡時 `REPORT_GENERATION_FAILED`），不白佔 30 秒的配額。
+  - L6：讀完快照、渲染之前再心跳一次；長時間的 REPEATABLE READ 會延後 vacuum（每份報告一次，20,000 個 finding 的渲染約 4–6 秒），記為已知代價。
+  - L8：`reports.requested_by_key_id`、`auth_profiles.disabled_by_key_id` 加索引；v0019 的 docstring 註明先停 api 與 worker。
+- 量測（純函式，合成資料）：20,000 個 finding 的渲染 JSON 3.8 秒、Markdown 6.3 秒（都在 8 MiB 處截斷），遠低於 30 秒的 lease。DB 快照的讀取以每頁 100 個 finding、固定的查詢數分頁，每頁之間心跳。

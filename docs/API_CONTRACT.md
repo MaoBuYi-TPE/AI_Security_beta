@@ -1429,7 +1429,7 @@ uv run secscan-admin worker [--once]
 ### 19.3 報告
 
 - `POST /api/v1/scans/{scan_id}/reports`：`{"format": "json" | "markdown"}`，必帶 `Idempotency-Key`（範圍是 project；同一個 key、同樣的內容回原本的報告，內容不同含 format 不同回 409 `IDEMPOTENCY_CONFLICT`）。scan 未終止 409 `SCAN_NOT_TERMINAL`。每個 project 同時最多 5 份 queued／generating、每個 scan 最多 20 份，超過 409 `QUOTA_EXCEEDED`。新的回 202，重送已結束的回 200。
-- worker 在 REPEATABLE READ READ ONLY transaction 中讀快照，產生之後存 DB；最多嘗試 3 次，用盡時 `failed`（`REPORT_ATTEMPTS_EXHAUSTED`）。
+- worker 在 REPEATABLE READ READ ONLY transaction 中讀快照，產生之後存 DB；最多嘗試 3 次，用盡時 `failed`：lease 一再過期是 `REPORT_ATTEMPTS_EXHAUSTED`，產生時一再出錯是 `REPORT_GENERATION_FAILED`。
 - `GET /api/v1/reports/{report_id}` 與 `GET /api/v1/scans/{scan_id}/reports`：`status`（queued／generating／succeeded／failed）、`format`、`schema_version`、`attempts`、`error_code`、`data_as_of`、`generated_at`、`size_bytes`、`sha256`、`truncated`、`omitted_findings`。
 - `GET /api/v1/reports/{report_id}/download`：只有 succeeded 能下載（否則 409 `REPORT_NOT_READY`）；送出前重新核對 sha256，不符回 500、不送出內容。
 - 內容：固定說明（未經 triage 的告警不是已驗證的漏洞、零告警不代表沒有弱點、not_observed 不等於已修補、平台不提供自動修補驗證、報告時間不是發現或修補時間、遮罩不保證辨識所有秘密）、掃描與引擎狀態、授權成立時間（grant 的 `approved_at`）、覆蓋與預算用量、摘要（以全部 finding 計算）、逐 finding 的標籤與 resolved 的依據（人工複測只有 metadata 與摘錄的 sha256）、比較快照摘要。不含 key id、storage_key、密文、idempotency key 與複測摘錄的原文。
@@ -1444,4 +1444,4 @@ uv run secscan-admin worker [--once]
 ### 19.5 POST /api/v1/auth-profiles/{profile_id}/disable
 
 - 權限：operator／admin；body `{"reason": "..."}`（≤ 500，寫進 audit，遮罩後保存）。
-- 停用是終止狀態：清除目前版本的密文，之後 PATCH 回 409 `AUTH_PROFILE_DISABLED`，以它建立新的 scan 也回 409。排隊中的 scan 在 runner 交出 secret 之前失敗（run 的錯誤碼 `AUTH_PROFILE_DISABLED`）；執行中的 scan 已經拿到 secret，不受影響，要立即停止請取消 scan。重複停用回 200，不重記 audit。
+- 停用是終止狀態：清除目前版本的密文，之後 PATCH 回 409 `AUTH_PROFILE_DISABLED`，以它建立新的 scan 也回 409。排隊中的 scan，以及執行中 scan 之後才準備的 run（例如 ZAP 之後的 Nuclei），都在 runner 交出 secret 之前失敗（run 的錯誤碼 `AUTH_PROFILE_DISABLED`）；已經啟動的 run 已拿到 secret，不受影響，要立即停止請取消 scan。重複停用回 200，不重記 audit。

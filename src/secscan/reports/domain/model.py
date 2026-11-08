@@ -37,7 +37,10 @@ ACTIVE_REPORT_STATUSES = frozenset({ReportStatus.QUEUED, ReportStatus.GENERATING
 
 
 class ReportErrorCode(StrEnum):
+    # lease 一再過期（例如 worker 中斷）用盡嘗試次數。
     ATTEMPTS_EXHAUSTED = "REPORT_ATTEMPTS_EXHAUSTED"
+    # 產生時一再發生錯誤（例如快照查詢逾時、內容核對失敗）用盡嘗試次數。
+    GENERATION_FAILED = "REPORT_GENERATION_FAILED"
 
 
 @dataclass(frozen=True, slots=True)

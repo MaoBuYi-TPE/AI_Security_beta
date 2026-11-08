@@ -168,8 +168,9 @@ class AuthProfileService:
         """停用（T21）：清除目前版本的密文，之後不能建立新版本或新的 scan；重複停用沒有效果。
 
         以 FOR UPDATE 鎖住 profile：建立 scan 時的 FOR SHARE 互斥，不會有 scan 綁到即將被清除的
-        版本。排隊中的 scan 在 runner 交出 secret 之前失敗（AUTH_PROFILE_DISABLED）；執行中的 scan
-        已經拿到 secret（該 run 專屬的檔案，run 結束時刪除），要立即停止請取消 scan。
+        版本。排隊中的 scan 與執行中 scan 之後才準備的 run（例如 ZAP 之後的 Nuclei）在 runner
+        交出 secret 之前失敗（AUTH_PROFILE_DISABLED）；已啟動的 run 已拿到 secret（該 run 專屬的
+        檔案，run 結束時刪除），不受影響，要立即停止請取消 scan。
         """
         self._profile(principal, profile_id, Permission.PROJECT_READ)
         self._profile(principal, profile_id, Permission.PROJECT_WRITE)

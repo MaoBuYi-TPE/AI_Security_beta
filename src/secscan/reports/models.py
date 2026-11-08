@@ -15,6 +15,7 @@ from sqlalchemy import (
     Identity,
     Index,
     LargeBinary,
+    SmallInteger,
     String,
     UniqueConstraint,
     func,
@@ -42,6 +43,7 @@ class ReportModel(UuidPrimaryKeyMixin, Base):
             ondelete="RESTRICT",
         ),
         Index(None, "scan_id"),
+        Index(None, "requested_by_key_id"),
         Index(
             "ix_reports_active_queue",
             "queue_position",
@@ -57,6 +59,7 @@ class ReportModel(UuidPrimaryKeyMixin, Base):
             "idempotency_key ~ '^[A-Za-z0-9_-]{16,128}$'", name="idempotency_key_valid"
         ),
         CheckConstraint("octet_length(request_sha256) = 32", name="request_sha256_length"),
+        # 單獨看不 NULL 安全；和各狀態的 shape CHECK 一起才完整（新增狀態時要補 shape）。
         CheckConstraint(
             f"size_bytes IS NULL OR (size_bytes >= 1 AND size_bytes <= {MAX_REPORT_BYTES} "
             "AND sha256 ~ '^[0-9a-f]{64}$' AND omitted_findings >= 0 "
@@ -65,7 +68,7 @@ class ReportModel(UuidPrimaryKeyMixin, Base):
         ),
         CheckConstraint(
             f"status <> 'queued' OR ({_LEASE_NULL} AND {_RESULT_NULL} "
-            "AND error_code IS NULL AND finished_at IS NULL)",
+            "AND error_code IS NULL AND finished_at IS NULL AND attempts < 3)",
             name="queued_shape",
         ),
         CheckConstraint(
@@ -83,7 +86,8 @@ class ReportModel(UuidPrimaryKeyMixin, Base):
         ),
         CheckConstraint(
             f"status <> 'failed' OR ({_LEASE_NULL} AND {_RESULT_NULL} "
-            "AND error_code ~ '^[A-Z][A-Z0-9_]{1,63}$' AND finished_at IS NOT NULL)",
+            "AND error_code IS NOT NULL AND error_code ~ '^[A-Z][A-Z0-9_]{1,63}$' "
+            "AND finished_at IS NOT NULL)",
             name="failed_shape",
         ),
     )
@@ -129,4 +133,7 @@ class ReportContentModel(Base):
     report_id: Mapped[UUID] = mapped_column(
         ForeignKey("reports.id", ondelete="RESTRICT"), primary_key=True
     )
+    # DB 層的 fencing token：寫入時的嘗試次數與 lease 的持有者（insert guard 核對）。
+    attempt: Mapped[int] = mapped_column(SmallInteger)
+    lease_owner: Mapped[str] = mapped_column(String(128))
     content: Mapped[bytes] = mapped_column(LargeBinary)

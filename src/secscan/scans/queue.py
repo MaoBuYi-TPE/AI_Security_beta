@@ -419,11 +419,18 @@ class QueueOperations:
             except InvalidAuthProfileError:
                 return RunErrorCode.PLAN_REJECTED, None
             if secret is None:
-                return RunErrorCode.AUTH_PROFILE_SUPERSEDED, None
+                return self._missing_secret(profile_id), None
             return None, secret
         if self._profiles.version_has_secret(profile_id, version=version):
             return None, None
-        return RunErrorCode.AUTH_PROFILE_SUPERSEDED, None
+        return self._missing_secret(profile_id), None
+
+    def _missing_secret(self, profile_id: UUID) -> RunErrorCode:
+        """沒有密文：停用（在第一次檢查之後才提交）與被新版本取代分開回報（新的 statement 看得到
+        已提交的停用）。"""
+        if self._profiles.is_disabled(profile_id):
+            return RunErrorCode.AUTH_PROFILE_DISABLED
+        return RunErrorCode.AUTH_PROFILE_SUPERSEDED
 
 
 class ScanQueue:

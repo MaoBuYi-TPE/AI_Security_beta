@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.api_keys.domain import Role
@@ -192,3 +193,52 @@ def test_a_failed_disable_rolls_back(
         "SELECT disabled_at FROM auth_profiles WHERE id = :id", id=scannable.profile.id
     )
     assert row.disabled_at is None
+
+
+def test_every_later_run_of_a_scan_fails_before_any_secret(
+    client: TestClient, queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    queue = ScanQueue(
+        sessionmaker(queue_engine, expire_on_commit=False), lab=LAB, clock=lambda: datetime.now(UTC)
+    )
+    scan = queue_seed.scan(world.operator_a, scannable, auth_profile_id=scannable.profile.id)
+    preflight = queue.claim("runner-1", PREFLIGHT)
+    assert preflight is not None
+    assert disable(client, scannable, world.operator_a.headers).status_code == 200  # type: ignore[attr-defined]
+    assert queue.prepare(preflight).run_status is RunStatus.FAILED
+    later = queue.claim("runner-1", frozenset(ScanEngine) - PREFLIGHT)
+    assert later is not None
+    assert queue.prepare(later).run_status is RunStatus.FAILED
+    errors = queue_seed.query(
+        "SELECT error_code FROM scanner_runs WHERE scan_id = :id ORDER BY sequence", id=scan.id
+    )
+    assert [row.error_code for row in errors] == ["AUTH_PROFILE_DISABLED"] * len(errors)
+
+
+def test_the_database_keeps_a_disabled_profile_without_secrets(
+    client: TestClient, queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
+) -> None:
+    profile = scannable.profile.id
+    with sessionmaker(queue_engine)() as session:
+        # 只設定停用而不清除密文：commit 時被 deferred 檢查擋下。
+        session.execute(
+            text(
+                "UPDATE auth_profiles SET disabled_at = now(), disabled_by_key_id = :key "
+                "WHERE id = :id"
+            ),
+            {"id": profile, "key": world.operator_a.principal.key_id},
+        )
+        with pytest.raises(IntegrityError, match="must not keep any secret"):
+            session.commit()
+    assert disable(client, scannable, world.operator_a.headers).status_code == 200  # type: ignore[attr-defined]
+    with sessionmaker(queue_engine)() as session:
+        statement = (
+            "INSERT INTO auth_profile_versions (profile_id, version, type, preflight_method, "
+            "preflight_path, preflight_expected_status, preflight_expected_json, "
+            "encrypted_secret, created_by_key_id) SELECT profile_id, version + 1, type, "
+            "preflight_method, preflight_path, preflight_expected_status, "
+            "preflight_expected_json, 'gAAAAAx', created_by_key_id FROM auth_profile_versions "
+            "WHERE profile_id = :id ORDER BY version DESC LIMIT 1"
+        )
+        error = violation(session, statement, {"id": profile})
+        assert "disabled profile" in str(error)

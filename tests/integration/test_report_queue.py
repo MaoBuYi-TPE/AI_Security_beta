@@ -233,3 +233,39 @@ def test_concurrent_creation_respects_the_project_quota(
     assert len(rival.errors) == 1
     [row] = queue_seed.query("SELECT count(*) AS n FROM reports WHERE status = 'queued'")
     assert row.n == 5
+
+
+def test_failures_release_the_attempt_immediately_until_exhausted(
+    sessions: sessionmaker[Session],
+    queue_seed: Seeder,
+    world: World,
+    item: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = enqueue(sessions, world, item.baseline)
+
+    def broken(*_: object, **__: object) -> object:
+        raise InjectedError
+
+    monkeypatch.setattr("secscan.worker.reports.render", broken)
+    worker = ReportWorker(sessions, owner="worker-r")
+    assert worker.drain(limit=1) == 0
+    assert status(queue_seed, report) == ("queued", 1, None)
+    assert worker.drain() == 0
+    assert status(queue_seed, report) == ("failed", 3, "REPORT_GENERATION_FAILED")
+
+
+def test_an_expired_lease_cannot_heartbeat_or_complete_before_reconcile(
+    sessions: sessionmaker[Session], queue_seed: Seeder, world: World, item: Scenario
+) -> None:
+    report = enqueue(sessions, world, item.baseline)
+    queue = ReportQueue(sessions)
+    lease = queue.claim("worker-a")
+    assert lease is not None
+    expire(queue_seed, report)
+    with pytest.raises(LeaseLostError):
+        queue.heartbeat(lease)
+    with pytest.raises(LeaseLostError):
+        queue.complete(lease, CONTENT, data_as_of=_now(queue_seed), generated_at=_now(queue_seed))
+    assert queue.release(lease) is False
+    assert status(queue_seed, report) == ("generating", 1, None)

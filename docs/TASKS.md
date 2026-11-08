@@ -1534,6 +1534,7 @@
     - 階段 A（triage 與 audit）：`findings/domain/triage.py`、`findings/triage_records.py`、`findings/reopen.py`（linker 自動重開）、`triage/`（PATCH、triage-events、證據資格、人工複測的一致性檢查）、migration v0017。資料庫審查（opus）0 CRITICAL／HIGH，2 MEDIUM、6 LOW 全部採用（§28.11）。G1–G3 的測試連續 5 次通過。
     - 階段 B（報告）：`reports/`（快照、用語、安全編碼、截斷、佇列、下載）、`worker/reports.py`、migration v0018。20,000 個合成 finding 的渲染：JSON 3.8 秒、Markdown 6.3 秒（都在 8 MiB 處截斷）。
     - 階段 C（交接項目）：全域稽核查詢、全域待核准清單、停用 auth profile、migration v0019。
+    - 階段 B、C 的資料庫審查（opus）：0 CRITICAL；1 HIGH（共用的 auth_profiles_guard 在 TRUNCATE 時引用不存在的欄位）、2 MEDIUM（failed 的 CHECK 三值邏輯、DB 層沒有 lease 的 fencing token）、8 LOW 全部採用（§28.12）。
     - 階段 D（Live）：`tests/live/triage_support.py`、`tests/live/report_assertions.py`，擴充 `test_fixture_rescan_live.py`；尚未執行。
   - 給 T23a：T21 新增的人工複測摘錄（`finding_triage_excerpts`）與報告內容（`report_contents`）在 DB 中沒有加密、沒有保留期限，與原始證據一併處理；清除摘錄時只改那張表，事件與雜湊不變；報告以新的 migration 開放「只刪除到期報告」（`DECISIONS.md` §28.9）。
 - [ ] T31 建立 benchmark harness。

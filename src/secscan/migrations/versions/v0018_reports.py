@@ -11,9 +11,10 @@ Create Date: 2026-11-08 18:00:00+00:00
     (project_id, idempotency_key) 唯一；queue_position 是 identity（FIFO）。
   - report_contents：內容（bytea，1 byte 到 8 MiB），只能在父列 generating 時寫入一次、
     之後不可修改。
-  - deferred constraint trigger 雙向核對：succeeded ⇒ 有內容，而且 SQL 算出的 sha256 與大小等於
-    metadata；有內容 ⇒ commit 時父列是 succeeded。被重新認領的舊 worker 即使繞過 fencing 也提交
-    不了。
+  - report_contents 帶著寫入時的 attempt 與 lease_owner（DB 層的 fencing token）：只有目前持有
+    未過期 lease 的那一次嘗試能寫入；心跳不能換 owner。
+  - deferred constraint trigger 雙向核對：succeeded ⇒ 有這一次嘗試的內容，而且 SQL 算出的 sha256
+    與大小等於 metadata；有內容 ⇒ commit 時父列是 succeeded。
   - T21 不刪除報告；T23a 以新的 migration 開放「只刪除到期報告」的路徑（report.create 的 audit
     保留）。
 - downgrade：刪除兩張表、trigger 與函式；所有報告會消失，只用於開發與測試。
@@ -57,6 +58,7 @@ _CHECKS = {
     "attempts_valid": "attempts >= 0 AND attempts <= 3",
     "idempotency_key_valid": "idempotency_key ~ '^[A-Za-z0-9_-]{16,128}$'",
     "request_sha256_length": "octet_length(request_sha256) = 32",
+    # 單獨看不 NULL 安全；和各狀態的 shape CHECK 一起才完整（新增狀態時要補 shape）。
     "result_valid": (
         f"size_bytes IS NULL OR (size_bytes >= 1 AND size_bytes <= {MAX_REPORT_BYTES} "
         "AND sha256 ~ '^[0-9a-f]{64}$' AND omitted_findings >= 0 "
@@ -64,7 +66,7 @@ _CHECKS = {
     ),
     "queued_shape": (
         f"status <> 'queued' OR ({_LEASE_NULL} AND {_RESULT_NULL} "
-        "AND error_code IS NULL AND finished_at IS NULL)"
+        "AND error_code IS NULL AND finished_at IS NULL AND attempts < 3)"
     ),
     "generating_shape": (
         "status <> 'generating' OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL "
@@ -78,7 +80,8 @@ _CHECKS = {
     ),
     "failed_shape": (
         f"status <> 'failed' OR ({_LEASE_NULL} AND {_RESULT_NULL} "
-        "AND error_code ~ '^[A-Z][A-Z0-9_]{1,63}$' AND finished_at IS NOT NULL)"
+        "AND error_code IS NOT NULL AND error_code ~ '^[A-Z][A-Z0-9_]{1,63}$' "
+        "AND finished_at IS NOT NULL)"
     ),
 }
 
@@ -115,8 +118,13 @@ BEGIN
         AND NEW.attempts = OLD.attempts + 1 THEN
         RETURN NEW;
     END IF;
+    -- 心跳不能換 owner：同一次嘗試的 lease 只屬於認領它的 worker。
+    IF OLD.status = 'generating' AND NEW.status = 'generating'
+        AND NEW.attempts = OLD.attempts AND NEW.lease_owner = OLD.lease_owner THEN
+        RETURN NEW;
+    END IF;
     IF OLD.status = 'generating' AND NEW.attempts = OLD.attempts
-        AND NEW.status IN ('generating', 'queued', 'succeeded', 'failed') THEN
+        AND NEW.status IN ('queued', 'succeeded', 'failed') THEN
         RETURN NEW;
     END IF;
     RAISE EXCEPTION USING ERRCODE = 'integrity_constraint_violation',
@@ -125,6 +133,8 @@ END;
 $$
 """
 )
+# DB 層的 fencing token：內容必須帶著目前這一次嘗試的 attempt 與 lease_owner，而且 lease 未過期。
+# 被重新認領的舊 worker 即使繞過程式的 FOR UPDATE，也寫不進內容。
 _CONTENT_INSERT = """
 CREATE FUNCTION report_contents_insert_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
@@ -132,9 +142,11 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM public.reports AS report
         WHERE report.id = NEW.report_id AND report.status = 'generating'
+            AND report.attempts = NEW.attempt AND report.lease_owner = NEW.lease_owner
+            AND report.lease_expires_at > clock_timestamp()
     ) THEN
         RAISE EXCEPTION USING ERRCODE = 'integrity_constraint_violation',
-            MESSAGE = 'report_contents: content is written once while generating';
+            MESSAGE = 'report_contents: content is written once by the current lease holder';
     END IF;
     RETURN NEW;
 END;
@@ -147,6 +159,7 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM public.report_contents AS stored
         WHERE stored.report_id = NEW.id
+            AND stored.attempt = NEW.attempts
             AND encode(sha256(stored.content), 'hex') = NEW.sha256
             AND octet_length(stored.content) = NEW.size_bytes
     ) THEN
@@ -249,6 +262,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index(op.f("ix_reports_scan_id"), "reports", ["scan_id"])
+    op.create_index(op.f("ix_reports_requested_by_key_id"), "reports", ["requested_by_key_id"])
     op.create_index(
         "ix_reports_active_queue",
         "reports",
@@ -258,6 +272,8 @@ def upgrade() -> None:
     op.create_table(
         "report_contents",
         sa.Column("report_id", sa.Uuid(), nullable=False),
+        sa.Column("attempt", sa.SmallInteger(), nullable=False),
+        sa.Column("lease_owner", sa.String(128), nullable=False),
         sa.Column("content", sa.LargeBinary(), nullable=False),
         sa.PrimaryKeyConstraint("report_id", name=op.f("pk_report_contents")),
         sa.ForeignKeyConstraint(
@@ -280,6 +296,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("report_contents")
     op.drop_index("ix_reports_active_queue", table_name="reports")
+    op.drop_index(op.f("ix_reports_requested_by_key_id"), table_name="reports")
     op.drop_index(op.f("ix_reports_scan_id"), table_name="reports")
     op.drop_table("reports")
     for function in _FUNCTIONS:

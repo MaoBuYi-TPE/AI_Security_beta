@@ -296,7 +296,9 @@ def _resolve_cases(
         resolved.append(finding_id)
     unchanged_rows = _pages(item, f"{URL}/{snapshot['id']}/findings")
     assert unchanged_rows == patched["findings"], "人工判定不可改寫比較快照"
-    write_measurement("triage-resolve", {"outcomes": outcomes, "resolved": resolved})
+    write_measurement(
+        "triage-resolve", {"outcomes": outcomes, "resolved": resolved}, filename="triage.json"
+    )
     assert resolved, "沒有任何案例符合人工複測的平台條件"
     return resolved
 
@@ -366,7 +368,9 @@ def _check_reopen(admin: Api, item: Lab, partial: Combined, resolved: list[str])
         "GET", f"/audit-events?project_id={project}&action=finding.reopen&limit=100"
     )
     assert {event["object_id"] for event in audits} >= set(reopened)
-    write_measurement("triage-reopen", {"resolved": resolved, "reopened": reopened})
+    write_measurement(
+        "triage-reopen", {"resolved": resolved, "reopened": reopened}, filename="triage.json"
+    )
     assert reopened, "小預算 scan 沒有重開任何已 resolve 的 finding"
 
 
@@ -405,7 +409,7 @@ def _check_reports(item: Lab, scans: tuple[Combined, ...]) -> None:
                     "attempts": meta["attempts"],
                 }
             )
-    write_measurement("reports", {"reports": measured})
+    write_measurement("reports", {"reports": measured}, filename="reports.json")
 
 
 def _finished_report(item: Lab, report_id: str) -> dict[str, Any] | None:

@@ -59,7 +59,10 @@ def queued(session: Session, item: Scenario, world: World) -> UUID:
 def succeed(session: Session, report: UUID, content: bytes = CONTENT, sha: bytes = CONTENT) -> None:
     session.execute(text(CLAIM), {"id": report})
     session.execute(
-        text("INSERT INTO report_contents (report_id, content) VALUES (:id, :content)"),
+        text(
+            "INSERT INTO report_contents (report_id, attempt, lease_owner, content) "
+            "VALUES (:id, 1, 'w', :content)"
+        ),
         {"id": report, "content": content},
     )
     session.execute(
@@ -96,10 +99,11 @@ def test_only_allowed_transitions_and_columns(
             assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION, statement
         error = violation(
             session,
-            "INSERT INTO report_contents (report_id, content) VALUES (:id, 'x')",
+            "INSERT INTO report_contents (report_id, attempt, lease_owner, content) "
+            "VALUES (:id, 1, 'w', 'x')",
             {"id": report},
         )
-        assert "while generating" in str(error)
+        assert "current lease holder" in str(error)
         session.execute(text(CLAIM), {"id": report})
         error = violation(session, "UPDATE reports SET attempts = 3 WHERE id = :id", {"id": report})
         assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
@@ -137,7 +141,10 @@ def test_content_and_success_are_checked_together_at_commit(
         report = queued(session, item, world)
         session.execute(text(CLAIM), {"id": report})
         session.execute(
-            text("INSERT INTO report_contents (report_id, content) VALUES (:id, 'x')"),
+            text(
+                "INSERT INTO report_contents (report_id, attempt, lease_owner, content) "
+                "VALUES (:id, 1, 'w', 'x')"
+            ),
             {"id": report},
         )
         with pytest.raises(IntegrityError, match="succeeded report"):
@@ -156,3 +163,58 @@ def test_content_and_success_are_checked_together_at_commit(
         )
         with pytest.raises(IntegrityError, match="need content"):
             session.commit()
+
+
+def test_shapes_are_null_safe_and_queued_rows_have_attempts_left(
+    queue_engine: Engine, item: Scenario, world: World
+) -> None:
+    with sessionmaker(queue_engine)() as session:
+        report = queued(session, item, world)
+        session.execute(text(CLAIM), {"id": report})
+        failed_without_code = (
+            "UPDATE reports SET status = 'failed', lease_owner = NULL, lease_expires_at = NULL, "
+            "heartbeat_at = NULL, finished_at = now() WHERE id = :id"
+        )
+        error = violation(session, failed_without_code, {"id": report})
+        assert error.diag.constraint_name == "ck_reports_failed_shape"
+        session.rollback()
+    with sessionmaker(queue_engine)() as session:
+        report = queued(session, item, world)
+        for _ in range(3):
+            session.execute(text(CLAIM), {"id": report})
+            requeue = (
+                "UPDATE reports SET status = 'queued', lease_owner = NULL, "
+                "lease_expires_at = NULL, heartbeat_at = NULL WHERE id = :id"
+            )
+            if _ < 2:
+                session.execute(text(requeue), {"id": report})
+        error = violation(session, requeue, {"id": report})
+        assert error.diag.constraint_name == "ck_reports_queued_shape"
+
+
+def test_content_needs_the_current_lease_token(
+    queue_engine: Engine, item: Scenario, world: World
+) -> None:
+    with sessionmaker(queue_engine)() as session:
+        report = queued(session, item, world)
+        session.execute(text(CLAIM), {"id": report})
+        insert = (
+            "INSERT INTO report_contents (report_id, attempt, lease_owner, content) "
+            "VALUES (:id, :attempt, :owner, 'x')"
+        )
+        for attempt, owner in ((2, "w"), (1, "other")):
+            error = violation(session, insert, {"id": report, "attempt": attempt, "owner": owner})
+            assert "current lease holder" in str(error)
+        error = violation(
+            session, "UPDATE reports SET lease_owner = 'other' WHERE id = :id", {"id": report}
+        )
+        assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
+        session.execute(
+            text(
+                "UPDATE reports SET lease_expires_at = clock_timestamp() - interval '1 second' "
+                "WHERE id = :id"
+            ),
+            {"id": report},
+        )
+        error = violation(session, insert, {"id": report, "attempt": 1, "owner": "w"})
+        assert "current lease holder" in str(error)

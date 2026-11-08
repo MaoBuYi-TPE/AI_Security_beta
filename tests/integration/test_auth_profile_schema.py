@@ -463,7 +463,10 @@ def test_guard_triggers_exist(db_session: Session) -> None:
     )
 
     assert triggers == {
-        "auth_profiles.auth_profiles_immutable",
+        # T21（v0019）：UPDATE 只允許停用一次、DELETE 拒絕；停用時不能留下密文（deferred）。
+        "auth_profiles.auth_profiles_update_guard",
+        "auth_profiles.auth_profiles_no_delete",
+        "auth_profiles.auth_profiles_disabled_erased",
         "auth_profiles.auth_profiles_no_truncate",
         "auth_profile_versions.auth_profile_versions_guard_rows",
         "auth_profile_versions.auth_profile_versions_no_truncate",
