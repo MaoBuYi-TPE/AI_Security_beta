@@ -148,6 +148,13 @@ class ScopeGrantService:
     def get(self, principal: Principal, grant_id: UUID) -> ScopeGrant:
         return self._grant(principal, grant_id, Permission.PROJECT_READ)
 
+    def list_pending(
+        self, principal: Principal, *, now: datetime, page: PageRequest
+    ) -> Page[ScopeGrant]:
+        """全域的待核准清單（T21）：只限 platform_admin。"""
+        authorize(principal, Permission.PLATFORM_MANAGE)
+        return self._grants.list_pending(now, page)
+
     def approve(
         self,
         principal: Principal,

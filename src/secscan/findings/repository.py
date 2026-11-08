@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Row, Select, case, func, select, tuple_
+from sqlalchemy import ColumnElement, Row, Select, case, exists, func, select, tuple_
 from sqlalchemy.orm import Session
 
 from secscan.core.pagination import Page, PageRequest
@@ -19,9 +19,10 @@ from secscan.findings.domain.model import (
 )
 from secscan.findings.domain.normalization import Confidence, Severity
 from secscan.findings.domain.taxonomy import CweSource, FindingCategory, FindingKind
+from secscan.findings.domain.triage import review_reasons
 from secscan.findings.models import FindingModel, FindingObservationModel
 from secscan.scans.domain.catalog import Engine
-from secscan.scans.models import ObservationModel, ScannerRunModel
+from secscan.scans.models import ObservationModel, ScanModel, ScannerRunModel
 
 _SEVERITY_RANK = {severity.value: rank for rank, severity in enumerate(Severity)}
 
@@ -46,8 +47,8 @@ class FindingRepository:
         total = self._session.scalar(
             select(func.count()).select_from(FindingModel).where(*conditions)
         )
-        models = self._session.scalars(
-            select(FindingModel)
+        rows = self._session.execute(
+            select(FindingModel, later_mapping_differs())
             .where(*conditions)
             .order_by(
                 case(_SEVERITY_RANK, value=FindingModel.normalized_severity).desc(),
@@ -61,11 +62,18 @@ class FindingRepository:
             .offset(page.offset)
             .limit(page.limit)
         ).all()
+        models = [row[0] for row in rows]
+        later = {row[0].id: bool(row[1]) for row in rows}
         sources = self._sources(scan_id, [model.id for model in models])
         links = self._related(scan_id, models, related)
         return Page(
             items=tuple(
-                finding_of(model, sources.get(model.id, ()), links.get(model.id, ()))
+                finding_of(
+                    model,
+                    sources.get(model.id, ()),
+                    links.get(model.id, ()),
+                    later_mapping=later[model.id],
+                )
                 for model in models
             ),
             total=total or 0,
@@ -169,14 +177,45 @@ def _conditions(scan_id: UUID, filters: FindingFilters) -> list[ColumnElement[bo
         conditions.append(FindingModel.category == filters.category.value)
     if filters.needs_review is not None:
         conditions.append(FindingModel.needs_review.is_(filters.needs_review))
+    if filters.lifecycle_state is not None:
+        conditions.append(FindingModel.lifecycle_state == filters.lifecycle_state.value)
     return conditions
+
+
+def later_mapping_differs() -> ColumnElement[bool]:
+    """resolve 之後，這個 target 有 scan 的 run 以不同的 mapping 連結（平台無法自動判斷是否復發）。
+
+    只對 resolved 有意義（其他狀態的 resolved_scan_position 是 NULL，比較結果不成立）。
+    """
+    return (
+        exists()
+        .where(
+            ScanModel.target_id == FindingModel.target_id,
+            ScanModel.queue_position > FindingModel.resolved_scan_position,
+            ScannerRunModel.scan_id == ScanModel.id,
+            ScannerRunModel.link_mapping_version.is_not(None),
+            tuple_(ScannerRunModel.link_mapping_version, ScannerRunModel.link_taxonomy_sha256)
+            != tuple_(FindingModel.mapping_version, FindingModel.taxonomy_sha256),
+        )
+        .correlate(FindingModel)
+        .label("later_mapping_differs")
+    )
 
 
 def finding_of(
     model: FindingModel,
     sources: tuple[FindingSource, ...] = (),
     related: tuple[UUID, ...] = (),
+    *,
+    later_mapping: bool = False,
 ) -> Finding:
+    lifecycle = LifecycleState(model.lifecycle_state)
+    review = review_reasons(
+        lifecycle,
+        observations_linked=model.observations_linked,
+        resolved_link_count=model.resolved_link_count,
+        later_mapping_differs=later_mapping,
+    )
     return Finding(
         id=model.id,
         target_id=model.target_id,
@@ -203,13 +242,15 @@ def finding_of(
         owasp_api_2023_source=MappingSource(model.owasp_api_2023_source),
         mapping_version=model.mapping_version,
         triage_state=TriageState(model.triage_state),
-        lifecycle_state=LifecycleState(model.lifecycle_state),
+        lifecycle_state=lifecycle,
         first_seen_scan_id=model.first_seen_scan_id,
         last_seen_scan_id=model.last_seen_scan_id,
         created_at=model.created_at,
         last_seen_at=model.last_seen_at,
         sources=sources,
         related_finding_ids=related,
+        triage_version=model.triage_version,
+        resolution_review=tuple(reason.value for reason in review),
     )
 
 

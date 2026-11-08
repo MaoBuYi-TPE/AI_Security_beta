@@ -29,6 +29,8 @@ dev = [
     "httpx2>=2.13.1",
     "hypothesis>=6.170.2",
     "import-linter>=2.15",
+    # T21：以 CommonMark 實際解析報告的 Markdown（SEC-17 的 token 不變式）；已經在 lock 中。
+    "markdown-it-py>=4.2.0",
     "mypy>=2.4.0",
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
@@ -139,6 +141,8 @@ layers = [
     "main | cli",
     "migrations",
     "health | runner | worker",
+    "reports",
+    "triage",
     "comparisons",
     "scanners | findings",
     "scans",

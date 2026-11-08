@@ -15,6 +15,7 @@ from uuid import UUID
 
 from secscan.findings.domain.model import Finding
 from secscan.findings.domain.normalization import Confidence, Severity
+from secscan.findings.domain.triage import Resolution
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.observation import ArtifactClassification, ArtifactKind, Observation
 
@@ -90,6 +91,9 @@ class FindingDetail:
     seen: SeenSummary
     engines: tuple[EngineCount, ...]
     recent_scans: tuple[ScanAppearance, ...]
+    # T21：快照中不同 path 的數量（triage 一個 finding 涵蓋它所有的物件）與目前 resolved 的依據。
+    distinct_paths: int = 0
+    resolution: Resolution | None = None
 
 
 @dataclass(frozen=True, slots=True)

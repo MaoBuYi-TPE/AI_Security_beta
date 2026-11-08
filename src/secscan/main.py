@@ -24,7 +24,9 @@ from secscan.findings.router import router as findings_router
 from secscan.grants.router import router as grants_router
 from secscan.health.router import router as health_router
 from secscan.migrations import head_revision
+from secscan.projects.router import audit_router
 from secscan.projects.router import router as projects_router
+from secscan.reports.router import router as reports_router
 from secscan.scanners.router import profiles_router as scan_profiles_router
 from secscan.scanners.router import router as scanners_router
 from secscan.scans.router import router as scans_router
@@ -32,6 +34,7 @@ from secscan.security.secret_cipher import SecretCipher
 from secscan.specs.router import router as specs_router
 from secscan.targets.domain import LabNetwork
 from secscan.targets.router import router as targets_router
+from secscan.triage.router import router as triage_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -83,6 +86,7 @@ def _api_v1() -> APIRouter:
     """業務 API：整個 router 都要平台 API key，之後新增的路由不會意外變成公開端點。"""
     api_v1 = authenticated_router(prefix=API_V1_PREFIX)
     api_v1.include_router(projects_router)
+    api_v1.include_router(audit_router)
     api_v1.include_router(api_keys_router)
     api_v1.include_router(targets_router)
     api_v1.include_router(grants_router)
@@ -90,6 +94,8 @@ def _api_v1() -> APIRouter:
     api_v1.include_router(auth_profiles_router)
     api_v1.include_router(scans_router)
     api_v1.include_router(findings_router)
+    api_v1.include_router(triage_router)
+    api_v1.include_router(reports_router)
     api_v1.include_router(comparisons_router)
     api_v1.include_router(scanners_router)
     api_v1.include_router(scan_profiles_router)

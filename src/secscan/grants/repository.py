@@ -6,7 +6,7 @@ grant 所屬的 project 由 target 取得（join targets），不在 grant 重�
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Row, Select, func, select
+from sqlalchemy import ColumnElement, Row, Select, func, select
 from sqlalchemy.orm import Session
 
 from secscan.core.db import flush_or_raise
@@ -103,6 +103,23 @@ class ScopeGrantRepository:
         row = self._session.execute(statement).first()
         return _from_row(row) if row is not None else None
 
+    def list_pending(self, now: datetime, page: PageRequest) -> Page[ScopeGrant]:
+        """跨 project、尚未過期的待核准申請（T21），由舊到新（先申請的先處理）。"""
+        total = (
+            self._session.scalar(
+                select(func.count()).select_from(ScopeGrantModel).where(*_pending(now))
+            )
+            or 0
+        )
+        rows = self._session.execute(
+            _with_project()
+            .where(*_pending(now))
+            .order_by(ScopeGrantModel.created_at, ScopeGrantModel.id)
+            .offset(page.offset)
+            .limit(page.limit)
+        )
+        return Page(items=tuple(_from_row(row) for row in rows), total=total, request=page)
+
     def list_by_target(self, target_id: UUID, page: PageRequest) -> Page[ScopeGrant]:
         """新版本在前。"""
         of_target = ScopeGrantModel.target_id == target_id
@@ -159,6 +176,13 @@ class ScopeGrantRepository:
         if grant is None:
             raise LookupError("找不到剛寫入的 scope grant")
         return grant
+
+
+def _pending(now: datetime) -> tuple[ColumnElement[bool], ...]:
+    return (
+        ScopeGrantModel.status == GrantStatus.PENDING.value,
+        ScopeGrantModel.valid_until > now,
+    )
 
 
 def _with_project() -> Select[ScopeGrantModel, UUID]:

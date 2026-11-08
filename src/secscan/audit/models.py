@@ -20,6 +20,8 @@ class AuditEventModel(UuidPrimaryKeyMixin, Base):
     __table_args__ = (
         # 依 project 由新到舊列出（GET /projects/{id}/audit-events）。
         Index(None, "project_id", "created_at"),
+        # 全域稽核查詢由新到舊分頁（T21，v0019）。
+        Index(None, "created_at", "id"),
         CheckConstraint("char_length(btrim(action)) > 0", name="action_not_blank"),
         CheckConstraint("char_length(btrim(object_type)) > 0", name="object_type_not_blank"),
         CheckConstraint("jsonb_typeof(redacted_changes) = 'object'", name="changes_is_object"),

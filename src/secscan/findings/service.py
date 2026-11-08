@@ -17,7 +17,7 @@ from secscan.api_keys.domain import Principal
 from secscan.core.errors import AppError, ErrorCode, not_found_error
 from secscan.core.pagination import Page, PageRequest
 from secscan.findings.domain.linking import merge, plan_links
-from secscan.findings.domain.model import Finding, FindingFilters
+from secscan.findings.domain.model import Finding, FindingFilters, LifecycleState
 from secscan.findings.domain.provenance import (
     FindingDetail,
     FindingHead,
@@ -28,7 +28,9 @@ from secscan.findings.domain.provenance import (
 from secscan.findings.domain.taxonomy import Taxonomy, load_taxonomy, mapping_identity
 from secscan.findings.provenance import ProvenanceRepository
 from secscan.findings.records import FindingRecords
+from secscan.findings.reopen import AutoReopener
 from secscan.findings.repository import FindingRepository
+from secscan.findings.triage_records import TriageRecords
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.locations import LocationSummary
 from secscan.scans.domain.model import Lease
@@ -81,6 +83,10 @@ class FindingLinker:
                     )
                     targets[draft.fingerprint] = (locked.id, locked.linked)
             records.insert_links(drafts, targets, self._mapping[1])
+            if any(item.status.lifecycle is LifecycleState.RESOLVED for item in existing.values()):
+                AutoReopener(session).reopen(
+                    lease, records.run_scan(lease), self._mapping, drafts, existing
+                )
             return len(observations)
 
 
@@ -90,6 +96,7 @@ class FindingService:
         self._targets = TargetService(session, lab=lab)
         self._findings = FindingRepository(session)
         self._provenance = ProvenanceRepository(session)
+        self._triage = TriageRecords(session)
 
     def for_scan(
         self, principal: Principal, scan_id: UUID, filters: FindingFilters, page: PageRequest
@@ -107,6 +114,8 @@ class FindingService:
             seen=self._provenance.seen(snapshot),
             engines=self._provenance.engines(snapshot),
             recent_scans=self._provenance.recent_scans(snapshot),
+            distinct_paths=self._provenance.distinct_paths(snapshot),
+            resolution=self._triage.resolution(finding_id),
         )
 
     def scans(

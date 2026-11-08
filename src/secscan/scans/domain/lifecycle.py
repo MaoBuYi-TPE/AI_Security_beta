@@ -94,6 +94,8 @@ class RunErrorCode(StrEnum):
     SCOPE_OUTSIDE_LAB = "SCOPE_OUTSIDE_LAB"
     SCOPE_MISMATCH = "SCOPE_MISMATCH"
     AUTH_PROFILE_SUPERSEDED = "AUTH_PROFILE_SUPERSEDED"
+    # T21：排隊中的 scan 綁定的 profile 已停用（在交出 secret 之前失敗）。
+    AUTH_PROFILE_DISABLED = "AUTH_PROFILE_DISABLED"
     # 建立 scan 的平台 key 已被撤銷（外洩時排進佇列的 scan 也不會開始）。
     CREATOR_KEY_REVOKED = "CREATOR_KEY_REVOKED"
     ENGINE_FAILED = "ENGINE_FAILED"

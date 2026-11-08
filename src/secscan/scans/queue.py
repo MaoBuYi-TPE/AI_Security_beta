@@ -409,6 +409,8 @@ class QueueOperations:
         if scan.auth_profile_id is None or scan.auth_profile_version is None:
             return None, None
         profile_id, version = scan.auth_profile_id, scan.auth_profile_version
+        if self._profiles.is_disabled(profile_id):
+            return RunErrorCode.AUTH_PROFILE_DISABLED, None
         if read_secret:
             try:
                 secret = self._profiles.sealed_secret(profile_id, version=version)

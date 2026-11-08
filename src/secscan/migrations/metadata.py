@@ -8,9 +8,15 @@ from secscan.audit.models import AuditEventModel
 from secscan.auth_profiles.models import AuthProfileModel, AuthProfileVersionModel
 from secscan.comparisons.models import ScanComparisonFindingModel, ScanComparisonModel
 from secscan.core.db import Base
-from secscan.findings.models import FindingModel, FindingObservationModel
+from secscan.findings.models import (
+    FindingModel,
+    FindingObservationModel,
+    FindingTriageEventModel,
+    FindingTriageExcerptModel,
+)
 from secscan.grants.models import ScopeGrantModel
 from secscan.projects.models import ProjectModel
+from secscan.reports.models import ReportContentModel, ReportModel
 from secscan.scanners.models import RunnerInstanceModel
 from secscan.scans.location_models import RunLocationModel, RunRuleLocationModel
 from secscan.scans.models import (
@@ -47,7 +53,11 @@ MODELS = (
     RunnerInstanceModel,
     FindingModel,
     FindingObservationModel,
+    FindingTriageEventModel,
+    FindingTriageExcerptModel,
     ScanComparisonModel,
     ScanComparisonFindingModel,
+    ReportModel,
+    ReportContentModel,
 )
 target_metadata = Base.metadata

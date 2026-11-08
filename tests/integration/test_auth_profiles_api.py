@@ -110,7 +110,9 @@ def test_create_returns_the_profile_without_the_secret(
         "secret_configured",
         "version_created_by_key_id",
         "version_created_at",
+        "disabled_at",
     }
+    assert data["disabled_at"] is None
     assert data["target_id"] == str(target.id)
     assert data["project_id"] == str(world.project_a.id)
     assert (data["version"], data["type"], data["header_name"]) == (1, "bearer", None)

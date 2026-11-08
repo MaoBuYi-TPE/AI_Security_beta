@@ -35,6 +35,7 @@ from secscan.core.db import ConstraintViolationError
 from secscan.core.errors import AppError, ErrorCode, not_found_error
 from secscan.core.json_types import JsonObject
 from secscan.core.pagination import Page, PageRequest
+from secscan.core.text import require_text
 from secscan.security.secret_cipher import SecretCipher, SecretUnreadableError
 from secscan.targets.domain import Target
 from secscan.targets.repository import TargetRepository
@@ -43,6 +44,7 @@ from secscan.targets.repository import TargetRepository
 # 舊版本不含密文，只有定義；lab 的 token 很快過期，版本數放寬一些。
 MAX_PROFILES_PER_TARGET = 10
 MAX_VERSIONS_PER_PROFILE = 100
+DISABLE_REASON_MAX_LENGTH = 500
 ROLE_CONFLICT_CONSTRAINT = "uq_auth_profiles_target_id_role_label"
 
 
@@ -131,6 +133,8 @@ class AuthProfileService:
         locked = self._profiles.lock(profile_id)
         if locked is None:
             raise not_found_error()
+        if locked.disabled_at is not None:
+            raise _disabled_error()
         current = locked.current
         try:
             plan = plan_version(current.definition, change)
@@ -157,6 +161,42 @@ class AuthProfileService:
 
     def get(self, principal: Principal, profile_id: UUID) -> AuthProfile:
         return self._profile(principal, profile_id, Permission.PROJECT_READ)
+
+    def disable(
+        self, principal: Principal, profile_id: UUID, *, reason: str, request_id: str | None
+    ) -> AuthProfile:
+        """停用（T21）：清除目前版本的密文，之後不能建立新版本或新的 scan；重複停用沒有效果。
+
+        以 FOR UPDATE 鎖住 profile：建立 scan 時的 FOR SHARE 互斥，不會有 scan 綁到即將被清除的
+        版本。排隊中的 scan 在 runner 交出 secret 之前失敗（AUTH_PROFILE_DISABLED）；執行中的 scan
+        已經拿到 secret（該 run 專屬的檔案，run 結束時刪除），要立即停止請取消 scan。
+        """
+        self._profile(principal, profile_id, Permission.PROJECT_READ)
+        self._profile(principal, profile_id, Permission.PROJECT_WRITE)
+        try:
+            require_text(reason, field="reason", max_length=DISABLE_REASON_MAX_LENGTH)
+        except ValueError as exc:
+            raise AppError(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                code=ErrorCode.INVALID_REQUEST,
+                message=str(exc),
+            ) from None
+        locked = self._profiles.lock(profile_id)
+        if locked is None:
+            raise not_found_error()
+        if locked.disabled_at is not None:
+            return locked
+        self._profiles.erase_secret(profile_id, version=locked.current.version)
+        self._profiles.disable(profile_id, by_key_id=principal.key_id)
+        disabled = self._existing(profile_id)
+        self._record(
+            disabled,
+            "auth_profile.disable",
+            principal,
+            request_id,
+            {"version": locked.current.version, "reason": reason},
+        )
+        return disabled
 
     def list_for_target(
         self, principal: Principal, target_id: UUID, page: PageRequest
@@ -313,3 +353,11 @@ def _updated(profile: AuthProfile, plan: VersionPlan, previous: ProfileVersion) 
     if "preflight" in plan.changed:
         changes["preflight"] = _preflight_summary(definition.preflight)
     return changes
+
+
+def _disabled_error() -> AppError:
+    return AppError(
+        status_code=HTTPStatus.CONFLICT,
+        code=ErrorCode.AUTH_PROFILE_DISABLED,
+        message="auth profile 已停用：不能再建立新版本。",
+    )

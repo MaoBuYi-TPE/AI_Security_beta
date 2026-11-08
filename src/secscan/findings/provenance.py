@@ -28,7 +28,7 @@ from secscan.findings.domain.provenance import (
     TracedObservation,
 )
 from secscan.findings.models import FindingModel, FindingObservationModel
-from secscan.findings.repository import finding_of
+from secscan.findings.repository import finding_of, later_mapping_differs
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.observation import ArtifactClassification, ArtifactKind
 from secscan.scans.models import ArtifactModel, ObservationModel, ScanModel, ScannerRunModel
@@ -58,15 +58,28 @@ class ProvenanceRepository:
         self._session = session
 
     def head(self, finding_id: UUID) -> FindingHead | None:
-        model = self._session.get(FindingModel, finding_id)
-        if model is None:
+        row = self._session.execute(
+            select(FindingModel, later_mapping_differs()).where(FindingModel.id == finding_id)
+        ).first()
+        if row is None:
             return None
+        model: FindingModel = row[0]
         return FindingHead(
-            finding=finding_of(model),
+            finding=finding_of(model, later_mapping=bool(row[1])),
             fingerprint=model.fingerprint,
             taxonomy_sha256=model.taxonomy_sha256,
             observations_linked=model.observations_linked,
         )
+
+    def distinct_paths(self, snapshot: Snapshot) -> int:
+        """快照中觀察的不同 path 數（triage 一個 finding 會涵蓋它所有的物件，報告也揭露）。"""
+        count = self._session.scalar(
+            select(func.count(distinct(ObservationModel.path)))
+            .select_from(_LINKS)
+            .join(ObservationModel, ObservationModel.id == _LINKS.observation_id)
+            .where(*_in(snapshot))
+        )
+        return count or 0
 
     def seen(self, snapshot: Snapshot) -> SeenSummary:
         """快照中的 scan 數，以及第一個與最後一個連結的 scan 與 run（和快照一致）。"""

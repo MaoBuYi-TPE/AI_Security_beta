@@ -110,6 +110,10 @@ class Finding:
     sources: tuple[FindingSource, ...] = ()
     # 同一次 scan、同一個位置、taxonomy 標示為相關的 finding（只標示，不合併）。
     related_finding_ids: tuple[UUID, ...] = ()
+    # T21：每次 triage 或 lifecycle 變更 +1（PATCH 的 expected_version）。
+    triage_version: int = 0
+    # resolved 之後平台無法自動判斷是否復發的原因（triage.ReviewReason 的值）；空的代表不需要。
+    resolution_review: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,3 +124,4 @@ class FindingFilters:
     triage_state: TriageState | None = None
     category: FindingCategory | None = None
     needs_review: bool | None = None
+    lifecycle_state: LifecycleState | None = None

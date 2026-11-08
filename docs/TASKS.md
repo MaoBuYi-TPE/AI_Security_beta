@@ -1529,11 +1529,18 @@
 - [ ] T21 完成人工 triage、audit 與 JSON/Markdown 報告。
   - DoD：未確認的告警清楚標記；只有平台產生的報告可下載，不提供工具 raw output 下載；worker 佇列、DB 保存、上限 8 MiB 與截斷標示；權限、遮罩、下載、安全編碼通過測試，不執行 HTML 或載入遠端資源。
   - resolved 必須有可支持結論的修復／覆蓋證據；accepted_risk 不等於修復；只有 resolved 之後建立的新 scan 的有效再現才能自動重開，舊觀察延遲入庫不得重開；版本不相容要人工確認；版本號併發控制與完整稽核。
+  - 細部計畫：使用者 2026-11-07 核准雙軌（平台複掃證據／人工複測）與六項條件，2026-11-08 評估後補上四點（平台複掃現行不可用、人工證據是操作者聲明、資料保護尚未完成、併發／交易一致性／審查是必要驗收），見 `DECISIONS.md` §28。**resolved 一律是人工判定，T21 不提供自動修補驗證。**
+  - 進度（2026-11-08，實作中）：
+    - 階段 A（triage 與 audit）：`findings/domain/triage.py`、`findings/triage_records.py`、`findings/reopen.py`（linker 自動重開）、`triage/`（PATCH、triage-events、證據資格、人工複測的一致性檢查）、migration v0017。資料庫審查（opus）0 CRITICAL／HIGH，2 MEDIUM、6 LOW 全部採用（§28.11）。G1–G3 的測試連續 5 次通過。
+    - 階段 B（報告）：`reports/`（快照、用語、安全編碼、截斷、佇列、下載）、`worker/reports.py`、migration v0018。20,000 個合成 finding 的渲染：JSON 3.8 秒、Markdown 6.3 秒（都在 8 MiB 處截斷）。
+    - 階段 C（交接項目）：全域稽核查詢、全域待核准清單、停用 auth profile、migration v0019。
+    - 階段 D（Live）：`tests/live/triage_support.py`、`tests/live/report_assertions.py`，擴充 `test_fixture_rescan_live.py`；尚未執行。
+  - 給 T23a：T21 新增的人工複測摘錄（`finding_triage_excerpts`）與報告內容（`report_contents`）在 DB 中沒有加密、沒有保留期限，與原始證據一併處理；清除摘錄時只改那張表，事件與雜湊不變；報告以新的 migration 開放「只刪除到期報告」（`DECISIONS.md` §28.9）。
 - [ ] T31 建立 benchmark harness。
   - DoD：透過自己的 API 執行各實驗組別，保存 manifest 與 guard 計數；`evaluate.py` 是純函式並有測試。組合組的子預算凍結或偏差揭露須在細部計畫決定，不冒稱現有共用預算已符合公平實驗。
 - [ ] T23 完成所有 P0 的安全、故障、整合測試，並在乾淨環境重建。
   - 因資料保護、部署與最終驗收涉及不同界線，拆成以下四項，各自細化後實作：
-  - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）。
+  - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）；含 T21 的人工複測摘錄與報告內容。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。

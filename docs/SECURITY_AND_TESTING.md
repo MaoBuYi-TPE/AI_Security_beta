@@ -198,7 +198,7 @@ T05 已涵蓋 project 層的權限：
 - 遮罩以固定 seed 的隨機輸入檢查 idempotent，並檢查惡意輸入下仍是線性時間。
 - 以突變檢查確認上述測試有鑑別力（`TASKS.md` T05）。
 
-SEC-16 要求的 artifact 跨專案測試隨下載端點在 M5 加入，尚未完成；scan 已在 T09、observation 已在 T15、scan 的 finding 清單已在 T19 涵蓋（見下；`GET /findings/{id}` 在 T20）。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
+SEC-16 的 artifact 部分：T21 依使用者決定不提供 artifact 下載，改以報告涵蓋（§4.3 的 TRIAGE／REPORT 表：A 專案的 key 對 B 專案的 triage、triage-events、報告的建立／查詢／清單／下載、停用 profile 與引用 B 專案的比較快照，一律與不存在相同的 404）；scan 已在 T09、observation 已在 T15、scan 的 finding 清單已在 T19 涵蓋（見下；`GET /findings/{id}` 在 T20）。T07 的規格與 inventory 已涵蓋：A 專案讀寫 B 專案的 target、規格與 grant 預覽，回應與不存在的 id、不存在的路徑完全相同。T08 的認證設定同樣涵蓋：建立、查詢、版本歷史與 PATCH，回應與不存在的 id、不存在的路徑完全相同。
 
 T08 已涵蓋認證設定：
 - **secret 不外流（SEC-14 的平台這一側）**：以 canary 確認 secret 不出現在任何回應（含 4xx）與 header、DEBUG 等級的所有日誌、audit、DB 的明文；422 只說明欄位與原因，expected_json 的 key 也不回顯。FastAPI 內建的 telemetry 已關閉；查詢的路由拿不到加密元件。
@@ -255,11 +255,11 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-01**：「建立或開始掃描被拒」已在 T09 實作並測試：建立 scan 時以 gate 拒絕，排隊中的 scan 在 runner 啟動前（prepare）重新判斷、不通過就 failed。「已執行者停止新出站」在 T13 完成（見下方 T13 與 §4.4）。
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
-- **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；**T18 涵蓋 Nuclei 的 JSONL（逐行嚴格解析、壞行整份 OUTPUT_INVALID、大小上限）**；Schemathesis 的輸出與報告的 Markdown 在 M6 之後。
-- **SEC-14**：T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；**T18 完成 Nuclei 的 JSONL 輸出與觀察（runner 以 `SecretMasker` 做位元組級遮罩、parser 以 `redact_text`／`redact_url` 做文字層遮罩，涵蓋 extracted-results／request／response／curl-command，`DECISIONS.md` §24.3）**；Schemathesis 的 token 在 M6 之後，不標成完成。
+- **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；**T18 涵蓋 Nuclei 的 JSONL（逐行嚴格解析、壞行整份 OUTPUT_INVALID、大小上限）**；**T21 涵蓋平台報告的安全呈現**（§4.3 的 REPORT 表：JSON 跳脫、Markdown 以 CommonMark 實際解析的 token 不變式、Hypothesis 與惡意輸入集合、8 MiB 上限）；Schemathesis 的輸出在 M6 之後。
+- **SEC-14**：T21 補上平台報告這一側（canary 不出現在 JSON 與 Markdown，§4.3 的 REPORT-01）；raw 證據的受限加密仍在 T23a，**SEC-14 不標完成**。T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；**T18 完成 Nuclei 的 JSONL 輸出與觀察（runner 以 `SecretMasker` 做位元組級遮罩、parser 以 `redact_text`／`redact_url` 做文字層遮罩，涵蓋 extracted-results／request／response／curl-command，`DECISIONS.md` §24.3）**；Schemathesis 的 token 在 M6 之後，不標成完成。
 - **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。Nuclei 模板的 allowlist 已在 **T17** 凍結（清單＋每檔 sha256＋`-ni -duc -pt http` 等執行設定，`DECISIONS.md` §23；清單外的模板一律不執行）；**T18 把凍結的 42 個模板以 InputFile 掛進 `/scan/in`、admission 以每檔 `ContentDigest` 核准（清單外的模板無法掛載，不用 `-id`），並加 `-dut` 只跑簽章模板（§24.2）**。
-- **SEC-18**：T10 涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；T15 涵蓋遮罩的兩階段與 worker 只讀 manifest 列出的檔案；artifact 的下載在 M5。
+- **SEC-18**：T10 涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；T15 涵蓋遮罩的兩階段與 worker 只讀 manifest 列出的檔案；**T21 不提供 artifact 下載**（只能以 report id 下載平台產生的報告，`?path=`、`?storage_key=` 不影響結果，`/artifacts/{id}/download` 回 404，§4.3 的 REPORT-05）。
 - **SEC-21**：T10 完成：plan 驗證與 create body 的不變式拒絕（unit）；socket-proxy 對 exec、archive、logs、pull、build、network／volume 的建立、其他容器、清單、路徑穿越與編碼、未核准的映像等 31 個端點回 403／405，帶 host bind 或 VolumesFrom 的 create 被拒；探針前後 daemon 上的容器完全相同（live）。殘餘風險：proxy 不檢查 privileged、namespace、capability，runner 被攻陷時仍能建立 privileged 容器（`DECISIONS.md` §14.1）。
 - **SEC-02 到 SEC-10（T11）**：guard 逐請求檢查，並以 live 的接收端與 canary 的收包紀錄證明（§4.4）。仍未涵蓋：工具實際的 proxy 設定與規格（M3）；HTTPS 的 CA 與上游憑證驗證（SEC-09、SEC-10 的 HTTPS 部分，M3 之前一律拒絕 CONNECT 與 https）；body 中的 `_method`（`DECISIONS.md` §15.10 的取捨；T14 的小型網站沒有這個欄位，T16 以真的靶機量測）。path 中的 `%`：T14 的 live 量測中，ZAP 對 path 參數的攻擊有 83% 以 `PATH_AMBIGUOUS` 被拒（`TOOLS.md` §7.5），維持 fail closed，覆蓋的缺口在 T16 量化。
 - **SEC-01（T11 的部分）**：guard 逐請求檢查 run 的期限（`not_after` 受 grant 的 `valid_until` 限制）、封鎖與續約。T13 補上執行中的停止：grant 撤銷或到期、target 停用、建立者的 key 撤銷時，runner 在下一次心跳先封鎖 guard、再停止容器。
@@ -357,6 +357,23 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 | RESCAN-16 | 觀察已寫入但尚未連結 → observations_complete=false，不當作零告警 | integration：comparison_facts |
 | RESCAN-17 | 同一對同時建立／先到者回滾、audit 故障、未封存 commit → 單一完整快照或全部回滾 | integration：comparison_transactions，真實多連線／等鎖／commit |
 | RESCAN-18 | 無權 scan、viewer 寫入、偽造證據、跨 target FK、封存後改寫／追加／TRUNCATE → 拒絕 | API 與 schema／transactions；SEC-16 的比較部分 |
+
+**人工 triage 與報告（TRIAGE、REPORT；T21，Gate D 的報告部分；`DECISIONS.md` §28）**：
+
+| 編號 | 反例 | 測試 |
+|---|---|---|
+| TRIAGE-01 | 沒有證據、未 confirmed、一次改兩個欄位、回到 open、resolved 時改 triage → 拒絕；任何人工操作序列不送 resolve 都到不了 resolved（Hypothesis） | unit：findings/test_triage_domain；integration：triage_api |
+| TRIAGE-02 | rescan_not_observed 只接受 not_observed（v1 不會產生，現行版本拒絕）；manual_retest 只接受平台證據都成立、只缺 rule／parameter 的 inconclusive；每個拒絕原因各一個反例 | unit：triage/test_evidence；integration：triage_api（構造的封存快照） |
+| TRIAGE-03 | 人工複測聲明的每一項一致性檢查（route、Host、參數、狀態列、身分、過時或未來的時間、結果、client 自填平台欄位、大小）；遮罩後才計算雜湊 | unit：triage/test_attestation；integration：triage_api |
+| TRIAGE-04 | 比較之後的新觀察、target 有進行中的 scan → 拒絕；比較快照在人工 resolve 之後不變 | integration：triage_api、test_triage_races |
+| TRIAGE-05 | 自動重開（R1–R4）：較新的 scan 再現才重開，failed／timed_out 的 run 也算；沒觀察到不重開也不關閉；mapping 不同不重開但標示需要人工確認；重試不重複；重開之後可再 resolve | integration：finding_linker_reopen |
+| TRIAGE-06 | DB 層繞過：未升版、跳版、升版沒有事件、事件鏈不符、事件／摘錄被修改或刪除、摘錄雜湊不符或缺少、系統事件引用其他 target、resolved 不是 confirmed、watermark 由 trigger 寫入、新 finding 版本不是 0、有資料時 downgrade | integration：triage_schema |
+| TRIAGE-07 | 併發（G1）：同版本兩個 PATCH、人工與自動重開互搶、resolve 期間建立的 scan、比較快照與 linker 的鎖；故障注入（G2）：每一步之間拋錯整筆回滾、重試只重開一次 | integration：triage_races、triage_transactions（各連續 5 次） |
+| REPORT-01 | 不可信字串只在 code token 中、沒有連結／圖片／HTML／URL 樣式；JSON 跳脫；canary 不出現；白名單欄位與 golden JSON Schema | unit：reports/test_encoding、test_document；contract：test_report_schema |
+| REPORT-02 | 截斷以整個 finding 為單位、摘要計數不變、開頭與結尾都有說明；真實的 8 MiB 與多位元組字元 | unit：reports/test_document |
+| REPORT-03 | 用語：平台文字的誇大字詞只在否定說明中；需要人工確認的 resolved 不算 resolved | unit：reports/test_document；live 的報告核對 |
+| REPORT-04 | 佇列：SKIP LOCKED、舊 worker 重新認領之後不能完成、最多 3 次、內容寫入後失敗整筆回滾、快照與 PATCH 隔離、同時建立的配額 | integration：report_queue；reports_schema（狀態轉換、內容只寫一次、雙向核對） |
+| REPORT-05 | 下載：只以 report id、sha 不符不送出內容、header（nosniff、CSP sandbox、no-store、ASCII 檔名）、其他 project 404、viewer 不能建立 | integration：reports_api |
 
 正例保留：兩側有觀察且版本可靠 → persistent；純函式所有層證據完整時可得到 new/not_observed，移除必要證據就不再成立。這些人工構造的正例不是工具完成證據。實際 producer 的負面分類不放寬；端點請求與工具退出碼均不能代替完整性。
 
@@ -619,7 +636,7 @@ Gate B：SEC-01 至 SEC-20 適用測試有結果；未支援能力明確關閉�
 
 Gate C：取消/故障/重送/partial 狀態測試通過。
 
-Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告驗證未開始，所以 Gate D 整體尚未通過。不得把局部通過當作整個 Gate 已通過。）
+Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），live 的報告核對與使用者人工審閱樣本報告完成前，Gate D 整體尚未通過。不得把局部通過當作整個 Gate 已通過。）
 
 Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 

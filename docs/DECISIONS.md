@@ -2479,3 +2479,84 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 - 增量審查後補上：`assert_calibrated_structure` 失敗時，訊息一併帶出 snapshot 的 reasons 與 counts（Live 結束會拆除 DB，偏離時仍能從日誌分析）；只改訊息、不改判斷，不重跑 Live。
 - 交接給 T23c（不在 T22 範圍，未修改）：`tests/live/zap_support.py` 的 `start_site` 與 `tests/live/guard_support.py` 的 `start_receiver` 同樣以 `docker run -d` 跑 guard 映像、沒有 tmpfs，再以 `docker rm -f`（不帶 `-v`）刪除，會和本節的 fixture 一樣留下匿名 volume。`make test-live-zap`、`make record-fixtures`、`make test-live-runner` 會用到；T23c 重跑這些 Live 前應把 tmpfs 常數移到 `tests/live/support.py` 共用並補單元測試，否則會觸發「有殘留就停止」的條件。
 - 限制：實際 producer 的 `rule_completed` 一律為 false，所以 Live 的單側 finding 都是 inconclusive；這一版不能計算「自動驗證修補成功率」，not_observed 只在離線 RESCAN 正反例中出現。Nuclei 在本 fixture 每次都有 1–2 個模板 error，依嚴格判定使 scan 成為 partially_completed。
+
+## 28. T21：人工 triage、audit 與 JSON／Markdown 報告（2026-11-08 開始）
+
+細部計畫經兩輪審查：第一版有一次獨立審查（Plan 子代理），使用者 2026-11-07 決定 resolved 採雙軌並附六項條件，2026-11-08 評估第一版後補上四點（§28.1、§28.2、§28.9、§28.10）。
+
+### 28.1 resolved 一律是人工判定；T21 不提供自動修補驗證
+
+- T22 的比較快照是平台事實，封存後不可修改；T21 的 triage 是人工判定。兩者分開保存、分開呈現：人工 resolve 之後，比較快照那一列仍是原本的分類（例如 inconclusive）。
+- 程式中沒有任何路徑會自動設定 resolved；DB 要求每次 triage 或 lifecycle 變更都有一筆事件與 actor。not_observed 與 inconclusive 都不會自動變成 resolved。
+- 雙軌（使用者 2026-11-07）：PATCH 明確寫出 `basis`，平台只檢查該依據的條件是否成立：
+  - `rescan_not_observed`：比較中該列是 not_observed（三層覆蓋都成立）。**現行版本不可用**：algorithm v1 的 producer 一律給 `rule_completed=false`，不會產生 not_observed；送出時以 `not_observed_required` 拒絕。規則仍實作，並以構造的封存快照測試（走正常的 trigger）。
+  - `manual_retest`：該列是 inconclusive，平台證據都成立，未完成的只有 `rule_incomplete`／`parameter_unverified`，另附結構化的人工複測證據（`attestation`）。這是目前唯一可用、Live 能驗證的一軌。
+- 共同條件：同一個 target、已封存、algorithm 版本受支援、整體 comparability 是 comparable、該列不需要人工確認、finding 已是 confirmed、target 沒有進行中的 scan、比較的 current 之後沒有再觀察到這個 finding（`observed_after_comparison`）。版本不相容、需要人工確認、引擎失敗或逾時一律拒絕。比較標頭的 `manual_review_required` 會彙總其他 finding，不拿來判斷這個 finding。
+- 文件、API 說明、報告、PR 與完成回報都不寫成「平台能驗證修復」。
+
+### 28.2 人工複測證據是操作者聲明，不是不可偽造的證據
+
+- request 欄位名稱是 `attestation`（不是 verification）。平台做的是**一致性檢查**：請求摘錄第一行是 finding 的 method 與 route（字面或 OpenAPI 樣板）、`Host` 等於 target、有參數時摘錄出現參數名稱、回應摘錄第一行是 HTTP 狀態列、身分相同、時間不晚於現在且不早於最後一次觀察到它的 scan 結束時間、結果是 `not_reproduced`、大小有上限。
+- 這些檢查擋不住偽造：複測不經過平台與 guard，平台不代為重送請求、沒有流量紀錄可比對。因此改以問責：不可修改的事件記下 actor key、request_id、DB 時間、依據、檢查清單與兩段摘錄的 sha256；audit 的 `finding.triage` 記下 `evidence_provenance=operator_supplied`、檢查範圍與雜湊。不做雙人覆核（單人專題），列為限制。
+- client 不能填寫 `provenance`、`platform_checks` 等平台欄位（多餘欄位回 422）。
+
+### 28.3 自動重開（R1–R4）與為什麼不鎖 target
+
+- linker 寫連結的同一個 transaction 中，四項都成立才重開：R1 finding 是 resolved；R2 有觀察連結到同一個 fingerprint；R3 這個 run 的 scan `queue_position` 大於 `resolved_scan_position`；R4 run 凍結的 (mapping_version, taxonomy_sha256) 等於 finding 的。failed／timed_out run 的陽性觀察也算有效再現。
+- 轉成 resolved 時，DB trigger 以**單一查詢**取得 target 所有 scan 的最大 `queue_position` 並確認沒有進行中的 scan；新的 scan 必須先取得 target 的 FOR NO KEY UPDATE 鎖才寫入、identity 的 cache 是 1，所以查詢看不到的 scan 位置一定比 watermark 大。不以 FOR SHARE 鎖 target：持續的 FOR SHARE 會餓死停用、撤銷這類 FOR UPDATE（§13.5）。
+- R4 不成立時不重開（使用者決定），改以衍生的 `resolution_review_required` 標示（resolve 之後又被觀察到但 mapping 不同，或 target 之後有 scan 用了不同的 mapping）；報告不把它算成已修補。
+- 事件以複合 FK 引用 scanner_runs(id, scan_id)，不直接引用 scans（linker 持有 run 鎖時對 scans 取 KEY SHARE 會和對帳的 scan → run 形成死鎖，同 §25.8）。
+
+### 28.4 樂觀鎖、悲觀鎖與 lock_findings 的修正
+
+- `expected_version` 必填，和 `triage_version` 不符回 409 `VERSION_CONFLICT`；PATCH 以 FOR NO KEY UPDATE 鎖 finding。
+- linker 的 `lock_findings` 由 FOR UPDATE 改成 FOR NO KEY UPDATE：建立比較快照時 FK 檢查會依 UUID 順序對 findings 取 KEY SHARE，FOR UPDATE 與 KEY SHARE 互斥，既有程式就可能死鎖。
+- 事件表 append-only（`scan_records_guard`）；事件鏈由 BEFORE INSERT 檢查（sequence 等於 finding 目前的版本、previous 等於上一筆的新值、新值等於 finding 目前的狀態），所以先 UPDATE finding、再 INSERT 事件；deferred constraint trigger 在 commit 時確認每次升版都有事件。
+
+### 28.5 報告
+
+- worker 佇列（`reports`，SKIP LOCKED、lease 30 秒、最多 3 次），內容存 DB（`report_contents`，≤ 8 MiB，超過以整個 finding 為單位截斷並標示）。POST 回 202、`Idempotency-Key` 必填、scan 必須已終止。
+- 在一個 REPEATABLE READ READ ONLY transaction 中讀快照；以明確的投影組成白名單欄位，Pydantic `extra="forbid"` 與 golden JSON Schema 檢查。三層遮罩與 canary。Markdown 的不可信字串只放在 code span（換行等換成可見符號）或最上層的 fenced block；JSON 跳脫 `< > &` 與 U+2028／U+2029。
+- 完成時以 fenced transaction（鎖住仍持有 lease 的 generating 列）寫內容並轉成 succeeded；deferred 檢查雙向核對內容與狀態、sha256 與大小。
+- 只能下載平台產生的報告（以 report id 授權）；契約中的 artifact 下載移除，工具輸出只提供 metadata。
+
+### 28.6 契約修正（端點都還沒實作，不影響既有 client）
+
+- 報告的 POST 由 201 改成 202；移除 `/artifacts/{id}/download`；報告要求 scan 已終止。
+- triage 的 request 改用 `basis`、`comparison_id`、`attestation`、`observation_ids`、`expected_version`，取代 `evidence_artifact_ids`。
+
+### 28.7 交接的管理項目
+
+- 全域 audit 查詢（platform_admin，加在 projects 的 router）、全域待核准清單（platform_admin）、停用 auth profile（終止狀態；清除目前密文；新的 scan 回 409；排隊中的 scan 在交出 secret 前失敗；執行中的 scan 不受影響）。
+- 不做：封存舊版 auth profile、刪除或封存規格（報告引用版本）、刪除報告（T23a）、上傳證據檔案、target 層級的 finding 清單、下載報告的 audit。
+
+### 28.8 限制
+
+- DB 角色仍能 `DISABLE TRIGGER`（DDL／DML 分權在 T23b）；不做 hash chain。
+- fixture 上的 Nuclei 每次都是 `ENGINE_REPORTED_ERRORS`：帶 Nuclei 來源的 finding 會有 `engine_incomplete`，兩軌都無法 resolve。
+- taxonomy 或 fingerprint 換版之後，T22 一律把舊 finding 判成 inconclusive，所以舊 finding 也無法再以證據 resolve。
+
+### 28.9 資料保護現況（T21 完成也不代表完成）
+
+- 人工複測摘錄另存 `finding_triage_excerpts`，事件只存雜湊與長度：T23a 加上加密與到期清除時只改這張表，事件與雜湊不變。摘錄內容只給 operator/admin（人工摘錄只能做樣式遮罩；觀察有 runner 以已知 secret 值精確遮罩）。
+- 報告內容與摘錄在 DB 中沒有加密、沒有保留期限（T23a）；runs volume 的原始輸出未加密（T23a）；DDL／DML 分權（T23b）。SEC-14 不標完成。
+
+### 28.10 必要驗收閘門
+
+- G1 併發、G2 交易一致性（故障注入）、G3 DB 層強制、G4 安全反例、G5 審查（code-reviewer、security-reviewer、database-reviewer）、G6 Live、G7 宣稱範圍；coverage 不能替代。G1、G2 的測試在每個階段閘門與最後各連續執行 5 次。
+
+### 28.11 階段 A 的資料庫審查（database-reviewer，opus，2026-11-08）
+
+- 結果：0 CRITICAL、0 HIGH、2 MEDIUM、6 LOW；設計宣稱 1–4 成立。全部採用：
+  - M1：`attestation_valid` 在 attestation 缺少 provenance 或不是 object 時，因 NULL 三值邏輯會通過 → 改成 `COALESCE(jsonb_typeof(...) = 'object' AND ... = 'operator_supplied', false)`，並補 `{}`、`null`、`"x"` 的反例。
+  - M2：有 resolved finding 時 downgrade 違反 `resolution_watermark` → 重設 lifecycle 的同一個 UPDATE 一併清除 watermark 與版本；補「有資料時 downgrade 成功」的測試。
+  - L1：進行中的狀態改成「不在終止清單中」，未知的新狀態視為忙碌。
+  - L2：chain trigger 檢查系統事件引用的 scan 屬於 finding 的 target。
+  - L3：resolve 事件以 FK `(comparison_id, finding_id)` 引用比較快照中這個 finding 的那一列。
+  - L4：reason 遮罩後再檢查長度，超過回 422（原本會在 INSERT 時變成 500）。
+  - L5：PATCH 以 FOR SHARE 鎖住呼叫者的 key 並重新確認沒有被撤銷（比照 runner）。
+  - L6：upgrade 一開始就取 ACCESS EXCLUSIVE；事件表的三組 FK 加上索引。
+- R3 依賴三個沒有寫在 DB、由程式維持的不變量（審查建議明列）：
+  - (a) 所有寫入 scans 的路徑都在 INSERT 之前取得 target 的列鎖（identity 在 BEFORE trigger 之前就配出，不能靠 trigger 補鎖）。
+  - (b) 不會有把觀察連結到已終止 scan 的工具（backfill、relink）；有的話 R3 永遠不成立、靜默地不重開。
+  - (c) PATCH 在證據檢查之前就鎖住 finding；這段期間 linker 不能寫入這個 finding 的連結。把鎖移到證據檢查之後會讓 `observed_after_comparison` 與 trigger 之間出現競態。

@@ -24,9 +24,10 @@ from secscan.findings.domain.linking import (
     ObservationRow,
     identity_verified,
 )
-from secscan.findings.domain.model import MappingSource
+from secscan.findings.domain.model import LifecycleState, MappingSource, TriageState
 from secscan.findings.domain.normalization import Severity
 from secscan.findings.domain.taxonomy import MemberKey, member_key
+from secscan.findings.domain.triage import TriageStatus
 from secscan.findings.errors import MappingChangedError
 from secscan.findings.models import FindingModel, FindingObservationModel
 from secscan.scans.domain.catalog import Engine
@@ -63,6 +64,18 @@ class LockedFinding:
     aggregate: Aggregate
     # 鎖住時的連結數：這個 transaction 保留的序號從它之後開始。
     linked: int
+    # T21：自動重開需要的狀態（R1、R3、R4）。
+    status: TriageStatus
+    resolved_scan_position: int | None
+    mapping: tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class RunScan:
+    """這個 run 所屬 scan 的佇列位置與 project（scan 的這兩個欄位不可修改，不另外加鎖）。"""
+
+    queue_position: int
+    project_id: UUID
 
 
 class FindingRecords:
@@ -252,10 +265,22 @@ class FindingRecords:
             inserted.update({row.fingerprint: row.id for row in rows})
         return inserted
 
+    def run_scan(self, lease: Lease) -> RunScan:
+        row = self._session.execute(
+            select(ScanModel.queue_position, ScanModel.project_id).where(
+                ScanModel.id == lease.scan_id
+            )
+        ).one()
+        return RunScan(row.queue_position, row.project_id)
+
     def lock_findings(
         self, target_id: UUID, fingerprints: Sequence[str]
     ) -> dict[str, LockedFinding]:
-        """既有的 finding 依 fingerprint 的順序鎖住（呼叫端傳入排序過的 fingerprint）。"""
+        """既有的 finding 依 fingerprint 的順序鎖住（呼叫端傳入排序過的 fingerprint）。
+
+        FOR NO KEY UPDATE（T21）：建立比較快照時 FK 檢查會依 UUID 的順序對 findings 取 KEY SHARE；
+        FOR UPDATE 與 KEY SHARE 互斥，兩者以不同順序鎖同一批 finding 會死鎖。
+        """
         locked: dict[str, LockedFinding] = {}
         for batch in _batches(list(fingerprints)):
             rows = self._session.execute(
@@ -266,16 +291,34 @@ class FindingRecords:
                     FindingModel.severity_conflict,
                     FindingModel.needs_review,
                     FindingModel.observations_linked,
+                    FindingModel.triage_state,
+                    FindingModel.lifecycle_state,
+                    FindingModel.triage_version,
+                    FindingModel.resolved_scan_position,
+                    FindingModel.mapping_version,
+                    FindingModel.taxonomy_sha256,
                 )
                 .where(FindingModel.target_id == target_id, FindingModel.fingerprint.in_(batch))
                 .order_by(FindingModel.fingerprint)
-                .with_for_update()
+                .with_for_update(key_share=True)
             )
             for row in rows:
                 aggregate = Aggregate(
                     Severity(row.normalized_severity), row.severity_conflict, row.needs_review
                 )
-                locked[row.fingerprint] = LockedFinding(row.id, aggregate, row.observations_linked)
+                status = TriageStatus(
+                    TriageState(row.triage_state),
+                    LifecycleState(row.lifecycle_state),
+                    row.triage_version,
+                )
+                locked[row.fingerprint] = LockedFinding(
+                    row.id,
+                    aggregate,
+                    row.observations_linked,
+                    status,
+                    row.resolved_scan_position,
+                    (row.mapping_version, row.taxonomy_sha256),
+                )
         return locked
 
     def update_finding(

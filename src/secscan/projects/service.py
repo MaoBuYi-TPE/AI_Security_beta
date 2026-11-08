@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from secscan.api_keys.access import authorize
 from secscan.api_keys.domain import Permission, Principal
-from secscan.audit.domain import AuditEvent
+from secscan.audit.domain import AuditEvent, AuditFilters
 from secscan.audit.service import AuditTrail
 from secscan.core.db import ConstraintViolationError
 from secscan.core.errors import AppError, ErrorCode, not_found_error
@@ -62,6 +62,13 @@ class ProjectService:
         authorize(principal, Permission.PLATFORM_MANAGE, project_id)
         self._existing(project_id)
         return self._audit.list_for_project(project_id, page)
+
+    def list_all_audit_events(
+        self, principal: Principal, filters: AuditFilters, page: PageRequest
+    ) -> Page[AuditEvent]:
+        """全域稽核（T21）：只限 platform_admin，含 project 為 NULL 的全域動作。"""
+        authorize(principal, Permission.PLATFORM_MANAGE)
+        return self._audit.list_all(filters, page)
 
     def _existing(self, project_id: UUID) -> Project:
         project = self._projects.get(project_id)

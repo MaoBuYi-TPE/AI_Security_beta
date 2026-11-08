@@ -51,3 +51,23 @@ def display_text(value: str, *, max_length: int) -> tuple[str, bool]:
     if len(cleaned) > max_length:
         return cleaned[:max_length], True
     return cleaned, False
+
+
+_MULTILINE_ALLOWED = frozenset("\n\t")
+
+
+def require_multiline_text(value: str, *, field: str, max_length: int) -> None:
+    """多行的人工輸入（triage 的理由、複測步驟）：和 require_text 相同，但允許換行與 tab。
+
+    其他控制字元與格式字元（CR、ESC、零寬、bidi 控制字元）一律拒絕；訊息不含輸入內容。
+    """
+    if not value.strip():
+        raise ValueError(f"{field} 不可為空白")
+    if len(value) > max_length:
+        raise ValueError(f"{field} 不可超過 {max_length} 個字元")
+    if any(
+        character not in _MULTILINE_ALLOWED
+        and unicodedata.category(character) in _INVISIBLE_CATEGORIES
+        for character in value
+    ):
+        raise ValueError(f"{field} 不可包含換行與 tab 以外的控制字元或不可見的格式字元")

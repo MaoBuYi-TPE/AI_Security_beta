@@ -19,6 +19,8 @@ def test_legacy_rule_header_credentials_fail_closed_at_launch(header: str) -> No
     session.execute.return_value.first.return_value = SimpleNamespace(
         type="api_key_header", header_name=header, encrypted_secret=b"opaque-test-token"
     )
+    # T21：profile 沒有停用（is_disabled 讀到的 disabled_at 是 NULL）。
+    session.scalar.return_value = None
     scan = create_autospec(LockedScan, instance=True)
     scan.auth_profile_id, scan.auth_profile_version = uuid4(), 1
 
@@ -33,6 +35,8 @@ def test_regular_api_key_header_still_returns_the_sealed_binding() -> None:
     session.execute.return_value.first.return_value = SimpleNamespace(
         type="api_key_header", header_name="X-API-Key", encrypted_secret=b"opaque-test-token"
     )
+    # T21：profile 沒有停用（is_disabled 讀到的 disabled_at 是 NULL）。
+    session.scalar.return_value = None
     scan = create_autospec(LockedScan, instance=True)
     scan.auth_profile_id, scan.auth_profile_version = uuid4(), 1
 
@@ -57,6 +61,7 @@ def test_new_scan_binding_rejects_a_legacy_reserved_header(monkeypatch: pytest.M
     profile = create_autospec(AuthProfile, instance=True)
     profile.id, profile.project_id, profile.target_id = uuid4(), uuid4(), uuid4()
     profile.current.definition.credential = Credential(AuthType.API_KEY_HEADER, "X-ZAP-Scan-ID")
+    profile.disabled_at = None
     request = create_autospec(ScanRequest, instance=True)
     request.auth_profile_id = profile.id
     target = create_autospec(Target, instance=True)

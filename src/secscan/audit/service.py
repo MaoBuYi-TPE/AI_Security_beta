@@ -5,7 +5,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from secscan.audit.domain import AuditEvent, NewAuditEvent
+from secscan.audit.domain import AuditEvent, AuditFilters, NewAuditEvent
 from secscan.audit.repository import AuditEventRepository
 from secscan.core.json_types import JsonValue
 from secscan.core.pagination import Page, PageRequest
@@ -44,3 +44,6 @@ class AuditTrail:
 
     def list_for_project(self, project_id: UUID, page: PageRequest) -> Page[AuditEvent]:
         return self._events.list_by_project(project_id, page)
+
+    def list_all(self, filters: AuditFilters, page: PageRequest) -> Page[AuditEvent]:
+        return self._events.list_all(filters, page)

@@ -18,15 +18,21 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
+    PrimaryKeyConstraint,
     String,
+    Text,
     UniqueConstraint,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from secscan.audit.domain import REQUEST_ID_MAX_LENGTH
 from secscan.auth_profiles.domain.model import ROLE_LABEL_MAX_LENGTH
 from secscan.core.db import Base, CreatedAtMixin, UuidPrimaryKeyMixin
+from secscan.core.json_types import JsonObject
 from secscan.findings.domain.fingerprint import RouteSource
 from secscan.findings.domain.model import LifecycleState, MappingSource, TriageState
 from secscan.findings.domain.normalization import Confidence, Severity
@@ -37,6 +43,12 @@ from secscan.findings.domain.taxonomy import (
     CweSource,
     FindingCategory,
     FindingKind,
+)
+from secscan.findings.domain.triage import (
+    EVIDENCE_MAX_BYTES,
+    REASON_MAX_LENGTH,
+    REQUEST_EXCERPT_MAX_BYTES,
+    RESPONSE_EXCERPT_MAX_BYTES,
 )
 from secscan.scans.domain.observation import (
     OBSERVATION_METHODS,
@@ -149,6 +161,18 @@ class FindingModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
         CheckConstraint(f"lifecycle_state IN ({_LIFECYCLE})", name="lifecycle_state_valid"),
         CheckConstraint("last_seen_at >= created_at", name="times"),
         CheckConstraint("observations_linked >= 0", name="observations_linked_valid"),
+        # T21（v0017）：resolved ⇒ confirmed；resolved ⇔ watermark 與連結數都有值（trigger 寫入）。
+        CheckConstraint("triage_version >= 0", name="triage_version_valid"),
+        CheckConstraint(
+            "lifecycle_state <> 'resolved' OR triage_state = 'confirmed'",
+            name="resolution_confirmed",
+        ),
+        CheckConstraint(
+            "(lifecycle_state = 'resolved') = (resolved_scan_position IS NOT NULL) "
+            "AND (resolved_scan_position IS NULL) = (resolved_link_count IS NULL) "
+            "AND (resolved_link_count IS NULL OR resolved_link_count <= observations_linked)",
+            name="resolution_watermark",
+        ),
     )
 
     target_id: Mapped[UUID] = mapped_column(ForeignKey("targets.id", ondelete="RESTRICT"))
@@ -192,6 +216,11 @@ class FindingModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     # 已連結的觀察數（v0015）：linker 持有列鎖時一次保留一批序號，commit 時 DB 核對它等於連結的
     # 筆數。讀取時以 link_sequence <= observations_linked 取得一致的快照（追溯 API 的分頁）。
     observations_linked: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    # T21（v0017）：每次 triage 或 lifecycle 變更恰好 +1，並有恰好一筆事件。
+    triage_version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    # resolve 時由 trigger 寫入：target 所有 scan 的最大 queue_position（R3）與當時的連結數。
+    resolved_scan_position: Mapped[int | None] = mapped_column(BigInteger)
+    resolved_link_count: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class FindingObservationModel(Base):
@@ -217,3 +246,135 @@ class FindingObservationModel(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     # 這個 finding 的第幾個連結（v0015）：必須是這個 transaction 在 finding 上保留的序號。
     link_sequence: Mapped[int] = mapped_column(BigInteger)
+
+
+_EVENT_KEYS = "ARRAY['classification', 'reasons', 'attestation', 'observation_ids', 'links']"
+
+
+class FindingTriageEventModel(Base):
+    """triage 或 lifecycle 的一次變更（append-only，v0017）；先 UPDATE finding、再 INSERT 事件。
+
+    系統事件只有自動重開（resolved → reopened），以複合 FK 引用 scanner_runs，不直接引用 scans。
+    """
+
+    __tablename__ = "finding_triage_events"
+    __table_args__ = (
+        PrimaryKeyConstraint("finding_id", "sequence"),
+        ForeignKeyConstraint(
+            ["finding_id", "target_id"], ["findings.id", "findings.target_id"], ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["comparison_id", "target_id"],
+            ["scan_comparisons.id", "scan_comparisons.target_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "scan_id"], ["scanner_runs.id", "scanner_runs.scan_id"], ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["comparison_id", "finding_id"],
+            ["scan_comparison_findings.comparison_id", "scan_comparison_findings.finding_id"],
+            ondelete="RESTRICT",
+        ),
+        Index(None, "actor_key_id"),
+        Index(None, "comparison_id", "target_id"),
+        Index(None, "run_id", "scan_id"),
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+        CheckConstraint("actor_kind IN ('key', 'system')", name="actor_kind_valid"),
+        CheckConstraint(
+            f"previous_triage_state IN ({_TRIAGE}) AND triage_state IN ({_TRIAGE}) "
+            f"AND previous_lifecycle_state IN ({_LIFECYCLE}) AND lifecycle_state IN ({_LIFECYCLE})",
+            name="states_valid",
+        ),
+        CheckConstraint(
+            "(previous_triage_state = triage_state) "
+            "<> (previous_lifecycle_state = lifecycle_state)",
+            name="one_change",
+        ),
+        CheckConstraint(
+            "reason_code IN ('manual', 'auto_reopen_new_observation')", name="reason_code_valid"
+        ),
+        CheckConstraint(
+            f"char_length(btrim(reason)) > 0 AND char_length(reason) <= {REASON_MAX_LENGTH}",
+            name="reason_valid",
+        ),
+        CheckConstraint(
+            "resolution_basis IS NULL OR resolution_basis IN "
+            "('rescan_not_observed', 'manual_retest')",
+            name="basis_valid",
+        ),
+        CheckConstraint(
+            f"jsonb_typeof(evidence) = 'object' AND octet_length(evidence::text) <= "
+            f"{EVIDENCE_MAX_BYTES} AND (evidence - {_EVENT_KEYS}) = jsonb_build_object()",
+            name="evidence_valid",
+        ),
+        CheckConstraint("(actor_kind = 'key') = (actor_key_id IS NOT NULL)", name="actor_valid"),
+        CheckConstraint(
+            "(actor_kind = 'system') = (run_id IS NOT NULL) "
+            "AND (run_id IS NULL) = (scan_id IS NULL) "
+            "AND (actor_kind = 'system') = (reason_code = 'auto_reopen_new_observation') "
+            "AND (actor_kind <> 'system' OR (previous_lifecycle_state = 'resolved' "
+            "AND lifecycle_state = 'reopened'))",
+            name="system_valid",
+        ),
+        CheckConstraint(
+            "(lifecycle_state = 'resolved' AND previous_lifecycle_state <> 'resolved') "
+            "= (comparison_id IS NOT NULL) "
+            "AND (comparison_id IS NULL) = (resolution_basis IS NULL)",
+            name="resolution_valid",
+        ),
+        CheckConstraint(
+            "(resolution_basis IS NOT DISTINCT FROM 'manual_retest') = (evidence ? 'attestation') "
+            "AND (resolution_basis IS DISTINCT FROM 'manual_retest' "
+            "OR COALESCE(jsonb_typeof(evidence -> 'attestation') = 'object' "
+            "AND evidence -> 'attestation' ->> 'provenance' = 'operator_supplied', false))",
+            name="attestation_valid",
+        ),
+    )
+
+    finding_id: Mapped[UUID]
+    target_id: Mapped[UUID]
+    sequence: Mapped[int] = mapped_column(BigInteger)
+    actor_kind: Mapped[str] = mapped_column(String(16))
+    actor_key_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("api_keys.id", ondelete="RESTRICT")
+    )
+    request_id: Mapped[str | None] = mapped_column(String(REQUEST_ID_MAX_LENGTH))
+    previous_triage_state: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    triage_state: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    previous_lifecycle_state: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    lifecycle_state: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    reason_code: Mapped[str] = mapped_column(String(LABEL_MAX_LENGTH))
+    reason: Mapped[str] = mapped_column(Text)
+    comparison_id: Mapped[UUID | None]
+    resolution_basis: Mapped[str | None] = mapped_column(String(LABEL_MAX_LENGTH))
+    run_id: Mapped[UUID | None]
+    scan_id: Mapped[UUID | None]
+    evidence: Mapped[JsonObject] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.clock_timestamp())
+
+
+class FindingTriageExcerptModel(Base):
+    """人工複測的遮罩摘錄（v0017）：和事件分開存放，T23a 加密與清除時不必修改事件。"""
+
+    __tablename__ = "finding_triage_excerpts"
+    __table_args__ = (
+        PrimaryKeyConstraint("finding_id", "sequence", "kind"),
+        ForeignKeyConstraint(
+            ["finding_id", "sequence"],
+            ["finding_triage_events.finding_id", "finding_triage_events.sequence"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("kind IN ('request', 'response')", name="kind_valid"),
+        CheckConstraint(
+            f"octet_length(content) >= 1 AND octet_length(content) <= CASE kind "
+            f"WHEN 'request' THEN {REQUEST_EXCERPT_MAX_BYTES} "
+            f"ELSE {RESPONSE_EXCERPT_MAX_BYTES} END",
+            name="content_size",
+        ),
+    )
+
+    finding_id: Mapped[UUID]
+    sequence: Mapped[int] = mapped_column(BigInteger)
+    kind: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)

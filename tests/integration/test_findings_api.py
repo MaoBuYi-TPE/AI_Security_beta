@@ -214,6 +214,9 @@ def test_findings_are_listed_with_mapping_and_sources(
         "mapping_version": "rules-1",
         "triage_state": "unreviewed",
         "lifecycle_state": "open",
+        "triage_version": 0,
+        "resolution_review_required": False,
+        "resolution_review_reasons": [],
         "first_seen_scan_id": str(scan.id),
         "last_seen_scan_id": str(scan.id),
         # 各來源的原值並列（等級衝突的依據）；同一個來源的觀察合計。

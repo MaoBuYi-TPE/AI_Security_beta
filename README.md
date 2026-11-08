@@ -322,7 +322,7 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - **fingerprint**（v2）：target、kind、群組、method、route（有規格時剛好一個最具體的 operation 才用樣板）、參數位置與名稱、auth role 與身分是否驗證過；route 是樣板時，沒有審查過的規則另外以字面 path 區分物件。標題、證據、等級、query、工具的 CWE 都不影響。去重的反例（同 CWE 不同參數、同 route 不同身分或物件、不同的弱點）與合併的對照組在 `tests/unit/findings/test_dedup_counterexamples.py` 與真實錄製的契約測試。
 - **等級**：各來源正規化之後的最高值，來源數本身不加分；來源不一致時 `severity_conflict`。兩個工具同時命中不是人工確認。
 - **OWASP**：Top 10:2025 依官方的 CWE 清單（`make owasp-top10` 從鎖定 commit 的官方分類頁凍結成 `findings/taxonomy/owasp_top10_2025.json`，`make owasp-top10-check` 逐位元組重現；不連網）；API Security Top 10:2023 是 curated。每個 finding 記下對應的來源與版本。
-- **API**：`GET /api/v1/scans/{scan_id}/findings`（分頁，可依 kind、category、severity、engine、triage_state、needs_review 篩選；sources 只有這個 scan 的來源；另給原始 CWE、未對應的原因與相關的 finding）。triage 在 T21。
+- **API**：`GET /api/v1/scans/{scan_id}/findings`（分頁，可依 kind、category、severity、engine、triage_state、lifecycle_state、needs_review 篩選；sources 只有這個 scan 的來源；另給原始 CWE、未對應的原因與相關的 finding）。triage 見下方 T21。
 - **來源追溯**（T20）：`GET /api/v1/findings/{id}`（有上限的摘要與近期 5 次 scan）、`/findings/{id}/scans`（完整的歷史，每個 scan 列出所有 run）、`/findings/{id}/observations`（連結當時的值 → 遮罩後的觀察 → 報告 artifact 的 metadata → run 的映像、plan_hash 與版本；不輸出 storage_key）。連結有 DB 指定的序號，帶回 `as_of` 翻頁時集合固定；DB 另外檢查觀察、finding 與 first／last seen 的 scan 屬於同一個 target（migration v0015）。
 - **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-findings`（同一個 scan 跑 ZAP 與 Nuclei，掃 fixture app 的弱點版與修補版，並以追溯 API 驗證每個觀察的來源；另跑小時間預算的部分失敗情境，約 25 分鐘）。
 - 設計見 `docs/DECISIONS.md` §25、§26；API 見 `docs/API_CONTRACT.md` §9、§17.9、§17.10。
@@ -338,6 +338,18 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - `ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-rescan LIVE_PYTEST_ENV="SECSCAN_RECORD_DIR=$PWD/recordings/fixture-rescan/run-name"`：同一隔離 target 的弱點→弱點、弱點→修補、小預算複掃。每次把 `run-name` 換成尚未存在的目錄；既有目錄或檔案會被拒絕，不覆寫歷史量測。不與其他 live 指令同時執行。結果在 gitignore 的 `recordings/fixture-rescan/`。三次有效校準與最終執行都通過（每次約 32 分鐘）：弱點→弱點、弱點→修補皆 comparable，小預算需人工確認；new／not_observed 一律為 0；已自動對應的 6 個修補案例（20 個 finding）都是 inconclusive，另 6 個案例沒有自動對應、未逐一驗證。細節見 `DECISIONS.md` §27.14。
 - v0016 升級保留既有 run 的未知 provenance，不回填；downgrade 會刪除新快照／位置／版本資料，僅供已備份的開發測試 DB。
 - 契約見 `docs/API_CONTRACT.md` §17.11，決策與實測見 `docs/DECISIONS.md` §27，反例見 `docs/SECURITY_AND_TESTING.md` §4.3 的 RESCAN 表。
+
+#### 人工 triage、audit 與報告（T21，實作中）
+
+- **resolved 一律是人工判定，平台不提供自動修補驗證。** `PATCH /api/v1/findings/{id}/triage` 一次改一個欄位，必帶 `expected_version` 與 `reason`；resolve 必須引用同一個 target 的比較快照：
+  - `basis: rescan_not_observed`：該列是 not_observed。比較演算法 v1 不會產生 not_observed，**現行版本不可用**。
+  - `basis: manual_retest`：該列是 inconclusive、平台證據都成立，另附人工複測聲明（`attestation`）。平台只做一致性檢查（route、Host、參數、狀態列、身分、時間），**不驗證摘錄的真實性**；不要貼上憑證。
+  - 比較快照不會被修改；resolve 之後較新的 scan 以相同的 fingerprint 與 mapping 又觀察到時自動重開。
+- `GET /api/v1/findings/{id}/triage-events`：不可修改的事件；摘錄內容只給 operator/admin。
+- 報告：`POST /api/v1/scans/{id}/reports`（必帶 `Idempotency-Key`、scan 必須已終止，回 202）→ worker 產生 → `GET /api/v1/reports/{id}/download`（只能以 report id 下載平台產生的報告；JSON 或 Markdown，≤ 8 MiB，超過時截斷並標示）。工具的原始輸出不提供下載。
+- 管理檢視（platform_admin）：`GET /api/v1/audit-events`、`GET /api/v1/scope-grants/pending`；`POST /api/v1/auth-profiles/{id}/disable` 停用認證設定（終止狀態）。
+- **資料保護尚未完成**：報告內容與人工複測摘錄在 DB 中沒有加密、沒有保留期限，原始證據的加密也還沒做（T23a）。
+- migration v0017–v0019；契約見 `docs/API_CONTRACT.md` §19，決策見 `docs/DECISIONS.md` §28，反例見 `docs/SECURITY_AND_TESTING.md` §4.3 的 TRIAGE／REPORT 表。
 
 #### 隔離 lab 靶場（T03）
 
