@@ -112,3 +112,29 @@ def test_an_underestimate_falls_back_to_searching_actual_sizes(
 def test_a_fixed_part_over_the_limit_is_an_error() -> None:
     with pytest.raises(ReportTooLargeError):
         render(snapshot(skewed()), generated_at=NOW, max_bytes=100)
+
+
+def test_one_more_finding_is_added_when_the_estimate_leaves_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 估計（每個 60）比實際（每個 50）大：估計選 3 個，實際還放得下第 4 個。
+    layout = render_module._Layout(lambda count: b"x" * (100 + 50 * count), (60,) * 6)
+    monkeypatch.setattr(render_module, "_layout", lambda *_: layout)
+    cut = render(snapshot(tuple(finding() for _ in range(6))), generated_at=NOW, max_bytes=320)
+    assert (cut.omitted_findings, len(cut.content)) == (2, 300)
+
+
+def test_all_but_the_last_finding_fit(monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = render_module._Layout(lambda count: b"x" * (100 + 50 * count), (50,) * 4)
+    monkeypatch.setattr(render_module, "_layout", lambda *_: layout)
+    cut = render(snapshot(tuple(finding() for _ in range(4))), generated_at=NOW, max_bytes=290)
+    assert (cut.truncated, cut.omitted_findings, len(cut.content)) == (True, 1, 250)
+
+
+def test_malformed_documents_are_rejected_by_the_markdown_renderer() -> None:
+    with pytest.raises(TypeError):
+        markdown_module.assemble({"truncation": []}, ())
+    with pytest.raises(TypeError):
+        markdown_module.finding_fragments(["not an object"])
+    with pytest.raises(TypeError):
+        markdown_module._list({"not": "a list"})

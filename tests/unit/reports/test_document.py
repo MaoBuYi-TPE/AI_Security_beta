@@ -3,15 +3,22 @@
 import json
 from dataclasses import replace
 from typing import Any
+from uuid import UUID
 
 import pytest
 from markdown_it import MarkdownIt
 
 from secscan.reports.domain import wording
 from secscan.reports.domain.document import clean, summary
-from secscan.reports.domain.model import MAX_REPORT_BYTES, ReportFormat, ReportSnapshot
+from secscan.reports.domain.model import (
+    MAX_REPORT_BYTES,
+    ReportFormat,
+    ReportSnapshot,
+    SourceRow,
+    SpecSection,
+)
 from secscan.reports.domain.render import render
-from tests.unit.reports.factory import MANUAL, NOW, SCAN, finding, snapshot
+from tests.unit.reports.factory import FINDING, MANUAL, NOW, SCAN, finding, snapshot
 from tests.unit.reports.test_encoding import MALICIOUS, assert_safe, flatten
 
 PLATFORM_KEY = "secscan_0123456789abcdef_" + "a" * 64
@@ -264,3 +271,48 @@ def test_secrets_are_masked_before_the_value_is_shortened() -> None:
     cleaned = clean(value)
     assert cleaned is not None
     assert "eyJ" not in cleaned
+
+
+def test_a_spec_section_appears_in_both_formats() -> None:
+    spec = SpecSection(UUID(int=9), 3, "3.1.0\n# 標題注入", 12)
+    markdown, document = render_both(snapshot(spec=spec))
+    assert document["spec"] == {
+        "id": str(UUID(int=9)),
+        "version": 3,
+        "openapi_version": "3.1.0\n# 標題注入",
+        "operation_count": 12,
+    }
+    assert f"## {wording.SECTION_TITLES['spec']}" in markdown
+    assert "- operation_count：12" in markdown
+    assert_safe(markdown)
+    assert "\n# 標題注入" not in markdown
+    plain, _ = render_both(snapshot())
+    assert wording.SECTION_TITLES["spec"] not in plain
+
+
+def test_a_rescan_resolution_has_no_attestation_and_multiple_sources_are_noted() -> None:
+    rescan = replace(
+        MANUAL,
+        basis="rescan_not_observed",
+        provenance="platform_comparison",
+        performed_at=None,
+        performed_by=None,
+        procedure=None,
+        request_excerpt_sha256=None,
+        request_excerpt_bytes=None,
+        response_excerpt_sha256=None,
+        response_excerpt_bytes=None,
+        checks_version=None,
+        platform_checks=(),
+    )
+    sources = (*FINDING.sources, SourceRow("nuclei", "cors", "info", "info", "", 1))
+    item = finding(
+        lifecycle_state="resolved", triage_state="confirmed", resolution=rescan, sources=sources
+    )
+    markdown, document = render_both(snapshot((item,)))
+    [projected] = document["findings"]
+    assert projected["resolution"]["attestation"] is None
+    assert projected["resolution"]["evidence_provenance"] == "platform_comparison"
+    assert projected["multiple_sources_note"]
+    assert "performed_at" not in markdown
+    assert projected["multiple_sources_note"] in markdown

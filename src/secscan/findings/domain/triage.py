@@ -106,20 +106,18 @@ class RequestedChange:
 
 def plan_manual(current: TriageStatus, change: RequestedChange) -> TriageStatus:
     """人工轉換後的狀態（版本 +1）；不成立時拋 TransitionError。不檢查證據（triage 模組負責）。"""
-    triage_changes = change.triage is not None and change.triage != current.triage
-    lifecycle_changes = change.lifecycle is not None and change.lifecycle != current.lifecycle
-    if triage_changes and lifecycle_changes:
+    triage = change.triage if change.triage != current.triage else None
+    lifecycle = change.lifecycle if change.lifecycle != current.lifecycle else None
+    if triage is not None and lifecycle is not None:
         raise TransitionError(TransitionProblem.MULTIPLE_CHANGES)
-    if not triage_changes and not lifecycle_changes:
-        raise TransitionError(TransitionProblem.NO_CHANGE)
-    if triage_changes and change.triage is not None:
+    if triage is not None:
         if current.lifecycle is LifecycleState.RESOLVED:
             raise TransitionError(TransitionProblem.TRIAGE_WHILE_RESOLVED)
-        return TriageStatus(change.triage, current.lifecycle, current.version + 1)
-    if change.lifecycle is None:
+        return TriageStatus(triage, current.lifecycle, current.version + 1)
+    if lifecycle is None:
         raise TransitionError(TransitionProblem.NO_CHANGE)
-    _check_lifecycle(current, change.lifecycle)
-    return TriageStatus(current.triage, change.lifecycle, current.version + 1)
+    _check_lifecycle(current, lifecycle)
+    return TriageStatus(current.triage, lifecycle, current.version + 1)
 
 
 def _check_lifecycle(current: TriageStatus, target: LifecycleState) -> None:

@@ -103,6 +103,7 @@ def _markdown_scan(data: JsonObject) -> list[str]:
         _field("valid_until", grant["valid_until"]),
         _field("authorization_reference", grant["authorization_reference"], untrusted=True),
         "",
+        *_markdown_spec(data["spec"]),
         f"## {wording.SECTION_TITLES['engines']}",
         "",
         "| engine | status | error_code |",
@@ -119,6 +120,22 @@ def _markdown_scan(data: JsonObject) -> list[str]:
     lines += [_field(key, coverage[key]) for key in coverage if key != "limitations"]
     lines += [f"- limitation：{item}" for item in _strings(coverage["limitations"])]
     return [*lines, ""]
+
+
+def _markdown_spec(spec: JsonValue) -> list[str]:
+    """API 規格（沒有規格的 scan 不列這一節）；openapi_version 來自上傳的文件，放在 code 中。"""
+    if spec is None:
+        return []
+    spec = _obj(spec)
+    return [
+        f"## {wording.SECTION_TITLES['spec']}",
+        "",
+        _field("spec_id", spec["id"]),
+        _field("spec_version", spec["version"]),
+        _field("openapi_version", spec["openapi_version"], untrusted=True),
+        _field("operation_count", spec["operation_count"]),
+        "",
+    ]
 
 
 def _markdown_summary(data: JsonObject) -> list[str]:

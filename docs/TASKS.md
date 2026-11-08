@@ -1540,7 +1540,7 @@
     - G6 Live：`make test-live-fixture-rescan` 兩次都通過（審查修正前後各一次，各約 31.5 分鐘）：兩個案例經人工複測 resolve、比較快照不變、反例的拒絕原因只來自平台條件、小預算 scan 之後 2／2 自動重開、4 份報告的核對都通過；`make test-live-fixture-findings` 回歸 3 passed；沒有殘留資源（§28.15）。
     - G7：文件、API 說明、報告與用語檢查都沒有「平台自動驗證修補」「資料保護已完成」「SEC-14 完成」這類敘述。
     - Gate D：去重（T20）與複掃（T22）的部分已通過；報告的離線、DB 與 live 核對已通過，**使用者人工審閱樣本報告（`recordings/t21-report-samples/`）之後才標 Gate D 通過**。
-    - 品質：`make lint`、`make typecheck`、`make test`（6462 passed、2 skipped，coverage 99.25%）通過；G1／G2 的閘門測試連續 5 次通過（每次 58 個）。
+    - 品質：`make lint`、`make typecheck`、`make test`（6462 passed、2 skipped，coverage 99.25%）通過；G1／G2 的閘門測試連續 5 次通過（每次 58 個）。合併後補查核心模組的 branch coverage，報告的三個模組未達 90%，後續 PR 補測試之後都是 100%（`triage_records.py` 97%），整體 6471 passed、coverage 99.37%（§28.16）。
   - 給 T23a：T21 新增的人工複測摘錄（`finding_triage_excerpts`）與報告內容（`report_contents`）在 DB 中沒有加密、沒有保留期限，與原始證據一併處理；清除摘錄時只改那張表，事件與雜湊不變；報告以新的 migration 開放「只刪除到期報告」（`DECISIONS.md` §28.9）。
 - [ ] T31 建立 benchmark harness。
   - DoD：透過自己的 API 執行各實驗組別，保存 manifest 與 guard 計數；`evaluate.py` 是純函式並有測試。組合組的子預算凍結或偏差揭露須在細部計畫決定，不冒稱現有共用預算已符合公平實驗。

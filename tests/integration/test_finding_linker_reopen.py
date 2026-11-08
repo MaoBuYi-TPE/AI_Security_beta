@@ -16,7 +16,7 @@ from secscan.main import create_app
 from secscan.scans.domain.lifecycle import RunStatus
 from tests.integration.api_support import Seeder, World
 from tests.integration.database import ProvisionedDatabase
-from tests.integration.finding_support import ZAP_CORS, ZAP_SQLI
+from tests.integration.finding_support import ZAP_CORS, ZAP_SQLI, ZAP_XCTO
 from tests.integration.triage_support import (
     CONFIRM,
     Scenario,
@@ -101,6 +101,20 @@ def test_a_newer_positive_observation_reopens_even_from_incomplete_runs(
     )
     assert audit.actor_key_id is None
     assert audit.changes["lifecycle"] == {"from": "resolved", "to": "reopened"}
+
+
+def test_a_run_with_a_new_finding_still_reopens_the_resolved_one(
+    queue_engine: Engine, queue_seed: Seeder, world: World, item: Scenario
+) -> None:
+    """同一個 run 也產生全新的 finding（沒有被鎖住的既有 finding）：只重開已 resolved 的那個。"""
+    run_scan(queue_engine, queue_seed, world, item.target, item.grant_id, (ZAP_XCTO, ZAP_SQLI))
+    assert state(queue_seed, item)[:2] == ("reopened", 3)
+    [new] = queue_seed.query(
+        "SELECT lifecycle_state, triage_version FROM findings "
+        "WHERE target_id = :target AND rule_group = 'x-content-type-options-missing'",
+        target=item.target.id,
+    )
+    assert (new.lifecycle_state, new.triage_version) == ("open", 0)
 
 
 def test_a_scan_without_the_finding_never_reopens_or_closes(

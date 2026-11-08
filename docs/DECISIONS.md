@@ -2626,3 +2626,10 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 - 第一次在審查修正之前執行，修正之後以第二次為準。Live 中的「操作者」是測試本身：它驗證流程、一致性檢查與標示，不證明人工聲明的真實性。
 - `make test-live-fixture-findings` 回歸一次（審查修正之後，linker 與 worker 迴圈都有改；錄到 `recordings/fixture-findings-t21/`，不覆寫 T19／T20 的錄製）：3 passed，22 分鐘；沒有殘留資源。3 個 warning 是 T19 既有 Live 測試的 pytest 棄用提醒（class-scoped fixture 寫成 instance method），與 T21 無關，留給 T23c 整理。
 - Gate D 的人工審閱樣本：Live 測試只核對報告、不保存內容，所以樣本改在 db-test 以真實的 PATCH、ReportService、ReportWorker 與渲染產生（觀察是整合測試的合成資料，UUID 換成代號），放在 gitignore 的 `recordings/t21-report-samples/`。使用者審閱之前，Gate D 不標通過。
+
+### 28.16 合併後補查核心模組的 branch coverage（2026-11-08）
+
+- PR #30 合併後才逐一檢查計畫要求的核心模組 branch coverage（≥ 90%），發現 `reports/domain/document.py`、`render.py`、`markdown.py` 分別約 83%、88%、89%：有規格時的 spec 區段、`rescan_not_observed` 沒有 attestation 的 resolution、多個來源的說明、截斷時「再多放一個」成功與最後一個放不下的分支、結構不符的文件都沒有測試。這是 PR #30 的 DoD 缺口，以後續 PR 補上。
+- 補測試的過程中發現 Markdown 報告沒有輸出 API 規格（JSON 有，計畫 §3.1 也列出規格），補上「API 規格」一節（`openapi_version` 來自上傳的文件，放在 code 中）。
+- `plan_manual` 有一個不可能走到的分支（只為了 mypy 的型別收窄），改寫成等價、每個分支都走得到的形式。
+- 結果：`reports/domain/*`、`triage/domain/*`、`findings/domain/triage.py`、`findings/reopen.py`、`reports/queue.py`、`worker/reports.py`、`security/redaction.py` 都是 100%；`findings/triage_records.py` 97%（剩下的分支是 DB CHECK 保證不會發生的防禦檢查）。整體 6471 passed、2 skipped，coverage 99.37%。
