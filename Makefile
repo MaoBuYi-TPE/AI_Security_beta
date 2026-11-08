@@ -52,7 +52,8 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 	lab-net lab-up lab-down lab-verify lab-images build images ensure-net scan-net up down \
 	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
 	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check \
-	owasp-top10 owasp-top10-check test-live-fixture-findings test-live-fixture-rescan
+	owasp-top10 owasp-top10-check test-live-fixture-findings test-live-fixture-rescan \
+	bench-check bench-live-check bench bench-evaluate
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -299,3 +300,29 @@ test-live-fixture-rescan: LIVE_TESTS := tests/live/test_fixture_rescan_live.py
 test-live-fixture-rescan: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/fixture-rescan
 test-live-fixture-rescan: LIVE_PYTEST_ARGS := -s
 test-live-fixture-rescan: test-live-runner
+
+# T31（docs/DECISIONS.md §29）：benchmark harness。BENCH_SPEC 是實驗規格，BENCH_NAME 是新的結果目錄
+# （benchmarks/results/<BENCH_NAME>/，只收英數字、- 與 _，已存在就停止，不覆寫）。
+# bench-check 離線檢查規格與名稱（不連網、不碰 Docker）；bench 先做這兩項檢查，再以
+# test-live-runner 的同一個隔離 stack 與清理範圍執行（需要 ENABLE_LIVE_LAB_TESTS=1；不另外清理任何
+# 東西）。不自動重試；環境故障就整批作廢、換新的 BENCH_NAME 重跑。Juice Shop、VAmPI 的映像要先以
+# make lab-images 取得（harness 不 pull）。
+# bench-evaluate 離線、只讀結果目錄，評估以 JSON 寫到 stdout；BENCH_EVALUATE_ARGS 傳 --truth 等。
+BENCH_RESULTS := $(CURDIR)/benchmarks/results
+bench-check:
+	@[ -n "$(BENCH_SPEC)" ] && [ -n "$(BENCH_NAME)" ] || { echo "需要設定 BENCH_SPEC 與 BENCH_NAME"; exit 1; }
+	@$(UV_RUN) python -m benchmarks.cli check-spec "$(BENCH_SPEC)" "$(BENCH_NAME)" \
+		--results-root "$(BENCH_RESULTS)"
+
+bench-live-check:
+	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }
+
+bench: LIVE_TESTS := tests/live/test_bench_live.py
+bench: LIVE_PYTEST_ENV := BENCH_SPEC="$(BENCH_SPEC)" BENCH_RESULTS_DIR="$(BENCH_RESULTS)/$(BENCH_NAME)"
+bench: LIVE_PYTEST_ARGS := -s
+bench: bench-live-check bench-check test-live-runner
+
+bench-evaluate:
+	@[ -n "$(BENCH_NAME)" ] || { echo "需要設定 BENCH_NAME"; exit 1; }
+	@$(UV_RUN) python -m benchmarks.cli evaluate "$(BENCH_NAME)" \
+		--results-root "$(BENCH_RESULTS)" $(BENCH_EVALUATE_ARGS)
