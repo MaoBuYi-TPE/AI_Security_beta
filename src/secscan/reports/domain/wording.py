@@ -22,6 +22,9 @@ NOTICES = (
     "遮罩依名稱與樣式判斷，不保證辨識所有秘密；分享報告前請自行檢查。",
 )
 FIXTURE_NOTICE = "這是 fixture 測試資料的掃描結果，不代表真實系統。"
+# results_complete 是掃描流程的完成度，不是測試覆蓋的完整度（Gate D 審查）。
+COMPLETION_NOTICE = "results_complete=true 只代表掃描流程已完成，不表示測試覆蓋完整。"
+COVERAGE_UNMEASURED_NOTICE = "本次未量測測試覆蓋（coverage_measured=false），原因見覆蓋一節的限制。"
 INCOMPLETE_NOTICE = "掃描未完整完成（狀態：{status}）：結果不完整，未觀察到的項目不能視為不存在。"
 TRUNCATED_NOTICE = (
     "報告超過大小上限，已依優先順序省略 {omitted} 個 finding；摘要的計數仍以全部 finding 計算。"
@@ -101,6 +104,8 @@ def all_platform_text() -> tuple[str, ...]:
         TRUNCATED_NOTICE,
         COMPARISON_NOTICE,
         COMPARISONS_OMITTED_NOTICE,
+        COMPLETION_NOTICE,
+        COVERAGE_UNMEASURED_NOTICE,
         UNTRUSTED_NOTICE,
         *TRIAGE_LABELS.values(),
         *LIFECYCLE_LABELS.values(),

@@ -59,6 +59,10 @@ def test_consistent_attestation_records_hashes_and_platform_fields() -> None:
     evidence = checked.evidence()
     assert evidence["provenance"] == "operator_supplied"
     assert evidence["platform_checks"] == list(PLATFORM_CHECKS)
+    # 檢查名稱不暗示平台驗證了結果：只是「宣稱的結果」符合要求（checks_version 2）。
+    assert evidence["checks_version"] == 2
+    assert "declared_result_is_not_reproduced" in PLATFORM_CHECKS
+    assert "result_not_reproduced" not in PLATFORM_CHECKS
     assert evidence["request_excerpt_sha256"] == hashlib.sha256(REQUEST.encode()).hexdigest()
     assert evidence["response_excerpt_bytes"] == len(RESPONSE.encode())
     # 事件 metadata 不含摘錄內容（另存、T23a 可清除）。

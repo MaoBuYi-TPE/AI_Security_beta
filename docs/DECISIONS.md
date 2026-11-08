@@ -2633,3 +2633,21 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 - 補測試的過程中發現 Markdown 報告沒有輸出 API 規格（JSON 有，計畫 §3.1 也列出規格），補上「API 規格」一節（`openapi_version` 來自上傳的文件，放在 code 中）。
 - `plan_manual` 有一個不可能走到的分支（只為了 mypy 的型別收窄），改寫成等價、每個分支都走得到的形式。
 - 結果：`reports/domain/*`、`triage/domain/*`、`findings/domain/triage.py`、`findings/reopen.py`、`reports/queue.py`、`worker/reports.py`、`security/redaction.py` 都是 100%；`findings/triage_records.py` 97%（剩下的分支是 DB CHECK 保證不會發生的防禦檢查）。整體 6471 passed、2 skipped，coverage 99.37%。
+
+### 28.17 Gate D 樣本報告的人工審查（使用者，2026-11-08）
+
+- 使用者的結論：核心安全語意 PASS（未確認的告警有標示、resolved 標為人工判定、固定說明揭露限制、比較快照與 triage 分離、摘要計數一致、完成狀態一致、覆蓋限制有揭露、摘錄只有雜湊）；有條件通過，Gate D 暫不關閉。處理：
+  - **檢查名稱**：`result_not_reproduced` 容易被誤解成平台確認了無法重現 → 改名為 `declared_result_is_not_reproduced`，`checks_version` 升到 2（v1 已合併到 main，但只出現在開發與測試資料）；API_CONTRACT §19.2 逐項定義 `platform_checks`，寫明沒有一項代表平台獨立驗證修補。
+  - **嚴重度的來源**：Markdown 的來源行只列正規化後的等級，讀者會以為工具原本就給 High → 每個來源同時列出工具的原始嚴重度、信心與平台正規化的嚴重度，finding 的標題列標明「正規化」。樣本中 SQLi「原始 Medium、正規化 high」部分來自合成資料：整合測試的 `observation()` 預設把 `severity_label` 一律設成 Medium，`raw_severity` 是 3（正規化依 raw 值）；真實的 ZAP 輸出這裡會是 High。
+  - **完成度不等於覆蓋**：固定說明在完整完成時加上「`results_complete=true` 只代表掃描流程已完成，不表示測試覆蓋完整」，沒有量測覆蓋時加上「本次未量測測試覆蓋」。
+  - **原始 JSON**：審查看到的 `\<id-1>`、`http\://` 是貼到聊天時產生的，檔案中沒有反斜線，`json.loads` 與 `ReportDocumentV1` 都通過。第一版樣本兩個檔案各自替換代號，兩份不同的報告都變成 `<id-1>`，替換也讓內容不再和平台輸出逐位元組相同 → 第二版（`recordings/t21-report-samples-v2/`）經下載端點取得原始位元組、不替換代號（都是合成資料的隨機 id），`manifest.json` 記下每份的 metadata（sha256、大小）與下載 header，四份的 sha256 與大小都和 metadata 相符，報告 id 各不相同；每份都套用 Live 的同一套核對（`check_headers`、`check_document`／`check_markdown`、用語檢查）。
+- **三種 scan 狀態的證據組合**：計畫 §6.3 的 Live 報告是 partially_completed 與 timed_out，§6.4 卻要求含 completed。fixture 上的 Nuclei 每次都是 `ENGINE_REPORTED_ERRORS`，Live 不會出現 completed 的 scan，所以 completed 只能由 DB 整合測試涵蓋：
+
+  | scan 狀態 | Live（真實掃描，`make test-live-fixture-rescan` 兩次） | DB 整合（真實 API、worker 與渲染，合成觀察） |
+  |---|---|---|
+  | partially_completed | baseline 的 JSON 與 Markdown，各兩次 | — |
+  | timed_out | 小預算 scan 的 JSON 與 Markdown，各兩次 | 樣本 `timed-out.json`／`.md` |
+  | completed | 無（fixture 的 Nuclei 一律失敗） | `test_reports_api`；樣本 `completed.json`／`.md` |
+
+  Live 與樣本都套用同一套核對。**是否正式接受這個證據組合由使用者決定**；接受之前 Gate D 不關閉，不重跑 Live、不擴大掃描。
+- Gate D 即使通過，也不代表 SEC-14（T23a）、權限與速率限制（T23b）或整個 M5 已完成。

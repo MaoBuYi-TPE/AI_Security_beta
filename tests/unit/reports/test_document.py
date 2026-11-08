@@ -103,6 +103,7 @@ def test_untrusted_values_are_encoded_in_every_field(value: str) -> None:
         parameter_name=value,
         auth_role=value,
         samples=(replace(finding().samples[0], path="/" + value, evidence=value),),
+        sources=(SourceRow("zap", value, value, "high", value, 1),),
     )
     item = snapshot(
         (hostile,),
@@ -316,3 +317,32 @@ def test_a_rescan_resolution_has_no_attestation_and_multiple_sources_are_noted()
     assert projected["multiple_sources_note"]
     assert "performed_at" not in markdown
     assert projected["multiple_sources_note"] in markdown
+
+
+def test_completion_and_unmeasured_coverage_are_not_overstated() -> None:
+    completed = replace(SCAN, status="completed", results_complete=True)
+    _, document = render_both(snapshot(scan=completed))
+    assert wording.COMPLETION_NOTICE in document["notices"]
+    assert wording.COVERAGE_UNMEASURED_NOTICE in document["notices"]
+    measured = replace(completed, coverage_measured=True)
+    _, document = render_both(snapshot(scan=measured))
+    assert wording.COMPLETION_NOTICE in document["notices"]
+    assert wording.COVERAGE_UNMEASURED_NOTICE not in document["notices"]
+    # 未完成的 scan 只有「未完整完成」的說明，不說流程已完成。
+    _, document = render_both(snapshot())
+    assert wording.COMPLETION_NOTICE not in document["notices"]
+
+
+def test_markdown_shows_the_raw_and_normalized_severity_of_each_source() -> None:
+    item = finding(
+        severity="high", sources=(SourceRow("zap", "40018", "Medium", "high", "Low", 2),)
+    )
+    markdown, _ = render_both(snapshot((item,)))
+    assert "### 1. high（正規化）/ security" in markdown
+    assert (
+        "- source：zap；規則 ` 40018 `；工具的原始嚴重度 ` Medium `；平台正規化 high；"
+        "工具的信心 ` Low `；觀察 2 次"
+    ) in markdown
+    empty = finding(sources=(SourceRow("nuclei", "tech", "", "info", "", 1),))
+    markdown, _ = render_both(snapshot((empty,)))
+    assert "工具的原始嚴重度 （無）；平台正規化 info；工具的信心 （無）" in markdown
