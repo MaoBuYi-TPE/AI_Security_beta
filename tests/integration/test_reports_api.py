@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Iterator
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,10 +17,11 @@ from secscan.main import create_app
 from secscan.reports.document_schema import ReportDocumentV1
 from secscan.reports.domain import wording
 from secscan.scans.domain.catalog import Engine as ScanEngine
+from secscan.scans.domain.lifecycle import RunStatus
 from secscan.worker.reports import ReportWorker
 from tests.integration.api_support import Seeder, World
 from tests.integration.database import ProvisionedDatabase
-from tests.integration.finding_support import web_scan
+from tests.integration.finding_support import ZAP_SQLI, web_scan
 from tests.integration.triage_support import (
     CONFIRM,
     Scenario,
@@ -28,8 +29,10 @@ from tests.integration.triage_support import (
     db_now,
     eligible,
     resolve_body,
+    run_scan,
     scenario,
 )
+from tests.live.report_assertions import check_document, check_headers, check_markdown
 from tests.unit.reports.test_encoding import assert_safe, flatten
 
 pytestmark = pytest.mark.integration
@@ -129,6 +132,63 @@ def test_reports_are_generated_and_downloaded_with_safe_headers(
 
 def uuid_hex(value: str) -> str:
     return value.replace("-", "")
+
+
+def test_completed_and_timed_out_reports_pass_the_live_report_checks(
+    client: TestClient, queue_engine: Engine, queue_seed: Seeder, world: World, item: Scenario
+) -> None:
+    """Gate D（docs/DECISIONS.md §28.17）：completed 狀態沒有 Live 樣本，改以這裡的真實 API、
+    worker、渲染與下載流程，直接套用 Live 的同一套報告核對；timed_out 一併核對作為對照。"""
+    comparison = eligible(queue_engine, item)
+    url = f"/api/v1/findings/{item.sqli}/triage"
+    assert client.patch(url, json=CONFIRM, headers=world.operator_a.headers).status_code == 200
+    body = resolve_body(comparison, attestation(item, db_now(queue_seed)))
+    assert client.patch(url, json=body, headers=world.operator_a.headers).status_code == 200
+    completed = checked_reports(client, queue_engine, world, item.baseline, "completed")
+    assert wording.COMPLETION_NOTICE in completed.notices
+    assert [f.lifecycle_state for f in completed.findings].count("resolved") == 1
+    # 時間預算用完的複掃又觀察到 SQLi：陽性觀察也算再現，SQLi 自動重開。
+    timed_out, _ = run_scan(
+        queue_engine,
+        queue_seed,
+        world,
+        item.target,
+        item.grant_id,
+        (ZAP_SQLI,),
+        status=RunStatus.TIMED_OUT,
+    )
+    partial = checked_reports(client, queue_engine, world, timed_out, "timed_out")
+    assert wording.COMPLETION_NOTICE not in partial.notices
+    assert "reopened" in {finding.lifecycle_state for finding in partial.findings}
+
+
+def checked_reports(
+    client: TestClient, engine: Engine, world: World, scan: UUID, status: str
+) -> ReportDocumentV1:
+    """一個 terminal scan 的 JSON 與 Markdown 報告：產生、下載，並套用 tests/live 的核對函式。"""
+    headers = world.operator_a.headers
+    shown = client.get(f"/api/v1/scans/{scan}", headers=headers).json()["data"]
+    complete = status == "completed"
+    assert shown["status"] == status
+    assert shown["results_complete"] is complete
+    created = {name: create(client, scan, name, headers) for name in ("json", "markdown")}
+    for response in created.values():
+        assert response.status_code == 202, response.text
+    assert drain(engine) == 2
+    contents: dict[str, bytes] = {}
+    for name, response in created.items():
+        report_id = response.json()["data"]["id"]
+        meta = client.get(f"/api/v1/reports/{report_id}", headers=headers).json()["data"]
+        downloaded = client.get(f"/api/v1/reports/{report_id}/download", headers=headers)
+        assert downloaded.status_code == 200
+        check_headers(meta, downloaded.headers, downloaded.content)
+        contents[name] = downloaded.content
+    document = check_document(contents["json"], complete=complete)
+    if not document.coverage.coverage_measured:
+        assert wording.COVERAGE_UNMEASURED_NOTICE in document.notices
+    plain = check_markdown(contents["markdown"].decode("utf-8"))
+    assert wording.claims_violations(plain) == []
+    return document
 
 
 def test_idempotency_terminal_scans_and_quotas(

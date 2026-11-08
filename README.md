@@ -350,6 +350,7 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - 報告：`POST /api/v1/scans/{id}/reports`（必帶 `Idempotency-Key`、scan 必須已終止，回 202）→ worker 產生 → `GET /api/v1/reports/{id}/download`（只能以 report id 下載平台產生的報告；JSON 或 Markdown，≤ 8 MiB，超過時截斷並標示）。工具的原始輸出不提供下載。
 - 管理檢視（platform_admin）：`GET /api/v1/audit-events`、`GET /api/v1/scope-grants/pending`；`POST /api/v1/auth-profiles/{id}/disable` 停用認證設定（終止狀態）。
 - **資料保護尚未完成**：報告內容與人工複測摘錄在 DB 中沒有加密、沒有保留期限，原始證據的加密也還沒做（T23a）。
+- Gate D（去重、複掃與報告的驗收）2026-11-08 通過，採用有文件記錄的替代證據：partially_completed 與 timed_out 的報告由兩次 Live 複掃驗證；completed 的報告由 DB 整合測試驗證（真實的 API、worker、渲染與下載，合成的觀察），**沒有 completed 的 Live 端到端驗證**。Gate D 通過不代表 M5 或資料保護已完成（`docs/DECISIONS.md` §28.17）。
 - migration v0017–v0019；契約見 `docs/API_CONTRACT.md` §19，決策見 `docs/DECISIONS.md` §28，反例見 `docs/SECURITY_AND_TESTING.md` §4.3 的 TRIAGE／REPORT 表。
 
 #### 隔離 lab 靶場（T03）

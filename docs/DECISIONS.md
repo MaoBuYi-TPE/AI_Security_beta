@@ -2634,7 +2634,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 - `plan_manual` 有一個不可能走到的分支（只為了 mypy 的型別收窄），改寫成等價、每個分支都走得到的形式。
 - 結果：`reports/domain/*`、`triage/domain/*`、`findings/domain/triage.py`、`findings/reopen.py`、`reports/queue.py`、`worker/reports.py`、`security/redaction.py` 都是 100%；`findings/triage_records.py` 97%（剩下的分支是 DB CHECK 保證不會發生的防禦檢查）。整體 6471 passed、2 skipped，coverage 99.37%。
 
-### 28.17 Gate D 樣本報告的人工審查（使用者，2026-11-08）
+### 28.17 Gate D 樣本報告的人工審查與關閉（使用者，2026-11-08）
 
 - 使用者的結論：核心安全語意 PASS（未確認的告警有標示、resolved 標為人工判定、固定說明揭露限制、比較快照與 triage 分離、摘要計數一致、完成狀態一致、覆蓋限制有揭露、摘錄只有雜湊）；有條件通過，Gate D 暫不關閉。處理：
   - **檢查名稱**：`result_not_reproduced` 容易被誤解成平台確認了無法重現 → 改名為 `declared_result_is_not_reproduced`，`checks_version` 升到 2（v1 已合併到 main，但只出現在開發與測試資料）；API_CONTRACT §19.2 逐項定義 `platform_checks`，寫明沒有一項代表平台獨立驗證修補。
@@ -2646,8 +2646,27 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
   | scan 狀態 | Live（真實掃描，`make test-live-fixture-rescan` 兩次） | DB 整合（真實 API、worker 與渲染，合成觀察） |
   |---|---|---|
   | partially_completed | baseline 的 JSON 與 Markdown，各兩次 | — |
-  | timed_out | 小預算 scan 的 JSON 與 Markdown，各兩次 | 樣本 `timed-out.json`／`.md` |
-  | completed | 無（fixture 的 Nuclei 一律失敗） | `test_reports_api`；樣本 `completed.json`／`.md` |
+  | timed_out | 小預算 scan 的 JSON 與 Markdown，各兩次 | 樣本 `timed-out.json`／`.md`；常駐測試（見下方「收尾補強」） |
+  | completed | 無（fixture 的 Nuclei 一律失敗） | `test_reports_api`；樣本 `completed.json`／`.md`；常駐測試（見下方「收尾補強」） |
 
-  Live 與樣本都套用同一套核對。**是否正式接受這個證據組合由使用者決定**；接受之前 Gate D 不關閉，不重跑 Live、不擴大掃描。
-- Gate D 即使通過，也不代表 SEC-14（T23a）、權限與速率限制（T23b）或整個 M5 已完成。
+  Live 與樣本都套用同一套核對。使用者已接受這個證據組合，見下方的關閉紀錄。
+- **Gate D 關閉紀錄（使用者，2026-11-08）：PASS（接受有文件記錄的替代證據）**
+  - **證據**：去重反例（T20，§26）、複掃反例（T22，§27）與報告安全語意驗收（T21，§28.15–§28.17）都有對應的測試證據。
+  - **三種狀態**：
+    - partially_completed 與 timed_out 由兩次 Live rescan 驗證。
+    - completed 因為 fixture 的 Nuclei 引擎限制，改用 DB 整合測試：走真實的 API、worker、渲染與下載流程，並共用報告驗證斷言（`tests/live/report_assertions.py`；常駐測試見「收尾補強」）。
+  - **適用範圍**：這個替代方案只適用於 Gate D 的報告正確性與措辭驗收，**不宣稱已完成 completed 的 Live 端到端驗證**。
+  - **PR #32**：修正人工複測的檢查名稱、版本與嚴重度呈現；測試結果 6473 passed、2 skipped，coverage 99.37%。
+  - **樣本**：報告樣本與下載校驗證據放在 `recordings/t21-report-samples-v2/` 與其中的 `manifest.json`（在 gitignore 中），由執行者保存。
+  - **不做的事**：不需要第三次 Live，也不為這個驗收差異修改 fixture 或掃描演算法。
+  - **收尾補強**：
+    - 關閉前核對時發現，共用斷言原本只由已刪除的樣本產生器套用過一次；`test_reports_api` 用的是另外寫的等價斷言，沒有常駐的回歸保護。
+    - 因此新增 `test_completed_and_timed_out_reports_pass_the_live_report_checks`。它重現樣本的同一個流程：completed 是 resolved 的 SQLi，timed_out 是複掃中自動重開的 SQLi。兩者都直接呼叫 `check_headers`、`check_document`、`check_markdown` 與用語檢查。
+    - completed 另外斷言 `results_complete=true` 與「完成度不等於覆蓋」的固定說明；`coverage_measured` 是 false 時，斷言「未量測覆蓋」的固定說明。
+    - 把傳給 `check_document` 的完成旗標反過來時，completed 與 timed_out 兩個案例都會失敗，所以測試不是空轉。只改測試，不改產品程式。
+    - 補強後的結果：新測試連續 3 次通過；`make lint`、`make typecheck` 通過；`make test` 6474 passed、2 skipped，coverage 99.37%，報告與人工複測的核心模組 branch coverage 仍是 100%。
+  - **仍未完成**：
+    - SEC-14（T23a）、權限與速率限制（T23b）。
+    - M5 的其他驗收項目：Gate A–C 尚未正式判定通過，Gate E（T23d）與 T23 的 DoD 尚未完成。
+    - Gate D 通過不代表 M5 完成。報告內容與人工複測摘錄尚未加密、尚未設定保留期限，不得宣稱已完成保護。
+  - **接下來**：原核准的順序不變，T21 → T31 → T23a–d。
