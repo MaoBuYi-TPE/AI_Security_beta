@@ -636,7 +636,7 @@ Gate B：SEC-01 至 SEC-20 適用測試有結果；未支援能力明確關閉�
 
 Gate C：取消/故障/重送/partial 狀態測試通過。
 
-Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者人工審閱樣本報告完成前，Gate D 整體尚未通過。不得把局部通過當作整個 Gate 已通過。）
+Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者審閱樣本報告的結論是核心安全語意通過、有條件通過，兩個措辭已修正（§28.17）。completed 狀態只有 DB 整合測試的證據（fixture 的 Live 不會產生 completed 的 scan），使用者決定是否接受這個證據組合之前，Gate D 整體尚未通過。不得把局部通過當作整個 Gate 已通過。）
 
 Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 

@@ -1424,7 +1424,7 @@ uv run secscan-admin worker [--once]
 
 ### 19.2 GET /api/v1/findings/{finding_id}/triage-events
 
-不可修改的事件，依 sequence 由舊到新、分頁。每筆含 actor（key 或 system、key 的名稱與角色）、`request_id`、前後狀態、`reason_code`、`reason`、`comparison_id`、`basis`、`evidence_provenance`、系統重開的 `run_id`／`scan_id`、`evidence`（寫入當時的白名單鍵，不含摘錄內容）與 `created_at`。`excerpts`（遮罩後的請求與回應摘錄）只給 operator／admin；viewer 是 null（人工摘錄只有樣式遮罩：已知的秘密樣式、縮排的 header 行，以及這個 target 的認證設定用過的自訂 header 名稱）。回應帶 `Cache-Control: no-store`。`evidence.attestation.platform_checks` 只列實際執行過的檢查（finding 沒有參數時沒有 `parameter_present`）。
+不可修改的事件，依 sequence 由舊到新、分頁。每筆含 actor（key 或 system、key 的名稱與角色）、`request_id`、前後狀態、`reason_code`、`reason`、`comparison_id`、`basis`、`evidence_provenance`、系統重開的 `run_id`／`scan_id`、`evidence`（寫入當時的白名單鍵，不含摘錄內容）與 `created_at`。`excerpts`（遮罩後的請求與回應摘錄）只給 operator／admin；viewer 是 null（人工摘錄只有樣式遮罩：已知的秘密樣式、縮排的 header 行，以及這個 target 的認證設定用過的自訂 header 名稱）。回應帶 `Cache-Control: no-store`。`evidence.attestation.platform_checks` 只列實際執行過的檢查（finding 沒有參數時沒有 `parameter_present`），`checks_version` 目前是 2。每一項都是對操作者聲明的一致性檢查，**沒有一項代表平台獨立驗證了修補**：`request_line_matches_route`、`host_matches_target`、`parameter_present`、`response_status_line` 檢查摘錄的格式與對象；`role_matches`、`time_within_bounds` 檢查聲明的身分與時間；`declared_result_is_not_reproduced` 只表示宣稱的結果是平台唯一接受的 `not_reproduced`（v1 叫 `result_not_reproduced`，名稱容易誤解成平台確認無法重現，v2 改名）；`size_within_limits` 檢查摘錄的大小。
 
 ### 19.3 報告
 
@@ -1435,7 +1435,8 @@ uv run secscan-admin worker [--once]
 - 內容：固定說明（未經 triage 的告警不是已驗證的漏洞、零告警不代表沒有弱點、not_observed 不等於已修補、平台不提供自動修補驗證、報告時間不是發現或修補時間、遮罩不保證辨識所有秘密）、掃描與引擎狀態、授權成立時間（grant 的 `approved_at`）、覆蓋與預算用量、摘要（以全部 finding 計算）、逐 finding 的標籤與 resolved 的依據（人工複測只有 metadata 與摘錄的 sha256）、比較快照摘要。不含 key id、storage_key、密文、idempotency key 與複測摘錄的原文。
 - 大小上限 8,388,608 bytes（UTF-8）：超過時依優先順序以整個 finding 為單位省略，`truncated=true`、記下省略數，開頭與結尾都有說明。
 - 比較快照最多列出最新的 10 份；較舊的份數記在內容的 `truncation.comparisons_omitted`，Markdown 另有說明。
-- 兩種格式的內容相同：Markdown 由 JSON 的文件渲染（有 API 規格的 scan 另有「API 規格」一節）。
+- 兩種格式的內容相同：Markdown 由 JSON 的文件渲染（有 API 規格的 scan 另有「API 規格」一節）。finding 的標題列是平台正規化的嚴重度；每個來源同時列出工具的原始嚴重度、信心（不可信的工具字串，放在 code 中）與平台正規化的嚴重度。
+- 固定說明另有兩句：scan 完整完成時「`results_complete=true` 只代表掃描流程已完成，不表示測試覆蓋完整」；沒有量測覆蓋時「本次未量測測試覆蓋」。
 - JSON 的 schema 是 `ReportDocumentV1`（每層 `additionalProperties: false`）；Markdown 中不可信的值只放在 code span 或最上層的 fenced code block。
 
 ### 19.4 管理檢視（platform_admin）

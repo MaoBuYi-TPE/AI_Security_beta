@@ -61,6 +61,11 @@ def _strings(value: JsonValue) -> list[str]:
     return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
+def _inline(value: JsonValue) -> str:
+    """句中的不可信值（工具的規則、原始等級與信心）：一律 code span；沒有值時是平台的標記。"""
+    return "（無）" if value is None or value == "" else code_span(str(value))
+
+
 def _field(label: str, value: JsonValue, *, untrusted: bool = False) -> str:
     if value is None:
         return f"- {label}：（無）"
@@ -154,7 +159,7 @@ def _markdown_finding(index: int, finding: JsonObject) -> list[str]:
     location = finding["location"]
     location = _obj(location)
     lines = [
-        f"### {index}. {finding['severity']} / {finding['kind']} / {finding['category']}",
+        f"### {index}. {finding['severity']}（正規化）/ {finding['kind']} / {finding['category']}",
         "",
         _field("finding_id", finding["id"]),
         _field("title", finding["title"], untrusted=True),
@@ -182,8 +187,11 @@ def _markdown_finding(index: int, finding: JsonObject) -> list[str]:
     for source in sources:
         source = _obj(source)
         lines.append(
-            f"- source：{source['engine']} / {source['normalized_severity']} / "
-            f"{source['observations']} / {code_span(str(source['rule']))}"
+            f"- source：{source['engine']}；規則 {_inline(source['rule'])}；"
+            f"工具的原始嚴重度 {_inline(source['severity_label'])}；"
+            f"平台正規化 {source['normalized_severity']}；"
+            f"工具的信心 {_inline(source['confidence_label'])}；"
+            f"觀察 {source['observations']} 次"
         )
     lines.append("")
     samples = finding["samples"]

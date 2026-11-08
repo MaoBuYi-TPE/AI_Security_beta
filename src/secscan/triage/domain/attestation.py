@@ -30,9 +30,13 @@ PERFORMED_BY_MAX_LENGTH = 100
 PROCEDURE_MAX_LENGTH = 1000
 ROLE_MAX_LENGTH = 64
 ACCEPTED_RESULT = "not_reproduced"
-CHECKS_VERSION = 1
+# v2：result_not_reproduced 改名為 declared_result_is_not_reproduced（Gate D 審查，
+# docs/DECISIONS.md §28.17）。v1 只出現在開發與測試資料。
+CHECKS_VERSION = 2
 DEFAULT_HTTP_PORT = 80
-# 平台實際做過的檢查（寫進事件與 audit，日後加檢查時 checks_version 跟著加一）。
+# 平台對操作者聲明做過的一致性檢查（寫進事件與 audit；增減或改名時 checks_version 跟著加一）。
+# 每一項都只檢查聲明本身（摘錄、身分、時間、宣稱的結果），沒有一項代表平台獨立驗證了修補：
+# declared_result_is_not_reproduced 是「宣稱的結果是平台唯一接受的 not_reproduced」。
 PLATFORM_CHECKS = (
     "request_line_matches_route",
     "host_matches_target",
@@ -40,7 +44,7 @@ PLATFORM_CHECKS = (
     "response_status_line",
     "role_matches",
     "time_within_bounds",
-    "result_not_reproduced",
+    "declared_result_is_not_reproduced",
     "size_within_limits",
 )
 PARAMETER_CHECK = "parameter_present"

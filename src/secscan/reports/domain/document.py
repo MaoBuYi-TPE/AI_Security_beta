@@ -187,6 +187,10 @@ def _notices(snapshot: ReportSnapshot, omitted: int) -> tuple[str, ...]:
         notices.append(wording.FIXTURE_NOTICE)
     if snapshot.scan.status != _TERMINAL_COMPLETE or not snapshot.scan.results_complete:
         notices.append(wording.INCOMPLETE_NOTICE.format(status=snapshot.scan.status))
+    else:
+        notices.append(wording.COMPLETION_NOTICE)
+    if not snapshot.scan.coverage_measured:
+        notices.append(wording.COVERAGE_UNMEASURED_NOTICE)
     if omitted:
         notices.append(wording.TRUNCATED_NOTICE.format(omitted=omitted))
     notices.append(wording.UNTRUSTED_NOTICE)
