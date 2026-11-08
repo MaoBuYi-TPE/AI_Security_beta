@@ -9,6 +9,7 @@ import pytest
 
 from secscan.auth_profiles.domain.model import RESERVED_ROLE_LABELS
 from secscan.grants.domain.scope import Budget
+from secscan.scans.domain.allocation import EngineBudget
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import (
@@ -128,6 +129,37 @@ def test_run_error_codes_match_the_status() -> None:
         _run(status=RunStatus.FAILED, started_at=NOW, finished_at=NOW)
     with pytest.raises(ValueError, match="錯誤碼"):
         _run(status=RunStatus.RUNNING, started_at=NOW, error_code=RunErrorCode.ENGINE_FAILED)
+
+
+# --- 引擎子預算（T31；docs/DECISIONS.md §29）-----------------------------------------------
+
+CAP = EngineBudget(max_requests=440, max_duration_seconds=220)
+
+
+def test_a_scanning_run_can_carry_its_cap_and_allotment() -> None:
+    run = _run(Engine.NUCLEI, budget=CAP, requests_allotted=440, seconds_allotted=200)
+
+    assert (run.budget, run.requests_allotted, run.seconds_allotted) == (CAP, 440, 200)
+
+
+@pytest.mark.parametrize("engine", [Engine.FAKE, Engine.PREFLIGHT])
+def test_only_scanning_runs_have_a_cap(engine: Engine) -> None:
+    with pytest.raises(ValueError, match="子預算"):
+        _run(engine, budget=CAP)
+
+
+@pytest.mark.parametrize(("requests", "seconds"), [(441, 220), (440, 221), (440, None)])
+def test_an_allotment_beyond_the_cap_is_not_a_valid_run(requests: int, seconds: int | None) -> None:
+    """DB 的 CHECK 也這樣要求：讀回不合規則的資料會讓讀取失敗（fail closed）。"""
+    with pytest.raises(ValueError, match="上限"):
+        _run(Engine.NUCLEI, budget=CAP, requests_allotted=requests, seconds_allotted=seconds)
+
+
+def test_runs_without_a_cap_keep_any_allotment() -> None:
+    """T31 之前的 run 只記下請求數。"""
+    run = _run(Engine.ZAP, requests_allotted=5_000)
+
+    assert (run.budget, run.seconds_allotted) == (None, None)
 
 
 def test_scan_models_are_immutable() -> None:

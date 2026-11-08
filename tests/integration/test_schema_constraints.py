@@ -43,8 +43,9 @@ pytestmark = pytest.mark.integration
 # category 1（v0014）；T20 的 observations_linked 與 link_sequence 2（v0015）；
 # T21 的 findings 3、finding_triage_events 12 與 finding_triage_excerpts 2（v0017，
 # test_triage_schema.py），reports 11 與 report_contents 1（v0018，test_reports_schema.py），
-# auth_profiles 的停用 1（v0019，test_auth_profile_disable.py）。
-EXPECTED_CHECK_COUNT = 189
+# auth_profiles 的停用 1（v0019，test_auth_profile_disable.py）；T31 的引擎子預算 3（v0020，
+# test_engine_budget_schema.py）。
+EXPECTED_CHECK_COUNT = 192
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "

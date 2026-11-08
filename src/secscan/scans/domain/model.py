@@ -3,6 +3,7 @@
 repository 回傳這裡的 frozen model；從 DB 讀回的資料也經過 __post_init__ 的檢查（fail closed）。
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -11,6 +12,7 @@ from uuid import UUID
 from secscan.core.json_types import JsonObject
 from secscan.grants.domain.matching import IneligibleReason
 from secscan.grants.domain.scope import Budget
+from secscan.scans.domain.allocation import NO_ENGINE_BUDGETS, EngineBudget
 from secscan.scans.domain.catalog import Engine, PlannedRun, ScanProfile
 from secscan.scans.domain.lifecycle import (
     ERROR_REQUIRED_RUN_STATUSES,
@@ -83,12 +85,30 @@ class ScannerRun:
     # 實際執行的 ExecutionPlan 與 zap 的 profile 定義（§20.2）：runner 建立容器之前寫入。
     plan_hash: str | None = None
     profile_definition_sha256: str | None = None
+    # 引擎子預算（T31；docs/DECISIONS.md §29）：建立時凍結的上限（沒有指定是 None），以及開始時
+    # 實際分到的請求數與秒數（容器版的 run 才有；T31 之前的 run 沒有記下秒數）。
+    budget: EngineBudget | None = None
+    requests_allotted: int | None = None
+    seconds_allotted: int | None = None
 
     def __post_init__(self) -> None:
         if (self.status in ERROR_REQUIRED_RUN_STATUSES) != (self.error_code is not None):
             raise ValueError(f"run 的狀態 {self.status.value} 與錯誤碼不一致")
         if self.preflight_result is not None and self.engine is not Engine.PREFLIGHT:
             raise ValueError("只有 preflight 的 run 有 preflight 的結果")
+        if self.budget is not None and self.engine in {Engine.PREFLIGHT, Engine.FAKE}:
+            raise ValueError("只有掃描引擎的 run 有子預算")
+        budget, requests, seconds = self.budget, self.requests_allotted, self.seconds_allotted
+        if (
+            budget is not None
+            and requests is not None
+            and (
+                seconds is None
+                or requests > budget.max_requests
+                or seconds > budget.max_duration_seconds
+            )
+        ):
+            raise ValueError("分到的配額超過這個引擎的上限")
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +214,8 @@ class NewScan:
     idempotency_key: str = field(repr=False)
     request_sha256: bytes
     created_by_key_id: UUID
+    # 引擎子預算（T31）：已通過 resolve_engine_budgets 的檢查；沒有指定是空的。
+    engine_budgets: Mapping[Engine, EngineBudget] = NO_ENGINE_BUDGETS
 
 
 @dataclass(frozen=True, slots=True)

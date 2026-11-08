@@ -71,6 +71,8 @@ TRIGGER_FUNCTIONS = (
     "report_contents_parent_check",
     "auth_profiles_update_guard",
     "auth_profiles_disabled_erased",
+    "scanner_runs_engine_budget_frozen",
+    "scanner_runs_allotment_once",
 )
 
 

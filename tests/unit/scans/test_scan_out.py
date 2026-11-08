@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from secscan.grants.domain.scope import Budget
+from secscan.scans.domain.allocation import EngineBudget
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import AuthBinding, Coverage, Scan, ScannerRun, VersionRef
@@ -290,6 +291,17 @@ def test_engine_runs_show_what_was_executed() -> None:
 
     assert (engine["plan_hash"], engine["profile_definition_sha256"]) == (plan_hash, definition)
     assert engine["result"] is None
+
+
+def test_engine_runs_show_their_frozen_cap() -> None:
+    """引擎子預算（T31）：建立時凍結的上限；沒有指定是 null。"""
+    zap = _run(1, Engine.ZAP, budget=EngineBudget(max_requests=760, max_duration_seconds=380))
+    nuclei = _run(2, Engine.NUCLEI)
+
+    engines = _out((zap, nuclei), auth=None)["engines"]
+
+    assert engines[0]["budget"] == {"max_requests": 760, "max_duration_seconds": 380}
+    assert engines[1]["budget"] is None
 
 
 def test_anonymous_scans_never_lose_a_credential() -> None:

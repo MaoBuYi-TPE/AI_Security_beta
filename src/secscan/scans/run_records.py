@@ -16,6 +16,7 @@ from secscan.auth_profiles.domain.preflight import Preflight
 from secscan.auth_profiles.repository import AuthProfileRepository
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.repository import ScopeGrantRepository
+from secscan.scans.domain.allocation import EngineBudget
 from secscan.scans.domain.catalog import Engine
 from secscan.scans.domain.coverage import FrozenOperation
 from secscan.scans.domain.lifecycle import RunStatus
@@ -130,12 +131,32 @@ class RunRecords:
             max(0, max_duration_seconds - int(used_seconds)),
         )
 
-    def allot(self, run_id: UUID, requests: int) -> None:
-        """容器版的 run 開始時分到的請求數（in-process 的 fake 不送流量、不佔預算）。"""
+    def engine_budget(self, run_id: UUID) -> EngineBudget | None:
+        """建立 scan 時凍結的這個引擎的上限（T31；docs/DECISIONS.md §29）；沒有指定是 None。
+
+        上限不能修改（trigger），呼叫端已持有 run 的鎖：不另外加鎖。
+        """
+        row = self._session.execute(
+            select(
+                ScannerRunModel.budget_max_requests, ScannerRunModel.budget_max_duration_seconds
+            ).where(ScannerRunModel.id == run_id)
+        ).one()
+        if row.budget_max_requests is None or row.budget_max_duration_seconds is None:
+            return None
+        return EngineBudget(
+            max_requests=row.budget_max_requests,
+            max_duration_seconds=row.budget_max_duration_seconds,
+        )
+
+    def allot(self, run_id: UUID, requests: int, seconds: int) -> None:
+        """容器版的 run 開始時分到的請求數與秒數（in-process 的 fake 不送流量、不佔預算）。
+
+        只能寫一次（trigger）；有上限的 run 兩者都不能超過上限（CHECK）。
+        """
         self._session.execute(
             update(ScannerRunModel)
             .where(ScannerRunModel.id == run_id)
-            .values(requests_allotted=requests)
+            .values(requests_allotted=requests, seconds_allotted=seconds)
             .execution_options(synchronize_session=False)
         )
 

@@ -8,6 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from secscan.grants.domain.scope import Budget
+from secscan.scans.domain.allocation import EngineBudgetRequest
 from secscan.scans.domain.catalog import Engine, InvalidScanRequestError, ScanProfile
 from secscan.scans.domain.request import (
     IDEMPOTENCY_KEY_MAX_LENGTH,
@@ -171,6 +172,78 @@ def test_fingerprint_ignores_any_engine_permutation(engines: list[Engine]) -> No
     ordered = dataclasses.replace(REQUEST, engines=tuple(Engine))
 
     assert fingerprint(permuted) == fingerprint(ordered)
+
+
+# --- 引擎子預算（BUDGET-05；docs/DECISIONS.md §29）-----------------------------------------
+
+WEB_REQUEST = ScanRequest(
+    target_id=UUID("11111111-1111-4111-8111-111111111111"),
+    scope_grant_id=UUID("22222222-2222-4222-8222-222222222222"),
+    api_spec_id=None,
+    auth_profile_id=None,
+    profile=ScanProfile.WEB_ACTIVE_LAB,
+    engines=(Engine.ZAP, Engine.NUCLEI),
+    budget=BudgetRequest(requests_per_second=2, max_requests=1_200, max_duration_seconds=600),
+)
+# T31 之前的程式算出的值（加入 engine_budgets 之前取得）：沒有子預算的請求必須逐位元組相同，
+# 既有的 Idempotency-Key 重送不會變成 409。不得為了通過測試更新這個值。
+WEB_REQUEST_DIGEST = "311fbc1a37016b6686a1dcabcb2173f431fe0afd21dc3cc9d3c9fd4244ca037e"
+SPLIT = (
+    EngineBudgetRequest(Engine.ZAP, max_requests=760, max_duration_seconds=380),
+    EngineBudgetRequest(Engine.NUCLEI, max_requests=440, max_duration_seconds=220),
+)
+
+
+def test_a_request_without_engine_budgets_keeps_the_previous_fingerprint() -> None:
+    assert fingerprint(WEB_REQUEST).hex() == WEB_REQUEST_DIGEST
+    assert WEB_REQUEST.engine_budgets is None
+
+
+def test_engine_budgets_change_the_fingerprint() -> None:
+    split = dataclasses.replace(WEB_REQUEST, engine_budgets=SPLIT)
+
+    assert fingerprint(split) != fingerprint(WEB_REQUEST)
+
+
+def test_the_order_of_engine_budgets_does_not_change_the_fingerprint() -> None:
+    forward = dataclasses.replace(WEB_REQUEST, engine_budgets=SPLIT)
+    backward = dataclasses.replace(WEB_REQUEST, engine_budgets=tuple(reversed(SPLIT)))
+
+    assert fingerprint(forward) == fingerprint(backward)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        EngineBudgetRequest(Engine.NUCLEI, max_requests=441, max_duration_seconds=220),
+        EngineBudgetRequest(Engine.NUCLEI, max_requests=440, max_duration_seconds=221),
+    ],
+)
+def test_every_engine_budget_item_changes_the_fingerprint(changed: EngineBudgetRequest) -> None:
+    original = dataclasses.replace(WEB_REQUEST, engine_budgets=SPLIT)
+    other = dataclasses.replace(WEB_REQUEST, engine_budgets=(SPLIT[0], changed))
+
+    assert fingerprint(other) != fingerprint(original)
+
+
+def test_shares_swapped_between_engines_change_the_fingerprint() -> None:
+    original = dataclasses.replace(WEB_REQUEST, engine_budgets=SPLIT)
+    swapped = dataclasses.replace(
+        WEB_REQUEST,
+        engine_budgets=(
+            EngineBudgetRequest(Engine.ZAP, max_requests=440, max_duration_seconds=220),
+            EngineBudgetRequest(Engine.NUCLEI, max_requests=760, max_duration_seconds=380),
+        ),
+    )
+
+    assert fingerprint(swapped) != fingerprint(original)
+
+
+def test_an_empty_allocation_differs_from_no_allocation() -> None:
+    """[] 會被 schema 拒絕；在 domain 也不和省略混為一談（fail closed）。"""
+    empty = dataclasses.replace(WEB_REQUEST, engine_budgets=())
+
+    assert fingerprint(empty) != fingerprint(WEB_REQUEST)
 
 
 # --- 預算 ----------------------------------------------------------------------------------

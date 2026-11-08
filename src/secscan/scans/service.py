@@ -7,7 +7,7 @@ operation、事件與 audit 在同一個 transaction。
 其他 project 的資源一律和不存在的一樣回 404。
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from uuid import UUID
@@ -26,6 +26,11 @@ from secscan.core.pagination import Page, PageRequest
 from secscan.grants.domain.matching import ScopeRules
 from secscan.grants.domain.scope import Budget
 from secscan.grants.service import ScopeGrantService, UsableGrant
+from secscan.scans.domain.allocation import (
+    EngineBudget,
+    check_allocation_shape,
+    resolve_engine_budgets,
+)
 from secscan.scans.domain.catalog import (
     Engine,
     IncompatibleProfileError,
@@ -108,6 +113,7 @@ class ScanService:
         operations = self._operations(principal, request, usable.target, rules)
         auth = self._auth(principal, request, usable.target, rules)
         budget = _budget(request, usable)
+        engine_budgets = _engine_budgets(request, budget)
         self._check_capacity(target.id, now=usable.checked_at)
         new_scan = NewScan(
             project_id=target.project_id,
@@ -123,6 +129,7 @@ class ScanService:
             idempotency_key=idempotency_key,
             request_sha256=digest,
             created_by_key_id=principal.key_id,
+            engine_budgets=engine_budgets,
         )
         try:
             scan_id = self._scans.create(new_scan)
@@ -340,6 +347,7 @@ def _planned_runs(request: ScanRequest, target: Target) -> tuple[PlannedRun, ...
     try:
         check_engine_auth(request.engines, authenticated=request.auth_profile_id is not None)
         runs = plan_runs(request.engines, authenticated=request.auth_profile_id is not None)
+        check_allocation_shape(request.engines, request.engine_budgets)
         check_profile(
             request.profile, target_kind=target.kind, has_spec=request.api_spec_id is not None
         )
@@ -359,6 +367,14 @@ def _planned_runs(request: ScanRequest, target: Target) -> tuple[PlannedRun, ...
 def _budget(request: ScanRequest, usable: UsableGrant) -> Budget:
     try:
         return resolve_budget(request.budget, grant_budget=usable.grant.budget)
+    except InvalidScanRequestError as exc:
+        raise _invalid_request(f"{exc}。") from None
+
+
+def _engine_budgets(request: ScanRequest, budget: Budget) -> Mapping[Engine, EngineBudget]:
+    """引擎子預算（T31；docs/DECISIONS.md §29）：scan 的總額確定之後才能檢查份額。"""
+    try:
+        return resolve_engine_budgets(request.engine_budgets, budget=budget)
     except InvalidScanRequestError as exc:
         raise _invalid_request(f"{exc}。") from None
 
@@ -390,7 +406,7 @@ def _created(scan: Scan, operations: tuple[FrozenOperation, ...]) -> JsonObject:
     auth profile 記為 identity；Idempotency-Key 不記。"""
     spec = scan.api_spec
     auth = scan.auth
-    return {
+    changes: JsonObject = {
         "target_id": str(scan.target_id),
         "scope_grant": {"id": str(scan.scope_grant.id), "version": scan.scope_grant.version},
         "api_spec": {"id": str(spec.id), "version": spec.version} if spec is not None else None,
@@ -416,3 +432,14 @@ def _created(scan: Scan, operations: tuple[FrozenOperation, ...]) -> JsonObject:
             else None
         ),
     }
+    # 引擎子預算（T31）只在有指定時記下：沒有指定的 scan，audit 的內容和之前相同。
+    capped = {run.engine.value: run.budget for run in scan.runs if run.budget is not None}
+    if capped:
+        changes["engine_budgets"] = {
+            engine: {
+                "max_requests": budget.max_requests,
+                "max_duration_seconds": budget.max_duration_seconds,
+            }
+            for engine, budget in capped.items()
+        }
+    return changes
