@@ -1,4 +1,7 @@
-"""worker 的常駐迴圈（docs/DECISIONS.md §14.6、§14.7）：每圈寫心跳，再處理等待解析的 run。"""
+"""worker 的常駐迴圈（docs/DECISIONS.md §14.6、§14.7）。
+
+每圈寫心跳，處理等待解析的 run，再處理一份報告（T21）。
+"""
 
 import time
 from collections.abc import Callable
@@ -6,6 +9,7 @@ from collections.abc import Callable
 from secscan.scanners.domain.instances import Capabilities
 from secscan.scanners.service import Fleet
 from secscan.scans.queue import RunReport
+from secscan.worker.reports import ReportWorker
 from secscan.worker.service import Worker
 
 
@@ -18,8 +22,10 @@ class WorkerLoop:
         stop_requested: Callable[[], bool],
         sleep: Callable[[float], None] = time.sleep,
         poll_seconds: float,
+        reports: ReportWorker | None = None,
     ) -> None:
         self._worker = worker
+        self._reports = reports
         self._fleet = fleet
         self._stop_requested = stop_requested
         self._sleep = sleep
@@ -37,9 +43,11 @@ class WorkerLoop:
                 limit=1 if once else None, on_report=on_report, on_heartbeat=self._beat
             )
             reports.extend(batch)
+            # 每圈先處理 run，再處理一份報告（T21）：解析不會被大量的報告請求餓死。
+            generated = self._reports.drain(limit=1) if self._reports is not None else 0
             if once:
                 break
-            if not batch:
+            if not batch and not generated:
                 self._sleep(self._poll_seconds)
         return reports
 

@@ -13,6 +13,7 @@ from secscan.api_keys.dependencies import CurrentPrincipal
 from secscan.auth_profiles.dependencies import CurrentCipher
 from secscan.auth_profiles.schemas import (
     AuthProfileCreate,
+    AuthProfileDisable,
     AuthProfileOut,
     AuthProfilePatch,
     AuthProfileVersionOut,
@@ -71,6 +72,24 @@ def update_profile(
     """產生新版本（operator、admin）；上一版的密文清除，舊的 scan 快照不受影響。"""
     profile = AuthProfileService(session, cipher=cipher).update(
         principal, profile_id, body.to_change(), request_id=request_id_of(request)
+    )
+    return ok(AuthProfileOut.of(profile))
+
+
+@router.post("/auth-profiles/{profile_id}/disable")
+def disable_profile(
+    profile_id: UUID,
+    body: AuthProfileDisable,
+    principal: CurrentPrincipal,
+    session: DbSession,
+    request: Request,
+) -> Envelope[AuthProfileOut]:
+    """停用（operator、admin）：清除目前的密文；之後不能建立新版本或新的 scan。重複停用回 200。
+
+    之後準備的 run 在交出 secret 之前失敗；已啟動的 run 不受影響（要立即停止請取消 scan）。
+    """
+    profile = AuthProfileService(session).disable(
+        principal, profile_id, reason=body.reason, request_id=request_id_of(request)
     )
     return ok(AuthProfileOut.of(profile))
 

@@ -180,6 +180,21 @@ class AuthProfileRepository:
         model, project_id = row
         return _profile(model, project_id, self._current(profile_id))
 
+    def disable(self, profile_id: UUID, *, by_key_id: UUID) -> None:
+        """停用（呼叫端已以 FOR UPDATE 鎖住 profile）；trigger 只允許從未停用 → 停用一次。"""
+        self._session.execute(
+            update(AuthProfileModel)
+            .where(AuthProfileModel.id == profile_id, AuthProfileModel.disabled_at.is_(None))
+            .values(disabled_at=func.statement_timestamp(), disabled_by_key_id=by_key_id)
+            .execution_options(synchronize_session=False)
+        )
+
+    def is_disabled(self, profile_id: UUID) -> bool:
+        disabled = self._session.scalar(
+            select(AuthProfileModel.disabled_at).where(AuthProfileModel.id == profile_id)
+        )
+        return disabled is not None
+
     def count_for_target(self, target_id: UUID) -> int:
         return (
             self._session.scalar(
@@ -307,6 +322,7 @@ def _profile(model: AuthProfileModel, project_id: UUID, current: ProfileVersion)
         created_by_key_id=model.created_by_key_id,
         created_at=model.created_at,
         current=current,
+        disabled_at=model.disabled_at,
     )
 
 

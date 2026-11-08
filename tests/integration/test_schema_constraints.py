@@ -40,8 +40,11 @@ pytestmark = pytest.mark.integration
 # T13 的容器確認刪除 1（test_container_cleanup_schema.py）；
 # T16 的 plan_hash 與 profile 定義 2（test_run_provenance.py）；
 # T19 的 findings 18 與 finding_observations 3（test_findings_schema.py），簽核之後 findings 的
-# category 1（v0014）；T20 的 observations_linked 與 link_sequence 2（v0015）。
-EXPECTED_CHECK_COUNT = 159
+# category 1（v0014）；T20 的 observations_linked 與 link_sequence 2（v0015）；
+# T21 的 findings 3、finding_triage_events 12 與 finding_triage_excerpts 2（v0017，
+# test_triage_schema.py），reports 11 與 report_contents 1（v0018，test_reports_schema.py），
+# auth_profiles 的停用 1（v0019，test_auth_profile_disable.py）。
+EXPECTED_CHECK_COUNT = 189
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "

@@ -60,12 +60,22 @@ class AuthProfileModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             f"AND role_label NOT IN ({_RESERVED_LABELS})",
             name="role_label_valid",
         ),
+        # T21（v0019）：停用是終止狀態，只能從 NULL 設定一次（trigger）。
+        CheckConstraint(
+            "(disabled_at IS NULL) = (disabled_by_key_id IS NULL) "
+            "AND (disabled_at IS NULL OR disabled_at >= created_at)",
+            name="disabled_valid",
+        ),
     )
 
     target_id: Mapped[UUID] = mapped_column(ForeignKey("targets.id", ondelete="RESTRICT"))
     name: Mapped[str] = mapped_column(String(PROFILE_NAME_MAX_LENGTH))
     role_label: Mapped[str] = mapped_column(String(ROLE_LABEL_MAX_LENGTH))
     created_by_key_id: Mapped[UUID] = mapped_column(ForeignKey("api_keys.id", ondelete="RESTRICT"))
+    disabled_at: Mapped[datetime | None]
+    disabled_by_key_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("api_keys.id", ondelete="RESTRICT"), index=True
+    )
 
 
 class AuthProfileVersionModel(CreatedAtMixin, Base):

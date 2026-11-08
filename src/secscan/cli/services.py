@@ -44,6 +44,7 @@ from secscan.targets.domain import LabNetwork
 from secscan.worker.artifacts import ArtifactReader
 from secscan.worker.config import WorkerSettings
 from secscan.worker.loop import WorkerLoop
+from secscan.worker.reports import ReportWorker
 from secscan.worker.service import Worker
 from secscan.worker.telemetry import TelemetryReader
 
@@ -167,6 +168,7 @@ def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
                 _fleet(sessions, owner, InstanceRole.WORKER),
                 stop_requested=stop.is_set,
                 poll_seconds=WORKER_POLL_SECONDS,
+                reports=ReportWorker(sessions, owner=owner),
             ).run(once=once, on_report=lambda item: report(describe(item)))
     except SQLAlchemyError as exc:
         report(f"資料庫發生錯誤（{type(exc).__name__}），已停止。")

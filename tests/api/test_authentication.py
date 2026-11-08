@@ -73,6 +73,16 @@ V1_ROUTES = {
     ("POST", "/api/v1/scan-comparisons"),
     ("GET", "/api/v1/scan-comparisons/{comparison_id}"),
     ("GET", "/api/v1/scan-comparisons/{comparison_id}/findings"),
+    # T21
+    ("PATCH", "/api/v1/findings/{finding_id}/triage"),
+    ("GET", "/api/v1/findings/{finding_id}/triage-events"),
+    ("POST", "/api/v1/scans/{scan_id}/reports"),
+    ("GET", "/api/v1/scans/{scan_id}/reports"),
+    ("GET", "/api/v1/reports/{report_id}"),
+    ("GET", "/api/v1/reports/{report_id}/download"),
+    ("GET", "/api/v1/audit-events"),
+    ("GET", "/api/v1/scope-grants/pending"),
+    ("POST", "/api/v1/auth-profiles/{profile_id}/disable"),
     # T10
     ("GET", "/api/v1/scanners"),
     ("GET", "/api/v1/scan-profiles"),

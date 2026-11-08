@@ -188,7 +188,12 @@ def test_committed_snapshot_and_rows_reject_truncate(
     body = pair(queue_engine, queue_seed, world)
     assert client.post(URL, json=body, headers=world.operator_a.headers).status_code == 201
     with Session(queue_engine) as session:
-        for statement in ("TRUNCATE scan_comparison_findings", "TRUNCATE scan_comparisons CASCADE"):
+        # T21 的 triage 事件以 FK 引用 scan_comparison_findings：不加 CASCADE 時 PostgreSQL 在
+        # trigger 之前就拒絕；加 CASCADE 時由各表的 no-truncate trigger 拒絕。
+        for statement in (
+            "TRUNCATE scan_comparison_findings CASCADE",
+            "TRUNCATE scan_comparisons CASCADE",
+        ):
             assert violation(session, statement, {}).sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
     assert _counts(queue_seed) == (1, 2, 1)
 

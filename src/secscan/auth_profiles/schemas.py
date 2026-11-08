@@ -185,6 +185,8 @@ class AuthProfileOut(BaseModel):
     secret_configured: bool
     version_created_by_key_id: UUID
     version_created_at: datetime
+    # T21：停用之後是終止狀態（密文已清除，不能再建立新版本或新的 scan）。
+    disabled_at: datetime | None
 
     @classmethod
     def of(cls, profile: AuthProfile) -> Self:
@@ -205,4 +207,13 @@ class AuthProfileOut(BaseModel):
             secret_configured=current.secret_configured,
             version_created_by_key_id=current.created_by_key_id,
             version_created_at=current.created_at,
+            disabled_at=profile.disabled_at,
         )
+
+
+class AuthProfileDisable(BaseModel):
+    """停用的理由（寫進 audit，遮罩後保存）；不要貼上憑證。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str = Field(min_length=1, max_length=500)

@@ -136,6 +136,8 @@ class AuthProfile:
     created_by_key_id: UUID
     created_at: datetime
     current: ProfileVersion
+    # T21：停用是終止狀態（密文已清除、不能再建立新版本或新的 scan）。
+    disabled_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

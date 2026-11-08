@@ -49,6 +49,17 @@ def list_grants(
     return ok_page(grants, partial(ScopeGrantOut.of, now=datetime.now(UTC)))
 
 
+# 必須註冊在 /scope-grants/{grant_id} 之前：否則 "pending" 會被當成 UUID 驗證。
+@router.get("/scope-grants/pending")
+def list_pending_grants(
+    principal: CurrentPrincipal, session: DbSession, lab: CurrentLab, page: PageQuery
+) -> Envelope[list[ScopeGrantOut]]:
+    """跨 project、尚未過期的待核准申請（只限 platform_admin），由舊到新。"""
+    now = datetime.now(UTC)
+    grants = ScopeGrantService(session, lab=lab).list_pending(principal, now=now, page=page)
+    return ok_page(grants, partial(ScopeGrantOut.of, now=now))
+
+
 @router.get("/scope-grants/{grant_id}")
 def get_grant(
     grant_id: UUID, principal: CurrentPrincipal, session: DbSession, lab: CurrentLab

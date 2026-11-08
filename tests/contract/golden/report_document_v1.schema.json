@@ -1,0 +1,1109 @@
+{
+  "$defs": {
+    "AttestationDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "checks_version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Checks Version"
+        },
+        "performed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Performed At"
+        },
+        "performed_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Performed By"
+        },
+        "platform_checks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Platform Checks",
+          "type": "array"
+        },
+        "procedure": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Procedure"
+        },
+        "request_excerpt_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Request Excerpt Bytes"
+        },
+        "request_excerpt_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Request Excerpt Sha256"
+        },
+        "response_excerpt_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Response Excerpt Bytes"
+        },
+        "response_excerpt_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Response Excerpt Sha256"
+        }
+      },
+      "required": [
+        "performed_at",
+        "performed_by",
+        "procedure",
+        "request_excerpt_sha256",
+        "request_excerpt_bytes",
+        "response_excerpt_sha256",
+        "response_excerpt_bytes",
+        "checks_version",
+        "platform_checks"
+      ],
+      "title": "AttestationDoc",
+      "type": "object"
+    },
+    "AuthenticationDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "preflight": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Preflight"
+        },
+        "profile_version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Profile Version"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Role"
+        }
+      },
+      "required": [
+        "role",
+        "profile_version",
+        "preflight"
+      ],
+      "title": "AuthenticationDoc",
+      "type": "object"
+    },
+    "AuthorizationDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "approved_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Approved At"
+        },
+        "authorization_reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Authorization Reference"
+        },
+        "grant_id": {
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "grant_version": {
+          "title": "Grant Version",
+          "type": "integer"
+        },
+        "valid_from": {
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_until": {
+          "title": "Valid Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant_id",
+        "grant_version",
+        "approved_at",
+        "valid_from",
+        "valid_until",
+        "authorization_reference"
+      ],
+      "title": "AuthorizationDoc",
+      "type": "object"
+    },
+    "BudgetUsageDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "requests_denied": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Requests Denied"
+        },
+        "requests_sent": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Requests Sent"
+        },
+        "traffic_duration_seconds": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Traffic Duration Seconds"
+        }
+      },
+      "required": [
+        "requests_sent",
+        "requests_denied",
+        "traffic_duration_seconds"
+      ],
+      "title": "BudgetUsageDoc",
+      "type": "object"
+    },
+    "ComparisonDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "comparability": {
+          "title": "Comparability",
+          "type": "string"
+        },
+        "counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Counts",
+          "type": "object"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "notice": {
+          "title": "Notice",
+          "type": "string"
+        },
+        "other_scan_id": {
+          "title": "Other Scan Id",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "other_scan_id",
+        "comparability",
+        "counts",
+        "notice"
+      ],
+      "title": "ComparisonDoc",
+      "type": "object"
+    },
+    "CoverageDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "authenticated_operations": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Authenticated Operations"
+        },
+        "coverage_measured": {
+          "title": "Coverage Measured",
+          "type": "boolean"
+        },
+        "eligible_operations": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Eligible Operations"
+        },
+        "ineligible_operations": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ineligible Operations"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "observed_operations": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Observed Operations"
+        }
+      },
+      "required": [
+        "coverage_measured",
+        "eligible_operations",
+        "ineligible_operations",
+        "observed_operations",
+        "authenticated_operations",
+        "limitations"
+      ],
+      "title": "CoverageDoc",
+      "type": "object"
+    },
+    "EngineDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
+          "title": "Engine",
+          "type": "string"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Error Code"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Finished At"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Started At"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "engine",
+        "status",
+        "error_code",
+        "started_at",
+        "finished_at"
+      ],
+      "title": "EngineDoc",
+      "type": "object"
+    },
+    "FindingDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "auth_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Auth Role"
+        },
+        "auth_verified": {
+          "title": "Auth Verified",
+          "type": "boolean"
+        },
+        "category": {
+          "title": "Category",
+          "type": "string"
+        },
+        "distinct_paths": {
+          "title": "Distinct Paths",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "lifecycle_label": {
+          "title": "Lifecycle Label",
+          "type": "string"
+        },
+        "lifecycle_state": {
+          "title": "Lifecycle State",
+          "type": "string"
+        },
+        "location": {
+          "$ref": "#/$defs/LocationDoc"
+        },
+        "multiple_sources_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Multiple Sources Note"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolutionDoc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolution_review_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Resolution Review Reasons",
+          "type": "array"
+        },
+        "resolution_review_required": {
+          "title": "Resolution Review Required",
+          "type": "boolean"
+        },
+        "review_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Review Label"
+        },
+        "rule_group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rule Group"
+        },
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/SampleDoc"
+          },
+          "title": "Samples",
+          "type": "array"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/SourceDoc"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        },
+        "triage_label": {
+          "title": "Triage Label",
+          "type": "string"
+        },
+        "triage_state": {
+          "title": "Triage State",
+          "type": "string"
+        },
+        "triage_version": {
+          "title": "Triage Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "category",
+        "rule_group",
+        "severity",
+        "location",
+        "auth_role",
+        "auth_verified",
+        "triage_state",
+        "triage_label",
+        "lifecycle_state",
+        "lifecycle_label",
+        "triage_version",
+        "resolution",
+        "resolution_review_required",
+        "resolution_review_reasons",
+        "review_label",
+        "sources",
+        "multiple_sources_note",
+        "distinct_paths",
+        "samples"
+      ],
+      "title": "FindingDoc",
+      "type": "object"
+    },
+    "LocationDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "parameter_location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parameter Location"
+        },
+        "parameter_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parameter Name"
+        },
+        "route": {
+          "title": "Route",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "route",
+        "parameter_location",
+        "parameter_name"
+      ],
+      "title": "LocationDoc",
+      "type": "object"
+    },
+    "ResolutionDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "attestation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttestationDoc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "basis": {
+          "title": "Basis",
+          "type": "string"
+        },
+        "basis_label": {
+          "title": "Basis Label",
+          "type": "string"
+        },
+        "comparison_id": {
+          "title": "Comparison Id",
+          "type": "string"
+        },
+        "decided_at": {
+          "title": "Decided At",
+          "type": "string"
+        },
+        "decided_by_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Decided By Role"
+        },
+        "evidence_provenance": {
+          "title": "Evidence Provenance",
+          "type": "string"
+        }
+      },
+      "required": [
+        "basis",
+        "basis_label",
+        "evidence_provenance",
+        "decided_at",
+        "decided_by_role",
+        "comparison_id",
+        "attestation"
+      ],
+      "title": "ResolutionDoc",
+      "type": "object"
+    },
+    "SampleDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evidence"
+        },
+        "parameter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parameter"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "parameter",
+        "evidence"
+      ],
+      "title": "SampleDoc",
+      "type": "object"
+    },
+    "ScanDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "auth_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Auth Role"
+        },
+        "budget_usage": {
+          "$ref": "#/$defs/BudgetUsageDoc"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Finished At"
+        },
+        "fixture": {
+          "title": "Fixture",
+          "type": "boolean"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "results_complete": {
+          "title": "Results Complete",
+          "type": "boolean"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "target_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Name"
+        },
+        "target_origin": {
+          "title": "Target Origin",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "results_complete",
+        "fixture",
+        "profile",
+        "auth_role",
+        "created_at",
+        "finished_at",
+        "target_name",
+        "target_origin",
+        "budget_usage"
+      ],
+      "title": "ScanDoc",
+      "type": "object"
+    },
+    "SourceDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confidence Label"
+        },
+        "engine": {
+          "title": "Engine",
+          "type": "string"
+        },
+        "normalized_severity": {
+          "title": "Normalized Severity",
+          "type": "string"
+        },
+        "observations": {
+          "title": "Observations",
+          "type": "integer"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rule"
+        },
+        "severity_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Severity Label"
+        }
+      },
+      "required": [
+        "engine",
+        "rule",
+        "severity_label",
+        "normalized_severity",
+        "confidence_label",
+        "observations"
+      ],
+      "title": "SourceDoc",
+      "type": "object"
+    },
+    "SpecDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "openapi_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Openapi Version"
+        },
+        "operation_count": {
+          "title": "Operation Count",
+          "type": "integer"
+        },
+        "version": {
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "openapi_version",
+        "operation_count"
+      ],
+      "title": "SpecDoc",
+      "type": "object"
+    },
+    "SummaryDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "by_kind": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "By Kind",
+          "type": "object"
+        },
+        "by_lifecycle": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "By Lifecycle",
+          "type": "object"
+        },
+        "by_severity": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "By Severity",
+          "type": "object"
+        },
+        "by_triage": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "By Triage",
+          "type": "object"
+        },
+        "findings_total": {
+          "title": "Findings Total",
+          "type": "integer"
+        },
+        "resolved_operator_supplied": {
+          "title": "Resolved Operator Supplied",
+          "type": "integer"
+        },
+        "resolved_platform_comparison": {
+          "title": "Resolved Platform Comparison",
+          "type": "integer"
+        },
+        "resolved_review_required": {
+          "title": "Resolved Review Required",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "findings_total",
+        "by_severity",
+        "by_kind",
+        "by_triage",
+        "by_lifecycle",
+        "resolved_operator_supplied",
+        "resolved_platform_comparison",
+        "resolved_review_required"
+      ],
+      "title": "SummaryDoc",
+      "type": "object"
+    },
+    "TruncationDoc": {
+      "additionalProperties": false,
+      "properties": {
+        "comparisons_omitted": {
+          "title": "Comparisons Omitted",
+          "type": "integer"
+        },
+        "notice": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Notice"
+        },
+        "omitted_findings": {
+          "title": "Omitted Findings",
+          "type": "integer"
+        },
+        "truncated": {
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "truncated",
+        "omitted_findings",
+        "notice",
+        "comparisons_omitted"
+      ],
+      "title": "TruncationDoc",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "authentication": {
+      "$ref": "#/$defs/AuthenticationDoc"
+    },
+    "authorization": {
+      "$ref": "#/$defs/AuthorizationDoc"
+    },
+    "comparisons": {
+      "items": {
+        "$ref": "#/$defs/ComparisonDoc"
+      },
+      "title": "Comparisons",
+      "type": "array"
+    },
+    "coverage": {
+      "$ref": "#/$defs/CoverageDoc"
+    },
+    "data_as_of": {
+      "title": "Data As Of",
+      "type": "string"
+    },
+    "engines": {
+      "items": {
+        "$ref": "#/$defs/EngineDoc"
+      },
+      "title": "Engines",
+      "type": "array"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/FindingDoc"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "format": {
+      "title": "Format",
+      "type": "string"
+    },
+    "generated_at": {
+      "title": "Generated At",
+      "type": "string"
+    },
+    "notices": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Notices",
+      "type": "array"
+    },
+    "report_id": {
+      "title": "Report Id",
+      "type": "string"
+    },
+    "scan": {
+      "$ref": "#/$defs/ScanDoc"
+    },
+    "schema_version": {
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "spec": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SpecDoc"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "summary": {
+      "$ref": "#/$defs/SummaryDoc"
+    },
+    "truncation": {
+      "$ref": "#/$defs/TruncationDoc"
+    }
+  },
+  "required": [
+    "schema_version",
+    "report_id",
+    "format",
+    "generated_at",
+    "data_as_of",
+    "notices",
+    "scan",
+    "authorization",
+    "spec",
+    "authentication",
+    "engines",
+    "coverage",
+    "summary",
+    "findings",
+    "comparisons",
+    "truncation"
+  ],
+  "title": "ReportDocumentV1",
+  "type": "object"
+}

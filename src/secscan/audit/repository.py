@@ -2,10 +2,10 @@
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session
 
-from secscan.audit.domain import AuditEvent, NewAuditEvent
+from secscan.audit.domain import AuditEvent, AuditFilters, NewAuditEvent
 from secscan.audit.models import AuditEventModel
 from secscan.core.db import flush_or_raise
 from secscan.core.pagination import Page, PageRequest
@@ -46,6 +46,44 @@ class AuditEventRepository:
             .limit(page.limit)
         )
         return Page(items=tuple(_to_domain(row) for row in rows), total=total, request=page)
+
+    def list_all(self, filters: AuditFilters, page: PageRequest) -> Page[AuditEvent]:
+        """全域的稽核事件（含 project 為 NULL 的全域動作），由新到舊。
+
+        可依 project、動作、物件與時間篩選。
+        """
+        conditions = _conditions(filters)
+        total = (
+            self._session.scalar(
+                select(func.count()).select_from(AuditEventModel).where(*conditions)
+            )
+            or 0
+        )
+        rows = self._session.scalars(
+            select(AuditEventModel)
+            .where(*conditions)
+            .order_by(AuditEventModel.created_at.desc(), AuditEventModel.id.desc())
+            .offset(page.offset)
+            .limit(page.limit)
+        )
+        return Page(items=tuple(_to_domain(row) for row in rows), total=total, request=page)
+
+
+def _conditions(filters: AuditFilters) -> list[ColumnElement[bool]]:
+    conditions: list[ColumnElement[bool]] = []
+    if filters.project_id is not None:
+        conditions.append(AuditEventModel.project_id == filters.project_id)
+    if filters.action is not None:
+        conditions.append(AuditEventModel.action == filters.action)
+    if filters.object_type is not None:
+        conditions.append(AuditEventModel.object_type == filters.object_type)
+    if filters.object_id is not None:
+        conditions.append(AuditEventModel.object_id == filters.object_id)
+    if filters.created_after is not None:
+        conditions.append(AuditEventModel.created_at >= filters.created_after)
+    if filters.created_before is not None:
+        conditions.append(AuditEventModel.created_at < filters.created_before)
+    return conditions
 
 
 def _to_domain(model: AuditEventModel) -> AuditEvent:

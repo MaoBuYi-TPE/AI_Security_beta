@@ -75,13 +75,21 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | GET | /api/v1/findings/{finding_id} | 同專案 | 200；有上限的摘要：身分、對應、快照中的 scan 數與觀察數、各引擎的數量、近期 5 次 scan（T20 已實作，§17.10） |
 | GET | /api/v1/findings/{finding_id}/scans | 同專案 | 200；完整的掃描歷史（由舊到新，分頁、`as_of` 快照）；每個 scan 列出所有 run 與它們的觀察數（T20 已實作，§17.10） |
 | GET | /api/v1/findings/{finding_id}/observations | 同專案 | 200；來源追溯：連結當時的值、遮罩後的觀察、報告 artifact 的 metadata 與 run（依連結序號分頁、`as_of` 快照，可依 scan_id／engine 篩選；T20 已實作，§17.10） |
-| PATCH | /api/v1/findings/{finding_id}/triage | operator/admin | 200；需 reason；敏感變更留 audit |
+| PATCH | /api/v1/findings/{finding_id}/triage | operator/admin | 200；一次改一個欄位，必帶 `expected_version` 與 reason；resolved 一律是人工判定（T21，§19.1） |
+| GET | /api/v1/findings/{finding_id}/triage-events | 同專案 | 200；不可修改的 triage 事件，依 sequence 由舊到新；摘錄內容只給 operator/admin（T21，§19.2） |
 | POST | /api/v1/scan-comparisons | operator/admin | 201 建立不可變快照；同一對與演算法版本已存在回 200；兩個 scan 都先做讀取授權（T22，§17.11） |
 | GET | /api/v1/scan-comparisons/{comparison_id} | 同專案 | 200；封存的可比性、差異理由、分類數量與限制說明（T22） |
 | GET | /api/v1/scan-comparisons/{comparison_id}/findings | 同專案 | 200；封存的逐 finding 分類與證據摘要；classification/page/limit，依 finding UUID 穩定排序（T22） |
-| POST | /api/v1/scans/{scan_id}/reports | operator/admin | 201；建立 JSON/Markdown 遮罩報告 artifact（P1 加 SARIF） |
-| GET | /api/v1/artifacts/{artifact_id}/download | 同專案 | 200；P0 僅遮罩報告/證據；不提供 raw secret artifact |
+| POST | /api/v1/scans/{scan_id}/reports | operator/admin | 202 排入佇列（重送已結束的報告回 200）；必帶 `Idempotency-Key`；scan 必須已終止（T21，§19.3） |
+| GET | /api/v1/scans/{scan_id}/reports | 同專案 | 200；這個 scan 的報告 metadata，新的在前（T21） |
+| GET | /api/v1/reports/{report_id} | 同專案 | 200；狀態、格式、大小、sha256、截斷、錯誤碼（T21） |
+| GET | /api/v1/reports/{report_id}/download | 同專案 | 200 附件下載平台產生的報告；未完成 409 `REPORT_NOT_READY`（T21，§19.3） |
 | GET | /api/v1/projects/{project_id}/audit-events | platform_admin | 200；遮罩且分頁，由新到舊（T05 已實作） |
+| GET | /api/v1/audit-events | platform_admin | 200；全域稽核（含 project 為 NULL 的事件），可依 project、action、object 與時間篩選（T21，§19.4） |
+| GET | /api/v1/scope-grants/pending | platform_admin | 200；跨 project、尚未過期的待核准申請，由舊到新（T21，§19.4） |
+| POST | /api/v1/auth-profiles/{profile_id}/disable | operator/admin | 200；停用（終止狀態），清除目前的密文；重複停用回 200（T21，§19.5） |
+
+T21 移除原本列出的 `/artifacts/{artifact_id}/download`：只有平台產生的報告可以下載，工具輸出只提供 metadata（`DECISIONS.md` §28.6）。
 
 `/health` 不在 `/api/v1`，便於部署探針；其他業務路由統一版本前綴。API 文件端點僅管理/開發環境開啟，不視為自行開發前端。
 
@@ -295,26 +303,28 @@ T19 已實作清單（§17.9）；以下是實際的形狀（2026-11-04 簽核�
 
 ## 10. Triage 與複掃比較
 
-Triage request：
+Triage request（T21 修正，取代原本的 `evidence_artifact_ids`；詳見 §19.1）：
 
 ```json
 {
-  "triage_state": "confirmed",
-  "lifecycle_state": "open",
-  "reason": "於授權靶場人工核對重現證據",
-  "evidence_artifact_ids": ["77777777-7777-4777-8777-777777777777"]
+  "expected_version": 1,
+  "lifecycle_state": "resolved",
+  "reason": "人工複測確認修補後的行為",
+  "basis": "manual_retest",
+  "comparison_id": "66666666-6666-4666-8666-666666666666",
+  "attestation": {"method": "manual_retest", "performed_at": "2026-11-08T12:00:00+00:00", "...": "..."}
 }
 ```
 
-將 lifecycle_state 設為 resolved 時必須提供驗證理由；accepted_risk 不等於已修補。所有變更保留舊值與 actor。
+resolved 一律是人工判定，平台不提供自動修補驗證；accepted_risk 與 false_positive 都不等於已修補。所有變更保留前後值、actor 與理由。「人工判定」指以 operator/admin 的 API key 送出的變更：平台無法分辨送出者是人或自動化的 client，問責的對象是 key 與它的持有者。
 
 Compare request 只接受 `baseline_scan_id`、`current_scan_id`；不能由 client 指定分類或聲稱覆蓋完成。回傳 scan 層級的 `comparable / different / not_comparable`、差異理由，以及逐 finding 的 `new / persistent / not_observed / inconclusive / not_comparable`。不同 target 回 422；其餘依版本、scope、auth 與覆蓋逐項判斷，見 §17.11。**not_observed 不等於已修補**；T22 不修改 triage 或 lifecycle。
 
 ## 11. 報告
 
-`POST /scans/{id}/reports` request：`{"format":"markdown"}` 或 `json`；P1 起支援 `sarif`。已有可用結果即可產生報告，但必須標記部分/未完成。報告有版本、hash、生成時間與掃描時間；生成報告的時間不是漏洞發現時間。
+`POST /scans/{id}/reports` request：`{"format":"markdown"}` 或 `json`；P1 起支援 `sarif`。T21 修正：scan 結束（含部分完成、失敗、逾時）之後才能產生，快照才穩定；未完成的 scan 在報告中標示。報告有版本、sha256、資料時間與產生時間；產生報告的時間不是漏洞發現或修補時間。詳見 §19.3。
 
-Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 不提供 raw artifact 公開下載端點。下載使用安全 Content-Disposition 檔名、正確 media type，不執行檔案內指令、不自動載入外部資源。
+只能以 report id 下載平台產生的報告，不接受 `path=` 或 `storage_key`；工具的原始輸出不提供下載。下載使用伺服器產生的 ASCII 檔名、正確的 media type、`nosniff`、`Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox` 與 `no-store`。
 
 ## 12. 穩定錯誤格式
 
@@ -341,10 +351,10 @@ Artifact download 必須再做 project/object 授權，不接受 `path=`。P0 �
 | 404 | RESOURCE_NOT_FOUND |
 | 405 | METHOD_NOT_ALLOWED |
 | 408 | REQUEST_TIMEOUT |
-| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、AUTH_ROLE_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED、SCAN_NOT_TERMINAL |
+| 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、AUTH_ROLE_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED、SCAN_NOT_TERMINAL、VERSION_CONFLICT、REPORT_NOT_READY、AUTH_PROFILE_DISABLED（T21） |
 | 413 | SPEC_TOO_LARGE、REQUEST_TOO_LARGE、ARTIFACT_TOO_LARGE |
 | 415 | UNSUPPORTED_MEDIA_TYPE |
-| 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、INVALID_SPEC、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE、TARGET_MISMATCH、QUOTA_EXCEEDED（比較輸入／證據超限） |
+| 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、INVALID_SPEC、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE、TARGET_MISMATCH、QUOTA_EXCEEDED（比較輸入／證據超限）、RESOLUTION_EVIDENCE_INSUFFICIENT（T21） |
 | 429 | API_RATE_LIMITED |
 | 500 | INTERNAL_ERROR |
 | 503 | RUNNER_UNAVAILABLE、DEPENDENCY_UNAVAILABLE |
@@ -1230,7 +1240,7 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 - `location.route`：scan 有規格時，剛好一個最具體的 operation 才用它的樣板（`openapi`），否則是字面的 path（`literal`）；query 不在 finding 的身分中。
 - `auth_verified` 是 false：帶認證的身分在那個 run 中失效或無法證明（preflight 沒有通過，或 guard 記下任何被拒絕、退化或探針被拒絕的帶認證請求），這種觀察不併入已驗證身分的 finding。
 - `owasp.top10_2025` 依官方的 CWE 清單（`official`），`owasp.api_2023` 依 curated 表（`curated`），沒有對應時是 null 與 `none`。
-- `triage_state`、`lifecycle_state` 在 T21 才能修改（這裡都是初始值）。
+- `triage_state`、`lifecycle_state` 以 T21 的 PATCH 修改（§19.1）；清單可依 `lifecycle_state` 篩選，並帶 `triage_version`、`resolution_review_required` 與 `resolution_review_reasons`。
 
 ### 17.10 Finding 的明細與來源追溯（T20）
 
@@ -1392,3 +1402,47 @@ uv run secscan-admin worker [--once]
 
 - `definition_sha256`：這個 profile 實際執行的規則定義（規則白名單、會改 method 的規則、強度與門檻）的 canonical JSON 的 sha256。
 - `grant_requirements`：grant 必須允許的請求（zap 的 web profile 從 `GET /` 開始 spider；nuclei 從 origin 根探測，也需要 `GET /`）。
+
+
+## 19. 人工 triage、報告與管理檢視（T21）
+
+設計理由見 `DECISIONS.md` §28。
+
+### 19.1 PATCH /api/v1/findings/{finding_id}/triage
+
+- 權限：operator／admin；viewer 403；其他 project 的 finding 與不存在的一樣 404。請求一律 `extra="forbid"`。
+- 欄位：`expected_version`（必填，等於 finding 目前的 `triage_version`，不符 409 `VERSION_CONFLICT`）、`reason`（必填，≤ 2000 字，可換行，不可有其他控制字元或格式字元；遮罩後保存）、`triage_state` 或 `lifecycle_state`（一次只改一個）、`observation_ids`（選填，≤ 20，必須連結到這個 finding）。
+- 轉換：triage 可改成另一個值（resolved 時不行，要先重開）；lifecycle 只允許 open／reopened → resolved（finding 必須已是 confirmed）與 resolved → reopened；任何狀態都不能回到 open。沒有變更或同時改兩個欄位回 422；狀態不允許回 409 `INVALID_STATE_TRANSITION`。
+- resolve 必須帶 `basis` 與 `comparison_id`：
+  - `basis: rescan_not_observed`：引用的比較中該列是 `not_observed`。**比較演算法 v1 不會產生 not_observed，所以現行版本一律以 `not_observed_required` 拒絕。**
+  - `basis: manual_retest`：該列是 `inconclusive`，平台證據都成立，未完成的只有 `rule_incomplete`／`parameter_unverified`；另附 `attestation`（操作者聲明）：`method`（`manual_retest`）、`performed_at`（帶時區，不晚於 DB 的現在、不早於最後一次觀察到它的 scan 結束時間）、`performed_by`（自述名稱 ≤ 100）、`procedure`（≤ 1000）、`result`（只接受 `not_reproduced`）、`auth_role`（等於 finding 的身分）、`request_excerpt`（HTTP/1.1 原始請求 ≤ 4 KiB：第一行是 finding 的 method 與 route，`Host` 等於 target；有參數時，query 參數必須是 request-target 中 query 的名稱，位置不明的參數也可以是 header 名稱或出現在 body，只比對名稱、不做子字串比對）、`response_excerpt`（≤ 8 KiB，第一行是 HTTP 狀態列）。平台只做這些一致性檢查，不驗證摘錄的真實性；不要貼上憑證。
+  - 共同條件：同一個 target（其他 project 的比較 404、不同 target 422 `TARGET_MISMATCH`）、整體 comparability 是 comparable、該列不需要人工確認、比較的 current 之後沒有再觀察到這個 finding、target 沒有進行中的 scan（409 `TARGET_BUSY`）。
+  - 不符時 422 `RESOLUTION_EVIDENCE_INSUFFICIENT`，訊息列出全部的原因代碼（固定的代碼，不回顯輸入）。
+- 回應：更新後的 finding 明細（§17.10），另含 `triage_version`、`distinct_paths`、`resolution`（依據、`evidence_provenance`＝`platform_comparison` 或 `operator_supplied`、判定者的角色與名稱、比較 id、複測 metadata 與摘錄的 sha256、固定說明「人工判定，平台未驗證修補」）、`resolution_review_required` 與 `resolution_review_reasons`。
+- 比較快照不會被修改：人工 resolve 之後，比較中那一列仍是原本的分類。
+- 自動重開：resolve 之後，較新的 scan 以相同的 fingerprint 與 mapping 又觀察到時，系統以 `auto_reopen_new_observation` 事件重開（failed／timed_out 的 run 也算）。mapping 不同時不重開，以 `resolution_review_required` 標示，報告不把它算成 resolved。
+
+### 19.2 GET /api/v1/findings/{finding_id}/triage-events
+
+不可修改的事件，依 sequence 由舊到新、分頁。每筆含 actor（key 或 system、key 的名稱與角色）、`request_id`、前後狀態、`reason_code`、`reason`、`comparison_id`、`basis`、`evidence_provenance`、系統重開的 `run_id`／`scan_id`、`evidence`（寫入當時的白名單鍵，不含摘錄內容）與 `created_at`。`excerpts`（遮罩後的請求與回應摘錄）只給 operator／admin；viewer 是 null（人工摘錄只有樣式遮罩：已知的秘密樣式、縮排的 header 行，以及這個 target 的認證設定用過的自訂 header 名稱）。回應帶 `Cache-Control: no-store`。`evidence.attestation.platform_checks` 只列實際執行過的檢查（finding 沒有參數時沒有 `parameter_present`）。
+
+### 19.3 報告
+
+- `POST /api/v1/scans/{scan_id}/reports`：`{"format": "json" | "markdown"}`，必帶 `Idempotency-Key`（範圍是 project；同一個 key、同樣的內容回原本的報告，內容不同含 format 不同回 409 `IDEMPOTENCY_CONFLICT`）。scan 未終止 409 `SCAN_NOT_TERMINAL`。每個 project 同時最多 5 份 queued／generating、每個 scan 最多 20 份未失敗的報告（failed 不計入），超過 409 `QUOTA_EXCEEDED`。新的回 202，重送已結束的回 200。
+- worker 在 REPEATABLE READ READ ONLY transaction 中讀快照，產生之後存 DB；最多嘗試 3 次，用盡時 `failed`：lease 一再過期是 `REPORT_ATTEMPTS_EXHAUSTED`，產生時一再出錯是 `REPORT_GENERATION_FAILED`。
+- `GET /api/v1/reports/{report_id}` 與 `GET /api/v1/scans/{scan_id}/reports`：`status`（queued／generating／succeeded／failed）、`format`、`schema_version`、`attempts`、`error_code`、`data_as_of`、`generated_at`、`size_bytes`、`sha256`、`truncated`、`omitted_findings`。
+- `GET /api/v1/reports/{report_id}/download`：只有 succeeded 能下載（否則 409 `REPORT_NOT_READY`）；送出前重新核對 sha256，不符回 500、不送出內容。
+- 內容：固定說明（未經 triage 的告警不是已驗證的漏洞、零告警不代表沒有弱點、not_observed 不等於已修補、平台不提供自動修補驗證、報告時間不是發現或修補時間、遮罩不保證辨識所有秘密）、掃描與引擎狀態、授權成立時間（grant 的 `approved_at`）、覆蓋與預算用量、摘要（以全部 finding 計算）、逐 finding 的標籤與 resolved 的依據（人工複測只有 metadata 與摘錄的 sha256）、比較快照摘要。不含 key id、storage_key、密文、idempotency key 與複測摘錄的原文。
+- 大小上限 8,388,608 bytes（UTF-8）：超過時依優先順序以整個 finding 為單位省略，`truncated=true`、記下省略數，開頭與結尾都有說明。
+- 比較快照最多列出最新的 10 份；較舊的份數記在內容的 `truncation.comparisons_omitted`，Markdown 另有說明。
+- JSON 的 schema 是 `ReportDocumentV1`（每層 `additionalProperties: false`）；Markdown 中不可信的值只放在 code span 或最上層的 fenced code block。
+
+### 19.4 管理檢視（platform_admin）
+
+- `GET /api/v1/audit-events?project_id=&action=&object_type=&object_id=&created_after=&created_before=`：全域稽核，含 project 為 NULL 的全域動作；由新到舊、分頁，內容已遮罩。時間是 [created_after, created_before)。
+- `GET /api/v1/scope-grants/pending`：跨 project、狀態是 pending 而且尚未過期的申請，由舊到新。
+
+### 19.5 POST /api/v1/auth-profiles/{profile_id}/disable
+
+- 權限：operator／admin；body `{"reason": "..."}`（≤ 500；以 `redact_text` 遮罩之後寫進不可修改的 audit，遮罩後超過 500 回 422）。不要貼上外洩的憑證：遮罩只依名稱與樣式判斷。
+- 停用是終止狀態：清除目前版本的密文，之後 PATCH 回 409 `AUTH_PROFILE_DISABLED`，以它建立新的 scan 也回 409。排隊中的 scan，以及執行中 scan 之後才準備的 run（例如 ZAP 之後的 Nuclei），都在 runner 交出 secret 之前失敗（run 的錯誤碼 `AUTH_PROFILE_DISABLED`）；已經啟動的 run 已拿到 secret，不受影響，要立即停止請取消 scan：回 200 不代表已經沒有 run 持有 secret（runner 準備完 run、啟動容器之前的短暫時間內停用，該 run 仍會拿到 secret）。重複停用回 200，不重記 audit。

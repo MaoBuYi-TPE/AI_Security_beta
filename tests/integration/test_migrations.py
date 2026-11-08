@@ -39,6 +39,10 @@ APP_TABLES = {
     "finding_observations",
     "scan_comparisons",
     "scan_comparison_findings",
+    "finding_triage_events",
+    "finding_triage_excerpts",
+    "reports",
+    "report_contents",
 }
 TRIGGER_FUNCTIONS = (
     "audit_events_reject_mutation",
@@ -57,6 +61,16 @@ TRIGGER_FUNCTIONS = (
     "scan_comparison_finding_insert_guard",
     "scan_comparison_sealed_check",
     "findings_guard",
+    "findings_triage_logged",
+    "finding_triage_events_chain",
+    "finding_triage_excerpts_insert",
+    "finding_triage_excerpts_complete",
+    "reports_guard",
+    "report_contents_insert_guard",
+    "reports_content_check",
+    "report_contents_parent_check",
+    "auth_profiles_update_guard",
+    "auth_profiles_disabled_erased",
 )
 
 

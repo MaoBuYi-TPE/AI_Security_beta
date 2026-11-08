@@ -130,6 +130,19 @@ class ComparisonRepository:
             request=page,
         )
 
+    def row(self, comparison_id: UUID, finding_id: UUID) -> FindingComparison | None:
+        """封存快照中某個 finding 的那一列（T21 的證據門檻引用；不修改快照）。"""
+        model = self._session.get(ScanComparisonFindingModel, (comparison_id, finding_id))
+        if model is None:
+            return None
+        return FindingComparison(
+            model.finding_id,
+            Classification(model.classification),
+            tuple(model.reasons),
+            model.manual_review_required,
+            _EVIDENCE.validate_python(model.evidence),
+        )
+
     def _insert_findings(
         self,
         comparison_id: UUID,

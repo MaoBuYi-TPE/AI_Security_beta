@@ -346,7 +346,10 @@ ExecutionPlan 只能包含：
 | finding_observations | observation_id（主鍵：每個觀察最多連結一次）、finding_id、連結時的 normalized_severity、normalized_confidence、needs_review、taxonomy_sha256（T19 新增；append-only） |
 | observations | id、scan_id、scanner_run_id、ordinal、source_event_id、source_index、source_rule、rule_variant、title、raw_severity、severity_label、raw_confidence、confidence_label、CWE、WASC、method、path、query、parameter 與位置、attack、evidence、other_info（遮罩並截斷）、auth_role、report_artifact_id、parser_version（T15 新增；T19 不加欄位，連結在 finding_observations，`DECISIONS.md` §25.2） |
 | artifacts | id、scanner_run_id、scan_id、kind（input/output）、path、sha256、size、redactions、classification、encrypted、storage_key（T15 新增；保留期限在 T23） |
-| reports | id、scan_id、format（json/markdown；P1 加 sarif）、status、artifact_id、lease 欄位、error；同時是 worker 的工作佇列 |
+| reports | id、project／target／scan、format（json/markdown；P1 加 sarif）、status、queue_position、idempotency_key 與 request_sha256、attempts、lease 欄位、error_code、data_as_of、generated_at、size_bytes、sha256、truncated、omitted_findings；同時是 worker 的工作佇列（T21，v0018） |
+| report_contents | report_id、content（bytea ≤ 8 MiB；只寫一次）（T21，v0018） |
+| finding_triage_events | (finding_id, sequence)、actor（key 或 system）、前後的 triage 與 lifecycle、reason_code、reason、comparison_id、resolution_basis、系統重開的 run 與 scan、evidence（白名單鍵）；append-only（T21，v0017） |
+| finding_triage_excerpts | (finding_id, sequence, kind)、遮罩後的人工複測摘錄（T21，v0017；T23a 加密與清除時只改這張表） |
 | scan_events | scan_id、sequence（每個 scan 各自連號）、event_type、scanner_run_id、payload（只由 enum 與 id 組成）、時間；供輪詢使用（T09 已建立） |
 | audit_events | actor_key_id、project、action、object_ref、redacted_changes、時間 |
 
@@ -413,7 +416,7 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - scanner_runs 新增 `results_recorded`、`parser_version`、`engine_version`、`exit_code`、`observation_count`、`result_details`（JSONB ≤ 4 KiB：排除與重複的計數、判定、AF 的摘要與 add-on 的版本）；CHECK 要求一起有值；run 結束之後由 0009 的 trigger 凍結。
   - artifacts、observations：只以複合 FK `(scanner_run_id, scan_id)` 引用 scanner_runs，不直接引用 scans（對帳先鎖 scans 再鎖 run）；不可修改、刪除或 TRUNCATE。
 - **T19（migration `0013`）**：findings 與 finding_observations（`DECISIONS.md` §25.8）。findings 的 first/last seen 以複合 FK 引用 scanner_runs、不直接引用 scans（同 observations 的鎖序理由）；trigger `findings_guard` 讓身分、對應、triage 與 lifecycle 不可修改，只有 last seen 與三個聚合可以更新而且只會往上，不能刪除。finding_observations append-only。
-- **其餘資料表由各功能任務以自己的 migration 加入**：reports 在 M5 加入。
+- **T21（migration `0017`–`0019`）**：triage 的版本與事件、人工複測摘錄（0017）；reports 與 report_contents（0018）；auth profile 的停用與全域稽核的索引（0019）。findings 的 `findings_guard` 改版為只允許版本恰好 +1 的 triage 變更（`DECISIONS.md` §28）。
 
 ## 7. ScanPlan 與執行快照
 
@@ -614,6 +617,7 @@ SHA256(canonical_json({
 `lifecycle_state`：open / resolved / reopened。
 
 - resolved 需要人工或明確的驗證程序加註原因與證據；不能只因為新的 scan 沒有告警就自動關閉。
+- **T21 更正**：resolved 一律是人工判定，平台不提供自動修補驗證（§11.2、`DECISIONS.md` §28）。
 
 Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_comparable`。比較的順序：
 
@@ -636,6 +640,14 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 - 三層證據分開：位置回應、規則完成、身分／參數可比。ZAP 規則 header 在 guard 中剝除後只作歸屬；不帶 header 不等於探索。Nuclei false 事件無法證明模板對位置完成，不建立 observation、不保存 URL 到覆蓋表。目前 rule_completed=false，採核准的 inconclusive 退路；不保存參數名稱或值。
 - `scan_comparisons` 以 ON CONFLICT 唯一鍵處理重複建立；建立者寫所有明細、seal 與 audit 才提交。deferred constraint trigger 拒絕未封存提交；父列不可見時明細插入立即拒絕。後續 finding 聚合不改變快照，T22 不變更 finding 生命週期。
 - 重新識別含 related 及 corroborated_by 成員原群組；只有保存的 mapping/hash 和目前分類表一致時才使用該表的關係，不拿新表重解釋舊 scan。位置＋群組索引及每個 run 的回應集合只建立一次，避免 finding 之間的平方比對與重掃全部位置。
+
+### 11.2 T21 的實作界線
+
+- 三種性質分開保存與呈現：平台事實（比較快照、觀察、coverage，封存後不可修改）、操作者聲明（人工複測的方法、時間、步驟與摘錄，平台只做一致性檢查）、人工判定（triage 與 resolved，以不可變事件與 audit 問責）。
+- 模組：轉換規則、自動重開的 R1–R4 與事件的寫入在 `findings/`（linker 在同一個 transaction 自動重開，findings 不能依賴上層）；PATCH、triage-events、證據資格與人工複測的一致性檢查在 `triage/`；報告在 `reports/`。import-linter 的 layers：`health | runner | worker` → `reports` → `triage` → `comparisons` → `scanners | findings` → …。
+- resolved 雙軌：`rescan_not_observed`（該列是 not_observed；比較演算法 v1 不會產生，現行版本不可用）與 `manual_retest`（該列是 inconclusive、平台證據都成立、只缺 rule／parameter 的完成證明，另附操作者聲明）。比較快照不會被修改。
+- DB 強制（migration `0017`）：triage 欄位只能在 `triage_version` 恰好 +1 時改；每次升版恰好一筆不可修改的事件（BEFORE INSERT 的事件鏈 + deferred 檢查）；resolved 時 trigger 以單一查詢寫入 watermark（target 所有 scan 的最大 `queue_position`）並確認 target 沒有進行中的 scan。人工複測摘錄另存 `finding_triage_excerpts`，事件只存 sha256 與長度。
+- 鎖：PATCH 與 linker 的 `lock_findings` 都是 FOR NO KEY UPDATE（和建立比較快照時 FK 的 KEY SHARE 相容）；PATCH 另以 FOR SHARE 鎖住呼叫者的 key（撤銷要等它）。
 
 ## 12. Artifact 與報告
 
@@ -666,3 +678,11 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 - 初版輸出 JSON/Markdown（P1 加 SARIF），並以 attachment 與正確的 content-type 傳送。
 - 需要處理 Markdown 中的原始 HTML 與連結，不自動載入遠端資源。
 - 產生報告不需要自訂前端。
+
+**T21 的實作**（`DECISIONS.md` §28.5、`API_CONTRACT.md` §19.3）：
+
+- `reports` 是 worker 的工作佇列（SKIP LOCKED、lease 30 秒、最多 3 次），內容存在 `report_contents`（≤ 8 MiB），不使用 artifact 或 runs volume。worker 每圈先處理 run，再處理一份報告。
+- 單一報告的錯誤（含這份報告專屬的 DB 錯誤：違反 CHECK、commit 時核對失敗、快照查詢逾時 57014）只記類別與位置，立即釋放這一次嘗試（退回 queued，用盡時 `REPORT_GENERATION_FAILED`）；連線中斷、等鎖逾時等其他 DB 錯誤讓 worker 程序結束（§17.6），報告留在 generating，lease 到期後由對帳處理。lease 已失效時不算完成、也不釋放。
+- worker 在 REPEATABLE READ READ ONLY transaction 中分頁讀快照，每頁之間以另一個短 transaction 心跳；以純函式投影成白名單欄位、再遮罩一次，渲染 JSON（`ReportDocumentV1` 驗證）或 Markdown（不可信的值只在 code span 或最上層的 fenced block）；完成時以 fenced transaction 寫入內容，deferred 檢查雙向核對內容、sha256 與狀態。
+- 只能以 report id 下載，送出前重新核對 sha256；`/artifacts/{id}/download` 已從契約移除，工具輸出只提供 metadata。
+- 報告內容與人工複測摘錄在 DB 中沒有加密、沒有保留期限（T23a）；T21 完成不代表資料保護已完成（`DECISIONS.md` §28.9）。

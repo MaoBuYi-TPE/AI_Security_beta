@@ -66,3 +66,15 @@ class AuditEvent:
     object_id: UUID | None
     request_id: str | None
     redacted_changes: Mapping[str, JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class AuditFilters:
+    """全域稽核查詢的篩選（T21）：時間是 [created_after, created_before)。"""
+
+    project_id: UUID | None = None
+    action: str | None = None
+    object_type: str | None = None
+    object_id: UUID | None = None
+    created_after: datetime | None = None
+    created_before: datetime | None = None

@@ -1526,14 +1526,27 @@
   - 未執行：`make test-live-zap`、`make test-live-lab` 未在 T22 重跑，留給 T23c 在最終版本執行。
   - 限制：實際 producer 的 `rule_completed` 一律 false，Live 的單側 finding 都是 inconclusive，這一版不能計算「自動驗證修補成功率」；不保存參數名稱或值；Nuclei 在這個 fixture 每次都有 1–2 個模板 error，雙引擎 scan 都是 partially_completed。
   - 給 T21／T31／T23：T21 的 resolved 要引用 T22 的比較（同 target、finding 為 not_observed、版本相同、之後沒有新觀察），目前實測不會出現 not_observed，因此 resolved 只能靠人工並留理由；T31 的複掃指標以比較快照計算，「誤判已修補」次數由 not_observed 的 ground truth 核對；T23c 重跑 `test-live-zap`、`test-live-runner`、`record-fixtures` 前先替 `zap_support.start_site` 與 `guard_support.start_receiver` 補上 tmpfs。
-- [ ] T21 完成人工 triage、audit 與 JSON/Markdown 報告。
+- [x] T21 完成人工 triage、audit 與 JSON/Markdown 報告（2026-11-08）。
   - DoD：未確認的告警清楚標記；只有平台產生的報告可下載，不提供工具 raw output 下載；worker 佇列、DB 保存、上限 8 MiB 與截斷標示；權限、遮罩、下載、安全編碼通過測試，不執行 HTML 或載入遠端資源。
   - resolved 必須有可支持結論的修復／覆蓋證據；accepted_risk 不等於修復；只有 resolved 之後建立的新 scan 的有效再現才能自動重開，舊觀察延遲入庫不得重開；版本不相容要人工確認；版本號併發控制與完整稽核。
+  - 細部計畫：使用者 2026-11-07 核准雙軌（平台複掃證據／人工複測）與六項條件，2026-11-08 評估後補上四點（平台複掃現行不可用、人工證據是操作者聲明、資料保護尚未完成、併發／交易一致性／審查是必要驗收），見 `DECISIONS.md` §28。**resolved 一律是人工判定，T21 不提供自動修補驗證。**
+  - 進度（2026-11-08，完成）：
+    - 階段 A（triage 與 audit）：`findings/domain/triage.py`、`findings/triage_records.py`、`findings/reopen.py`（linker 自動重開）、`triage/`（PATCH、triage-events、證據資格、人工複測的一致性檢查）、migration v0017。資料庫審查（opus）0 CRITICAL／HIGH，2 MEDIUM、6 LOW 全部採用（§28.11）。G1–G3 的測試連續 5 次通過。
+    - 階段 B（報告）：`reports/`（快照、用語、安全編碼、截斷、佇列、下載）、`worker/reports.py`、migration v0018。20,000 個合成 finding 的渲染：JSON 3.8 秒、Markdown 6.3 秒（都在 8 MiB 處截斷）。
+    - 階段 C（交接項目）：全域稽核查詢、全域待核准清單、停用 auth profile、migration v0019。
+    - 階段 B、C 的資料庫審查（opus）：0 CRITICAL；1 HIGH（共用的 auth_profiles_guard 在 TRUNCATE 時引用不存在的欄位）、2 MEDIUM（failed 的 CHECK 三值邏輯、DB 層沒有 lease 的 fencing token）、8 LOW 全部採用（§28.12）。
+    - 階段 D（Live）：`tests/live/triage_support.py`、`tests/live/report_assertions.py`，擴充 `test_fixture_rescan_live.py`。
+    - G5 審查（opus）：程式碼審查 0 CRITICAL／HIGH、5 MEDIUM、5 LOW 全部採用（§28.13）；安全審查 0 CRITICAL／HIGH、1 MEDIUM（截斷迴圈可被偏斜的大小分布放大）、10 LOW，L5 寫進文件、L8 的每個 key 速率限制留給 T23b，其餘採用（§28.14）。
+    - G6 Live：`make test-live-fixture-rescan` 兩次都通過（審查修正前後各一次，各約 31.5 分鐘）：兩個案例經人工複測 resolve、比較快照不變、反例的拒絕原因只來自平台條件、小預算 scan 之後 2／2 自動重開、4 份報告的核對都通過；`make test-live-fixture-findings` 回歸 3 passed；沒有殘留資源（§28.15）。
+    - G7：文件、API 說明、報告與用語檢查都沒有「平台自動驗證修補」「資料保護已完成」「SEC-14 完成」這類敘述。
+    - Gate D：去重（T20）與複掃（T22）的部分已通過；報告的離線、DB 與 live 核對已通過，**使用者人工審閱樣本報告（`recordings/t21-report-samples/`）之後才標 Gate D 通過**。
+    - 品質：`make lint`、`make typecheck`、`make test`（6462 passed、2 skipped，coverage 99.25%）通過；G1／G2 的閘門測試連續 5 次通過（每次 58 個）。
+  - 給 T23a：T21 新增的人工複測摘錄（`finding_triage_excerpts`）與報告內容（`report_contents`）在 DB 中沒有加密、沒有保留期限，與原始證據一併處理；清除摘錄時只改那張表，事件與雜湊不變；報告以新的 migration 開放「只刪除到期報告」（`DECISIONS.md` §28.9）。
 - [ ] T31 建立 benchmark harness。
   - DoD：透過自己的 API 執行各實驗組別，保存 manifest 與 guard 計數；`evaluate.py` 是純函式並有測試。組合組的子預算凍結或偏差揭露須在細部計畫決定，不冒稱現有共用預算已符合公平實驗。
 - [ ] T23 完成所有 P0 的安全、故障、整合測試，並在乾淨環境重建。
   - 因資料保護、部署與最終驗收涉及不同界線，拆成以下四項，各自細化後實作：
-  - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）。
+  - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）；含 T21 的人工複測摘錄與報告內容。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。

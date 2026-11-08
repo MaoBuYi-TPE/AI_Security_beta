@@ -104,6 +104,11 @@ class FindingCoreOut(BaseModel):
     mapping_version: str
     triage_state: TriageState
     lifecycle_state: LifecycleState
+    # T21：PATCH /findings/{id}/triage 的 expected_version。
+    triage_version: int
+    # resolved 之後平台無法自動判斷是否復發（又被觀察到但 mapping 不同，或規則已換版）：不算已修補。
+    resolution_review_required: bool
+    resolution_review_reasons: list[str]
     first_seen_scan_id: UUID
     last_seen_scan_id: UUID
     created_at: datetime
@@ -147,6 +152,9 @@ def finding_fields(finding: Finding) -> dict[str, object]:
         "mapping_version": finding.mapping_version,
         "triage_state": finding.triage_state,
         "lifecycle_state": finding.lifecycle_state,
+        "triage_version": finding.triage_version,
+        "resolution_review_required": bool(finding.resolution_review),
+        "resolution_review_reasons": list(finding.resolution_review),
         "first_seen_scan_id": finding.first_seen_scan_id,
         "last_seen_scan_id": finding.last_seen_scan_id,
         "created_at": finding.created_at,

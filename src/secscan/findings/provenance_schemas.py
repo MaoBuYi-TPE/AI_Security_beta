@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from secscan.core.json_types import JsonObject
 from secscan.findings.domain.normalization import Confidence, Severity
 from secscan.findings.domain.provenance import (
     ArtifactRecord,
@@ -25,6 +26,12 @@ from secscan.findings.domain.provenance import (
     ScanAppearance,
     SeenSummary,
     TracedObservation,
+)
+from secscan.findings.domain.triage import (
+    RESOLUTION_NOTICES,
+    EvidenceProvenance,
+    Resolution,
+    ResolutionBasis,
 )
 from secscan.findings.schemas import FindingCoreOut, finding_fields
 from secscan.scans.domain.catalog import Engine
@@ -105,6 +112,60 @@ class ScanAppearanceOut(_Frozen):
         )
 
 
+class AttestationSummaryOut(_Frozen):
+    """人工複測聲明的 metadata（操作者提供；平台只做一致性檢查）。摘錄內容只在 triage-events。"""
+
+    method: str
+    provenance: EvidenceProvenance
+    performed_at: datetime
+    performed_by: str
+    procedure: str
+    result: str
+    role: str
+    request_excerpt_sha256: str
+    request_excerpt_bytes: int
+    response_excerpt_sha256: str
+    response_excerpt_bytes: int
+    checks_version: int
+    platform_checks: list[str]
+
+    @classmethod
+    def of(cls, document: JsonObject) -> Self:
+        return cls.model_validate({name: document.get(name) for name in cls.model_fields})
+
+
+class ResolutionOut(_Frozen):
+    """resolved 的依據：一律是人工判定（decided_by 是送出 PATCH 的 key）。"""
+
+    basis: ResolutionBasis
+    evidence_provenance: EvidenceProvenance
+    comparison_id: UUID
+    decided_at: datetime
+    decided_by_role: str | None
+    decided_by_name: str | None
+    event_sequence: int
+    attestation: AttestationSummaryOut | None
+    notice: str
+
+    @classmethod
+    def of(cls, resolution: Resolution) -> Self:
+        return cls(
+            basis=resolution.basis,
+            evidence_provenance=resolution.provenance,
+            comparison_id=resolution.comparison_id,
+            decided_at=resolution.decided_at,
+            decided_by_role=resolution.decided_by_role,
+            decided_by_name=resolution.decided_by_name,
+            event_sequence=resolution.event_sequence,
+            attestation=(
+                AttestationSummaryOut.of(resolution.attestation)
+                if resolution.attestation is not None
+                else None
+            ),
+            notice=RESOLUTION_NOTICES[resolution.basis],
+        )
+
+
 class FindingDetailOut(FindingCoreOut):
     """GET /findings/{id}：有上限的摘要（近期 5 次 scan）；完整的歷史與觀察另外分頁。"""
 
@@ -114,6 +175,9 @@ class FindingDetailOut(FindingCoreOut):
     seen: SeenOut
     engines: list[EngineCountOut]
     recent_scans: list[ScanAppearanceOut]
+    # T21：快照中不同 path 的數量；目前 resolved 的依據（不是 resolved 時為 null）。
+    distinct_paths: int
+    resolution: ResolutionOut | None
 
     @classmethod
     def of(cls, detail: FindingDetail) -> Self:
@@ -126,6 +190,10 @@ class FindingDetailOut(FindingCoreOut):
                 "seen": SeenOut.of(detail.seen),
                 "engines": [EngineCountOut.of(count) for count in detail.engines],
                 "recent_scans": [ScanAppearanceOut.of(scan) for scan in detail.recent_scans],
+                "distinct_paths": detail.distinct_paths,
+                "resolution": (
+                    ResolutionOut.of(detail.resolution) if detail.resolution is not None else None
+                ),
             }
         )
 

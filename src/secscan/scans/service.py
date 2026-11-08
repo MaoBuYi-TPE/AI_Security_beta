@@ -267,6 +267,12 @@ class ScanService:
         locked = self._profiles.lock(profile.id, shared=True)
         if locked is None:
             raise not_found_error()
+        if locked.disabled_at is not None:
+            raise AppError(
+                status_code=HTTPStatus.CONFLICT,
+                code=ErrorCode.AUTH_PROFILE_DISABLED,
+                message="auth profile 已停用，不能用來建立新的 scan。",
+            )
         current = locked.current
         try:
             current.definition.credential.require_usable()
