@@ -16,9 +16,12 @@ from secscan.triage.domain.attestation import (
 )
 from tests.live.report_assertions import check_document, check_headers, check_markdown
 from tests.live.triage_support import (
+    LOCATION_PROBLEMS,
     Observed,
+    assert_rejected_for,
     attestation,
     confirm_body,
+    located_attestation,
     passes,
     platform_problems,
     resolve_body,
@@ -92,7 +95,7 @@ def test_report_checks_accept_platform_reports_and_reject_tampering() -> None:
     headers = {
         "Content-Type": "text/markdown; charset=utf-8",
         "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; sandbox",
         "Cache-Control": "no-store",
         "Content-Disposition": 'attachment; filename="secscan-report-00000000-00000000.md"',
     }
@@ -105,3 +108,62 @@ def test_report_checks_accept_platform_reports_and_reject_tampering() -> None:
     as_json = render(snapshot(report_format=ReportFormat.JSON), generated_at=NOW)
     document = check_document(as_json.content, complete=False)
     assert document.findings
+
+
+def _finding(route: str, parameter: str | None, role: str = "anonymous") -> dict[str, object]:
+    location = {
+        "method": "GET",
+        "route": route,
+        "parameter_location": "query" if parameter else None,
+        "parameter_name": parameter,
+    }
+    return {"location": location, "auth_role": role}
+
+
+@pytest.mark.parametrize(
+    ("route", "source", "parameter"),
+    [("/", RouteSource.LITERAL, None), ("/users/{id}", RouteSource.OPENAPI, "q")],
+)
+def test_located_attestations_match_their_own_finding(
+    route: str, source: RouteSource, parameter: str | None
+) -> None:
+    body = located_attestation(
+        _finding(route, parameter, "user"), observed("T30-FX-01", 200, "[]"), "lab-x", 8080
+    )
+    assert body["auth_role"] == "user"
+    check_attestation(
+        Attestation(
+            performed_at=AT,
+            performed_by=body["performed_by"],
+            procedure=body["procedure"],
+            result=body["result"],
+            auth_role=body["auth_role"],
+            request_excerpt=body["request_excerpt"],
+            response_excerpt=body["response_excerpt"],
+        ),
+        FindingLocation("GET", route, source, parameter, "user", "query" if parameter else None),
+        TargetHost("lab-x", 8080),
+        now=AT,
+        last_observed_at=None,
+    )
+
+
+def _rejected(*codes: str) -> dict[str, object]:
+    message = "證據不足，不能標成 resolved：" + ", ".join(codes)
+    return {"error": {"code": "RESOLUTION_EVIDENCE_INSUFFICIENT", "message": message}}
+
+
+def test_rejections_must_come_from_the_platform_conditions() -> None:
+    found = assert_rejected_for(
+        _rejected("engine_incomplete", "performed_before_last_observation"), ["engine_incomplete"]
+    )
+    assert found == {"engine_incomplete", "performed_before_last_observation"}
+    with pytest.raises(AssertionError):
+        assert_rejected_for(_rejected("row_not_inconclusive"), ["engine_incomplete"])
+    for problem in LOCATION_PROBLEMS:
+        with pytest.raises(AssertionError):
+            assert_rejected_for(_rejected("engine_incomplete", problem), ["engine_incomplete"])
+    with pytest.raises(AssertionError):
+        assert_rejected_for(_rejected("engine_incomplete"), [])
+    with pytest.raises(AssertionError):
+        assert_rejected_for({"error": {"code": "INVALID_REQUEST", "message": "x"}}, ["x"])

@@ -7,12 +7,13 @@
 每讀完一頁呼叫 on_page（worker 以另一個短 transaction 寫心跳）。
 """
 
+import re
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Row, and_, distinct, func, select
+from sqlalchemy import ColumnElement, Row, and_, distinct, func, select
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.orm import Session
 
@@ -44,6 +45,7 @@ from secscan.reports.domain.model import (
     SourceRow,
     SpecSection,
 )
+from secscan.scans.domain.model import Scan
 from secscan.scans.models import ObservationModel
 from secscan.scans.repository import ScanRepository
 from secscan.scans.schemas import ScanOut
@@ -51,6 +53,8 @@ from secscan.specs.repository import ApiSpecRepository
 from secscan.targets.models import TargetModel
 
 PAGE_SIZE = 100
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_CHECK_NAME = re.compile(r"[a-z][a-z_]{0,63}")
 
 
 class SnapshotUnavailableError(Exception):
@@ -77,10 +81,35 @@ class SnapshotReader:
         if grant is None:
             raise SnapshotUnavailableError("grant 不存在")
         public = ScanOut.of(scan)
+        return ReportSnapshot(
+            report_id=report_id,
+            format=report_format,
+            data_as_of=data_as_of,
+            scan=self._scan_section(scan, public),
+            authorization=AuthorizationSection(
+                grant_id=grant.id,
+                grant_version=scan.scope_grant.version,
+                approved_at=grant.approved_at,
+                valid_from=grant.window.valid_from,
+                valid_until=grant.window.valid_until,
+                authorization_reference=grant.authorization_reference,
+            ),
+            spec=self._spec(scan),
+            auth=AuthSection(
+                role=scan.auth_role,
+                profile_version=scan.auth.version if scan.auth is not None else None,
+                preflight=public.auth.preflight if public.auth is not None else None,
+            ),
+            findings=self._findings(scan_id, on_page),
+            comparisons=self._comparisons(scan_id),
+            comparisons_omitted=max(0, self._comparison_total(scan_id) - MAX_COMPARISONS),
+        )
+
+    def _scan_section(self, scan: Scan, public: ScanOut) -> ScanSection:
         target_name = self._session.scalar(
             select(TargetModel.name).where(TargetModel.id == scan.target_id)
         )
-        section = ScanSection(
+        return ScanSection(
             id=scan.id,
             status=scan.status.value,
             profile=scan.profile.value,
@@ -111,35 +140,15 @@ class SnapshotReader:
             authenticated_operations=public.coverage.authenticated_operations,
             coverage_limitations=tuple(public.coverage.limitations),
         )
-        spec = None
-        if scan.api_spec is not None:
-            found = ApiSpecRepository(self._session).get(scan.api_spec.id)
-            if found is not None:
-                spec = SpecSection(
-                    found.id, scan.api_spec.version, found.openapi_version, found.operation_count
-                )
-        auth = AuthSection(
-            role=scan.auth_role,
-            profile_version=scan.auth.version if scan.auth is not None else None,
-            preflight=public.auth.preflight if public.auth is not None else None,
-        )
-        return ReportSnapshot(
-            report_id=report_id,
-            format=report_format,
-            data_as_of=data_as_of,
-            scan=section,
-            authorization=AuthorizationSection(
-                grant_id=grant.id,
-                grant_version=scan.scope_grant.version,
-                approved_at=grant.approved_at,
-                valid_from=grant.window.valid_from,
-                valid_until=grant.window.valid_until,
-                authorization_reference=grant.authorization_reference,
-            ),
-            spec=spec,
-            auth=auth,
-            findings=self._findings(scan_id, on_page),
-            comparisons=self._comparisons(scan_id),
+
+    def _spec(self, scan: Scan) -> SpecSection | None:
+        if scan.api_spec is None:
+            return None
+        found = ApiSpecRepository(self._session).get(scan.api_spec.id)
+        if found is None:
+            return None
+        return SpecSection(
+            found.id, scan.api_spec.version, found.openapi_version, found.operation_count
         )
 
     def _findings(self, scan_id: UUID, on_page: Callable[[], None]) -> tuple[FindingSection, ...]:
@@ -229,16 +238,19 @@ class SnapshotReader:
         ).all()
         return {row[0].finding_id: _resolution(row) for row in rows}
 
+    def _comparison_total(self, scan_id: UUID) -> int:
+        total = self._session.scalar(
+            select(func.count()).select_from(ScanComparisonModel).where(*_involving(scan_id))
+        )
+        return total or 0
+
     def _comparisons(self, scan_id: UUID) -> tuple[ComparisonSection, ...]:
+        """這個 scan 參與的比較快照，最新的 MAX_COMPARISONS 份（省略的數量另外揭露）。"""
         comparisons = ScanComparisonModel
         rows = self._session.scalars(
             select(comparisons)
-            .where(
-                comparisons.sealed.is_(True),
-                (comparisons.baseline_scan_id == scan_id)
-                | (comparisons.current_scan_id == scan_id),
-            )
-            .order_by(comparisons.created_at, comparisons.id)
+            .where(*_involving(scan_id))
+            .order_by(comparisons.created_at.desc(), comparisons.id.desc())
             .limit(MAX_COMPARISONS)
         ).all()
         sections = []
@@ -260,6 +272,14 @@ class SnapshotReader:
                 )
             )
         return tuple(sections)
+
+
+def _involving(scan_id: UUID) -> tuple[ColumnElement[bool], ...]:
+    comparisons = ScanComparisonModel
+    return (
+        comparisons.sealed.is_(True),
+        (comparisons.baseline_scan_id == scan_id) | (comparisons.current_scan_id == scan_id),
+    )
 
 
 def _section(
@@ -308,19 +328,7 @@ def _resolution(row: Row[FindingTriageEventModel, str | None]) -> ResolutionSect
         raise SnapshotUnavailableError("resolved 的事件缺少依據或比較快照")
     basis = ResolutionBasis(event.resolution_basis)
     attestation = event.evidence.get("attestation")
-    values: dict[str, Any] = {}
-    if isinstance(attestation, dict):
-        values = {
-            "performed_at": attestation.get("performed_at"),
-            "performed_by": attestation.get("performed_by"),
-            "procedure": attestation.get("procedure"),
-            "request_excerpt_sha256": attestation.get("request_excerpt_sha256"),
-            "request_excerpt_bytes": attestation.get("request_excerpt_bytes"),
-            "response_excerpt_sha256": attestation.get("response_excerpt_sha256"),
-            "response_excerpt_bytes": attestation.get("response_excerpt_bytes"),
-            "checks_version": attestation.get("checks_version"),
-            "platform_checks": _strings(attestation.get("platform_checks")),
-        }
+    values = _attestation(attestation) if isinstance(attestation, dict) else {}
     return ResolutionSection(
         basis=basis.value,
         provenance=PROVENANCE_OF_BASIS[basis].value,
@@ -331,5 +339,58 @@ def _resolution(row: Row[FindingTriageEventModel, str | None]) -> ResolutionSect
     )
 
 
-def _strings(value: object) -> tuple[str, ...]:
-    return tuple(item for item in value if isinstance(item, str)) if isinstance(value, list) else ()
+def _attestation(attestation: dict[str, Any]) -> dict[str, Any]:
+    """事件 evidence（JSONB）中的複測 metadata：逐欄驗證型別與格式（安全審查 L4）。
+
+    performed_at、雜湊、長度與版本在 Markdown 中放在 code 以外，只接受平台寫入的格式；不符代表
+    DB 中的資料被改過或寫入路徑出錯，這次嘗試失敗（不把它渲染出來）。performed_by、procedure 是
+    操作者的文字，投影時遮罩、渲染時一律放在 code 中。
+    """
+    return {
+        "performed_at": _timestamp(attestation.get("performed_at")),
+        "performed_by": _text(attestation.get("performed_by")),
+        "procedure": _text(attestation.get("procedure")),
+        "request_excerpt_sha256": _digest(attestation.get("request_excerpt_sha256")),
+        "request_excerpt_bytes": _count(attestation.get("request_excerpt_bytes")),
+        "response_excerpt_sha256": _digest(attestation.get("response_excerpt_sha256")),
+        "response_excerpt_bytes": _count(attestation.get("response_excerpt_bytes")),
+        "checks_version": _count(attestation.get("checks_version")),
+        "platform_checks": _check_names(attestation.get("platform_checks")),
+    }
+
+
+def _timestamp(value: object) -> str:
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None:
+            return parsed.isoformat()
+    raise SnapshotUnavailableError("人工複測的時間格式不符")
+
+
+def _text(value: object) -> str:
+    if not isinstance(value, str):
+        raise SnapshotUnavailableError("人工複測的文字欄位格式不符")
+    return value
+
+
+def _digest(value: object) -> str:
+    if isinstance(value, str) and _SHA256.fullmatch(value):
+        return value
+    raise SnapshotUnavailableError("人工複測摘錄的雜湊格式不符")
+
+
+def _count(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    raise SnapshotUnavailableError("人工複測的長度或版本格式不符")
+
+
+def _check_names(value: object) -> tuple[str, ...]:
+    if isinstance(value, list) and all(
+        isinstance(item, str) and _CHECK_NAME.fullmatch(item) for item in value
+    ):
+        return tuple(value)
+    raise SnapshotUnavailableError("人工複測的檢查清單格式不符")

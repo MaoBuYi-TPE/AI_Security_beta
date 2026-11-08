@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 
 from secscan.api_keys.dependencies import CurrentPrincipal
 from secscan.core.api import PageQuery, ok_page
@@ -46,7 +46,10 @@ def list_triage_events(
     principal: CurrentPrincipal,
     session: DbSession,
     page: PageQuery,
+    response: Response,
 ) -> Envelope[list[TriageEventOut]]:
     """不可修改的 triage 事件，依 sequence 由舊到新；摘錄內容只給 operator/admin。"""
     events = TriageService(session).events(principal, finding_id, page)
+    # 回應可能含人工複測的摘錄（只做樣式遮罩）：不得被 proxy 或 client 快取。
+    response.headers["Cache-Control"] = "no-store"
     return ok_page(events, TriageEventOut.of)

@@ -93,6 +93,28 @@ def test_consistent_attestation_records_hashes_and_platform_fields() -> None:
         ({"request_excerpt": "GET /search?q=1 HTTP/1.1\nHost: other:8080\n"}, A.HOST_MISMATCH),
         ({"request_excerpt": "GET /search?q=1 HTTP/1.1\nHost: lab-fixture\n"}, A.HOST_MISMATCH),
         ({"request_excerpt": "GET /search?q=1 HTTP/1.1\nAccept: */*\n"}, A.HOST_MISMATCH),
+        # absolute-form：authority 以 request-target 為準，必須是 http 而且等於 target。
+        (
+            {
+                "request_excerpt": "GET http://other.example/search?q=1 HTTP/1.1\n"
+                "Host: lab-fixture:8080\n"
+            },
+            A.HOST_MISMATCH,
+        ),
+        (
+            {
+                "request_excerpt": "GET https://lab-fixture:8080/search?q=1 HTTP/1.1\n"
+                "Host: lab-fixture:8080\n"
+            },
+            A.HOST_MISMATCH,
+        ),
+        (
+            {
+                "request_excerpt": "GET http://user@lab-fixture:8080/search?q=1 HTTP/1.1\n"
+                "Host: lab-fixture:8080\n"
+            },
+            A.HOST_MISMATCH,
+        ),
         (
             {
                 "request_excerpt": "GET /search?q=1 HTTP/1.1\nHost: lab-fixture:8080\n"
@@ -110,11 +132,63 @@ def test_consistent_attestation_records_hashes_and_platform_fields() -> None:
             {"request_excerpt": "GET /search?q=" + "x" * REQUEST_EXCERPT_MAX_BYTES + " HTTP/1.1\n"},
             A.EXCERPT_TOO_LARGE,
         ),
-        ({"response_excerpt": "   "}, A.EXCERPT_TOO_LARGE),
+        ({"response_excerpt": "   "}, A.EXCERPT_EMPTY),
+        ({"request_excerpt": ""}, A.EXCERPT_EMPTY),
+        # 名稱只是其他名稱的一部分、或只出現在 query 值中，都不算有這個參數。
+        (
+            {"request_excerpt": "GET /search?xq=1 HTTP/1.1\nHost: lab-fixture:8080\n"},
+            A.PARAMETER_MISSING,
+        ),
+        (
+            {"request_excerpt": "GET /search?x=q HTTP/1.1\nHost: lab-fixture:8080\n"},
+            A.PARAMETER_MISSING,
+        ),
     ],
 )
 def test_each_inconsistency_is_rejected(changes: dict[str, object], expected: A) -> None:
     assert expected in problems_of(**changes)
+
+
+def test_empty_excerpt_is_not_reported_as_too_large() -> None:
+    assert A.EXCERPT_TOO_LARGE not in problems_of(response_excerpt="  \n ")
+
+
+def test_query_parameter_is_only_matched_in_the_request_target_query() -> None:
+    query = replace(LOCATION, parameter_location="query")
+    in_body = "GET /search HTTP/1.1\nHost: lab-fixture:8080\n\nq=1"
+    with pytest.raises(AttestationError) as caught:
+        check(replace(ATTESTATION, request_excerpt=in_body), query)
+    assert caught.value.problems == (A.PARAMETER_MISSING,)
+    absolute = "GET http://lab-fixture:8080/search?q=1 HTTP/1.1\nHost: lab-fixture:8080\n"
+    check(replace(ATTESTATION, request_excerpt=absolute), query)
+    check(replace(ATTESTATION, request_excerpt="GET /search?a=1&q= HTTP/1.1\n" + _HOST), query)
+
+
+_HOST = "Host: lab-fixture:8080\n"
+
+
+def test_unknown_location_also_matches_header_names_and_body() -> None:
+    unknown = replace(LOCATION, parameter_location="unknown", parameter_name="X-Trace")
+    header = "GET /search HTTP/1.1\n" + _HOST + "x-trace: 1\n"
+    check(replace(ATTESTATION, request_excerpt=header), unknown)
+    body = "GET /search HTTP/1.1\n" + _HOST + '\n{"X-Trace": 1}'
+    check(replace(ATTESTATION, request_excerpt=body), unknown)
+    form = "GET /search HTTP/1.1\n" + _HOST + "\na=1&X-Trace=2"
+    check(replace(ATTESTATION, request_excerpt=form), unknown)
+    nested = "GET /search HTTP/1.1\n" + _HOST + '\n{"outer": [{"X-Trace": 1}]}'
+    check(replace(ATTESTATION, request_excerpt=nested), unknown)
+    # 只是其他鍵名或值的一部分不算（不做子字串比對）。
+    for body in ('{"X-Trace-Id": 1}', '{"a": "X-Trace"}', "MyX-Trace=1", "[" * 3000):
+        partial = "GET /search HTTP/1.1\n" + _HOST + "\n" + body
+        with pytest.raises(AttestationError):
+            check(replace(ATTESTATION, request_excerpt=partial), unknown)
+    # 沒有冒號的畸形 header 行不影響 body 的起點。
+    malformed = "GET /search HTTP/1.1\n" + _HOST + "garbage\n\nX-Trace=1"
+    check(replace(ATTESTATION, request_excerpt=malformed), unknown)
+    missing = "GET /search HTTP/1.1\n" + _HOST + "Accept: x-trace\nX-Trace\n\nnothing"
+    with pytest.raises(AttestationError) as caught:
+        check(replace(ATTESTATION, request_excerpt=missing), unknown)
+    assert caught.value.problems == (A.PARAMETER_MISSING,)
 
 
 def test_all_problems_are_reported_together() -> None:
@@ -170,3 +244,24 @@ def test_masked_excerpts_are_idempotent_and_bounded(value: str) -> None:
     assert "\r" not in masked
     assert "\x00" not in masked
     assert mask_excerpt(masked, REQUEST_EXCERPT_MAX_BYTES) == masked
+
+
+def test_only_the_checks_actually_run_are_recorded() -> None:
+    with_parameter = check()
+    assert "parameter_present" in with_parameter.evidence()["platform_checks"]  # type: ignore[attr-defined]
+    no_parameter = replace(LOCATION, parameter_name=None)
+    request = "GET /search HTTP/1.1\n" + _HOST
+    checked = check(replace(ATTESTATION, request_excerpt=request), no_parameter)
+    recorded = checked.evidence()["platform_checks"]  # type: ignore[attr-defined]
+    assert "parameter_present" not in recorded
+    assert len(recorded) == len(PLATFORM_CHECKS) - 1
+
+
+def test_target_secret_headers_and_indented_headers_are_masked() -> None:
+    target = replace(TARGET, secret_header_names=frozenset({"x-lab"}))
+    request = (
+        "GET /search?q=1 HTTP/1.1\n" + _HOST + "X-Lab: s3cr3t-value\n Authorization: Token abc\n"
+    )
+    checked = check(replace(ATTESTATION, request_excerpt=request), target=target)
+    assert "s3cr3t-value" not in checked.request_excerpt  # type: ignore[attr-defined]
+    assert "Token abc" not in checked.request_excerpt  # type: ignore[attr-defined]

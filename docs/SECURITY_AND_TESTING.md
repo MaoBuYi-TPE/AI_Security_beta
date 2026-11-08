@@ -373,7 +373,7 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 | REPORT-02 | 截斷以整個 finding 為單位、摘要計數不變、開頭與結尾都有說明；真實的 8 MiB 與多位元組字元 | unit：reports/test_document |
 | REPORT-03 | 用語：平台文字的誇大字詞只在否定說明中；需要人工確認的 resolved 不算 resolved | unit：reports/test_document；live 的報告核對 |
 | REPORT-04 | 佇列：SKIP LOCKED、舊 worker 重新認領之後不能完成、最多 3 次、內容寫入後失敗整筆回滾、快照與 PATCH 隔離、同時建立的配額 | integration：report_queue；reports_schema（狀態轉換、內容只寫一次、雙向核對） |
-| REPORT-05 | 下載：只以 report id、sha 不符不送出內容、header（nosniff、CSP sandbox、no-store、ASCII 檔名）、其他 project 404、viewer 不能建立 | integration：reports_api |
+| REPORT-05 | 下載：只以 report id、sha 不符不送出內容、header（nosniff、CSP sandbox 與 frame-ancestors、no-store、ASCII 檔名）、其他 project 404、viewer 不能建立 | integration：reports_api |
 
 正例保留：兩側有觀察且版本可靠 → persistent；純函式所有層證據完整時可得到 new/not_observed，移除必要證據就不再成立。這些人工構造的正例不是工具完成證據。實際 producer 的負面分類不放寬；端點請求與工具退出碼均不能代替完整性。
 

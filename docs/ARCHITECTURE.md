@@ -682,6 +682,7 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 **T21 的實作**（`DECISIONS.md` §28.5、`API_CONTRACT.md` §19.3）：
 
 - `reports` 是 worker 的工作佇列（SKIP LOCKED、lease 30 秒、最多 3 次），內容存在 `report_contents`（≤ 8 MiB），不使用 artifact 或 runs volume。worker 每圈先處理 run，再處理一份報告。
+- 單一報告的錯誤（含這份報告專屬的 DB 錯誤：違反 CHECK、commit 時核對失敗、快照查詢逾時 57014）只記類別與位置，立即釋放這一次嘗試（退回 queued，用盡時 `REPORT_GENERATION_FAILED`）；連線中斷、等鎖逾時等其他 DB 錯誤讓 worker 程序結束（§17.6），報告留在 generating，lease 到期後由對帳處理。lease 已失效時不算完成、也不釋放。
 - worker 在 REPEATABLE READ READ ONLY transaction 中分頁讀快照，每頁之間以另一個短 transaction 心跳；以純函式投影成白名單欄位、再遮罩一次，渲染 JSON（`ReportDocumentV1` 驗證）或 Markdown（不可信的值只在 code span 或最上層的 fenced block）；完成時以 fenced transaction 寫入內容，deferred 檢查雙向核對內容、sha256 與狀態。
 - 只能以 report id 下載，送出前重新核對 sha256；`/artifacts/{id}/download` 已從契約移除，工具輸出只提供 metadata。
 - 報告內容與人工複測摘錄在 DB 中沒有加密、沒有保留期限（T23a）；T21 完成不代表資料保護已完成（`DECISIONS.md` §28.9）。

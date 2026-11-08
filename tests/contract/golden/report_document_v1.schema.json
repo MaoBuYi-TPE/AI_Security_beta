@@ -973,6 +973,10 @@
     "TruncationDoc": {
       "additionalProperties": false,
       "properties": {
+        "comparisons_omitted": {
+          "title": "Comparisons Omitted",
+          "type": "integer"
+        },
         "notice": {
           "anyOf": [
             {
@@ -996,7 +1000,8 @@
       "required": [
         "truncated",
         "omitted_findings",
-        "notice"
+        "notice",
+        "comparisons_omitted"
       ],
       "title": "TruncationDoc",
       "type": "object"

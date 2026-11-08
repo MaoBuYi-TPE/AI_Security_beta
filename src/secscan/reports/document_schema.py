@@ -164,6 +164,8 @@ class TruncationDoc(_Strict):
     truncated: bool
     omitted_findings: int
     notice: str | None
+    # 最多列出最新的 10 份比較快照；省略的較舊份數。
+    comparisons_omitted: int
 
 
 class ReportDocumentV1(_Strict):

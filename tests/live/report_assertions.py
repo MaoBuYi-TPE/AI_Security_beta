@@ -44,7 +44,9 @@ def check_headers(meta: Mapping[str, Any], headers: Mapping[str, str], content: 
     report_format = str(meta["format"])
     assert lowered["content-type"] == _MEDIA[report_format]
     assert lowered["x-content-type-options"] == "nosniff"
-    assert lowered["content-security-policy"] == "default-src 'none'; sandbox"
+    assert lowered["content-security-policy"] == (
+        "default-src 'none'; frame-ancestors 'none'; sandbox"
+    )
     assert lowered["cache-control"] == "no-store"
     filename = (
         f"secscan-report-{str(meta['scan_id']).replace('-', '')[:8]}-"

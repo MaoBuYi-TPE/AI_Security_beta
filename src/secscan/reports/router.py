@@ -94,7 +94,7 @@ def download_headers(report: Report) -> dict[str, str]:
         "Content-Type": media_type,
         "Content-Disposition": f'attachment; filename="{filename}"',
         "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; sandbox",
         "Cache-Control": "no-store",
     }
 

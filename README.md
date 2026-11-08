@@ -345,6 +345,7 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
   - `basis: rescan_not_observed`：該列是 not_observed。比較演算法 v1 不會產生 not_observed，**現行版本不可用**。
   - `basis: manual_retest`：該列是 inconclusive、平台證據都成立，另附人工複測聲明（`attestation`）。平台只做一致性檢查（route、Host、參數、狀態列、身分、時間），**不驗證摘錄的真實性**；不要貼上憑證。
   - 比較快照不會被修改；resolve 之後較新的 scan 以相同的 fingerprint 與 mapping 又觀察到時自動重開。
+  - 「人工判定」指的是以 operator/admin 的 API key 送出的 PATCH：平台分不出送出者是人還是自動化的 client，問責的對象是 key 與它的持有者（事件與 audit 記下 key 與 request_id）。
 - `GET /api/v1/findings/{id}/triage-events`：不可修改的事件；摘錄內容只給 operator/admin。
 - 報告：`POST /api/v1/scans/{id}/reports`（必帶 `Idempotency-Key`、scan 必須已終止，回 202）→ worker 產生 → `GET /api/v1/reports/{id}/download`（只能以 report id 下載平台產生的報告；JSON 或 Markdown，≤ 8 MiB，超過時截斷並標示）。工具的原始輸出不提供下載。
 - 管理檢視（platform_admin）：`GET /api/v1/audit-events`、`GET /api/v1/scope-grants/pending`；`POST /api/v1/auth-profiles/{id}/disable` 停用認證設定（終止狀態）。

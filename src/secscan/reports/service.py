@@ -2,8 +2,8 @@
 
 - 建立：先以 scan 的 project 授權（其他 project 404、角色不足 403）；Idempotency-Key 的範圍是
   project，同一個 key、同樣的內容回原本的報告，內容不同（包含 format）回 409。scan 必須已終止。
-  配額（每個 project 5 份進行中、每個 scan 20 份）在鎖住 project 列之後計數與寫入，同時送出也不會
-  超額。報告由 worker 產生，這裡只排入佇列（202）。
+  配額（每個 project 5 份進行中、每個 scan 20 份未失敗的報告）在鎖住 project 列之後計數與寫入，
+  同時送出也不會超額。報告由 worker 產生，這裡只排入佇列（202）。
 - 下載：只有 succeeded 能下載；送出前重新核對 sha256，不符就回 500、不送出內容。只能以 report id
   下載，沒有 path 或 storage_key 參數。
 """
@@ -32,6 +32,7 @@ from secscan.reports.domain.model import (
     ReportStatus,
 )
 from secscan.reports.models import ReportContentModel, ReportModel
+from secscan.scans.domain.model import Scan
 from secscan.scans.service import ScanService
 from secscan.targets.domain import LabNetwork
 
@@ -97,20 +98,9 @@ class ReportService:
             .where(ProjectModel.id == scan.project_id)
             .with_for_update(key_share=True)
         )
-        existing = self._session.scalar(
-            select(ReportModel).where(
-                ReportModel.project_id == scan.project_id,
-                ReportModel.idempotency_key == idempotency_key,
-            )
-        )
-        if existing is not None:
-            if existing.request_sha256 != fingerprint:
-                raise AppError(
-                    status_code=HTTPStatus.CONFLICT,
-                    code=ErrorCode.IDEMPOTENCY_CONFLICT,
-                    message="同一個 Idempotency-Key 已用於內容不同的報告請求。",
-                )
-            return _report(existing), False
+        replay = self._replay(scan.project_id, idempotency_key, fingerprint)
+        if replay is not None:
+            return replay, False
         if not scan.is_terminal:
             raise AppError(
                 status_code=HTTPStatus.CONFLICT,
@@ -118,10 +108,24 @@ class ReportService:
                 message="scan 結束之後才能產生報告。",
             )
         self._check_quota(scan.project_id, scan_id)
+        report = self._enqueue(
+            principal, scan, report_format, idempotency_key, fingerprint, request_id
+        )
+        return report, True
+
+    def _enqueue(
+        self,
+        principal: Principal,
+        scan: Scan,
+        report_format: ReportFormat,
+        idempotency_key: str,
+        fingerprint: bytes,
+        request_id: str | None,
+    ) -> Report:
         model = ReportModel(
             project_id=scan.project_id,
             target_id=scan.target_id,
-            scan_id=scan_id,
+            scan_id=scan.id,
             format=report_format.value,
             schema_version=SCHEMA_VERSION,
             status=ReportStatus.QUEUED.value,
@@ -139,9 +143,27 @@ class ReportService:
             actor_key_id=principal.key_id,
             project_id=scan.project_id,
             request_id=request_id,
-            changes={"scan_id": str(scan_id), "format": report_format.value},
+            changes={"scan_id": str(scan.id), "format": report_format.value},
         )
-        return _report(model), True
+        return _report(model)
+
+    def _replay(self, project_id: UUID, idempotency_key: str, fingerprint: bytes) -> Report | None:
+        """同一個 key：內容相同回原本的報告，不同（包含 format）回 409。"""
+        existing = self._session.scalar(
+            select(ReportModel).where(
+                ReportModel.project_id == project_id,
+                ReportModel.idempotency_key == idempotency_key,
+            )
+        )
+        if existing is None:
+            return None
+        if existing.request_sha256 != fingerprint:
+            raise AppError(
+                status_code=HTTPStatus.CONFLICT,
+                code=ErrorCode.IDEMPOTENCY_CONFLICT,
+                message="同一個 Idempotency-Key 已用於內容不同的報告請求。",
+            )
+        return _report(existing)
 
     def get(self, principal: Principal, report_id: UUID) -> Report:
         model = self._session.get(ReportModel, report_id)
@@ -193,8 +215,15 @@ class ReportService:
                 ReportModel.status.in_([status.value for status in ACTIVE_REPORT_STATUSES]),
             )
         )
+        # 失敗的報告不計入每個 scan 的上限：反覆失敗不會讓這個 scan 永久無法產生報告
+        # （安全審查 L8）。
         per_scan = self._session.scalar(
-            select(func.count()).select_from(ReportModel).where(ReportModel.scan_id == scan_id)
+            select(func.count())
+            .select_from(ReportModel)
+            .where(
+                ReportModel.scan_id == scan_id,
+                ReportModel.status != ReportStatus.FAILED.value,
+            )
         )
         if (active or 0) >= MAX_ACTIVE_PER_PROJECT or (per_scan or 0) >= MAX_PER_SCAN:
             raise AppError(
@@ -202,7 +231,7 @@ class ReportService:
                 code=ErrorCode.QUOTA_EXCEEDED,
                 message=(
                     f"報告數量超過上限（每個 project 同時 {MAX_ACTIVE_PER_PROJECT} 份進行中、"
-                    f"每個 scan {MAX_PER_SCAN} 份）。"
+                    f"每個 scan {MAX_PER_SCAN} 份未失敗的報告）。"
                 ),
             )
 

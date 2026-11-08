@@ -148,7 +148,8 @@ _NAME = r"[A-Za-z0-9_.\-\[\]]"
 # 「名稱=<REDACTED>」不會再被比對，重複套用結果不變。
 _PAIR = re.compile(rf"(?<!{_NAME})({_NAME}{{1,64}})=([^&\s;,\"'<>]+)")
 _JSON_PAIR = re.compile(r'"([^"\\\n]{1,64})"(\s*:\s*)"((?:[^"\\]|\\.)*)"')
-_HEADER = re.compile(r"^([A-Za-z0-9-]{1,64})([ \t]*:[ \t]*)(\S[^\n]*)", re.MULTILINE)
+# 行首的 header（允許前置的空白：縮排或折行的 header 行也要遮罩）。
+_HEADER = re.compile(r"^([ \t]*)([A-Za-z0-9-]{1,64})([ \t]*:[ \t]*)(\S[^\n]*)", re.MULTILINE)
 _COOKIE_VALUE = re.compile(r"=([^;\s]+)")
 _COOKIE_HEADERS = frozenset({"cookie", "set-cookie"})
 
@@ -175,12 +176,16 @@ def sensitive_query_values(url: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-def redact_text(text: str, *, values: Collection[str] = ()) -> str:
+def redact_text(
+    text: str, *, values: Collection[str] = (), header_names: Collection[str] = ()
+) -> str:
     """文字中的秘密：呼叫端給的值、Bearer／Basic／JWT、行首的敏感 header、cookie 的值、
-    JSON 的敏感欄位與 `名稱=值`。
+    JSON 的敏感欄位與 `名稱=值`。header_names 是呼叫端已知的秘密 header 名稱（例如認證設定自訂
+    的 header），名稱看起來不敏感也遮罩。
     """
+    extra = frozenset(name.lower() for name in header_names)
     masked = _mask(_literal(text, values))
-    masked = _HEADER.sub(_header, masked)
+    masked = _HEADER.sub(lambda match: _header(match, extra), masked)
     masked = _JSON_PAIR.sub(_json_pair, masked)
     return _PAIR.sub(_pair, masked)
 
@@ -216,12 +221,14 @@ def _pairs(query: str) -> str:
     return "&".join(redacted)
 
 
-def _header(match: re.Match[str]) -> str:
-    name, separator, value = match.groups()
+def _header(match: re.Match[str], extra: frozenset[str]) -> str:
+    indent, name, separator, value = match.groups()
     if name.lower() in _COOKIE_HEADERS:
         count = 0 if name.lower() == "cookie" else 1
-        return name + separator + _COOKIE_VALUE.sub(f"={REDACTED}", value, count=count)
-    return name + separator + REDACTED if is_sensitive_key(name) else match.group(0)
+        return indent + name + separator + _COOKIE_VALUE.sub(f"={REDACTED}", value, count=count)
+    if is_sensitive_key(name) or name.lower() in extra:
+        return indent + name + separator + REDACTED
+    return match.group(0)
 
 
 def _json_pair(match: re.Match[str]) -> str:

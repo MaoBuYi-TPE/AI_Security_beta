@@ -42,7 +42,6 @@ class LockedTriage:
     id: UUID
     target_id: UUID
     status: TriageStatus
-    observations_linked: int
 
 
 class StaleTriageVersionError(Exception):
@@ -61,7 +60,6 @@ class TriageRecords:
                 FindingModel.triage_state,
                 FindingModel.lifecycle_state,
                 FindingModel.triage_version,
-                FindingModel.observations_linked,
             )
             .where(FindingModel.id == finding_id)
             .with_for_update(key_share=True)
@@ -71,7 +69,7 @@ class TriageRecords:
         status = TriageStatus(
             TriageState(row.triage_state), LifecycleState(row.lifecycle_state), row.triage_version
         )
-        return LockedTriage(row.id, row.target_id, status, row.observations_linked)
+        return LockedTriage(row.id, row.target_id, status)
 
     def apply(self, finding_id: UUID, planned: TriageStatus) -> None:
         """已鎖住的 finding 改成 planned（版本必須恰好是目前 +1）。"""

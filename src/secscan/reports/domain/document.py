@@ -26,25 +26,51 @@ from secscan.reports.domain.model import (
 from secscan.security.redaction import redact_text, redact_url
 
 _TERMINAL_COMPLETE = "completed"
+REVIEW_BUCKET = "resolved_review_required"
 
 
 def clean(value: str | None) -> str | None:
-    """不可信的文字：換掉控制字元、遮罩已知的秘密樣式、限制長度（先遮罩再截斷）。"""
+    """不可信的文字：換掉控制字元、遮罩已知的秘密樣式、最後才限制長度。
+
+    先遮罩再截斷（安全審查 L7）：先截斷會切開秘密，剩下的半截不再符合遮罩的樣式。輸入來自 DB，
+    各欄位本身有長度上限。
+    """
     if value is None:
         return None
-    cleaned, _ = display_text(value, max_length=MAX_TEXT_LENGTH * 4)
-    masked = redact_text(cleaned)
-    return masked if len(masked) <= MAX_TEXT_LENGTH else masked[:MAX_TEXT_LENGTH] + "…"
+    return _shorten(redact_text(_displayable(value)))
 
 
 def clean_path(value: str) -> str:
-    masked = redact_url(display_text(value, max_length=MAX_TEXT_LENGTH * 4)[0])
+    return _shorten(redact_url(_displayable(value)))
+
+
+def _displayable(value: str) -> str:
+    return display_text(value, max_length=len(value))[0]
+
+
+def _shorten(masked: str) -> str:
     return masked if len(masked) <= MAX_TEXT_LENGTH else masked[:MAX_TEXT_LENGTH] + "…"
 
 
-def document(snapshot: ReportSnapshot, generated_at: datetime, count: int) -> JsonObject:
-    """JSON 的文件（鍵的順序固定；只有白名單的欄位）。"""
+def project_findings(snapshot: ReportSnapshot) -> tuple[JsonObject, ...]:
+    """每個 finding 的投影（遮罩、清理）；render 只做一次，截斷時重複使用。"""
+    return tuple(_finding(item) for item in snapshot.findings)
+
+
+def document(
+    snapshot: ReportSnapshot,
+    generated_at: datetime,
+    count: int,
+    *,
+    projected: Sequence[JsonObject] | None = None,
+) -> JsonObject:
+    """JSON 的文件（鍵的順序固定；只有白名單的欄位）。projected 是 project_findings 的結果。"""
     omitted = len(snapshot.findings) - count
+    findings: list[JsonValue] = (
+        list(projected[:count])
+        if projected is not None
+        else [_finding(item) for item in snapshot.findings[:count]]
+    )
     scan = snapshot.scan
     return {
         "schema_version": SCHEMA_VERSION,
@@ -96,7 +122,7 @@ def document(snapshot: ReportSnapshot, generated_at: datetime, count: int) -> Js
             "limitations": list(scan.coverage_limitations),
         },
         "summary": summary(snapshot.findings),
-        "findings": [_finding(item) for item in snapshot.findings[:count]],
+        "findings": findings,
         "comparisons": [
             {
                 "id": str(item.id),
@@ -112,6 +138,7 @@ def document(snapshot: ReportSnapshot, generated_at: datetime, count: int) -> Js
             "truncated": omitted > 0,
             "omitted_findings": omitted,
             "notice": wording.TRUNCATED_NOTICE.format(omitted=omitted) if omitted else None,
+            "comparisons_omitted": snapshot.comparisons_omitted,
         },
     }
 
@@ -130,13 +157,23 @@ def summary(findings: Sequence[FindingSection]) -> JsonObject:
         "by_severity": _counts(findings, "severity", [s.value for s in reversed(Severity)]),
         "by_kind": _counts(findings, "kind", [kind.value for kind in FindingKind]),
         "by_triage": _counts(findings, "triage_state", [state.value for state in TriageState]),
-        "by_lifecycle": _counts(
-            findings, "lifecycle_state", [state.value for state in LifecycleState]
-        ),
+        "by_lifecycle": _lifecycle_counts(findings),
         "resolved_operator_supplied": provenance[EvidenceProvenance.OPERATOR_SUPPLIED.value],
         "resolved_platform_comparison": provenance[EvidenceProvenance.PLATFORM_COMPARISON.value],
         "resolved_review_required": len(review),
     }
+
+
+def _lifecycle_counts(findings: Sequence[FindingSection]) -> JsonObject:
+    """需要人工確認的 resolved 另列一桶，不算進 resolved（wording.REVIEW_LABEL）。"""
+    counted = Counter(
+        REVIEW_BUCKET
+        if item.lifecycle_state == LifecycleState.RESOLVED.value and item.review_reasons
+        else item.lifecycle_state
+        for item in findings
+    )
+    keys = [state.value for state in LifecycleState] + [REVIEW_BUCKET]
+    return {key: counted[key] for key in keys}
 
 
 def _counts(findings: Sequence[FindingSection], field: str, keys: list[str]) -> JsonObject:

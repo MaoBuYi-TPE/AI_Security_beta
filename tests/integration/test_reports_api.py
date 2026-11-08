@@ -93,7 +93,9 @@ def test_reports_are_generated_and_downloaded_with_safe_headers(
     headers = downloaded.headers
     assert headers["content-type"] == "application/json"
     assert headers["x-content-type-options"] == "nosniff"
-    assert headers["content-security-policy"] == "default-src 'none'; sandbox"
+    assert headers["content-security-policy"] == (
+        "default-src 'none'; frame-ancestors 'none'; sandbox"
+    )
     assert headers["cache-control"] == "no-store"
     assert headers["content-disposition"] == (
         f'attachment; filename="secscan-report-{item.baseline.hex[:8]}-'

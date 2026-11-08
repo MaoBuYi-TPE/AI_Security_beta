@@ -12,7 +12,8 @@ Create Date: 2026-11-08 21:00:00+00:00
     是終止狀態）；DELETE 仍由 `auth_profiles_guard` 拒絕。`auth_profiles_guard` 本身不變（它也掛在
     auth_profile_versions 的 TRUNCATE 上，函式中不能引用只屬於 auth_profiles 的欄位：PL/pgSQL 依
     trigger 所屬資料表的 row type 解析 OLD 的欄位）。
-  - auth_profile_versions_guard 改版：已停用的 profile 不能新增版本。
+  - auth_profile_versions_guard 改版：已停用的 profile 不能新增版本（以 FOR SHARE 讀父列，和
+    同時進行的停用互斥）。
   - deferred constraint trigger：profile 轉成停用時，commit 時不能還有任何帶密文的版本（停用時
     一定清除目前的密文）。
   - 索引：audit_events (created_at, id)（全域稽核查詢由新到舊分頁）、auth_profiles 的
@@ -51,22 +52,30 @@ def _row(prefix: str) -> str:
     return "(" + ", ".join(f"{prefix}.{column}" for column in _VERSION_COLUMNS) + ")"
 
 
+# 以 FOR SHARE 讀父列：和停用的 UPDATE 互斥。直接以 SQL 新增版本、同時有一個停用尚未 commit 時，
+# 這裡會等它 commit，在 READ COMMITTED 下重新讀到停用之後的列（安全審查 L6）；只用快照讀會判斷成
+# 未停用，留下帶密文的版本。應用程式新增版本前已以 FOR UPDATE 鎖住 profile，不受影響。
 _DISABLED_PARENT = """
-        IF EXISTS (
-            SELECT 1 FROM public.auth_profiles AS profile
-            WHERE profile.id = NEW.profile_id AND profile.disabled_at IS NOT NULL
-        ) THEN
+        SELECT profile.disabled_at INTO parent_disabled_at
+        FROM public.auth_profiles AS profile
+        WHERE profile.id = NEW.profile_id
+        FOR SHARE;
+        IF parent_disabled_at IS NOT NULL THEN
             RAISE EXCEPTION USING
                 ERRCODE = 'integrity_constraint_violation',
                 MESSAGE = 'auth_profile_versions: a disabled profile cannot get new versions';
         END IF;"""
+_DISABLED_DECLARE = """
+DECLARE
+    parent_disabled_at timestamptz;"""
 
 
 def _versions_guard(*, disable_aware: bool) -> str:
     parent = _DISABLED_PARENT if disable_aware else ""
+    declare = _DISABLED_DECLARE if disable_aware else ""
     return f"""
 CREATE OR REPLACE FUNCTION auth_profile_versions_guard() RETURNS trigger
-LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+LANGUAGE plpgsql SET search_path = pg_catalog AS $${declare}
 BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.encrypted_secret IS NULL THEN

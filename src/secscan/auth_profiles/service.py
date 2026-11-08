@@ -36,6 +36,7 @@ from secscan.core.errors import AppError, ErrorCode, not_found_error
 from secscan.core.json_types import JsonObject
 from secscan.core.pagination import Page, PageRequest
 from secscan.core.text import require_text
+from secscan.security.redaction import redact_text
 from secscan.security.secret_cipher import SecretCipher, SecretUnreadableError
 from secscan.targets.domain import Target
 from secscan.targets.repository import TargetRepository
@@ -174,14 +175,7 @@ class AuthProfileService:
         """
         self._profile(principal, profile_id, Permission.PROJECT_READ)
         self._profile(principal, profile_id, Permission.PROJECT_WRITE)
-        try:
-            require_text(reason, field="reason", max_length=DISABLE_REASON_MAX_LENGTH)
-        except ValueError as exc:
-            raise AppError(
-                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-                code=ErrorCode.INVALID_REQUEST,
-                message=str(exc),
-            ) from None
+        masked_reason = _disable_reason(reason)
         locked = self._profiles.lock(profile_id)
         if locked is None:
             raise not_found_error()
@@ -195,7 +189,7 @@ class AuthProfileService:
             "auth_profile.disable",
             principal,
             request_id,
-            {"version": locked.current.version, "reason": reason},
+            {"version": locked.current.version, "reason": masked_reason},
         )
         return disabled
 
@@ -361,4 +355,23 @@ def _disabled_error() -> AppError:
         status_code=HTTPStatus.CONFLICT,
         code=ErrorCode.AUTH_PROFILE_DISABLED,
         message="auth profile 已停用：不能再建立新版本。",
+    )
+
+
+def _disable_reason(reason: str) -> str:
+    """停用的理由寫進不可修改的 audit：先以 redact_text 遮罩（比照 triage 的 reason），遮罩後再
+    檢查長度；不符回 422（安全審查 L1）。"""
+    try:
+        require_text(reason, field="reason", max_length=DISABLE_REASON_MAX_LENGTH)
+    except ValueError as exc:
+        raise _invalid_reason(str(exc)) from None
+    masked = redact_text(reason)
+    if len(masked) > DISABLE_REASON_MAX_LENGTH:
+        raise _invalid_reason(f"reason 遮罩之後超過 {DISABLE_REASON_MAX_LENGTH} 個字元。")
+    return masked
+
+
+def _invalid_reason(message: str) -> AppError:
+    return AppError(
+        status_code=HTTPStatus.UNPROCESSABLE_ENTITY, code=ErrorCode.INVALID_REQUEST, message=message
     )

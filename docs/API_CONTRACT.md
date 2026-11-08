@@ -316,7 +316,7 @@ Triage request（T21 修正，取代原本的 `evidence_artifact_ids`；詳見 �
 }
 ```
 
-resolved 一律是人工判定，平台不提供自動修補驗證；accepted_risk 與 false_positive 都不等於已修補。所有變更保留前後值、actor 與理由。
+resolved 一律是人工判定，平台不提供自動修補驗證；accepted_risk 與 false_positive 都不等於已修補。所有變更保留前後值、actor 與理由。「人工判定」指以 operator/admin 的 API key 送出的變更：平台無法分辨送出者是人或自動化的 client，問責的對象是 key 與它的持有者。
 
 Compare request 只接受 `baseline_scan_id`、`current_scan_id`；不能由 client 指定分類或聲稱覆蓋完成。回傳 scan 層級的 `comparable / different / not_comparable`、差異理由，以及逐 finding 的 `new / persistent / not_observed / inconclusive / not_comparable`。不同 target 回 422；其餘依版本、scope、auth 與覆蓋逐項判斷，見 §17.11。**not_observed 不等於已修補**；T22 不修改 triage 或 lifecycle。
 
@@ -324,7 +324,7 @@ Compare request 只接受 `baseline_scan_id`、`current_scan_id`；不能由 cli
 
 `POST /scans/{id}/reports` request：`{"format":"markdown"}` 或 `json`；P1 起支援 `sarif`。T21 修正：scan 結束（含部分完成、失敗、逾時）之後才能產生，快照才穩定；未完成的 scan 在報告中標示。報告有版本、sha256、資料時間與產生時間；產生報告的時間不是漏洞發現或修補時間。詳見 §19.3。
 
-只能以 report id 下載平台產生的報告，不接受 `path=` 或 `storage_key`；工具的原始輸出不提供下載。下載使用伺服器產生的 ASCII 檔名、正確的 media type、`nosniff`、`Content-Security-Policy: default-src 'none'; sandbox` 與 `no-store`。
+只能以 report id 下載平台產生的報告，不接受 `path=` 或 `storage_key`；工具的原始輸出不提供下載。下載使用伺服器產生的 ASCII 檔名、正確的 media type、`nosniff`、`Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox` 與 `no-store`。
 
 ## 12. 穩定錯誤格式
 
@@ -1415,7 +1415,7 @@ uv run secscan-admin worker [--once]
 - 轉換：triage 可改成另一個值（resolved 時不行，要先重開）；lifecycle 只允許 open／reopened → resolved（finding 必須已是 confirmed）與 resolved → reopened；任何狀態都不能回到 open。沒有變更或同時改兩個欄位回 422；狀態不允許回 409 `INVALID_STATE_TRANSITION`。
 - resolve 必須帶 `basis` 與 `comparison_id`：
   - `basis: rescan_not_observed`：引用的比較中該列是 `not_observed`。**比較演算法 v1 不會產生 not_observed，所以現行版本一律以 `not_observed_required` 拒絕。**
-  - `basis: manual_retest`：該列是 `inconclusive`，平台證據都成立，未完成的只有 `rule_incomplete`／`parameter_unverified`；另附 `attestation`（操作者聲明）：`method`（`manual_retest`）、`performed_at`（帶時區，不晚於 DB 的現在、不早於最後一次觀察到它的 scan 結束時間）、`performed_by`（自述名稱 ≤ 100）、`procedure`（≤ 1000）、`result`（只接受 `not_reproduced`）、`auth_role`（等於 finding 的身分）、`request_excerpt`（HTTP/1.1 原始請求 ≤ 4 KiB：第一行是 finding 的 method 與 route，`Host` 等於 target，有參數時出現參數名稱）、`response_excerpt`（≤ 8 KiB，第一行是 HTTP 狀態列）。平台只做這些一致性檢查，不驗證摘錄的真實性；不要貼上憑證。
+  - `basis: manual_retest`：該列是 `inconclusive`，平台證據都成立，未完成的只有 `rule_incomplete`／`parameter_unverified`；另附 `attestation`（操作者聲明）：`method`（`manual_retest`）、`performed_at`（帶時區，不晚於 DB 的現在、不早於最後一次觀察到它的 scan 結束時間）、`performed_by`（自述名稱 ≤ 100）、`procedure`（≤ 1000）、`result`（只接受 `not_reproduced`）、`auth_role`（等於 finding 的身分）、`request_excerpt`（HTTP/1.1 原始請求 ≤ 4 KiB：第一行是 finding 的 method 與 route，`Host` 等於 target；有參數時，query 參數必須是 request-target 中 query 的名稱，位置不明的參數也可以是 header 名稱或出現在 body，只比對名稱、不做子字串比對）、`response_excerpt`（≤ 8 KiB，第一行是 HTTP 狀態列）。平台只做這些一致性檢查，不驗證摘錄的真實性；不要貼上憑證。
   - 共同條件：同一個 target（其他 project 的比較 404、不同 target 422 `TARGET_MISMATCH`）、整體 comparability 是 comparable、該列不需要人工確認、比較的 current 之後沒有再觀察到這個 finding、target 沒有進行中的 scan（409 `TARGET_BUSY`）。
   - 不符時 422 `RESOLUTION_EVIDENCE_INSUFFICIENT`，訊息列出全部的原因代碼（固定的代碼，不回顯輸入）。
 - 回應：更新後的 finding 明細（§17.10），另含 `triage_version`、`distinct_paths`、`resolution`（依據、`evidence_provenance`＝`platform_comparison` 或 `operator_supplied`、判定者的角色與名稱、比較 id、複測 metadata 與摘錄的 sha256、固定說明「人工判定，平台未驗證修補」）、`resolution_review_required` 與 `resolution_review_reasons`。
@@ -1424,16 +1424,17 @@ uv run secscan-admin worker [--once]
 
 ### 19.2 GET /api/v1/findings/{finding_id}/triage-events
 
-不可修改的事件，依 sequence 由舊到新、分頁。每筆含 actor（key 或 system、key 的名稱與角色）、`request_id`、前後狀態、`reason_code`、`reason`、`comparison_id`、`basis`、`evidence_provenance`、系統重開的 `run_id`／`scan_id`、`evidence`（寫入當時的白名單鍵，不含摘錄內容）與 `created_at`。`excerpts`（遮罩後的請求與回應摘錄）只給 operator／admin；viewer 是 null（人工摘錄只有樣式遮罩）。
+不可修改的事件，依 sequence 由舊到新、分頁。每筆含 actor（key 或 system、key 的名稱與角色）、`request_id`、前後狀態、`reason_code`、`reason`、`comparison_id`、`basis`、`evidence_provenance`、系統重開的 `run_id`／`scan_id`、`evidence`（寫入當時的白名單鍵，不含摘錄內容）與 `created_at`。`excerpts`（遮罩後的請求與回應摘錄）只給 operator／admin；viewer 是 null（人工摘錄只有樣式遮罩：已知的秘密樣式、縮排的 header 行，以及這個 target 的認證設定用過的自訂 header 名稱）。回應帶 `Cache-Control: no-store`。`evidence.attestation.platform_checks` 只列實際執行過的檢查（finding 沒有參數時沒有 `parameter_present`）。
 
 ### 19.3 報告
 
-- `POST /api/v1/scans/{scan_id}/reports`：`{"format": "json" | "markdown"}`，必帶 `Idempotency-Key`（範圍是 project；同一個 key、同樣的內容回原本的報告，內容不同含 format 不同回 409 `IDEMPOTENCY_CONFLICT`）。scan 未終止 409 `SCAN_NOT_TERMINAL`。每個 project 同時最多 5 份 queued／generating、每個 scan 最多 20 份，超過 409 `QUOTA_EXCEEDED`。新的回 202，重送已結束的回 200。
+- `POST /api/v1/scans/{scan_id}/reports`：`{"format": "json" | "markdown"}`，必帶 `Idempotency-Key`（範圍是 project；同一個 key、同樣的內容回原本的報告，內容不同含 format 不同回 409 `IDEMPOTENCY_CONFLICT`）。scan 未終止 409 `SCAN_NOT_TERMINAL`。每個 project 同時最多 5 份 queued／generating、每個 scan 最多 20 份未失敗的報告（failed 不計入），超過 409 `QUOTA_EXCEEDED`。新的回 202，重送已結束的回 200。
 - worker 在 REPEATABLE READ READ ONLY transaction 中讀快照，產生之後存 DB；最多嘗試 3 次，用盡時 `failed`：lease 一再過期是 `REPORT_ATTEMPTS_EXHAUSTED`，產生時一再出錯是 `REPORT_GENERATION_FAILED`。
 - `GET /api/v1/reports/{report_id}` 與 `GET /api/v1/scans/{scan_id}/reports`：`status`（queued／generating／succeeded／failed）、`format`、`schema_version`、`attempts`、`error_code`、`data_as_of`、`generated_at`、`size_bytes`、`sha256`、`truncated`、`omitted_findings`。
 - `GET /api/v1/reports/{report_id}/download`：只有 succeeded 能下載（否則 409 `REPORT_NOT_READY`）；送出前重新核對 sha256，不符回 500、不送出內容。
 - 內容：固定說明（未經 triage 的告警不是已驗證的漏洞、零告警不代表沒有弱點、not_observed 不等於已修補、平台不提供自動修補驗證、報告時間不是發現或修補時間、遮罩不保證辨識所有秘密）、掃描與引擎狀態、授權成立時間（grant 的 `approved_at`）、覆蓋與預算用量、摘要（以全部 finding 計算）、逐 finding 的標籤與 resolved 的依據（人工複測只有 metadata 與摘錄的 sha256）、比較快照摘要。不含 key id、storage_key、密文、idempotency key 與複測摘錄的原文。
 - 大小上限 8,388,608 bytes（UTF-8）：超過時依優先順序以整個 finding 為單位省略，`truncated=true`、記下省略數，開頭與結尾都有說明。
+- 比較快照最多列出最新的 10 份；較舊的份數記在內容的 `truncation.comparisons_omitted`，Markdown 另有說明。
 - JSON 的 schema 是 `ReportDocumentV1`（每層 `additionalProperties: false`）；Markdown 中不可信的值只放在 code span 或最上層的 fenced code block。
 
 ### 19.4 管理檢視（platform_admin）
@@ -1443,5 +1444,5 @@ uv run secscan-admin worker [--once]
 
 ### 19.5 POST /api/v1/auth-profiles/{profile_id}/disable
 
-- 權限：operator／admin；body `{"reason": "..."}`（≤ 500，寫進 audit，遮罩後保存）。
-- 停用是終止狀態：清除目前版本的密文，之後 PATCH 回 409 `AUTH_PROFILE_DISABLED`，以它建立新的 scan 也回 409。排隊中的 scan，以及執行中 scan 之後才準備的 run（例如 ZAP 之後的 Nuclei），都在 runner 交出 secret 之前失敗（run 的錯誤碼 `AUTH_PROFILE_DISABLED`）；已經啟動的 run 已拿到 secret，不受影響，要立即停止請取消 scan。重複停用回 200，不重記 audit。
+- 權限：operator／admin；body `{"reason": "..."}`（≤ 500；以 `redact_text` 遮罩之後寫進不可修改的 audit，遮罩後超過 500 回 422）。不要貼上外洩的憑證：遮罩只依名稱與樣式判斷。
+- 停用是終止狀態：清除目前版本的密文，之後 PATCH 回 409 `AUTH_PROFILE_DISABLED`，以它建立新的 scan 也回 409。排隊中的 scan，以及執行中 scan 之後才準備的 run（例如 ZAP 之後的 Nuclei），都在 runner 交出 secret 之前失敗（run 的錯誤碼 `AUTH_PROFILE_DISABLED`）；已經啟動的 run 已拿到 secret，不受影響，要立即停止請取消 scan：回 200 不代表已經沒有 run 持有 secret（runner 準備完 run、啟動容器之前的短暫時間內停用，該 run 仍會拿到 secret）。重複停用回 200，不重記 audit。

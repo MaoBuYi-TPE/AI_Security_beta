@@ -1,8 +1,9 @@
 """報告的快照模型（docs/DECISIONS.md §28.5）：worker 在 REPEATABLE READ READ ONLY transaction 中
 讀出的值。只放白名單的欄位（不含 key id、storage_key、密文、lease、idempotency key 與複測摘錄）。
 
-不可信的字串（target 名稱、finding 標題、規則、path、參數、樣本、人工輸入）在建立快照時已遮罩並
-限制長度（document.py 的 clean），渲染時再依格式安全編碼（markdown.py、jsonfmt.py）。
+快照保存的是 DB 中的原值（觀察在收集時已遮罩）；不可信的字串（target 名稱、finding 標題、規則、
+path、參數、樣本、人工輸入）在 document.py 投影時才再遮罩一次並限制長度，渲染時再依格式安全編碼
+（encoding.py、markdown.py）。
 """
 
 from dataclasses import dataclass
@@ -182,3 +183,5 @@ class ReportSnapshot:
     auth: AuthSection
     findings: tuple[FindingSection, ...]
     comparisons: tuple[ComparisonSection, ...]
+    # 超過 MAX_COMPARISONS 份時省略較舊的比較快照（報告中揭露數量）。
+    comparisons_omitted: int = 0

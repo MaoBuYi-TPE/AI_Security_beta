@@ -10,6 +10,7 @@
 import re
 
 from secscan.findings.domain.triage import ResolutionBasis
+from secscan.reports.domain.model import MAX_COMPARISONS
 
 NOTICES = (
     "本報告由平台產生；未經人工 triage 的告警只是工具告警，不是已驗證的漏洞。",
@@ -26,6 +27,9 @@ TRUNCATED_NOTICE = (
     "報告超過大小上限，已依優先順序省略 {omitted} 個 finding；摘要的計數仍以全部 finding 計算。"
 )
 COMPARISON_NOTICE = "比較快照是平台事實，不等於已修補；人工判定的 resolved 不會修改它。"
+COMPARISONS_OMITTED_NOTICE = (
+    f"- 只列出最新的 {MAX_COMPARISONS} 份比較快照，另有 {{omitted}} 份較舊的未列出。"
+)
 UNTRUSTED_NOTICE = "以程式碼格式顯示的內容來自工具輸出或人工輸入，是不可信的資料。"
 
 TRIAGE_LABELS = {
@@ -95,6 +99,7 @@ def all_platform_text() -> tuple[str, ...]:
         INCOMPLETE_NOTICE,
         TRUNCATED_NOTICE,
         COMPARISON_NOTICE,
+        COMPARISONS_OMITTED_NOTICE,
         UNTRUSTED_NOTICE,
         *TRIAGE_LABELS.values(),
         *LIFECYCLE_LABELS.values(),

@@ -9,11 +9,12 @@
 """
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from secscan.core.json_types import JsonObject
 from secscan.core.text import display_text, require_multiline_text, require_text
@@ -42,6 +43,8 @@ PLATFORM_CHECKS = (
     "result_not_reproduced",
     "size_within_limits",
 )
+PARAMETER_CHECK = "parameter_present"
+REQUEST_LINE_PARTS = 3  # method、request-target、HTTP 版本
 _STATUS_LINE = re.compile(r"HTTP/(?:1\.[01]|2(?:\.0)?|3) [1-5][0-9]{2}(?: .*)?")
 _TEMPLATE_SEGMENT = re.compile(r"\{[^/{}]+\}")
 
@@ -54,6 +57,7 @@ class AttestationProblem(StrEnum):
     PERFORMED_IN_FUTURE = "performed_in_future"
     PERFORMED_BEFORE_LAST_OBSERVATION = "performed_before_last_observation"
     EXCERPT_TOO_LARGE = "excerpt_too_large"
+    EXCERPT_EMPTY = "excerpt_empty"
     REQUEST_LINE_MISMATCH = "request_line_mismatch"
     HOST_MISMATCH = "host_mismatch"
     PARAMETER_MISSING = "parameter_missing"
@@ -86,12 +90,16 @@ class FindingLocation:
     route_source: RouteSource
     parameter_name: str | None
     auth_role: str
+    # 觀察的參數位置（query 或 unknown）：query 只在 request-target 的 query 名稱中比對。
+    parameter_location: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class TargetHost:
     host: str
     port: int
+    # 這個 target 的認證設定自訂的 header 名稱（各版本）：摘錄中這些 header 的值一律遮罩。
+    secret_header_names: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +110,8 @@ class CheckedAttestation:
     auth_role: str
     request_excerpt: str
     response_excerpt: str
+    # 實際執行過的檢查（finding 沒有參數時不做 parameter_present，也不宣稱做過）。
+    checks: tuple[str, ...] = PLATFORM_CHECKS
 
     @property
     def request_sha256(self) -> str:
@@ -126,7 +136,7 @@ class CheckedAttestation:
             "response_excerpt_sha256": self.response_sha256,
             "response_excerpt_bytes": _bytes(self.response_excerpt),
             "checks_version": CHECKS_VERSION,
-            "platform_checks": list(PLATFORM_CHECKS),
+            "platform_checks": list(self.checks),
         }
 
 
@@ -150,11 +160,18 @@ def check_attestation(
         problems.append(AttestationProblem.PERFORMED_IN_FUTURE)
     if last_observed_at is not None and attestation.performed_at < last_observed_at:
         problems.append(AttestationProblem.PERFORMED_BEFORE_LAST_OBSERVATION)
-    request = mask_excerpt(attestation.request_excerpt, REQUEST_EXCERPT_MAX_BYTES)
-    response = mask_excerpt(attestation.response_excerpt, RESPONSE_EXCERPT_MAX_BYTES)
-    if request is None or response is None:
+    secret_headers = target.secret_header_names
+    request = mask_excerpt(
+        attestation.request_excerpt, REQUEST_EXCERPT_MAX_BYTES, header_names=secret_headers
+    )
+    response = mask_excerpt(
+        attestation.response_excerpt, RESPONSE_EXCERPT_MAX_BYTES, header_names=secret_headers
+    )
+    if not attestation.request_excerpt.strip() or not attestation.response_excerpt.strip():
+        problems.append(AttestationProblem.EXCERPT_EMPTY)
+    elif request is None or response is None:
         problems.append(AttestationProblem.EXCERPT_TOO_LARGE)
-    else:
+    if request is not None and response is not None:
         problems.extend(_request_problems(request, location, target))
         if not _STATUS_LINE.fullmatch(_first_line(response)):
             problems.append(AttestationProblem.RESPONSE_STATUS_LINE_MISSING)
@@ -167,13 +184,20 @@ def check_attestation(
         auth_role=attestation.auth_role,
         request_excerpt=request,
         response_excerpt=response,
+        checks=tuple(
+            check
+            for check in PLATFORM_CHECKS
+            if check != PARAMETER_CHECK or location.parameter_name is not None
+        ),
     )
 
 
-def mask_excerpt(value: str, max_bytes: int) -> str | None:
+def mask_excerpt(
+    value: str, max_bytes: int, *, header_names: frozenset[str] = frozenset()
+) -> str | None:
     """遮罩後、以 UTF-8 計不超過 max_bytes 的摘錄；超過時回傳 None（不截斷：雜湊要對應原意）。"""
     cleaned, truncated = display_text(value, max_length=max_bytes)
-    masked = redact_text(cleaned)
+    masked = redact_text(cleaned, header_names=header_names)
     if truncated or not masked.strip() or _bytes(masked) > max_bytes:
         return None
     return masked
@@ -204,16 +228,58 @@ def _request_problems(
     lines = request.split("\n")
     if not _request_line_matches(lines[0], location):
         problems.append(AttestationProblem.REQUEST_LINE_MISMATCH)
-    if not _host_matches(_headers(lines[1:]), target):
+    if not _host_matches(lines[0], _headers(lines[1:]), target):
         problems.append(AttestationProblem.HOST_MISMATCH)
-    if location.parameter_name is not None and location.parameter_name not in request:
+    if location.parameter_name is not None and not _parameter_present(
+        lines, location.parameter_name, location.parameter_location
+    ):
         problems.append(AttestationProblem.PARAMETER_MISSING)
     return problems
 
 
+def _parameter_present(lines: list[str], name: str, parameter_location: str | None) -> bool:
+    """query 參數只看 request-target 的 query 名稱；位置不明時也看 header 名稱與 body 的鍵名
+    （表單或 JSON 的鍵）。一律比對完整的名稱，不做子字串比對。
+
+    只是名稱的一致性檢查（不驗證值或攻擊字串），寫進 platform_checks 的 parameter_present。
+    """
+    target = _request_target(lines[0])
+    query = urlsplit(target).query if "://" in target else target.partition("?")[2]
+    if name in {key for key, _ in parse_qsl(query, keep_blank_values=True)}:
+        return True
+    if parameter_location == "query":
+        return False
+    rest = lines[1:]
+    blank = next((index for index, line in enumerate(rest) if not line.strip()), len(rest))
+    body = "\n".join(rest[blank + 1 :])
+    return name.lower() in {header for header, _ in _headers(rest)} or name in _body_names(body)
+
+
+def _body_names(body: str) -> set[str]:
+    """body 中的鍵名：表單（a=1&b=2）與 JSON 任一層的物件鍵。摘錄 ≤ 4 KiB，以迴圈走訪不遞迴。"""
+    names = {key for key, _ in parse_qsl(body.strip(), keep_blank_values=True)}
+    try:
+        data: object = json.loads(body)
+    except (ValueError, RecursionError):
+        return names
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            names.update(node)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return names
+
+
 def _request_line_matches(line: str, location: FindingLocation) -> bool:
     parts = line.strip().split(" ")
-    if len(parts) != 3 or not parts[2].startswith("HTTP/") or parts[0] != location.method:
+    if (
+        len(parts) != REQUEST_LINE_PARTS
+        or not parts[2].startswith("HTTP/")
+        or parts[0] != location.method
+    ):
         return False
     target = parts[1]
     path = urlsplit(target).path if "://" in target else target.split("?", 1)[0]
@@ -240,14 +306,27 @@ def _headers(lines: list[str]) -> list[tuple[str, str]]:
     return headers
 
 
-def _host_matches(headers: list[tuple[str, str]], target: TargetHost) -> bool:
+def _host_matches(request_line: str, headers: list[tuple[str, str]], target: TargetHost) -> bool:
+    """恰好一個 Host 等於 target；absolute-form 的 request-target 也必須是 http 而且 authority
+    等於 target（RFC 9112 §3.2.2：這時以 request-target 的 authority 為準）。"""
     hosts = [value.lower() for name, value in headers if name == "host"]
     if len(hosts) != 1:
         return False
     accepted = {f"{target.host}:{target.port}".lower()}
     if target.port == DEFAULT_HTTP_PORT:
         accepted.add(target.host.lower())
+    request_target = _request_target(request_line)
+    if "://" in request_target:
+        absolute = urlsplit(request_target)
+        if absolute.scheme.lower() != "http" or absolute.netloc.lower() not in accepted:
+            return False
     return hosts[0] in accepted
+
+
+def _request_target(request_line: str) -> str:
+    """request line（method、request-target、版本三段）的 request-target；格式不符時是空字串。"""
+    parts = request_line.strip().split(" ")
+    return parts[1] if len(parts) == REQUEST_LINE_PARTS else ""
 
 
 def _first_line(text: str) -> str:

@@ -8,7 +8,7 @@ import pytest
 from markdown_it import MarkdownIt
 
 from secscan.reports.domain import wording
-from secscan.reports.domain.document import summary
+from secscan.reports.domain.document import clean, summary
 from secscan.reports.domain.model import MAX_REPORT_BYTES, ReportFormat, ReportSnapshot
 from secscan.reports.domain.render import render
 from tests.unit.reports.factory import MANUAL, NOW, SCAN, finding, snapshot
@@ -213,3 +213,54 @@ def test_summary_counts_every_finding_and_review_is_not_resolved() -> None:
     }
     assert counted["resolved_platform_comparison"] == 1
     assert counted["resolved_operator_supplied"] == 0
+
+
+def test_lifecycle_counts_keep_review_required_out_of_resolved() -> None:
+    resolved = finding(lifecycle_state="resolved", triage_state="confirmed", resolution=MANUAL)
+    counted: dict[str, Any] = summary(
+        (
+            finding(),
+            finding(lifecycle_state="reopened", triage_state="confirmed"),
+            resolved,
+            replace(
+                resolved, id=finding().id, review_reasons=("mapping_changed_since_resolution",)
+            ),
+        )
+    )
+    assert counted["by_lifecycle"] == {
+        "open": 1,
+        "resolved": 1,
+        "reopened": 1,
+        "resolved_review_required": 1,
+    }
+    assert sum(counted["by_lifecycle"].values()) == counted["findings_total"]
+    assert counted["resolved_review_required"] == 1
+    # 需要人工確認的也不算進依證據性質的計數：兩個計數加起來就是 resolved 那一桶。
+    assert counted["resolved_operator_supplied"] == 1
+    assert (
+        counted["resolved_operator_supplied"] + counted["resolved_platform_comparison"]
+        == counted["by_lifecycle"]["resolved"]
+    )
+
+
+def test_omitted_comparisons_are_disclosed_in_both_formats() -> None:
+    markdown, document = render_both(snapshot(comparisons_omitted=4))
+    assert document["truncation"]["comparisons_omitted"] == 4
+    assert wording.COMPARISONS_OMITTED_NOTICE.format(omitted=4) in markdown
+    plain_markdown, plain = render_both(snapshot())
+    assert plain["truncation"]["comparisons_omitted"] == 0
+    assert "份較舊的未列出" not in plain_markdown
+
+
+def test_secrets_are_masked_before_the_value_is_shortened() -> None:
+    """先截斷會切開最後一個 JWT，半截不再符合遮罩的樣式；遮罩之後才截斷就不會（安全審查 L7）。"""
+    jwt = CANARIES[2]
+    # 最後一個 JWT 從第 3970 個字元開始：舊作法在 4000 處切開，只剩 header 與半個 payload。
+    start = 3970
+    repeats = start // (len(jwt) + 1)
+    filler = start - repeats * (len(jwt) + 1)
+    value = (jwt + " ") * repeats + "x" * (filler - 1) + " " + jwt
+    assert value.rindex(jwt) == start
+    cleaned = clean(value)
+    assert cleaned is not None
+    assert "eyJ" not in cleaned

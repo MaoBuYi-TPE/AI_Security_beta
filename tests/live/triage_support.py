@@ -6,10 +6,12 @@
 不補造）。Live 中的「操作者」是測試本身：它驗證流程、一致性檢查與標示，不證明人工聲明的真實性。
 """
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+import re
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from pydantic import TypeAdapter
 
@@ -82,6 +84,42 @@ def attestation(observed: Observed, host: str, port: int, role: str) -> dict[str
         "request_excerpt": request,
         "response_excerpt": response,
     }
+
+
+# 這些原因代表聲明本身對錯了位置或身分：反例必須只因平台條件被拒絕，不能因為這些原因被拒絕。
+LOCATION_PROBLEMS = frozenset(
+    {"request_line_mismatch", "host_mismatch", "parameter_missing", "role_mismatch"}
+)
+_TEMPLATE = re.compile(r"\{[^/{}]+\}")
+
+
+def located_attestation(
+    finding: Mapping[str, Any], observed: Observed, host: str, port: int
+) -> dict[str, Any]:
+    """對準 finding 自己的 method、route、參數與身分的聲明（反例用：拒絕只能來自平台條件）。"""
+    location = finding["location"]
+    path = _TEMPLATE.sub("1", location["route"])
+    if location["parameter_name"]:
+        path += "?" + urlencode({location["parameter_name"]: "1"})
+    located = replace(observed, method=location["method"], path=path)
+    return attestation(located, host, port, finding["auth_role"])
+
+
+def rejection_codes(response: Mapping[str, Any]) -> set[str]:
+    """422 RESOLUTION_EVIDENCE_INSUFFICIENT 訊息中列出的固定原因代碼。"""
+    _, _, listed = response["error"]["message"].partition("：")
+    return {code.strip() for code in listed.split(",") if code.strip()}
+
+
+def assert_rejected_for(response: Mapping[str, Any], expected: Iterable[str]) -> set[str]:
+    """拒絕原因必須包含每個預期的平台條件，而且不含位置或身分不符（否則反例沒有鑑別力）。"""
+    assert response["error"]["code"] == "RESOLUTION_EVIDENCE_INSUFFICIENT", response
+    codes = rejection_codes(response)
+    wanted = set(expected)
+    assert wanted, "反例必須至少有一個預期的平台條件"
+    assert wanted <= codes, (sorted(wanted - codes), sorted(codes))
+    assert not codes & LOCATION_PROBLEMS, sorted(codes & LOCATION_PROBLEMS)
+    return codes
 
 
 def platform_problems(snapshot: Mapping[str, Any], row: Mapping[str, Any] | None) -> list[str]:

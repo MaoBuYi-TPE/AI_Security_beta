@@ -287,6 +287,38 @@ def test_request_shape_state_and_version_rules(
     assert row.n == 1
 
 
+def test_cited_observations_of_the_finding_are_recorded(
+    client: TestClient, queue_seed: Seeder, world: World, item: Scenario
+) -> None:
+    rows = queue_seed.query(
+        "SELECT observation_id FROM finding_observations WHERE finding_id = :id "
+        "ORDER BY observation_id",
+        id=item.sqli,
+    )
+    cited = [str(row.observation_id) for row in rows]
+    assert cited
+    # 重複的 id 只記一次，保留第一次出現的順序。
+    body = {**CONFIRM, "observation_ids": [*cited, cited[0]]}
+    result = patch(client, item.sqli, body, world.operator_a.headers)
+    assert result.status_code == 200, result.text
+    [event] = queue_seed.query(
+        "SELECT evidence FROM finding_triage_events WHERE finding_id = :id", id=item.sqli
+    )
+    assert event.evidence["observation_ids"] == cited
+    # 其他 finding 的觀察不能引用。
+    [other] = queue_seed.query(
+        "SELECT observation_id FROM finding_observations WHERE finding_id = :id LIMIT 1",
+        id=item.cors,
+    )
+    rejected = patch(
+        client,
+        item.cors,
+        {**CONFIRM, "observation_ids": [cited[0], str(other.observation_id)]},
+        world.operator_a.headers,
+    )
+    assert rejected.status_code == 422, rejected.text
+
+
 def test_authorization_hides_other_projects_and_requires_a_writer(
     client: TestClient, queue_engine: Engine, queue_seed: Seeder, world: World, item: Scenario
 ) -> None:

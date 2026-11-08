@@ -4,6 +4,7 @@
 document.py 投影出的白名單文件，不直接讀快照。
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from secscan.core.json_types import JsonObject, JsonValue
@@ -16,24 +17,32 @@ from secscan.reports.domain.model import ReportSnapshot
 def markdown(snapshot: ReportSnapshot, generated_at: datetime, count: int) -> str:
     """Markdown：平台文字在 code 以外，不可信的值一律經 code_span／code_block。"""
     data = document(snapshot, generated_at, count)
-    lines: list[str] = [f"# {wording.SECTION_TITLES['report']}", ""]
-    truncation = data["truncation"]
-    truncation = _obj(truncation)
+    return assemble(data, finding_fragments(_list(data["findings"])))
+
+
+def finding_fragments(findings: Sequence[JsonValue]) -> tuple[str, ...]:
+    """每個 finding 的 Markdown 片段（以換行結尾）；第 i 個的編號是 i + 1，不隨截斷改變。"""
+    return tuple(
+        "\n".join(_markdown_finding(index, _obj(finding))) + "\n"
+        for index, finding in enumerate(findings, start=1)
+    )
+
+
+def assemble(data: JsonObject, fragments: Sequence[str]) -> str:
+    """固定部分加上前 len(fragments) 個 finding 的片段（和逐行 join 的結果完全相同）。"""
+    truncation = _obj(data["truncation"])
+    head: list[str] = [f"# {wording.SECTION_TITLES['report']}", ""]
     if truncation["notice"]:
-        lines += [f"> {truncation['notice']}", ""]
-    lines += [f"## {wording.SECTION_TITLES['notices']}", ""]
-    lines += [f"- {notice}" for notice in _strings(data["notices"])]
-    lines += ["", *_markdown_scan(data), *_markdown_summary(data)]
-    lines += [f"## {wording.SECTION_TITLES['findings']}", ""]
-    findings = data["findings"]
-    findings = _list(findings)
-    for index, finding in enumerate(findings, start=1):
-        finding = _obj(finding)
-        lines += _markdown_finding(index, finding)
-    lines += _markdown_comparisons(data)
+        head += [f"> {truncation['notice']}", ""]
+    head += [f"## {wording.SECTION_TITLES['notices']}", ""]
+    head += [f"- {notice}" for notice in _strings(data["notices"])]
+    head += ["", *_markdown_scan(data), *_markdown_summary(data)]
+    head += [f"## {wording.SECTION_TITLES['findings']}", ""]
+    tail = _markdown_comparisons(data)
     if truncation["notice"]:
-        lines += [f"## {wording.SECTION_TITLES['truncation']}", "", f"> {truncation['notice']}", ""]
-    return "\n".join(lines) + "\n"
+        tail += [f"## {wording.SECTION_TITLES['truncation']}", "", f"> {truncation['notice']}", ""]
+    text = "\n".join(head) + "\n" + "".join(fragments)
+    return text + "\n".join(tail) + "\n" if tail else text
 
 
 def _obj(value: JsonValue) -> JsonObject:
@@ -200,6 +209,11 @@ def _markdown_comparisons(data: JsonObject) -> list[str]:
     if not comparisons:
         return []
     lines = [f"## {wording.SECTION_TITLES['comparisons']}", "", f"- {wording.COMPARISON_NOTICE}"]
+    truncation = _obj(data["truncation"])
+    if truncation["comparisons_omitted"]:
+        lines.append(
+            wording.COMPARISONS_OMITTED_NOTICE.format(omitted=truncation["comparisons_omitted"])
+        )
     for item in comparisons:
         item = _obj(item)
         counts = item["counts"]

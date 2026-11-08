@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
+from secscan.auth_profiles.models import AuthProfileModel, AuthProfileVersionModel
 from secscan.findings.domain.fingerprint import RouteSource
 from secscan.findings.models import FindingModel, FindingObservationModel
 from secscan.scans.domain.lifecycle import ACTIVE_SCAN_STATUSES
@@ -36,6 +37,7 @@ class TriageQueries:
                 FindingModel.route,
                 FindingModel.route_source,
                 FindingModel.parameter_name,
+                FindingModel.parameter_location,
                 FindingModel.auth_role,
                 TargetModel.project_id,
                 TargetModel.canonical_origin,
@@ -52,10 +54,23 @@ class TriageQueries:
             route_source=RouteSource(row.route_source),
             parameter_name=row.parameter_name,
             auth_role=row.auth_role,
+            parameter_location=row.parameter_location,
         )
-        return FindingFacts(
-            row.target_id, row.project_id, location, TargetHost(origin.host, origin.port)
-        )
+        target = TargetHost(origin.host, origin.port, self._secret_headers(row.target_id))
+        return FindingFacts(row.target_id, row.project_id, location, target)
+
+    def _secret_headers(self, target_id: UUID) -> frozenset[str]:
+        """target 的認證設定在各版本用過的自訂 header 名稱（不讀密文）。"""
+        names = self._session.scalars(
+            select(AuthProfileVersionModel.header_name)
+            .join(AuthProfileModel, AuthProfileModel.id == AuthProfileVersionModel.profile_id)
+            .where(
+                AuthProfileModel.target_id == target_id,
+                AuthProfileVersionModel.header_name.is_not(None),
+            )
+            .distinct()
+        ).all()
+        return frozenset(name for name in names if name is not None)
 
     def now(self) -> datetime:
         """DB 的時間（transaction 開始時）：人工複測的時間以它為準，不信任 client 或 API 的時鐘。"""

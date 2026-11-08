@@ -46,8 +46,10 @@ from tests.live.test_lab_zap_live import Measured, _assert_invariants
 from tests.live.triage_support import (
     RETESTS,
     Observed,
+    assert_rejected_for,
     attestation,
     confirm_body,
+    located_attestation,
     passes,
     platform_problems,
     resolve_body,
@@ -285,7 +287,7 @@ def _resolve_cases(
         outcomes.append({"case_id": case_id, "finding_id": finding_id, "problems": problems})
         if problems:
             assert status == 422, response
-            assert response["error"]["code"] == "RESOLUTION_EVIDENCE_INSUFFICIENT"
+            assert_rejected_for(response, problems)
             continue
         assert status == 200, response
         resolution = response["data"]["resolution"]
@@ -311,11 +313,16 @@ def _rejected_cases(
     observed: dict[str, Observed],
     resolved: list[str],
 ) -> None:
-    """反例：帶 Nuclei 失敗來源的 CSP、unchanged 中 persistent 的 finding、缺少摘錄。"""
+    """反例：帶 Nuclei 失敗來源的 CSP、unchanged 中 persistent 的 finding、缺少摘錄。
+
+    每個反例的聲明都對準該 finding 自己的 method、route、參數與身分，拒絕原因必須包含平台
+    條件算出的每個代碼，而且不含位置或身分不符（否則反例沒有鑑別力）。
+    """
     host, port = _host_port(item)
-    claim = attestation(next(iter(observed.values())), host, port, "anonymous")
+    sample = next(iter(observed.values()))
+    by_id = {finding["id"]: finding for finding in baseline.findings}
     csp = [
-        finding
+        finding["id"]
         for finding in baseline.findings
         if finding["rule_group"] == "csp-header-missing"
         and finding["location"]["route"] == "/"
@@ -324,28 +331,41 @@ def _rejected_cases(
     persistent = [
         row["finding_id"]
         for row in unchanged["findings"]
-        if row["classification"] == "persistent" and row["finding_id"] not in resolved
+        if row["classification"] == "persistent"
+        and row["finding_id"] not in resolved
+        and row["finding_id"] in by_id
     ]
-    for finding_id, comparison in (
-        *((finding["id"], patched["snapshot"]["id"]) for finding in csp[:1]),
-        *((finding_id, unchanged["snapshot"]["id"]) for finding_id in persistent[:1]),
-    ):
+    outcomes: list[dict[str, Any]] = []
+    negatives = [(finding_id, patched) for finding_id in csp[:1]]
+    negatives += [(finding_id, unchanged) for finding_id in persistent[:1]]
+    for finding_id, cited in negatives:
+        rows = {row["finding_id"]: row for row in cited["findings"]}
+        expected = platform_problems(cited["snapshot"], rows.get(finding_id))
+        claim = located_attestation(by_id[finding_id], sample, host, port)
         version = _confirmed(item, finding_id)
         status, response = item.operator.call(
-            "PATCH", f"/findings/{finding_id}/triage", resolve_body(version, comparison, claim)
+            "PATCH",
+            f"/findings/{finding_id}/triage",
+            resolve_body(version, cited["snapshot"]["id"], claim),
         )
         assert status == 422, response
-        assert response["error"]["code"] == "RESOLUTION_EVIDENCE_INSUFFICIENT"
+        codes = assert_rejected_for(response, expected)
+        outcomes.append({"finding_id": finding_id, "expected": expected, "codes": sorted(codes)})
+    assert len(outcomes) == len(negatives)
+    write_measurement("triage-rejected", {"outcomes": outcomes}, filename="triage-rejected.json")
     if persistent:
         finding_id = persistent[0]
         version = int(_detail(item, finding_id)["triage_version"])
+        claim = located_attestation(by_id[finding_id], sample, host, port)
         partial_claim = {key: value for key, value in claim.items() if key != "response_excerpt"}
-        status, _ = item.operator.call(
+        status, response = item.operator.call(
             "PATCH",
             f"/findings/{finding_id}/triage",
             resolve_body(version, unchanged["snapshot"]["id"], partial_claim),
         )
-        assert status == 422
+        assert status == 422, response
+        assert response["error"]["code"] == "INVALID_REQUEST"
+        assert "response_excerpt" in response["error"]["message"]
 
 
 def _check_reopen(admin: Api, item: Lab, partial: Combined, resolved: list[str]) -> None:

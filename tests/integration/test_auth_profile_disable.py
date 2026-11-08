@@ -215,6 +215,44 @@ def test_every_later_run_of_a_scan_fails_before_any_secret(
     assert [row.error_code for row in errors] == ["AUTH_PROFILE_DISABLED"] * len(errors)
 
 
+NEW_VERSION = (
+    "INSERT INTO auth_profile_versions (profile_id, version, type, preflight_method, "
+    "preflight_path, preflight_expected_status, preflight_expected_json, "
+    "encrypted_secret, created_by_key_id) SELECT profile_id, version + 1, type, "
+    "preflight_method, preflight_path, preflight_expected_status, "
+    "preflight_expected_json, 'gAAAAAx', created_by_key_id FROM auth_profile_versions "
+    "WHERE profile_id = :id ORDER BY version DESC LIMIT 1"
+)
+
+
+def test_a_direct_insert_racing_a_disable_waits_and_is_rejected(
+    queue_database: ProvisionedDatabase,
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """繞過應用程式直接新增版本、同時有停用尚未 commit：trigger 以 FOR SHARE 等停用 commit，
+    重新讀到已停用而拒絕；不會留下帶密文的版本（安全審查 L6）。"""
+    profile = scannable.profile.id
+
+    def work(session: Session) -> object:
+        return session.execute(text(NEW_VERSION), {"id": profile})
+
+    rival = Race(queue_database, "insert-rival", work)
+    with sessionmaker(queue_engine).begin() as session:
+        AuthProfileService(session).disable(
+            world.operator_a.principal, profile, reason="停用", request_id=None
+        )
+        rival.start()
+        wait_until_waiting_for_a_lock(queue_seed, "insert-rival")
+    rival.join()
+    [error] = rival.errors
+    assert isinstance(error, IntegrityError)
+    assert "disabled profile" in str(error)
+    assert secrets(queue_seed, scannable) == 0
+
+
 def test_the_database_keeps_a_disabled_profile_without_secrets(
     client: TestClient, queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
 ) -> None:
@@ -232,13 +270,5 @@ def test_the_database_keeps_a_disabled_profile_without_secrets(
             session.commit()
     assert disable(client, scannable, world.operator_a.headers).status_code == 200  # type: ignore[attr-defined]
     with sessionmaker(queue_engine)() as session:
-        statement = (
-            "INSERT INTO auth_profile_versions (profile_id, version, type, preflight_method, "
-            "preflight_path, preflight_expected_status, preflight_expected_json, "
-            "encrypted_secret, created_by_key_id) SELECT profile_id, version + 1, type, "
-            "preflight_method, preflight_path, preflight_expected_status, "
-            "preflight_expected_json, 'gAAAAAx', created_by_key_id FROM auth_profile_versions "
-            "WHERE profile_id = :id ORDER BY version DESC LIMIT 1"
-        )
-        error = violation(session, statement, {"id": profile})
+        error = violation(session, NEW_VERSION, {"id": profile})
         assert "disabled profile" in str(error)

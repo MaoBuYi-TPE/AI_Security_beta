@@ -165,7 +165,38 @@ class TriageService:
     ) -> _Resolution:
         if command.comparison_id is None or command.basis is None:
             raise _invalid("resolve 必須帶 basis 與 comparison_id。")
-        comparison = self._comparisons.get(command.comparison_id)
+        comparison_id, cited, current_scan = self._cited(
+            principal, command.comparison_id, finding_id, facts
+        )
+        observed_after = self._queries.observed_after(finding_id, current_scan)
+        problems: list[str] = [
+            problem.value
+            for problem in evidence_problems(command.basis, cited, observed_after=observed_after)
+        ]
+        checked = None
+        if command.basis is ResolutionBasis.MANUAL_RETEST and command.attestation is not None:
+            checked = self._checked(command.attestation, finding_id, facts, problems)
+        if problems:
+            raise AppError(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                code=ErrorCode.RESOLUTION_EVIDENCE_INSUFFICIENT,
+                message="證據不足，不能標成 resolved：" + ", ".join(problems),
+            )
+        evidence: JsonObject = {}
+        if cited.row is not None:
+            evidence = {
+                "classification": cited.row.classification.value,
+                "reasons": list(cited.row.reasons),
+            }
+        if checked is not None:
+            evidence["attestation"] = checked.evidence()
+        return _Resolution(comparison_id, command.basis, evidence, checked)
+
+    def _cited(
+        self, principal: Principal, comparison_id: UUID, finding_id: UUID, facts: FindingFacts
+    ) -> tuple[UUID, CitedComparison, UUID]:
+        """引用的比較快照（其他 project 404、不同 target 422），以及這個 finding 的那一列。"""
+        comparison = self._comparisons.get(comparison_id)
         if comparison is None:
             raise not_found_error()
         authorize(principal, Permission.PROJECT_READ, comparison.project_id)
@@ -186,35 +217,27 @@ class TriageService:
             else None
         )
         cited = CitedComparison(comparison.algorithm_version, comparison.comparability, row)
-        observed_after = self._queries.observed_after(finding_id, comparison.current_scan_id)
-        problems: list[str] = [
-            problem.value
-            for problem in evidence_problems(command.basis, cited, observed_after=observed_after)
-        ]
-        checked = None
-        if command.basis is ResolutionBasis.MANUAL_RETEST and command.attestation is not None:
-            try:
-                checked = check_consistency(
-                    command.attestation,
-                    facts.location,
-                    facts.target,
-                    now=self._queries.now(),
-                    last_observed_at=self._queries.last_observed_at(finding_id),
-                )
-            except AttestationError as error:
-                problems.extend(problem.value for problem in error.problems)
-        if problems:
-            raise AppError(
-                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-                code=ErrorCode.RESOLUTION_EVIDENCE_INSUFFICIENT,
-                message="證據不足，不能標成 resolved：" + ", ".join(problems),
+        return comparison.id, cited, comparison.current_scan_id
+
+    def _checked(
+        self,
+        attestation: Attestation,
+        finding_id: UUID,
+        facts: FindingFacts,
+        problems: list[str],
+    ) -> CheckedAttestation | None:
+        """人工複測聲明的一致性檢查；不符的原因加進 problems（和平台條件一起回報）。"""
+        try:
+            return check_consistency(
+                attestation,
+                facts.location,
+                facts.target,
+                now=self._queries.now(),
+                last_observed_at=self._queries.last_observed_at(finding_id),
             )
-        evidence: JsonObject = {}
-        if row is not None:
-            evidence = {"classification": row.classification.value, "reasons": list(row.reasons)}
-        if checked is not None:
-            evidence["attestation"] = checked.evidence()
-        return _Resolution(comparison.id, command.basis, evidence, checked)
+        except AttestationError as error:
+            problems.extend(problem.value for problem in error.problems)
+            return None
 
     def _write(
         self,
@@ -227,11 +250,6 @@ class TriageService:
         resolution: _Resolution | None,
         request_id: str | None,
     ) -> None:
-        evidence: JsonObject = dict(resolution.evidence) if resolution is not None else {}
-        if command.observation_ids:
-            evidence["observation_ids"] = [
-                str(item) for item in dict.fromkeys(command.observation_ids)
-            ]
         try:
             self._records.apply(locked.id, planned)
         except IntegrityError as error:
@@ -250,7 +268,7 @@ class TriageService:
                 current=planned,
                 reason_code=TriageReasonCode.MANUAL,
                 reason=reason,
-                evidence=evidence,
+                evidence=_event_evidence(command, resolution),
                 comparison_id=resolution.comparison_id if resolution is not None else None,
                 basis=resolution.basis if resolution is not None else None,
             )
@@ -271,6 +289,13 @@ class TriageService:
             request_id=request_id,
             changes=_audit_changes(locked.status, planned, reason, resolution),
         )
+
+
+def _event_evidence(command: TriageCommand, resolution: _Resolution | None) -> JsonObject:
+    evidence: JsonObject = dict(resolution.evidence) if resolution is not None else {}
+    if command.observation_ids:
+        evidence["observation_ids"] = [str(item) for item in dict.fromkeys(command.observation_ids)]
+    return evidence
 
 
 def _reason(value: str) -> str:
