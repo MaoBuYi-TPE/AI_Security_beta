@@ -265,3 +265,8 @@ def test_target_secret_headers_and_indented_headers_are_masked() -> None:
     checked = check(replace(ATTESTATION, request_excerpt=request), target=target)
     assert "s3cr3t-value" not in checked.request_excerpt  # type: ignore[attr-defined]
     assert "Token abc" not in checked.request_excerpt  # type: ignore[attr-defined]
+
+
+def test_an_excerpt_without_a_trailing_blank_line_is_consistent() -> None:
+    request = "GET /search?q=1 HTTP/1.1\nHost: lab-fixture:8080"
+    check(replace(ATTESTATION, request_excerpt=request))

@@ -1435,6 +1435,7 @@ uv run secscan-admin worker [--once]
 - 內容：固定說明（未經 triage 的告警不是已驗證的漏洞、零告警不代表沒有弱點、not_observed 不等於已修補、平台不提供自動修補驗證、報告時間不是發現或修補時間、遮罩不保證辨識所有秘密）、掃描與引擎狀態、授權成立時間（grant 的 `approved_at`）、覆蓋與預算用量、摘要（以全部 finding 計算）、逐 finding 的標籤與 resolved 的依據（人工複測只有 metadata 與摘錄的 sha256）、比較快照摘要。不含 key id、storage_key、密文、idempotency key 與複測摘錄的原文。
 - 大小上限 8,388,608 bytes（UTF-8）：超過時依優先順序以整個 finding 為單位省略，`truncated=true`、記下省略數，開頭與結尾都有說明。
 - 比較快照最多列出最新的 10 份；較舊的份數記在內容的 `truncation.comparisons_omitted`，Markdown 另有說明。
+- 兩種格式的內容相同：Markdown 由 JSON 的文件渲染（有 API 規格的 scan 另有「API 規格」一節）。
 - JSON 的 schema 是 `ReportDocumentV1`（每層 `additionalProperties: false`）；Markdown 中不可信的值只放在 code span 或最上層的 fenced code block。
 
 ### 19.4 管理檢視（platform_admin）

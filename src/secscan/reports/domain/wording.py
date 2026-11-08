@@ -56,6 +56,7 @@ SECTION_TITLES = {
     "notices": "固定說明",
     "scan": "掃描",
     "authorization": "授權",
+    "spec": "API 規格",
     "engines": "引擎",
     "coverage": "覆蓋",
     "summary": "摘要",
