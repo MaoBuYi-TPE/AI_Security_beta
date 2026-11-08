@@ -2605,3 +2605,24 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
   - L8（部分採用）：每個 scan 20 份的上限原本把 failed 也算進去，反覆失敗會讓這個 scan 永久無法產生報告 → failed 不計入。每個 key 的速率限制屬於 T23b（全域 rate limit），T21 不做。
   - L9（採用）：triage-events 的回應加上 `Cache-Control: no-store`；`redact_text` 的 header 規則允許前置空白（縮排或折行的 header 行，這是共用模組的改動，只會多遮罩）；摘錄另外遮罩這個 target 的認證設定各版本用過的自訂 header 名稱（只讀名稱，不讀密文）。
   - L10（採用）：下載的 CSP 加上 `frame-ancestors 'none'`（`default-src` 不涵蓋它）。
+
+### 28.15 Live（G6，2026-11-08）
+
+- 依核准的計畫只執行兩個既有指令。每輪前後確認：只剩 `secscan-db-test-1`、volume 數不變（269）、沒有 live 網路、Makefile 與 Compose 的清理範圍和 main 相同、接著電源；日誌的敏感樣式掃描（平台 key、Bearer、JWT、Fernet 密文、連線字串、密碼、`*KEY*=`）都是 0。
+- 第一次 `make test-live-fixture-rescan`（實作完成後、commit 24a04ca，`recordings/fixture-rescan/t21-run-1/`）：通過，31 分 35 秒。
+- 第二次 `make test-live-fixture-rescan`（程式碼與安全審查的修正之後、commit e9c2683，`t21-run-2/`）：通過，31 分 31 秒。
+- 兩次的結果：
+
+  | 項目 | 第一次 | 第二次 |
+  |---|---|---|
+  | T22 的比較（unchanged／patched／partial） | new、not_observed 都是 0；unchanged 是 persistent 29、inconclusive 2 | new、not_observed 都是 0；unchanged 是 persistent 30、inconclusive 0 |
+  | patched 比較 | persistent 8、inconclusive 24 | persistent 8、inconclusive 24 |
+  | 人工複測後 resolve（T30-FX-01 SQLi、T30-FX-02 XSS） | 2 個，平台條件都成立；比較快照仍是 inconclusive | 2 個，同左 |
+  | `basis=rescan_not_observed` | 一律 422 `not_observed_required` | 同左 |
+  | 反例 | CSP 與 persistent 的 finding 都 422 | 同左；拒絕原因與平台條件算出的完全相同（CSP：`engine_incomplete`、`reasons_not_eligible`；persistent：`inconclusive_required`、`current_observed`、`coverage_missing`、`reasons_not_eligible`），沒有位置或身分不符；缺少摘錄是 `INVALID_REQUEST` |
+  | 小預算 scan 之後自動重開 | 2／2，系統事件與 `finding.reopen` | 2／2 |
+  | 報告（baseline 與小預算 scan 各 JSON、Markdown） | 4 份都 1 次嘗試完成、未截斷；sha256、header、Pydantic、Markdown 安全檢查與標示都通過 | 同左（CSP 已含 `frame-ancestors`） |
+
+- 第一次在審查修正之前執行，修正之後以第二次為準。Live 中的「操作者」是測試本身：它驗證流程、一致性檢查與標示，不證明人工聲明的真實性。
+- `make test-live-fixture-findings` 回歸一次（審查修正之後，linker 與 worker 迴圈都有改；錄到 `recordings/fixture-findings-t21/`，不覆寫 T19／T20 的錄製）：3 passed，22 分鐘；沒有殘留資源。3 個 warning 是 T19 既有 Live 測試的 pytest 棄用提醒（class-scoped fixture 寫成 instance method），與 T21 無關，留給 T23c 整理。
+- Gate D 的人工審閱樣本：Live 測試只核對報告、不保存內容，所以樣本改在 db-test 以真實的 PATCH、ReportService、ReportWorker 與渲染產生（觀察是整合測試的合成資料，UUID 換成代號），放在 gitignore 的 `recordings/t21-report-samples/`。使用者審閱之前，Gate D 不標通過。

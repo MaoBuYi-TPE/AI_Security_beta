@@ -364,15 +364,15 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 |---|---|---|
 | TRIAGE-01 | 沒有證據、未 confirmed、一次改兩個欄位、回到 open、resolved 時改 triage → 拒絕；任何人工操作序列不送 resolve 都到不了 resolved（Hypothesis） | unit：findings/test_triage_domain；integration：triage_api |
 | TRIAGE-02 | rescan_not_observed 只接受 not_observed（v1 不會產生，現行版本拒絕）；manual_retest 只接受平台證據都成立、只缺 rule／parameter 的 inconclusive；每個拒絕原因各一個反例 | unit：triage/test_evidence；integration：triage_api（構造的封存快照） |
-| TRIAGE-03 | 人工複測聲明的每一項一致性檢查（route、Host、參數、狀態列、身分、過時或未來的時間、結果、client 自填平台欄位、大小）；遮罩後才計算雜湊 | unit：triage/test_attestation；integration：triage_api |
+| TRIAGE-03 | 人工複測聲明的每一項一致性檢查（route、Host 與 absolute-form 的 authority、參數名稱（query 的名稱；位置不明時另有 header 名稱與 body 的鍵名，不做子字串比對）、狀態列、身分、過時或未來的時間、結果、空白或過大的摘錄、client 自填平台欄位）；遮罩後才計算雜湊；`platform_checks` 只列實際執行的檢查；縮排的 header 與 target 的自訂 header 名稱也遮罩；`observation_ids` 只接受這個 finding 的觀察 | unit：triage/test_attestation；integration：triage_api；live 的反例斷言拒絕原因只來自平台條件 |
 | TRIAGE-04 | 比較之後的新觀察、target 有進行中的 scan → 拒絕；比較快照在人工 resolve 之後不變 | integration：triage_api、test_triage_races |
 | TRIAGE-05 | 自動重開（R1–R4）：較新的 scan 再現才重開，failed／timed_out 的 run 也算；沒觀察到不重開也不關閉；mapping 不同不重開但標示需要人工確認；重試不重複；重開之後可再 resolve | integration：finding_linker_reopen |
 | TRIAGE-06 | DB 層繞過：未升版、跳版、升版沒有事件、事件鏈不符、事件／摘錄被修改或刪除、摘錄雜湊不符或缺少、系統事件引用其他 target、resolved 不是 confirmed、watermark 由 trigger 寫入、新 finding 版本不是 0、有資料時 downgrade | integration：triage_schema |
 | TRIAGE-07 | 併發（G1）：同版本兩個 PATCH、人工與自動重開互搶、resolve 期間建立的 scan、比較快照與 linker 的鎖；故障注入（G2）：每一步之間拋錯整筆回滾、重試只重開一次 | integration：triage_races、triage_transactions（各連續 5 次） |
 | REPORT-01 | 不可信字串只在 code token 中、沒有連結／圖片／HTML／URL 樣式；JSON 跳脫；canary 不出現；白名單欄位與 golden JSON Schema | unit：reports/test_encoding、test_document；contract：test_report_schema |
-| REPORT-02 | 截斷以整個 finding 為單位、摘要計數不變、開頭與結尾都有說明；真實的 8 MiB 與多位元組字元 | unit：reports/test_document |
+| REPORT-02 | 截斷以整個 finding 為單位、摘要計數不變、開頭與結尾都有說明；真實的 8 MiB 與多位元組字元；大小分布偏斜時截斷點等於逐一嘗試的結果、每個 finding 只投影與渲染一次（成本與分布無關）；比較快照只列最新的 10 份並揭露省略數；先遮罩再截斷 | unit：reports/test_document、test_render |
 | REPORT-03 | 用語：平台文字的誇大字詞只在否定說明中；需要人工確認的 resolved 不算 resolved | unit：reports/test_document；live 的報告核對 |
-| REPORT-04 | 佇列：SKIP LOCKED、舊 worker 重新認領之後不能完成、最多 3 次、內容寫入後失敗整筆回滾、快照與 PATCH 隔離、同時建立的配額 | integration：report_queue；reports_schema（狀態轉換、內容只寫一次、雙向核對） |
+| REPORT-04 | 佇列：SKIP LOCKED、舊 worker 重新認領之後不能完成、最多 3 次、內容寫入後失敗整筆回滾、快照與 PATCH 隔離、同時建立的配額；報告專屬的 DB 錯誤立即釋放、其他 DB 錯誤讓 worker 結束、lease 失效留給對帳；failed 不計入每個 scan 的配額；WorkerLoop 每圈一份 | integration：report_queue、report_worker；reports_schema（狀態轉換、內容只寫一次、雙向核對） |
 | REPORT-05 | 下載：只以 report id、sha 不符不送出內容、header（nosniff、CSP sandbox 與 frame-ancestors、no-store、ASCII 檔名）、其他 project 404、viewer 不能建立 | integration：reports_api |
 
 正例保留：兩側有觀察且版本可靠 → persistent；純函式所有層證據完整時可得到 new/not_observed，移除必要證據就不再成立。這些人工構造的正例不是工具完成證據。實際 producer 的負面分類不放寬；端點請求與工具退出碼均不能代替完整性。
@@ -636,7 +636,7 @@ Gate B：SEC-01 至 SEC-20 適用測試有結果；未支援能力明確關閉�
 
 Gate C：取消/故障/重送/partial 狀態測試通過。
 
-Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），live 的報告核對與使用者人工審閱樣本報告完成前，Gate D 整體尚未通過。不得把局部通過當作整個 Gate 已通過。）
+Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者人工審閱樣本報告完成前，Gate D 整體尚未通過。不得把局部通過當作整個 Gate 已通過。）
 
 Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 

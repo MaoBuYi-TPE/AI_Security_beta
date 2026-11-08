@@ -339,7 +339,7 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - v0016 升級保留既有 run 的未知 provenance，不回填；downgrade 會刪除新快照／位置／版本資料，僅供已備份的開發測試 DB。
 - 契約見 `docs/API_CONTRACT.md` §17.11，決策與實測見 `docs/DECISIONS.md` §27，反例見 `docs/SECURITY_AND_TESTING.md` §4.3 的 RESCAN 表。
 
-#### 人工 triage、audit 與報告（T21，實作中）
+#### 人工 triage、audit 與報告（T21）
 
 - **resolved 一律是人工判定，平台不提供自動修補驗證。** `PATCH /api/v1/findings/{id}/triage` 一次改一個欄位，必帶 `expected_version` 與 `reason`；resolve 必須引用同一個 target 的比較快照：
   - `basis: rescan_not_observed`：該列是 not_observed。比較演算法 v1 不會產生 not_observed，**現行版本不可用**。
