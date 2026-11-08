@@ -7,11 +7,18 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import Engine, inspect, text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
 
 from secscan.migrations import alembic_config, head_revision
 from secscan.migrations.metadata import target_metadata
+from secscan.scans.domain.allocation import EngineBudgetRequest
+from secscan.scans.domain.catalog import Engine as ScanEngine
+from secscan.scans.service import ScanService
 from tests.integration.conftest import app_engine
 from tests.integration.database import ProvisionedDatabase
+from tests.integration.scan_support import web_scan
+from tests.integration.scope_support import LAB
 
 pytestmark = pytest.mark.integration
 
@@ -71,6 +78,8 @@ TRIGGER_FUNCTIONS = (
     "report_contents_parent_check",
     "auth_profiles_update_guard",
     "auth_profiles_disabled_erased",
+    "scanner_runs_engine_budget_frozen",
+    "scanner_runs_allotment_once",
 )
 
 
@@ -162,5 +171,36 @@ def test_env_reads_connection_from_settings(
     engine = app_engine(fresh_database)
     try:
         assert _current_revisions(engine) == [head_revision()]
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_unfinished_runs_with_engine_budgets(
+    fresh_database: ProvisionedDatabase,
+) -> None:
+    """v0020（T31）：降回去時舊程式會讓它們分到剩下的全部，子預算悄悄消失，所以拒絕。"""
+    engine = app_engine(fresh_database)
+    split = (
+        EngineBudgetRequest(ScanEngine.ZAP, max_requests=760, max_duration_seconds=380),
+        EngineBudgetRequest(ScanEngine.NUCLEI, max_requests=440, max_duration_seconds=220),
+    )
+    try:
+        _migrate(engine, "up", "head")
+        with Session(engine) as session, session.begin():
+            world, scan = web_scan(
+                session, engines=(ScanEngine.ZAP, ScanEngine.NUCLEI), split=split
+            )
+
+        with pytest.raises(DBAPIError, match="unfinished runs still have engine budgets"):
+            _migrate(engine, "down", "0019")
+        assert _current_revisions(engine) == [head_revision()]
+
+        with Session(engine) as session, session.begin():
+            ScanService(session, lab=LAB).cancel(world.operator, scan.id, request_id=None)
+        _migrate(engine, "down", "0019")
+
+        assert _current_revisions(engine) == ["0019"]
+        removed = {"scanner_runs_engine_budget_frozen", "scanner_runs_allotment_once"}
+        assert not removed & _existing_functions(engine)
     finally:
         engine.dispose()

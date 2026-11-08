@@ -11,10 +11,11 @@ from datetime import datetime
 from typing import Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from secscan.core.json_types import JsonObject
 from secscan.grants.schemas import BudgetIn, BudgetOut
+from secscan.scans.domain.allocation import EngineBudget, EngineBudgetRequest
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Scan, ScanEvent, ScannerRun
@@ -39,8 +40,22 @@ AUTHENTICATION_LOST = "AUTHENTICATION_LOST"
 AUTHENTICATION_HEALTH_UNKNOWN = "AUTHENTICATION_HEALTH_UNKNOWN"
 
 
+class EngineBudgetIn(BaseModel):
+    """一個引擎的份額（T31；docs/DECISIONS.md §29）：建立時凍結，之後不能修改。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    engine: Engine
+    max_requests: StrictInt
+    max_duration_seconds: StrictInt
+
+
 class ScanCreate(BaseModel):
-    """建立 scan；budget 省略的項目使用 grant 的值。"""
+    """建立 scan；budget 省略的項目使用 grant 的值。
+
+    engine_budgets 是選填的引擎子預算：只用於兩個以上掃描引擎的 scan，每個引擎各列一次；省略時
+    每個 run 分到剩下的全部預算（規則由 domain 判斷）。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -51,6 +66,9 @@ class ScanCreate(BaseModel):
     profile: ScanProfile
     engines: list[Engine] = Field(min_length=1, max_length=len(Engine))
     budget: BudgetIn = Field(default_factory=BudgetIn)
+    engine_budgets: list[EngineBudgetIn] | None = Field(
+        default=None, min_length=1, max_length=len(Engine)
+    )
 
     def to_request(self) -> ScanRequest:
         return ScanRequest(
@@ -64,6 +82,18 @@ class ScanCreate(BaseModel):
                 requests_per_second=self.budget.requests_per_second,
                 max_requests=self.budget.max_requests,
                 max_duration_seconds=self.budget.max_duration_seconds,
+            ),
+            engine_budgets=(
+                tuple(
+                    EngineBudgetRequest(
+                        engine=item.engine,
+                        max_requests=item.max_requests,
+                        max_duration_seconds=item.max_duration_seconds,
+                    )
+                    for item in self.engine_budgets
+                )
+                if self.engine_budgets is not None
+                else None
             ),
         )
 
@@ -154,6 +184,48 @@ class RunResultOut(BaseModel):
         )
 
 
+class EngineBudgetOut(BaseModel):
+    """建立 scan 時凍結的這個引擎的上限（T31）。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    max_requests: int
+    max_duration_seconds: int
+
+    @classmethod
+    def of(cls, budget: EngineBudget) -> Self:
+        return cls(
+            max_requests=budget.max_requests, max_duration_seconds=budget.max_duration_seconds
+        )
+
+
+class RunUsageOut(BaseModel):
+    """這個 run 分到的配額與 guard 的計數（T31；docs/DECISIONS.md §29）。
+
+    沒有容器（in-process 的 fake、還沒開始、開始之前就結束）或不明時是 null；
+    duration_allotted_seconds 在 T31 之前的 run 沒有記下。traffic_duration_seconds 是容器啟動到
+    清理完成的秒數，可能略多於分到的秒數（被 runner 停止時的清理時間），會從之後的 run 扣除。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    requests_allotted: int | None
+    duration_allotted_seconds: int | None
+    requests_sent: int | None
+    requests_denied: int | None
+    traffic_duration_seconds: int | None
+
+    @classmethod
+    def of(cls, run: ScannerRun) -> Self:
+        return cls(
+            requests_allotted=run.requests_allotted,
+            duration_allotted_seconds=run.seconds_allotted,
+            requests_sent=run.requests_sent,
+            requests_denied=run.requests_denied,
+            traffic_duration_seconds=run.traffic_seconds,
+        )
+
+
 class EngineRunOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -169,6 +241,9 @@ class EngineRunOut(BaseModel):
     profile_definition_sha256: str | None
     # 解析過才有值（fake、preflight 與還沒解析的 run 是 null）。
     result: RunResultOut | None
+    # 引擎子預算（T31）：建立時凍結的上限；沒有指定是 null（分到剩下的全部）。
+    budget: EngineBudgetOut | None
+    usage: RunUsageOut
 
     @classmethod
     def of(cls, run: ScannerRun) -> Self:
@@ -182,6 +257,8 @@ class EngineRunOut(BaseModel):
             plan_hash=run.plan_hash,
             profile_definition_sha256=run.profile_definition_sha256,
             result=RunResultOut.of(run.result) if run.result is not None else None,
+            budget=EngineBudgetOut.of(run.budget) if run.budget is not None else None,
+            usage=RunUsageOut.of(run),
         )
 
 

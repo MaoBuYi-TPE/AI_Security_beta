@@ -19,7 +19,8 @@ from secscan.core.pagination import Page, PageRequest
 from secscan.grants.domain.matching import IneligibleReason
 from secscan.grants.domain.scope import Budget
 from secscan.grants.models import ScopeGrantModel
-from secscan.scans.domain.catalog import Engine, ScanProfile
+from secscan.scans.domain.allocation import EngineBudget
+from secscan.scans.domain.catalog import Engine, PlannedRun, ScanProfile
 from secscan.scans.domain.lifecycle import ACTIVE_SCAN_STATUSES, RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import (
     ANONYMOUS_ROLE,
@@ -128,12 +129,7 @@ class ScanRepository:
             self._session.add(model)
             flush_or_raise(self._session)
         self._session.add_all(
-            ScannerRunModel(
-                scan_id=model.id,
-                engine=run.engine.value,
-                sequence=run.sequence,
-                status=RunStatus.QUEUED.value,
-            )
+            _new_run(model.id, run, new_scan.engine_budgets.get(run.engine))
             for run in new_scan.runs
         )
         if new_scan.operations:
@@ -415,6 +411,30 @@ def _run(model: ScannerRunModel) -> ScannerRun:
         result=_result(model),
         plan_hash=model.plan_hash,
         profile_definition_sha256=model.profile_definition_sha256,
+        budget=engine_budget_of(model),
+        requests_allotted=model.requests_allotted,
+        seconds_allotted=model.seconds_allotted,
+    )
+
+
+def _new_run(scan_id: UUID, run: PlannedRun, budget: EngineBudget | None) -> ScannerRunModel:
+    return ScannerRunModel(
+        scan_id=scan_id,
+        engine=run.engine.value,
+        sequence=run.sequence,
+        status=RunStatus.QUEUED.value,
+        budget_max_requests=budget.max_requests if budget is not None else None,
+        budget_max_duration_seconds=budget.max_duration_seconds if budget is not None else None,
+    )
+
+
+def engine_budget_of(model: ScannerRunModel) -> EngineBudget | None:
+    """建立時凍結的上限（T31）；DB 的 CHECK 保證兩欄同時有值。"""
+    if model.budget_max_requests is None or model.budget_max_duration_seconds is None:
+        return None
+    return EngineBudget(
+        max_requests=model.budget_max_requests,
+        max_duration_seconds=model.budget_max_duration_seconds,
     )
 
 

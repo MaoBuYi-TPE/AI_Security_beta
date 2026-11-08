@@ -24,6 +24,7 @@ from secscan.grants.domain.lifecycle import ScopeGrant
 from secscan.grants.domain.scope import Scope
 from secscan.guard.domain.budget import RunBudget
 from secscan.scans.containers import ContainerRecords, PendingContainer
+from secscan.scans.domain.allocation import allowance
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import (
     MAX_PARSE_ATTEMPTS,
@@ -224,11 +225,14 @@ class QueueOperations:
         if error_code is None:
             error_code, secret = self._binding(scan, read_secret=image_ref is not None)
         error_code = error_code or self._gate.locked_creator(scan)
-        requests, seconds = self._records.remaining(
-            scan.id,
-            run.id,
-            max_requests=scan.max_requests,
-            max_duration_seconds=scan.max_duration_seconds,
+        requests, seconds = allowance(
+            *self._records.remaining(
+                scan.id,
+                run.id,
+                max_requests=scan.max_requests,
+                max_duration_seconds=scan.max_duration_seconds,
+            ),
+            self._records.engine_budget(run.id),
         )
         if error_code is None and (requests == 0 or seconds == 0):
             error_code = RunErrorCode.BUDGET_EXHAUSTED
@@ -242,7 +246,7 @@ class QueueOperations:
         )
         self._progress.move(scan, run, RunStatus.RUNNING, container=container)
         if container is not None:
-            self._records.allot(run.id, requests)
+            self._records.allot(run.id, requests, seconds)
         progress = Progress(run_status=RunStatus.RUNNING, scan_status=self._progress.settle(scan))
         launch = self._launch(
             scan, progress, secret, _egress(scan, grant, secret, requests), seconds=seconds

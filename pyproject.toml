@@ -56,6 +56,10 @@ select = ["E", "W", "F", "I", "N", "UP", "B", "S", "BLE", "T20", "SIM", "PT", "C
 # 中文註解與文件字串使用的全形標點。
 allowed-confusables = ["，", "：", "；", "（", "）", "！", "？", "／"]
 
+[tool.ruff.lint.isort]
+# benchmarks/ 是 T31 的 harness（repo 根目錄的頂層套件，不進 wheel）。
+known-first-party = ["benchmarks"]
+
 [tool.ruff.lint.per-file-ignores]
 # S105/S106：測試用的假密碼（真實秘密只在 .env 與執行期產生，fixture 另有防洩密測試）。
 "tests/**/*.py" = ["S101", "S105", "S106"]
@@ -75,7 +79,7 @@ allowed-confusables = ["，", "：", "；", "（", "）", "！", "？", "／"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "benchmarks"]
 plugins = ["pydantic.mypy"]
 
 [tool.pydantic-mypy]
@@ -107,7 +111,7 @@ markers = [
 branch = true
 # 用路徑而不是套件名稱：Alembic 以自訂模組名稱（env_py…）載入 env.py 與 migration 檔，
 # 依套件名稱比對會把這些實際執行過的程式漏算成 0%。
-source = ["src/secscan"]
+source = ["src/secscan", "benchmarks"]
 
 [tool.importlinter]
 root_package = "secscan"

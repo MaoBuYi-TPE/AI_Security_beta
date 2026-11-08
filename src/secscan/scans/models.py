@@ -36,6 +36,7 @@ from secscan.core.db import Base, CreatedAtMixin, UuidPrimaryKeyMixin
 from secscan.core.json_types import JsonObject
 from secscan.grants.domain.matching import IneligibleReason
 from secscan.grants.domain.scope import PATH_MAX_LENGTH
+from secscan.scans.domain.allocation import SCANNING_ENGINES
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import (
     ACTIVE_SCAN_STATUSES,
@@ -107,6 +108,7 @@ _TERMINAL_RUNS = _in_list(_sorted(TERMINAL_RUN_STATUSES))
 _LEASED_RUNS = _in_list(_sorted(LEASED_RUN_STATUSES))
 _ERROR_RUNS = _in_list(_sorted(ERROR_REQUIRED_RUN_STATUSES))
 _ENGINES = _in_list(engine.value for engine in Engine)
+_SCANNING_ENGINES = _in_list(engine.value for engine in Engine if engine in SCANNING_ENGINES)
 _PROFILES = _in_list(profile.value for profile in ScanProfile)
 _EVENT_TYPES = _in_list(event.value for event in EventType)
 _REASONS = _in_list(reason.value for reason in IneligibleReason)
@@ -339,6 +341,26 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
             "AND requests_sent <= requests_allotted)",
             name="sent_within_allotment",
         ),
+        # 引擎子預算（T31；docs/DECISIONS.md §29）：建立時凍結的上限（migration 的 trigger
+        # 禁止修改），只屬於掃描引擎。分到的秒數和請求數一起寫入；有上限時兩者都不能超過它
+        # （舊的 runner 只寫請求數會被這個 CHECK 擋下，容器不會建立）。
+        CheckConstraint(
+            "(budget_max_requests IS NULL) = (budget_max_duration_seconds IS NULL) "
+            "AND (budget_max_requests IS NULL OR (budget_max_requests > 0 "
+            "AND budget_max_duration_seconds > 0 "
+            f"AND engine IN ({_SCANNING_ENGINES})))",
+            name="engine_budget_valid",
+        ),
+        CheckConstraint(
+            "seconds_allotted IS NULL OR (seconds_allotted >= 0 AND requests_allotted IS NOT NULL)",
+            name="seconds_allotted_valid",
+        ),
+        CheckConstraint(
+            "budget_max_requests IS NULL OR requests_allotted IS NULL "
+            "OR (seconds_allotted IS NOT NULL AND requests_allotted <= budget_max_requests "
+            "AND seconds_allotted <= budget_max_duration_seconds)",
+            name="allotment_within_engine_budget",
+        ),
         # preflight 的結果（docs/DECISIONS.md §16.5）：只有 preflight 的 run 有值。
         CheckConstraint(
             f"preflight_result IS NULL OR (engine = '{Engine.PREFLIGHT.value}' "
@@ -409,6 +431,9 @@ class ScannerRunModel(UuidPrimaryKeyMixin, CreatedAtMixin, Base):
     image_ref: Mapped[str | None] = mapped_column(String(IMAGE_REF_MAX_LENGTH))
     container_removed_at: Mapped[datetime | None]
     requests_allotted: Mapped[int | None]
+    seconds_allotted: Mapped[int | None]
+    budget_max_requests: Mapped[int | None]
+    budget_max_duration_seconds: Mapped[int | None]
     requests_sent: Mapped[int | None]
     requests_denied: Mapped[int | None]
     traffic_seconds: Mapped[int | None]

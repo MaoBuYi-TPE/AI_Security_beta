@@ -12,6 +12,7 @@ from uuid import UUID
 
 from secscan.core.json_types import JsonObject, JsonValue
 from secscan.grants.domain.scope import Budget
+from secscan.scans.domain.allocation import EngineBudgetRequest
 from secscan.scans.domain.catalog import Engine, InvalidScanRequestError, ScanProfile
 
 IDEMPOTENCY_KEY_MIN_LENGTH = 16
@@ -70,6 +71,8 @@ class ScanRequest:
     profile: ScanProfile
     engines: tuple[Engine, ...]
     budget: BudgetRequest
+    # 引擎子預算（T31；docs/DECISIONS.md §29）；None 是沒有指定（每個 run 分到剩下的全部）。
+    engine_budgets: tuple[EngineBudgetRequest, ...] | None = None
 
 
 def fingerprint(request: ScanRequest) -> bytes:
@@ -77,6 +80,8 @@ def fingerprint(request: ScanRequest) -> bytes:
 
     比對的是請求本身，不是伺服器解析出的值（例如 profile 的最新版本）：同樣的請求重送，
     不會因為 profile 換過版本就變成 409。engines 先排序；省略 budget 等於每一項都是 null。
+    engine_budgets 只在有指定時加入（依引擎排序）：沒有指定的請求和 T31 之前逐位元組相同，
+    既有的 key 重送不受影響，所以不改 FINGERPRINT_VERSION。
     """
     engines: list[JsonValue] = [*sorted(engine.value for engine in request.engines)]
     content: JsonObject = {
@@ -93,6 +98,8 @@ def fingerprint(request: ScanRequest) -> bytes:
             "max_duration_seconds": request.budget.max_duration_seconds,
         },
     }
+    if request.engine_budgets is not None:
+        content["engine_budgets"] = _engine_budgets(request.engine_budgets)
     canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("ascii")).digest()
 
@@ -123,6 +130,17 @@ def _within(field: str, value: int | None, cap: int) -> int:
             f"budget.{field} 必須是 1 到 {cap}（scope grant 的上限）的整數"
         )
     return value
+
+
+def _engine_budgets(requested: Sequence[EngineBudgetRequest]) -> list[JsonValue]:
+    return [
+        {
+            "engine": item.engine.value,
+            "max_requests": item.max_requests,
+            "max_duration_seconds": item.max_duration_seconds,
+        }
+        for item in sorted(requested, key=lambda item: item.engine.value)
+    ]
 
 
 def _optional_id(value: UUID | None) -> str | None:

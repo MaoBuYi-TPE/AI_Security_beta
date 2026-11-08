@@ -7,7 +7,7 @@
   另標 AUTHENTICATION_LOST（authenticated 是 null），guard 的紀錄看不出時標
   AUTHENTICATION_HEALTH_UNKNOWN（§20.4）。
 - engines[]：實際執行的 plan 與 profile 定義的 hash；解析過的 run 另有 guard 的流量明細
-  （§20.2、§20.3）。
+  （§20.2、§20.3）；每個 run 的上限、分到的配額與 guard 的計數（T31，§29）。
 """
 
 from datetime import UTC, datetime
@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from secscan.grants.domain.scope import Budget
+from secscan.scans.domain.allocation import EngineBudget
 from secscan.scans.domain.catalog import Engine, ScanProfile
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus, ScanStatus
 from secscan.scans.domain.model import AuthBinding, Coverage, Scan, ScannerRun, VersionRef
@@ -290,6 +291,48 @@ def test_engine_runs_show_what_was_executed() -> None:
 
     assert (engine["plan_hash"], engine["profile_definition_sha256"]) == (plan_hash, definition)
     assert engine["result"] is None
+
+
+def test_engine_runs_show_their_frozen_cap() -> None:
+    """引擎子預算（T31）：建立時凍結的上限；沒有指定是 null。"""
+    zap = _run(1, Engine.ZAP, budget=EngineBudget(max_requests=760, max_duration_seconds=380))
+    nuclei = _run(2, Engine.NUCLEI)
+
+    engines = _out((zap, nuclei), auth=None)["engines"]
+
+    assert engines[0]["budget"] == {"max_requests": 760, "max_duration_seconds": 380}
+    assert engines[1]["budget"] is None
+
+
+def test_engine_runs_show_their_allotment_and_guard_counts() -> None:
+    """每個 run 分到的配額與 guard 的計數（T31）：實驗以它揭露每個引擎實際用了多少。"""
+    zap = _run(1, Engine.ZAP, requests_allotted=760, seconds_allotted=380)
+
+    usage = _out((zap,), auth=None)["engines"][0]["usage"]
+
+    assert usage == {
+        "requests_allotted": 760,
+        "duration_allotted_seconds": 380,
+        "requests_sent": 2,
+        "requests_denied": 1,
+        "traffic_duration_seconds": 3,
+    }
+
+
+def test_runs_without_a_container_have_no_usage() -> None:
+    """in-process 的 fake 不送流量：每一項都是 null，不以 0 冒充。"""
+    fake = _run(
+        1,
+        Engine.FAKE,
+        container=False,
+        requests_sent=None,
+        requests_denied=None,
+        traffic_seconds=None,
+    )
+
+    usage = _out((fake,), auth=None)["engines"][0]["usage"]
+
+    assert set(usage.values()) == {None}
 
 
 def test_anonymous_scans_never_lose_a_credential() -> None:

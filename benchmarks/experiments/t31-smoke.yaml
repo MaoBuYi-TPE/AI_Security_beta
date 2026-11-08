@@ -1,0 +1,29 @@
+# T31 的 Live smoke（docs/DECISIONS.md §29；執行需要使用者另外授權）。
+# 目的只是證明 harness 經 API 跑完各組、記下 manifest 與 guard 計數，以及子預算在真實執行中有效：
+# 數字不是實驗結果，不寫進任何指標。正式的總預算與份額由 T27 依非 holdout 的校準凍結。
+name: t31-smoke
+purpose: smoke
+seed: 31
+profile: web_active_lab
+budget:
+  requests_per_second: 2
+  max_requests: 1200
+  max_duration_seconds: 600
+groups:
+  - id: A
+    engines: [zap]
+  - id: B
+    engines: [nuclei]
+  - id: C
+    engines: [zap, nuclei]
+    engine_budgets:
+      - {engine: zap, max_requests: 760, max_duration_seconds: 380}
+      - {engine: nuclei, max_requests: 440, max_duration_seconds: 220}
+targets:
+  - id: fixture
+    kind: fixture
+cells:
+  - {group: A, target: fixture, variant: insecure, repetitions: 1}
+  - {group: B, target: fixture, variant: insecure, repetitions: 1}
+comparisons:
+  - {id: c-fixture, group: C, target: fixture, baseline: insecure, current: secure}

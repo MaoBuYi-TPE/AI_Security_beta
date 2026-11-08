@@ -118,6 +118,8 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make owasp-top10-check | M4（T19 已建立） | 重新產生並與已提交的對應表逐位元組比對（不覆寫） |
 | make test-live-fixture-findings | M4（T19 已建立，T20 擴充） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個 scan 以真的 ZAP 與 Nuclei 掃 fixture app 的弱點版與修補版，驗證 worker 連結 finding（佐證合併、CORS 只標示相關、最高等級與衝突、每個觀察連結一次）；T20 加上追溯 API 的驗證與小時間預算的部分失敗情境；錄製到 `recordings/fixture-findings/`（gitignore） |
 | make record-fixtures | M3（T15 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：只在 live lab 網路重新錄製 ZAP 的輸出到 `recordings/zap/`（gitignore），人工審查之後才搬進 `tests/fixtures/zap/`；約 8 分鐘 |
-| make bench | M5 起 | 透過自己的 API 執行實驗，結果輸出到 benchmarks/results/ |
+| make bench-check | M5（T31 已建立） | 離線檢查實驗規格（`BENCH_SPEC`）與結果目錄的名稱（`BENCH_NAME`，已存在就失敗）；不連網、不碰 Docker |
+| make bench | M5（T31 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：先做 bench-check，再以 test-live-runner 的同一個隔離 stack 與清理範圍，經自己的 API 依規格跑完排程，結果寫到 `benchmarks/results/<BENCH_NAME>/`（gitignore、沒有加密）。Live smoke 尚未執行（需要另外授權） |
+| make bench-evaluate | M5（T31 已建立） | 離線、只讀一個完整的結果目錄，評估以 JSON 寫到 stdout；選填 `BENCH_TRUTH`、`BENCH_ADJUDICATIONS`、`BENCH_PAIR_LABELS`、`BENCH_INCLUDE_HOLDOUT` |
 
 不得建立一個表面上回 exit 0、實際上沒有驗證的 target，只為了讓命令「看起來都有」。測試不能用時，要明確失敗，或列出有理由的 skip。

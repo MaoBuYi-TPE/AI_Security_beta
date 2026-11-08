@@ -175,7 +175,10 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 
 **分配與用盡**：
 
-- 單一 runner 下各引擎依序執行；預算預先分配給各引擎，總額不變。不夠用時明確標記 coverage limited。
+- 單一 runner 下各引擎依序執行，共用 scan 的總額。**T31 更正**（`DECISIONS.md` §29.1）：原本寫「預算預先分配給各引擎」，T12 實作的是每個 run 分到 scan 剩下的全部（`DECISIONS.md` §16.4），兩者一直不一致。現在的行為：
+  - 沒有指定子預算時，每個 run 分到剩下的全部（先跑的引擎可能用掉大部分）。
+  - 多引擎的 scan 可以在建立時凍結各引擎的上限（`engine_budgets`）：每個 run 取「剩下的」與「這個引擎的上限」的較小值，沒用完的份額作廢、不轉給後面的引擎。只會讓單一 run 的配額變小，總額與 guard 的強制不變。
+  - 每個 run 分到的配額與 guard 的計數由 API 的 `engines[].usage` 揭露。不夠用時明確標記 coverage limited。
 - 預算用盡時，立即禁止新的出站請求、停止工具。**T16 更正**（`DECISIONS.md` §20.1）：guard 回報用盡（`BUDGET_EXHAUSTED`）或 runner 的牆鐘上限（`TIME_LIMIT_EXCEEDED`）時**不收集**工具的輸出（out/ 沒有遮罩，不交給 worker）；ZAP 的 plan 以 maxDuration 在預算之前自行停止並寫出報告（`timed_out`／`ENGINE_TIMEOUT`，結果入庫），正常的情況不會先撞到預算。原本「保存已有資料」與程式不一致，以程式為準；guard 的流量明細與 run 的版本仍保存（§20.2、§20.3）。
 - 收集與正規化另設短時間與大小上限，不能無限延長掃描。
 
