@@ -11,6 +11,8 @@
 - 金鑰（docs/DECISIONS.md §30.2）：runner 沒有合法的 EVIDENCE_ENCRYPTION_KEYS、worker 沒有合法的
   CONTENT_ENCRYPTION_KEYS 就不啟動；runner 持有的兩組不得共用金鑰。
 - --once：最多處理一個 run 就結束。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。
+- 原始證據的 keeper（docs/DECISIONS.md §30.3）：常駐時是背景執行緒；--once 不啟動執行緒，改在處理
+  之前與結束之前各同步跑一輪。keeper 有任何失敗時不認領新的 run，--once 以 exit 1 結束。
 """
 
 import os
@@ -34,6 +36,8 @@ from secscan.findings.service import FindingLinker
 from secscan.migrations import head_revision
 from secscan.runner.config import RunnerSettings
 from secscan.runner.docker_runtime import DockerRuntime
+from secscan.runner.evidence import EvidenceVault
+from secscan.runner.keeper import EvidenceKeeper, KeeperSettings
 from secscan.runner.loop import RunnerLoop
 from secscan.runner.reconciler import ContainerReconciler
 from secscan.runner.service import ContainerRunner
@@ -41,6 +45,7 @@ from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.fake import FakeScript
 from secscan.scanners.domain.instances import InstanceRole
 from secscan.scanners.service import Fleet
+from secscan.scans.evidence_records import EvidenceStore
 from secscan.scans.queue import RunReport, ScanQueue
 from secscan.security.blob_cipher import BlobCipher
 from secscan.security.key_rings import (
@@ -65,6 +70,8 @@ RUNNER_APPLICATION_NAME = "secscan-runner"
 WORKER_APPLICATION_NAME = "secscan-worker"
 PACKAGE = "secscan"
 WORKER_POLL_SECONDS = 2.0
+# runner 停止時等 keeper 結束這一輪的上限（compose 的 stop_grace_period 是 30 秒）。
+KEEPER_STOP_SECONDS = 15.0
 
 type Report = Callable[[str], None]
 
@@ -114,17 +121,63 @@ def run_runner(
         if not _ready(engine, report):
             return EXIT_FAILURE
         sessions = sessionmaker(engine, expire_on_commit=False)
+        keeper = _keeper(sessions, engine, settings, runner_settings, evidence)
         with stop_signals() as stop:
             loop = _runner_loop(
-                sessions, settings, runner_settings, runtime, script, cipher, stop.is_set
+                sessions,
+                settings,
+                runner_settings,
+                runtime,
+                script,
+                cipher,
+                stop.is_set,
+                lambda: keeper.healthy,
             )
-            reports = loop.run(once=once, on_report=lambda item: report(describe(item)))
+            reports = _serve(loop, keeper, once=once, report=report)
     except SQLAlchemyError as exc:
         report(f"資料庫發生錯誤（{type(exc).__name__}），已停止。")
         return EXIT_FAILURE
     finally:
         engine.dispose()
-    return _runner_exit(loop, reports, once=once, report=report)
+    return _runner_exit(loop, reports, keeper, once=once, report=report)
+
+
+def _keeper(
+    sessions: sessionmaker[Session],
+    engine: Engine,
+    settings: Settings,
+    runner_settings: RunnerSettings,
+    cipher: BlobCipher,
+) -> EvidenceKeeper:
+    return EvidenceKeeper(
+        EvidenceStore(sessions, engine=engine),
+        EvidenceVault(runner_settings.runs_dir, cipher),
+        KeeperSettings(
+            retention_days=settings.evidence_retention_days,
+            plaintext_max_minutes=settings.evidence_plaintext_max_minutes,
+        ),
+    )
+
+
+def _serve(
+    loop: RunnerLoop, keeper: EvidenceKeeper, *, once: bool, report: Report
+) -> list[RunReport]:
+    """常駐：keeper 在背景執行緒；--once：處理之前與結束之前各同步跑一輪。"""
+
+    def on_report(item: RunReport) -> None:
+        report(describe(item))
+
+    if once:
+        keeper.run_pass()
+        try:
+            return loop.run(once=True, on_report=on_report)
+        finally:
+            keeper.run_pass()
+    keeper.start()
+    try:
+        return loop.run(once=False, on_report=on_report)
+    finally:
+        keeper.stop(timeout=KEEPER_STOP_SECONDS)
 
 
 def _runner_loop(
@@ -135,6 +188,7 @@ def _runner_loop(
     script: FakeScript,
     cipher: SecretCipher | None,
     stop_requested: Callable[[], bool],
+    evidence_ready: Callable[[], bool],
 ) -> RunnerLoop:
     owner = _owner(InstanceRole.RUNNER)
     workspace = Workspace(runner_settings.runs_dir, runner_settings.secrets_dir)
@@ -149,6 +203,7 @@ def _runner_loop(
         reconciler=ContainerReconciler(queue, runtime, workspace, guard),
         policy=policy,
         stop_requested=stop_requested,
+        evidence_ready=evidence_ready,
         poll_seconds=runner_settings.poll_seconds,
     )
     loop.attach(
@@ -216,9 +271,22 @@ def describe(item: RunReport) -> str:
     )
 
 
-def _runner_exit(loop: RunnerLoop, reports: list[RunReport], *, once: bool, report: Report) -> int:
+def _runner_exit(
+    loop: RunnerLoop,
+    reports: list[RunReport],
+    keeper: EvidenceKeeper,
+    *,
+    once: bool,
+    report: Report,
+) -> int:
     if loop.failures:
         report(f"有 {loop.failures} 個 run 無法確認容器已停止，留給對帳（原因見上方的 log）。")
+        return EXIT_FAILURE
+    if not keeper.healthy:
+        report(
+            "原始證據無法加密或清除（原因見上方的 log）：明文保留原狀，修好之前不認領新的 run；"
+            "secscan-admin retention-status 列出積壓。"
+        )
         return EXIT_FAILURE
     if not loop.available_engines:
         report("沒有可用的引擎：Docker、scan_net、volume 或映像不符合要求（原因見上方的 log）。")

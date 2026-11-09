@@ -17,6 +17,7 @@ from secscan.core.json_types import JsonObject
 from secscan.grants.schemas import BudgetIn, BudgetOut
 from secscan.scans.domain.allocation import EngineBudget, EngineBudgetRequest
 from secscan.scans.domain.catalog import Engine, ScanProfile
+from secscan.scans.domain.evidence import EvidenceState, EvidenceStatus
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Scan, ScanEvent, ScannerRun
 from secscan.scans.domain.observation import Observation, ParameterLocation, RunResult
@@ -226,6 +227,24 @@ class RunUsageOut(BaseModel):
         )
 
 
+class RunEvidenceOut(BaseModel):
+    """runs volume 中原始證據的狀態（docs/DECISIONS.md §30.3）。
+
+    none：從來沒有目錄；pending：還沒加密（執行中、等待解析，或加密失敗後等待重試）；
+    sealed：只剩加密檔（run 結束之後才加密，不是全程靜態加密）；purged：保留期限到了已刪除。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    status: EvidenceStatus
+    sealed_at: datetime | None
+    purged_at: datetime | None
+
+    @classmethod
+    def of(cls, state: EvidenceState) -> Self:
+        return cls(status=state.status, sealed_at=state.sealed_at, purged_at=state.purged_at)
+
+
 class EngineRunOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -244,6 +263,7 @@ class EngineRunOut(BaseModel):
     # 引擎子預算（T31）：建立時凍結的上限；沒有指定是 null（分到剩下的全部）。
     budget: EngineBudgetOut | None
     usage: RunUsageOut
+    evidence: RunEvidenceOut
 
     @classmethod
     def of(cls, run: ScannerRun) -> Self:
@@ -259,6 +279,7 @@ class EngineRunOut(BaseModel):
             result=RunResultOut.of(run.result) if run.result is not None else None,
             budget=EngineBudgetOut.of(run.budget) if run.budget is not None else None,
             usage=RunUsageOut.of(run),
+            evidence=RunEvidenceOut.of(run.evidence),
         )
 
 

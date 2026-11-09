@@ -29,9 +29,10 @@ fake 引擎的 runner（docs/DECISIONS.md §13.7）：
     uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-300]
     uv run secscan-admin worker [--once]
 
-加密金鑰的檢查與換版（docs/DECISIONS.md §30；說明見 secscan.cli.keys）：
+金鑰、原始證據與保留期限（docs/DECISIONS.md §30；見 secscan.cli.keys、secscan.cli.evidence）：
 
-    uv run secscan-admin check-encryption-keys
+    uv run secscan-admin check-encryption-keys | retention-status
+    secscan-admin rotate-evidence-keys | export-evidence --run <id> [--path <路徑>]（runner 容器內）
 """
 
 import argparse
@@ -60,7 +61,7 @@ from secscan.api_keys.domain import (
 )
 from secscan.api_keys.service import ApiKeyService
 from secscan.auth_profiles.service import AuthProfileService, SecretRotationError
-from secscan.cli import keys, services
+from secscan.cli import evidence, keys, services
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
 from secscan.core.text import require_text
@@ -137,6 +138,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         _report(f"設定不正確（DB_* 環境變數或 .env）：{problems}")
         return EXIT_FAILURE
     handled = keys.run(args, settings, _report)
+    if handled is None:
+        handled = evidence.run(args, settings, _report)
     if handled is not None:
         return handled
     if args.command == ROTATE_COMMAND:
@@ -393,6 +396,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     worker.add_argument("--once", action="store_true", help="最多處理一個 run 就結束")
     keys.register(commands)
+    evidence.register(commands)
     return parser
 
 

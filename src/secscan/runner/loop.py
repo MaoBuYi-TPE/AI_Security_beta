@@ -7,6 +7,8 @@
   probe 通過、而且 guard 可用時的引擎；probe 每 60 秒重做一次。
 - 執行容器驗證的 probe（engine_probe.py，docs/DECISIONS.md §18.8）：每圈前進一步，不阻塞認領；
   zap 只有驗證通過才可用。runner 停止時刪除執行中的 probe 容器。
+- 原始證據的 keeper（keeper.py，docs/DECISIONS.md §30.3）在另一個執行緒加密與清除；這裡每圈只讀它
+  是否健康：不健康時不認領（EVIDENCE_SEALING_FAILED），執行中的 run 照常完成。
 - lease 失效或監看途中 Docker 不可用時記下、重新 probe，繼續處理下一個（run 留給對帳）。
   DB 錯誤直接往外拋：程序結束，由 compose 重啟。
 """
@@ -19,7 +21,7 @@ from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, Engin
 from secscan.runner.domain.runtime import ContainerRuntime, RuntimeUnavailableError
 from secscan.runner.engine_probe import EngineProber
 from secscan.runner.guard import GuardChannel
-from secscan.runner.probe import probe, require_guard
+from secscan.runner.probe import probe, require_guard, require_sealing
 from secscan.runner.reconciler import ContainerReconciler
 from secscan.runner.service import ContainerRunner
 from secscan.runner.workspace import Workspace
@@ -46,6 +48,7 @@ class RunnerLoop:
         policy: ContainerPolicy,
         engines: Mapping[Engine, EnginePolicy] = ENGINE_POLICIES,
         stop_requested: Callable[[], bool],
+        evidence_ready: Callable[[], bool],
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         poll_seconds: float,
@@ -59,6 +62,7 @@ class RunnerLoop:
         self._policy = policy
         self._engines = engines
         self._stop_requested = stop_requested
+        self._evidence_ready = evidence_ready
         self._sleep = sleep
         self._monotonic = monotonic
         self._poll_seconds = poll_seconds
@@ -154,13 +158,17 @@ class RunnerLoop:
         self._capabilities = self._prober.apply(self._environment)
 
     def _check_guard(self) -> None:
-        """每一輪都讀 guard 的 status：停機與恢復不必等 60 秒的 probe。"""
+        """每一輪都讀 guard 的 status 與 keeper 的健康：停機與恢復不必等 60 秒的 probe。"""
         health = self._guard.health()
         available = health.available and self._guard_writable
         if not available and self._effective.available_engines:
             issue = "POLICY_NOT_WRITABLE" if health.available else str(health.issue)
             logger.warning("egress guard 不可用（%s）：不認領", issue)
-        self._effective = require_guard(self._capabilities, available=available)
+        sealing = self._evidence_ready()
+        if not sealing and available and self._effective.available_engines:
+            logger.warning("原始證據無法加密（keeper 不健康）：不認領")
+        guarded = require_guard(self._capabilities, available=available)
+        self._effective = require_sealing(guarded, healthy=sealing)
 
     def _run_one(self, runner: ContainerRunner) -> RunReport | None:
         try:

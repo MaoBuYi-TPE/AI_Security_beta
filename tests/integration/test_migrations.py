@@ -50,6 +50,7 @@ APP_TABLES = {
     "finding_triage_excerpts",
     "reports",
     "report_contents",
+    "run_evidence",
 }
 TRIGGER_FUNCTIONS = (
     "audit_events_reject_mutation",
@@ -80,6 +81,7 @@ TRIGGER_FUNCTIONS = (
     "auth_profiles_disabled_erased",
     "scanner_runs_engine_budget_frozen",
     "scanner_runs_allotment_once",
+    "run_evidence_guard",
 )
 
 

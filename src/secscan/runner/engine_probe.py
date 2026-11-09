@@ -7,7 +7,8 @@ build_container：uid 10001、唯讀 rootfs、tmpfs）啟動 zap 的映像，確
   其他引擎照常認領；zap 在驗證通過之前是 ENGINE_PROBE_PENDING。
 - 每次用新的 id（workspace 的目錄不會重用）；secret 目錄是空的（不需要 proxy：probe 不送請求，
   也不寫 guard 的 policy）。容器確認刪除之後才刪 secret 目錄：刪不掉時，runner 下次啟動依證據
-  的清理（§17.4）以它找回容器。
+  的清理（§17.4）以它找回容器。工作目錄也在容器確認刪除之後刪除（§30.3）；刪不掉時由 keeper 當成
+  孤兒目錄處理（一小時沒有變動才加密，保留期限到了才刪除）。
 - 有牆鐘上限；結果以映像快取（同一個程序不再執行），失敗以退避重試。
 輸出都是不可信的資料：以 workspace.read_output 讀取（有大小上限），由 evaluate_probe 判斷。
 """
@@ -190,6 +191,10 @@ class EngineProber:
             self._workspace.discard_secrets(running.probe_id)
         except WorkspaceError as exc:
             logger.error("無法刪除 zap 的 probe 的 secret 目錄（%s）", exc)
+        try:
+            self._workspace.discard_run(running.probe_id)
+        except WorkspaceError as exc:
+            logger.error("無法刪除 zap 的 probe 的工作目錄（%s）：由 keeper 處理", exc)
 
     def _record(self, result: ProbeResult) -> None:
         if result.issue is None:

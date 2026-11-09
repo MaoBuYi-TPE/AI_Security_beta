@@ -32,6 +32,7 @@ from uuid import UUID, uuid4
 
 from secscan.core.identifiers import canonical_uuid
 from secscan.runner.domain.admission import SECRET_FILES
+from secscan.runner.fs import TreeError, TreeLimits, open_directory, opened, remove_tree
 from secscan.scanners.domain.plan import InputFile
 from secscan.security.secret_masking import SecretMasker
 
@@ -200,6 +201,15 @@ class Workspace:
             raise WorkspaceError(f"無法刪除 secret（{_reason(exc)}）") from None
         finally:
             os.close(dir_fd)
+
+    def discard_run(self, run_id: UUID) -> None:
+        """刪除整個工作目錄（capability probe 用：不送請求、沒有 secret，評估完就刪；
+        docs/DECISIONS.md §30.3）。不跟隨 symlink；不存在也算成功。"""
+        try:
+            with opened(open_directory(self._runs)) as runs_fd:
+                remove_tree(runs_fd, str(run_id), TreeLimits())
+        except TreeError as exc:
+            raise WorkspaceError(f"無法刪除工作目錄（{exc}）") from None
 
     def secret_runs(self) -> frozenset[UUID]:
         """secrets volume 中留下 secret 的 run（標準格式的 run_id 目錄；不跟隨 symlink）。"""

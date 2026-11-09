@@ -4,7 +4,8 @@
 - scan_net 存在、internal、gateway 是 isolated（掃描容器連不到宿主與其他網路）；
 - runs 與 secrets 兩個 volume 存在，而且 runner 掛載的目錄可寫（權限錯了要在認領之前發現）；
 - 每個核准的映像都在本機（runner 不 pull），而且是 daemon 的架構。
-egress guard 不可用時，每個引擎都不可用（require_guard；docs/DECISIONS.md §15.7）。
+egress guard 不可用時，每個引擎都不可用（require_guard；docs/DECISIONS.md §15.7）；
+原始證據無法加密時也一樣（require_sealing；§30.3）。
 回報只有引擎、映像 ref 與原因代碼。
 """
 
@@ -89,13 +90,24 @@ def _api(text: str) -> tuple[int, int] | None:
 
 def require_guard(capabilities: Capabilities, *, available: bool) -> Capabilities:
     """guard 不可用時，原本可用的引擎都改成 GUARD_UNAVAILABLE（其他原因照原樣回報）。"""
-    if available:
+    return (
+        capabilities if available else _unavailable(capabilities, CapabilityIssue.GUARD_UNAVAILABLE)
+    )
+
+
+def require_sealing(capabilities: Capabilities, *, healthy: bool) -> Capabilities:
+    """keeper 不健康（加密失敗、停止、停擺或換版中）時，原本可用的引擎都改成
+    EVIDENCE_SEALING_FAILED：不認領新的 run，執行中的 run 不受影響。
+    """
+    if healthy:
         return capabilities
+    return _unavailable(capabilities, CapabilityIssue.EVIDENCE_SEALING_FAILED)
+
+
+def _unavailable(capabilities: Capabilities, issue: CapabilityIssue) -> Capabilities:
     return Capabilities(
         engines=tuple(
-            item
-            if item.issue is not None
-            else replace(item, issue=CapabilityIssue.GUARD_UNAVAILABLE)
+            item if item.issue is not None else replace(item, issue=issue)
             for item in capabilities.engines
         )
     )

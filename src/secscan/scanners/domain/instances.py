@@ -47,6 +47,9 @@ class CapabilityIssue(StrEnum):
     ENGINE_PROBE_PENDING = "ENGINE_PROBE_PENDING"
     ENGINE_PROBE_FAILED = "ENGINE_PROBE_FAILED"
     ENGINE_INCOMPATIBLE = "ENGINE_INCOMPATIBLE"
+    # runs volume 中的原始證據無法加密，或 keeper 停止、停擺、換版中（docs/DECISIONS.md §30.3）：
+    # 不認領新的 run，直到 keeper 有一輪沒有任何失敗（比照 guard 停擺）。
+    EVIDENCE_SEALING_FAILED = "EVIDENCE_SEALING_FAILED"
 
 
 @dataclass(frozen=True, slots=True)

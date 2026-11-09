@@ -121,6 +121,7 @@ def _loop(
         reconciler=ContainerReconciler(queue, runtime, workspace, guard),
         policy=POLICY,
         stop_requested=stop_requested,
+        evidence_ready=lambda: True,
         sleep=clock.sleep,
         monotonic=clock.monotonic,
         poll_seconds=2,

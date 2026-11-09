@@ -117,7 +117,9 @@ class ArtifactRecord:
     size: int
     redactions: int
     classification: ArtifactClassification
+    # 原始檔案只剩加密檔（docs/DECISIONS.md §30.3）；保留期限到了已刪除時有 purged_at。
     encrypted: bool
+    purged_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -198,6 +198,7 @@ def test_each_observation_traces_to_its_report_and_run(
         "redactions": 0,
         "classification": "masked",
         "encrypted": False,
+        "purged_at": None,
     }
     run = _run_row(queue_seed, lease.run_id)
     shown = traced["run"]
