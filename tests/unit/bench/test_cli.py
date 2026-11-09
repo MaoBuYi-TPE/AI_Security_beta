@@ -22,8 +22,16 @@ from benchmarks.batch import (
 from benchmarks.cli import main
 from benchmarks.collect import CollectError, normalize_comparison
 from benchmarks.manifest import MANIFEST_FILE, REQUIRED_PROVENANCE, build_manifest
-from benchmarks.results import reserve, seal, write_bytes, write_json
+from benchmarks.results import (
+    read_json,
+    reserve,
+    sealed_name,
+    write_bytes,
+    write_checksums,
+    write_json,
+)
 from benchmarks.schedule import build_schedule
+from benchmarks.sealing import BenchKeys, create_key_file, key_file_path
 from benchmarks.spec import parse_spec
 from benchmarks.stats import SMOKE_NOTICE
 from tests.unit.bench.records import TRUTH
@@ -32,12 +40,23 @@ from tests.unit.bench.samples import comparison_json, finding_json, scan_json
 SMOKE = Path(__file__).resolve().parents[3] / "benchmarks" / "experiments" / "t31-smoke.yaml"
 
 
+@pytest.fixture(autouse=True)
+def _keys(bench_keys: BenchKeys) -> BenchKeys:
+    """每個測試一把新的 bench 金鑰（BENCH_KEY_FILE 指向暫存目錄）。"""
+    return bench_keys
+
+
+def _loaded() -> BenchKeys:
+    return BenchKeys.load(key_file_path())
+
+
 def _write_batch(root: Path, name: str, *, complete: bool = True) -> Path:
     """和 Live 的 harness 相同的寫法（benchmarks.batch 與 results），只是 scan 來自樣本。"""
     content = SMOKE.read_bytes()
     spec = parse_spec(content)
+    keys = _loaded()
     directory = reserve(root, name)
-    files = {SPEC_FILE: write_bytes(directory, SPEC_FILE, content)}
+    files = {SPEC_FILE: write_bytes(directory, SPEC_FILE, content, keys=keys)}
     digest = hashlib.sha256(content).hexdigest()
     scans, comparisons, baseline = [], [], None
     schedule = build_schedule(spec)
@@ -48,7 +67,9 @@ def _write_batch(root: Path, name: str, *, complete: bool = True) -> Path:
         document = scan_document(
             item, target_kind="fixture", scan=scan_json(), findings=[sqli], observation_count=4
         )
-        files[scan_file(item.position)] = write_json(directory, scan_file(item.position), document)
+        files[scan_file(item.position)] = write_json(
+            directory, scan_file(item.position), document, keys=keys
+        )
         labeled = labeled_scan(document)
         scans.append(labeled)
         if item.role == "baseline":
@@ -59,7 +80,10 @@ def _write_batch(root: Path, name: str, *, complete: bool = True) -> Path:
             )
             name_ = comparison_file(item.comparison)
             files[name_] = write_json(
-                directory, name_, comparison_document(item.comparison, snapshot, findings)
+                directory,
+                name_,
+                comparison_document(item.comparison, snapshot, findings),
+                keys=keys,
             )
             comparisons.append((item.comparison, normalize_comparison(snapshot, findings)))
     manifest = build_manifest(
@@ -73,8 +97,8 @@ def _write_batch(root: Path, name: str, *, complete: bool = True) -> Path:
         complete=complete,
         stopped_reason=None if complete else "AssertionError",
     )
-    write_json(directory, MANIFEST_FILE, manifest)
-    seal(directory)
+    write_json(directory, MANIFEST_FILE, manifest, keys=keys)
+    write_checksums(directory)
     return directory
 
 
@@ -205,7 +229,7 @@ def test_evaluate_refuses_a_modified_batch(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     directory = _write_batch(tmp_path, "run-5")
-    path = directory / scan_file(1)
+    path = directory / sealed_name(scan_file(1))
     path.chmod(0o600)
     path.write_text("{}", encoding="utf-8")
 
@@ -236,8 +260,8 @@ def test_evaluate_needs_holdout_on_a_frozen_truth(
 
 def test_load_batch_checks_the_spec_copy(tmp_path: Path) -> None:
     directory = _write_batch(tmp_path, "run-7")
-    manifest = json.loads((directory / MANIFEST_FILE).read_text(encoding="utf-8"))
-    batch = load_batch(directory)
+    manifest = read_json(directory, MANIFEST_FILE, keys=_loaded())
+    batch = load_batch(directory, _loaded())
 
     assert len(batch.scans) == len(manifest["scans"]) == 4
     assert batch.comparisons[0][0] == "c-fixture"
@@ -262,13 +286,14 @@ def test_a_malformed_scan_file_is_refused(document: dict[str, Any], problem: str
 
 def _rewrite(directory: Path, name: str, change: Any) -> None:
     """改寫一個檔案並重新封存（模擬內容一致、但彼此對不上的批次）。"""
-    document = json.loads((directory / name).read_text(encoding="utf-8"))
+    keys = _loaded()
+    document = read_json(directory, name, keys=keys)
     change(document)
-    for path in (directory / name, directory / "SHA256SUMS"):
+    for path in (directory / sealed_name(name), directory / "SHA256SUMS"):
         path.chmod(0o600)
         path.unlink()
-    write_json(directory, name, document)
-    seal(directory)
+    write_json(directory, name, document, keys=keys)
+    write_checksums(directory)
 
 
 def test_load_batch_refuses_files_that_disagree_with_the_manifest(tmp_path: Path) -> None:
@@ -276,7 +301,7 @@ def test_load_batch_refuses_files_that_disagree_with_the_manifest(tmp_path: Path
     _rewrite(directory, MANIFEST_FILE, lambda m: m["scans"][0].update(scan_id=str(uuid4())))
 
     with pytest.raises(CollectError, match="scan 檔和 manifest"):
-        load_batch(directory)
+        load_batch(directory, _loaded())
 
 
 def test_load_batch_refuses_a_comparison_that_disagrees(tmp_path: Path) -> None:
@@ -284,7 +309,7 @@ def test_load_batch_refuses_a_comparison_that_disagrees(tmp_path: Path) -> None:
     _rewrite(directory, MANIFEST_FILE, lambda m: m["comparisons"][0].update(id=str(uuid4())))
 
     with pytest.raises(CollectError, match="比較檔"):
-        load_batch(directory)
+        load_batch(directory, _loaded())
 
 
 def test_load_batch_refuses_a_replaced_spec(tmp_path: Path) -> None:
@@ -292,7 +317,7 @@ def test_load_batch_refuses_a_replaced_spec(tmp_path: Path) -> None:
     _rewrite(directory, MANIFEST_FILE, lambda m: m.update(spec_sha256="0" * 64))
 
     with pytest.raises(CollectError, match=r"spec\.yaml"):
-        load_batch(directory)
+        load_batch(directory, _loaded())
 
 
 def test_the_module_runs_as_a_command(
@@ -312,3 +337,79 @@ def test_the_module_runs_as_a_command(
 
     assert stopped.value.code == 0
     assert "4 個 scan" in capsys.readouterr().out
+
+
+# --- T23a：金鑰檔與明文結果的轉換（BSEAL；docs/DECISIONS.md §30.7）-----------------------
+
+
+def test_create_key_writes_a_new_private_key_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "config" / "bench-keys"
+    monkeypatch.setenv("BENCH_KEY_FILE", str(path))
+
+    assert main(["create-key"]) == 0
+    out = capsys.readouterr().out
+    assert str(path) in out
+    assert path.read_text().strip() not in out
+    assert main(["create-key"]) == 2
+    assert "不覆寫" in capsys.readouterr().err
+
+
+def test_check_spec_needs_a_usable_key_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("BENCH_KEY_FILE", str(tmp_path / "missing"))
+
+    assert main(["check-spec", str(SMOKE), "x", "--results-root", str(tmp_path)]) == 2
+    assert "make bench-key" in capsys.readouterr().err
+
+
+def test_evaluate_refuses_the_wrong_key_without_partial_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_batch(tmp_path / "results", "run-11")
+    other = tmp_path / "other-keys"
+    create_key_file(other)
+    monkeypatch.setenv("BENCH_KEY_FILE", str(other))
+
+    assert main(["evaluate", "run-11", "--results-root", str(tmp_path / "results")]) == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "解不開" in err
+
+
+def test_seal_results_converts_a_plaintext_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "plain"
+    source.mkdir()
+    files = {"spec.yaml": SMOKE.read_bytes()}
+    files["manifest.json"] = json.dumps({"manifest_version": 1, "files": {}}).encode()
+    for name, content in files.items():
+        (source / name).write_bytes(content)
+    sums = "".join(f"{hashlib.sha256(c).hexdigest()}  {n}\n" for n, c in sorted(files.items()))
+    (source / "SHA256SUMS").write_text(sums)
+    root = tmp_path / "results"
+
+    assert main(["seal-results", str(source), "sealed", "--results-root", str(root)]) == 0
+
+    assert "沒有改變" in capsys.readouterr().out
+    assert (root / "sealed" / "spec.yaml.sealed").exists()
+    assert (source / "spec.yaml").read_bytes() == files["spec.yaml"]
+
+
+def test_load_batch_checks_each_file_against_the_manifest(tmp_path: Path) -> None:
+    directory = _write_batch(tmp_path, "run-12")
+    name = scan_file(1)
+    _rewrite(
+        directory,
+        MANIFEST_FILE,
+        lambda m: m["files"][name].update(sha256="0" * 64),
+    )
+    with pytest.raises(CollectError, match="解密之後"):
+        load_batch(directory, _loaded())
+
+    _rewrite(directory, MANIFEST_FILE, lambda m: m["files"].pop(name))
+    with pytest.raises(CollectError, match="和 manifest 不符"):
+        load_batch(directory, _loaded())

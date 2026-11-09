@@ -5,7 +5,7 @@
 - bench 的 recipe 只有這一行：建立、測試與清理完全沿用 test-live-runner（同一個隔離專案與範圍），
   不新增任何清理或 Docker 指令。
 - 使用者給的值（BENCH_SPEC、BENCH_NAME…）以環境變數交給 shell 展開，不以 $(…) 嵌進 recipe 的文字。
-- bench-check 與 bench-evaluate 是離線的：不碰 Docker、compose 或刪除檔案。
+- bench-check、bench-evaluate、bench-key 與 bench-seal 是離線的：不碰 Docker、compose 或刪除檔案。
 """
 
 import re
@@ -22,8 +22,17 @@ USER_VALUES = (
     "BENCH_ADJUDICATIONS",
     "BENCH_PAIR_LABELS",
     "BENCH_INCLUDE_HOLDOUT",
+    "BENCH_SOURCE",
+    "BENCH_KEY_FILE",
 )
-BENCH_TARGETS = ("bench-check", "bench-live-check", "bench", "bench-evaluate")
+BENCH_TARGETS = (
+    "bench-check",
+    "bench-live-check",
+    "bench",
+    "bench-evaluate",
+    "bench-key",
+    "bench-seal",
+)
 
 
 def _rule(target: str) -> tuple[list[str], list[str]]:
@@ -68,7 +77,8 @@ def test_the_live_gate_is_checked_first() -> None:
 
 
 def test_the_offline_targets_do_not_touch_docker_or_files() -> None:
-    for target in ("bench-check", "bench-evaluate"):
+    """bench-key、bench-seal 只建立新的檔案或目錄（O_EXCL），不刪除、不覆寫（T23a）。"""
+    for target in ("bench-check", "bench-evaluate", "bench-key", "bench-seal"):
         prerequisites, recipe = _rule(target)
         assert prerequisites == []
         text = _logical(recipe)
@@ -99,3 +109,9 @@ def test_the_bench_targets_are_phony() -> None:
 
     for target in BENCH_TARGETS:
         assert f" {target}" in phony.replace("\\\n", " ").replace("\t", " ")
+
+
+def test_sealing_takes_the_source_and_name_from_the_environment() -> None:
+    """T23a：bench-seal 的原目錄與新的名稱以環境變數交給 shell；bench-key 沒有參數。"""
+    assert '"$$BENCH_SOURCE" "$$BENCH_NAME"' in _logical(_rule("bench-seal")[1])
+    assert _logical(_rule("bench-key")[1]) == "@$(UV_RUN) python -m benchmarks.cli create-key"

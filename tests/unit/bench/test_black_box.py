@@ -14,6 +14,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3] / "benchmarks"
 THIRD_PARTY = {"pydantic", "yaml"}
+# 只有 sealing 可以使用 cryptography（結果目錄的加密，T23a；docs/DECISIONS.md §30.7）。
+CRYPTOGRAPHY_MODULES = {"sealing"}
 FORBIDDEN_STDLIB = {
     "socket",
     "ssl",
@@ -68,6 +70,15 @@ def _imports(path: Path) -> set[str]:
     return names
 
 
+def test_only_sealing_uses_cryptography() -> None:
+    users = {
+        path.stem
+        for path in _modules()
+        if any(name.split(".")[0] == "cryptography" for name in _imports(path))
+    }
+    assert users == CRYPTOGRAPHY_MODULES
+
+
 def test_there_are_modules_to_check() -> None:
     assert {path.stem for path in _modules()} >= {"spec", "schedule", "collect", "results"}
 
@@ -77,7 +88,8 @@ def test_benchmarks_only_import_the_standard_library_pydantic_yaml_and_itself(pa
     for name in _imports(path):
         top = name.split(".")[0]
         assert top not in FORBIDDEN_STDLIB, f"{path.name} 不能 import {name}"
-        assert top == "benchmarks" or top in THIRD_PARTY or top in sys.stdlib_module_names, (
+        allowed = THIRD_PARTY | ({"cryptography"} if path.stem in CRYPTOGRAPHY_MODULES else set())
+        assert top == "benchmarks" or top in allowed or top in sys.stdlib_module_names, (
             f"{path.name} 不能 import {name}"
         )
 

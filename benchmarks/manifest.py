@@ -1,23 +1,28 @@
 """run manifest（SECURITY_AND_TESTING.md §8；docs/DECISIONS.md §29）。
 
 記錄重現與稽核需要的：規格的 sha256、種子與實際順序；程式、映像、profile 與靶機的身分；每個 scan 的
-預算、子預算、狀態與 guard 計數；每個檔案的 sha256；session 是否完整。API 拿不到的身分（commit、
+預算、子預算、狀態與 guard 計數；每個檔案明文與密文的 sha256（版本 2，T23a 起結果檔都加密；
+docs/DECISIONS.md §30.7）；session 是否完整。API 拿不到的身分（commit、
 本機建置的映像、fixture 的原始碼雜湊、strict-1 的 path 規則）由 harness 記下並標明來源。
 """
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from benchmarks.models import ComparisonRecord, LabeledScan, RunRecord
+from benchmarks.models import ComparisonRecord, FileDigests, LabeledScan, RunRecord
 from benchmarks.schedule import ScheduledScan
 from benchmarks.spec import ExperimentSpec
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 MANIFEST_FILE = "manifest.json"
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 REQUIRED_PROVENANCE = ("git_commit", "git_dirty", "scanners", "scan_profiles", "targets")
 # 一律揭露的限制（docs/DECISIONS.md §29）。
 DISCLOSURES = (
-    "results_not_encrypted",
+    # 結果檔以本機的 bench 金鑰加密（不是平台的金鑰）；金鑰遺失之後無法復原。
+    "results_encrypted_with_local_bench_key",
+    "bench_key_loss_makes_results_unrecoverable",
     "observation_evidence_not_stored",
     "path_policy_strict_1_identified_by_commit",
     "engine_order_fixed_zap_then_nuclei",
@@ -56,7 +61,7 @@ def build_manifest(
     scans: Sequence[LabeledScan],
     comparisons: Sequence[tuple[str, ComparisonRecord]],
     provenance: Mapping[str, object],
-    files: Mapping[str, str],
+    files: Mapping[str, FileDigests],
     complete: bool,
     stopped_reason: str | None,
 ) -> dict[str, Any]:
@@ -85,7 +90,10 @@ def build_manifest(
             for block, record in comparisons
         ],
         "provenance": dict(provenance),
-        "files": dict(sorted(files.items())),
+        "files": {
+            name: {"sha256": digests.sha256, "sealed_sha256": digests.sealed_sha256}
+            for name, digests in sorted(files.items())
+        },
         "complete": complete,
         "stopped_reason": stopped_reason,
         "disclosures": list(DISCLOSURES),
@@ -106,9 +114,20 @@ def check_manifest(manifest: object, *, require_complete: bool = True) -> dict[s
         key not in provenance for key in REQUIRED_PROVENANCE
     ):
         raise ManifestError("manifest 的 provenance 不完整")
+    files = manifest["files"]
+    if not isinstance(files, dict) or not all(_digests(entry) for entry in files.values()):
+        raise ManifestError("manifest 的 files 必須記下每個檔案明文與密文的 sha256")
     if require_complete and manifest["complete"] is not True:
         raise ManifestError("session 沒有完整結束（complete 是 false），不評估：整批作廢")
     return manifest
+
+
+def _digests(entry: object) -> bool:
+    return (
+        isinstance(entry, dict)
+        and entry.keys() == {"sha256", "sealed_sha256"}
+        and all(isinstance(value, str) and _SHA256.fullmatch(value) for value in entry.values())
+    )
 
 
 def _scheduled(item: ScheduledScan) -> dict[str, Any]:

@@ -112,3 +112,11 @@ class LabeledScan:
     comparison: str | None
     role: str | None
     scan: ScanRecord
+
+
+@dataclass(frozen=True, slots=True)
+class FileDigests:
+    """結果檔的明文與密文的 sha256（manifest 的 files；docs/DECISIONS.md §30.7）。"""
+
+    sha256: str
+    sealed_sha256: str

@@ -54,7 +54,7 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
 	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check \
 	owasp-top10 owasp-top10-check test-live-fixture-findings test-live-fixture-rescan \
-	bench-check bench-live-check bench bench-evaluate
+	bench-check bench-live-check bench bench-evaluate bench-key bench-seal
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -316,8 +316,12 @@ test-live-fixture-rescan: test-live-runner
 # make lab-images 取得（harness 不 pull）。
 # bench-evaluate 離線、只讀結果目錄，評估以 JSON 寫到 stdout；BENCH_TRUTH、BENCH_ADJUDICATIONS、
 # BENCH_PAIR_LABELS 是選填的檔案，BENCH_INCLUDE_HOLDOUT 設成任何非空的值就納入 holdout。
+# T23a（docs/DECISIONS.md §30.7）：結果檔以本機的 bench 金鑰加密（BENCH_KEY_FILE，預設
+# ~/.config/secscan/bench-keys；不可放在 repo 中）。bench-key 以 O_EXCL 建立新的金鑰檔，已經存在就
+# 失敗、不覆寫，也不輸出金鑰；金鑰遺失之後結果無法復原，請另外備份。bench-seal 把 T23a 之前的明文
+# 結果目錄（BENCH_SOURCE）轉成新的加密結果目錄（BENCH_NAME），原目錄不修改也不刪除。三者都離線。
 BENCH_RESULTS := $(CURDIR)/benchmarks/results
-export BENCH_SPEC BENCH_NAME BENCH_TRUTH BENCH_ADJUDICATIONS BENCH_PAIR_LABELS BENCH_INCLUDE_HOLDOUT
+export BENCH_SPEC BENCH_NAME BENCH_TRUTH BENCH_ADJUDICATIONS BENCH_PAIR_LABELS BENCH_INCLUDE_HOLDOUT BENCH_SOURCE BENCH_KEY_FILE
 bench-check:
 	@[ -n "$$BENCH_SPEC" ] && [ -n "$$BENCH_NAME" ] || { echo "需要設定 BENCH_SPEC 與 BENCH_NAME"; exit 1; }
 	@$(UV_RUN) python -m benchmarks.cli check-spec "$$BENCH_SPEC" "$$BENCH_NAME" \
@@ -337,3 +341,11 @@ bench-evaluate:
 		$${BENCH_ADJUDICATIONS:+--adjudications "$$BENCH_ADJUDICATIONS"} \
 		$${BENCH_PAIR_LABELS:+--pair-labels "$$BENCH_PAIR_LABELS"} \
 		$${BENCH_INCLUDE_HOLDOUT:+--include-holdout}
+
+bench-key:
+	@$(UV_RUN) python -m benchmarks.cli create-key
+
+bench-seal:
+	@[ -n "$$BENCH_SOURCE" ] && [ -n "$$BENCH_NAME" ] || { echo "需要設定 BENCH_SOURCE 與 BENCH_NAME"; exit 1; }
+	@$(UV_RUN) python -m benchmarks.cli seal-results "$$BENCH_SOURCE" "$$BENCH_NAME" \
+		--results-root "$(BENCH_RESULTS)"
