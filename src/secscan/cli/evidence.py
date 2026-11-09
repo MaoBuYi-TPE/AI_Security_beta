@@ -29,20 +29,18 @@ from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy import Engine, select
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from secscan.audit.service import AuditTrail
-from secscan.cli.services import EXIT_FAILURE, EXIT_OK, NOT_READY, Report
+from secscan.cli.services import EXIT_FAILURE, EXIT_OK, Report, audit_local, with_database
 from secscan.core.config import Settings
-from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
-from secscan.migrations import head_revision
+from secscan.core.json_types import JsonValue
 from secscan.runner.config import RunnerSettings
 from secscan.runner.evidence import EvidenceError, EvidenceVault
 from secscan.scans.evidence_records import EvidenceStore
 from secscan.scans.models import ScanModel, ScannerRunModel
 from secscan.security.key_rings import EVIDENCE_SETTING, evidence_cipher
 from secscan.security.secret_cipher import InvalidEncryptionKeysError
+from secscan.worker.retention import ContentRetention
 
 ROTATE_COMMAND = "rotate-evidence-keys"
 EXPORT_COMMAND = "export-evidence"
@@ -88,7 +86,7 @@ def register(commands: Subparsers) -> None:
 def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | None:
     """這個模組的指令；其他指令回傳 None。"""
     if args.command == STATUS_COMMAND:
-        return _with_database(settings, report, lambda engine: _status(engine, settings, report))
+        return _database(settings, report, lambda engine: _status(engine, settings, report))
     if args.command not in (ROTATE_COMMAND, EXPORT_COMMAND):
         return None
     try:
@@ -102,8 +100,8 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
         return EXIT_FAILURE
     vault = EvidenceVault(runner_settings.runs_dir, cipher)
     if args.command == ROTATE_COMMAND:
-        return _with_database(settings, report, lambda engine: _rotate(engine, vault, report))
-    return _with_database(
+        return _database(settings, report, lambda engine: _rotate(engine, vault, report))
+    return _database(
         settings, report, lambda engine: _export(engine, vault, args.run, args.path, report)
     )
 
@@ -118,7 +116,12 @@ def _rotate(engine: Engine, vault: EvidenceVault, report: Report) -> int:
         report("keeper 正在處理原始證據，等不到鎖：請稍後再執行（沒有改變任何檔案）。")
         return EXIT_FAILURE
     files, directories, failed = outcome
-    _audit(engine, "evidence_keys.rotate", None, None, {"files": files, "failures": len(failed)})
+    audit_local(
+        engine,
+        "evidence_keys.rotate",
+        {"files": files, "failures": len(failed)},
+        object_type="run_evidence",
+    )
     if failed:
         listed = "、".join(failed[:MAX_LISTED])
         report(
@@ -176,8 +179,19 @@ def _export(
         report(f"{exc}。")
         return EXIT_FAILURE
     project_id = _project_of(engine, run_id)
-    changes = {"run_id": name, "path_sha256": _sha256(path), "size_bytes": verified.size}
-    _audit(engine, "evidence.export", run_id, project_id, changes)
+    changes: dict[str, JsonValue] = {
+        "run_id": name,
+        "path_sha256": _sha256(path),
+        "size_bytes": verified.size,
+    }
+    audit_local(
+        engine,
+        "evidence.export",
+        changes,
+        object_type="run_evidence",
+        object_id=run_id,
+        project_id=project_id,
+    )
     try:
         exported = vault.export(name, path, sys.stdout.buffer)
     except EvidenceError as exc:
@@ -224,44 +238,21 @@ def _status(engine: Engine, settings: Settings, report: Report) -> int:
         f"保留 {settings.evidence_retention_days} 天、等待解析上限 "
         f"{settings.evidence_plaintext_max_minutes} 分鐘。"
     )
+    content = ContentRetention(sessionmaker(engine)).summary()
+    report(
+        f"報告內容：保留中 {content.reports_kept}（其中已到期待清除 {content.reports_due}）、"
+        f"已清除 {content.reports_purged}。人工複測摘錄：保留中 {content.excerpts_kept}"
+        f"（其中已到期待清除 {content.excerpts_due}）、已清除 {content.excerpts_purged}。"
+        "清除只刪除欄位與資料列，DB 的 WAL 與備份仍保留舊資料。"
+    )
     return EXIT_OK
 
 
 # --- 共用 --------------------------------------------------------------------------------------
 
 
-def _with_database(settings: Settings, report: Report, action: Callable[[Engine], int]) -> int:
-    engine = create_db_engine(settings, application_name=APPLICATION_NAME, pooled=False)
-    try:
-        status = probe_database(engine, head_revision())
-        if status is not DatabaseStatus.READY:
-            report(NOT_READY[status])
-            return EXIT_FAILURE
-        return action(engine)
-    except SQLAlchemyError as exc:
-        report(f"資料庫發生錯誤（{type(exc).__name__}），已停止。")
-        return EXIT_FAILURE
-    finally:
-        engine.dispose()
-
-
-def _audit(
-    engine: Engine,
-    action: str,
-    object_id: UUID | None,
-    project_id: UUID | None,
-    changes: dict[str, Any],
-) -> None:
-    with Session(engine, expire_on_commit=False) as session, session.begin():
-        AuditTrail(session).record(
-            action=action,
-            object_type="run_evidence",
-            object_id=object_id,
-            actor_key_id=None,
-            project_id=project_id,
-            request_id=None,
-            changes=changes,
-        )
+def _database(settings: Settings, report: Report, action: Callable[[Engine], int]) -> int:
+    return with_database(settings, report, action, application_name=APPLICATION_NAME)
 
 
 def _setting(settings: Settings) -> str | None:

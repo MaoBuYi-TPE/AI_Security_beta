@@ -29,6 +29,7 @@ from tests.integration.triage_support import (
     run_scan,
     scenario,
 )
+from tests.secret_support import shared_content_cipher
 
 pytestmark = pytest.mark.integration
 CONFIRM = TriageCommand(expected_version=0, reason="確認", triage=TriageState.CONFIRMED)
@@ -46,7 +47,9 @@ def item(queue_engine: Engine, queue_seed: Seeder, world: World) -> Scenario:
 
 def change(principal: Principal, finding: UUID, command: TriageCommand) -> Callable[[Session], str]:
     def work(session: Session) -> str:
-        TriageService(session).change(principal, finding, command, request_id=None)
+        TriageService(session, cipher=shared_content_cipher()).change(
+            principal, finding, command, request_id=None
+        )
         return "changed"
 
     return work
@@ -65,7 +68,9 @@ def resolve(engine: Engine, seed: Seeder, world: World, item: Scenario) -> None:
     comparison = eligible(engine, item)
     principal = world.operator_a.principal
     with sessionmaker(engine).begin() as session:
-        TriageService(session).change(principal, item.sqli, CONFIRM, request_id=None)
+        TriageService(session, cipher=shared_content_cipher()).change(
+            principal, item.sqli, CONFIRM, request_id=None
+        )
     command = TriageCommand(
         expected_version=1,
         reason="人工複測",
@@ -75,7 +80,9 @@ def resolve(engine: Engine, seed: Seeder, world: World, item: Scenario) -> None:
         attestation=_attestation(item, seed),
     )
     with sessionmaker(engine).begin() as session:
-        TriageService(session).change(principal, item.sqli, command, request_id=None)
+        TriageService(session, cipher=shared_content_cipher()).change(
+            principal, item.sqli, command, request_id=None
+        )
 
 
 def _attestation(item: Scenario, seed: Seeder) -> Attestation:
@@ -100,7 +107,9 @@ def test_two_patches_with_the_same_version_produce_one_event(
     principal = world.operator_a.principal
     rival = Race(queue_database, "triage-rival", change(principal, item.sqli, CONFIRM))
     with sessionmaker(queue_engine).begin() as session:
-        TriageService(session).change(principal, item.sqli, CONFIRM, request_id=None)
+        TriageService(session, cipher=shared_content_cipher()).change(
+            principal, item.sqli, CONFIRM, request_id=None
+        )
         rival.start()
         wait_until_waiting_for_a_lock(queue_seed, "triage-rival")
     rival.join()
@@ -130,7 +139,7 @@ def test_manual_and_automatic_reopen_never_reopen_twice(
     rival = Race(queue_database, "linker-rival", link)
     manual = TriageCommand(expected_version=2, reason="人工重開", lifecycle=LifecycleState.REOPENED)
     with sessionmaker(queue_engine).begin() as session:
-        TriageService(session).change(
+        TriageService(session, cipher=shared_content_cipher()).change(
             world.operator_a.principal, item.sqli, manual, request_id=None
         )
         rival.start()
@@ -157,7 +166,9 @@ def test_a_scan_created_while_resolving_still_reopens(
     comparison = eligible(queue_engine, item)
     principal = world.operator_a.principal
     with sessionmaker(queue_engine).begin() as session:
-        TriageService(session).change(principal, item.sqli, CONFIRM, request_id=None)
+        TriageService(session, cipher=shared_content_cipher()).change(
+            principal, item.sqli, CONFIRM, request_id=None
+        )
     command = TriageCommand(
         expected_version=1,
         reason="人工複測",
@@ -167,7 +178,9 @@ def test_a_scan_created_while_resolving_still_reopens(
         attestation=_attestation(item, queue_seed),
     )
     with sessionmaker(queue_engine).begin() as session:
-        TriageService(session).change(principal, item.sqli, command, request_id=None)
+        TriageService(session, cipher=shared_content_cipher()).change(
+            principal, item.sqli, command, request_id=None
+        )
         # resolve 尚未提交時建立的 scan：位置一定大於 trigger 寫入的 watermark。
         web_scan(queue_seed, world, item.target, item.grant_id, (ScanEngine.ZAP,))
     lease = parsed_run(queue(queue_engine), ScanEngine.ZAP, (ZAP_SQLI,))

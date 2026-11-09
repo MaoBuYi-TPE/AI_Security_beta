@@ -2,6 +2,8 @@
 
 - 線上模式：呼叫端（例如測試）可經 config.attributes["connection"] 傳入連線；
   否則依 Settings（環境變數或 .env 的 DB_*）以不共用連線池的 engine 連線。
+- CONTENT_ENCRYPTION_KEYS（v0022 加密既有的報告與摘錄）一樣由 Settings 放進
+  config.attributes["content_encryption_keys"]；呼叫端已經放了就不覆寫。migration 不讀 os.environ。
 - 離線模式（alembic upgrade --sql）：只需要方言，不連線、也不讀取密碼。
 """
 
@@ -10,7 +12,7 @@ from sqlalchemy import Connection
 
 from secscan.core.config import Settings
 from secscan.core.db import create_db_engine
-from secscan.migrations import render_item
+from secscan.migrations import CONTENT_KEYS_ATTRIBUTE, render_item
 from secscan.migrations.metadata import target_metadata
 
 OFFLINE_URL = "postgresql+psycopg://"
@@ -44,7 +46,9 @@ def run_migrations_online() -> None:
     if isinstance(shared, Connection):
         _run_with(shared)
         return
-    engine = create_db_engine(Settings(), application_name=MIGRATION_APPLICATION_NAME, pooled=False)
+    settings = Settings()
+    context.config.attributes.setdefault(CONTENT_KEYS_ATTRIBUTE, settings.content_encryption_keys)
+    engine = create_db_engine(settings, application_name=MIGRATION_APPLICATION_NAME, pooled=False)
     try:
         with engine.connect() as connection:
             _run_with(connection)

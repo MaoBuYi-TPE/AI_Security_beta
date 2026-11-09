@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,7 @@ def test_create_app_keeps_the_cipher_in_app_state() -> None:
     assert isinstance(app.state.secret_cipher, SecretCipher)
     assert isinstance(app.state.content_cipher, BlobCipher)
     assert app.state.content_cipher.setting_name == "CONTENT_ENCRYPTION_KEYS"
+    assert app.state.excerpt_retention == timedelta(days=30)
 
 
 # --- 報告內容與人工複測摘錄的金鑰（KEY-01；docs/DECISIONS.md §30.2）---------------------------

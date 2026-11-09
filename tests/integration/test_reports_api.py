@@ -18,10 +18,10 @@ from secscan.reports.document_schema import ReportDocumentV1
 from secscan.reports.domain import wording
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunStatus
-from secscan.worker.reports import ReportWorker
 from tests.integration.api_support import Seeder, World
 from tests.integration.database import ProvisionedDatabase
 from tests.integration.finding_support import ZAP_SQLI, web_scan
+from tests.integration.report_support import report_worker
 from tests.integration.triage_support import (
     CONFIRM,
     Scenario,
@@ -65,7 +65,7 @@ def create(
 
 
 def drain(engine: Engine) -> int:
-    return ReportWorker(sessionmaker(engine, expire_on_commit=False), owner="worker-r").drain()
+    return report_worker(sessionmaker(engine, expire_on_commit=False), owner="worker-r").drain()
 
 
 def test_reports_are_generated_and_downloaded_with_safe_headers(
@@ -266,19 +266,35 @@ def test_reports_are_hidden_from_other_projects_and_viewers_cannot_create(
     assert artifact.status_code == 404
 
 
-def test_sha_mismatch_never_sends_content(
+def test_moved_or_tampered_ciphertext_is_never_sent(
     client: TestClient, queue_engine: Engine, queue_seed: Seeder, world: World, item: Scenario
 ) -> None:
-    created = create(client, item.baseline, "markdown", world.operator_a.headers)
-    report_id = created.json()["data"]["id"]
+    """CONT-01：密文的 context 綁定報告：把另一份報告的密文搬過來（換版的路徑允許更新 content）、
+    或改成解不開的 token，下載都回 500、不送出任何內容。"""
+    first = create(client, item.baseline, "markdown", world.operator_a.headers).json()["data"]
+    second = create(client, item.baseline, "json", world.operator_a.headers).json()["data"]
     drain(queue_engine)
-    # 只能繞過 trigger 才能改內容：模擬 DB 層的損壞（DDL 權限），API 仍不送出內容。
-    queue_seed.execute_together(
-        "ALTER TABLE report_contents DISABLE TRIGGER report_contents_immutable",
-        "UPDATE report_contents SET content = 'tampered' WHERE report_id = :id",
-        "ALTER TABLE report_contents ENABLE TRIGGER report_contents_immutable",
-        id=report_id,
+    original = client.get(
+        f"/api/v1/reports/{second['id']}/download", headers=world.operator_a.headers
+    ).content
+    queue_seed.execute(
+        "UPDATE report_contents SET content = "
+        "(SELECT content FROM report_contents WHERE report_id = :source) WHERE report_id = :id",
+        source=second["id"],
+        id=first["id"],
     )
-    tampered = client.get(f"/api/v1/reports/{report_id}/download", headers=world.operator_a.headers)
+
+    moved = client.get(f"/api/v1/reports/{first['id']}/download", headers=world.operator_a.headers)
+
+    assert moved.status_code == 500
+    assert original not in moved.content
+    assert moved.json()["error"]["code"] == "INTERNAL_ERROR"
+    queue_seed.execute(
+        "UPDATE report_contents SET content = :token WHERE report_id = :id",
+        token=b"gAAAAA" + b"A" * 120,
+        id=first["id"],
+    )
+    tampered = client.get(
+        f"/api/v1/reports/{first['id']}/download", headers=world.operator_a.headers
+    )
     assert tampered.status_code == 500
-    assert b"tampered" not in tampered.content

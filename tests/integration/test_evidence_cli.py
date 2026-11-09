@@ -245,4 +245,6 @@ def test_retention_status_shows_only_counts(
 
     err = capsysbinary.readouterr().err.decode()
     assert "已加密 1" in err
+    assert "報告內容：保留中 0" in err
+    assert "人工複測摘錄：保留中 0" in err
     assert str(sealed_run.run_id) not in err

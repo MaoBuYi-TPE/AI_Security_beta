@@ -82,6 +82,8 @@ TRIGGER_FUNCTIONS = (
     "scanner_runs_engine_budget_frozen",
     "scanner_runs_allotment_once",
     "run_evidence_guard",
+    "report_contents_guard",
+    "finding_triage_excerpts_guard",
 )
 
 

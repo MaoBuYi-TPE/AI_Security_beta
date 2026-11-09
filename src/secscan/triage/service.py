@@ -11,11 +11,20 @@ PATCH 的順序：
    scan（409 TARGET_BUSY；DB 的 trigger 也會擋）、雙軌的平台條件與人工複測聲明的一致性檢查。所有
    不符的原因一次列在 422 RESOLUTION_EVIDENCE_INSUFFICIENT 的訊息中（固定的代碼，不回顯輸入）。
 5. 寫入：finding（版本 +1）→ 事件 → 摘錄 → audit，全在同一個 transaction；任何一步失敗都整筆回滾。
+   摘錄先核對雜湊與長度和事件中的 attestation 相符，再以 CONTENT_ENCRYPTION_KEYS 加密（context
+   綁定 finding、事件與種類），期限是建立時間加 EXCERPT_RETENTION_DAYS（DECISIONS §30.4、§30.5）。
+
+讀取事件時只為 operator／admin 解密摘錄，並再核對一次雜湊與長度；解不開或不符就回 500、不送出。
+清除之後（tombstone）content 是 null。
 
 resolved 一律是人工判定：這裡不會因為比較快照的分類而自動改任何狀態，比較快照也不被修改。
 """
 
-from dataclasses import dataclass
+import hashlib
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from uuid import UUID
 
@@ -33,21 +42,27 @@ from secscan.core.pagination import Page, PageRequest
 from secscan.core.text import require_multiline_text
 from secscan.findings.domain.model import LifecycleState, TriageState
 from secscan.findings.domain.triage import (
+    EXCERPT_MAX_BYTES,
     PROVENANCE_OF_BASIS,
     REASON_MAX_LENGTH,
     REQUEST_PROBLEMS,
     ActorKind,
+    Excerpt,
+    ExcerptKind,
     NewTriageEvent,
     RequestedChange,
     ResolutionBasis,
+    SealedExcerpt,
     TransitionError,
     TriageEvent,
     TriageReasonCode,
     TriageStatus,
+    excerpt_context,
     plan_manual,
     resolves,
 )
 from secscan.findings.triage_records import LockedTriage, TriageRecords
+from secscan.security.blob_cipher import BlobCipher, SealedDataUnreadableError
 from secscan.security.redaction import redact_text
 from secscan.triage.domain.attestation import (
     CHECKS_VERSION,
@@ -60,7 +75,11 @@ from secscan.triage.domain.attestation import check_attestation as check_consist
 from secscan.triage.domain.evidence import CitedComparison, ComparisonRow, evidence_problems
 from secscan.triage.repository import FindingFacts, TriageQueries
 
+logger = logging.getLogger(__name__)
+
 TARGET_BUSY_CONSTRAINT = "findings_resolve_target_busy"
+# 摘錄的保留期限（EXCERPT_RETENTION_DAYS 的預設值；docs/DECISIONS.md §30.5）。
+DEFAULT_EXCERPT_RETENTION = timedelta(days=30)
 MAX_CITED_OBSERVATIONS = 20
 
 
@@ -85,12 +104,23 @@ class _Resolution:
 
 
 class TriageService:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        cipher: BlobCipher | None = None,
+        excerpt_retention: timedelta = DEFAULT_EXCERPT_RETENTION,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        """cipher 是內容的金鑰（沒有時，寫入或讀取摘錄直接失敗）；clock 預設是 DB 的時間。"""
         self._session = session
         self._queries = TriageQueries(session)
         self._records = TriageRecords(session)
         self._comparisons = ComparisonRepository(session)
         self._audit = AuditTrail(session)
+        self._cipher = cipher
+        self._excerpt_retention = excerpt_retention
+        self._clock = clock if clock is not None else self._queries.now
 
     def change(
         self,
@@ -133,7 +163,60 @@ class TriageService:
         writer = (
             decide(principal, Permission.PROJECT_WRITE, facts.project_id) is AccessDecision.ALLOWED
         )
-        return self._records.events(finding_id, page, with_excerpts=writer)
+        page_of_events = self._records.events(finding_id, page, with_excerpts=writer)
+        if not writer:
+            return page_of_events
+        return replace(
+            page_of_events,
+            items=tuple(self._opened(finding_id, event) for event in page_of_events.items),
+        )
+
+    def _opened(self, finding_id: UUID, event: TriageEvent) -> TriageEvent:
+        sealed = event.sealed_excerpts or ()
+        excerpts = tuple(self._open_excerpt(finding_id, event, item) for item in sealed)
+        return replace(event, sealed_excerpts=None, excerpts=excerpts)
+
+    def _open_excerpt(self, finding_id: UUID, event: TriageEvent, item: SealedExcerpt) -> Excerpt:
+        if item.token is None:
+            return Excerpt(item.kind, None, item.expires_at, item.purged_at)
+        context = excerpt_context(finding_id, event.sequence, item.kind)
+        try:
+            content = self._require_cipher().unseal(
+                item.token, context=context, max_bytes=EXCERPT_MAX_BYTES[item.kind]
+            )
+        except SealedDataUnreadableError:
+            content = None
+        if content is None or not _matches(event.evidence, item.kind, content):
+            logger.error(
+                "finding %s 的事件 %s 的摘錄核對失敗：不送出內容", finding_id, event.sequence
+            )
+            raise _excerpt_unreadable()
+        return Excerpt(item.kind, content.decode("utf-8"), item.expires_at, item.purged_at)
+
+    def _require_cipher(self) -> BlobCipher:
+        if self._cipher is None:
+            raise RuntimeError("人工複測摘錄需要內容的加密元件（CONTENT_ENCRYPTION_KEYS）")
+        return self._cipher
+
+    def _sealed_excerpts(
+        self, finding_id: UUID, sequence: int, evidence: JsonObject, checked: CheckedAttestation
+    ) -> list[tuple[ExcerptKind, bytes]]:
+        """核對雜湊與長度和事件中的 attestation 相符，再加密（DB 不再核對明文）。"""
+        cipher = self._require_cipher()
+        sealed: list[tuple[ExcerptKind, bytes]] = []
+        texts = {
+            ExcerptKind.REQUEST: checked.request_excerpt,
+            ExcerptKind.RESPONSE: checked.response_excerpt,
+        }
+        for kind, text in texts.items():
+            content = text.encode("utf-8")
+            if not _matches(evidence, kind, content):
+                raise RuntimeError("摘錄和事件中的雜湊或長度不符")
+            context = excerpt_context(finding_id, sequence, kind)
+            sealed.append(
+                (kind, cipher.seal(content, context=context, max_bytes=EXCERPT_MAX_BYTES[kind]))
+            )
+        return sealed
 
     def _require_active_key(self, principal: Principal) -> None:
         """以 FOR SHARE 鎖住呼叫者的 key 並重新確認沒有被撤銷：撤銷（FOR UPDATE）要等這個
@@ -256,6 +339,7 @@ class TriageService:
             if _constraint(error) == TARGET_BUSY_CONSTRAINT:
                 raise _target_busy() from None
             raise
+        evidence = _event_evidence(command, resolution)
         self._records.append(
             NewTriageEvent(
                 finding_id=locked.id,
@@ -268,17 +352,18 @@ class TriageService:
                 current=planned,
                 reason_code=TriageReasonCode.MANUAL,
                 reason=reason,
-                evidence=_event_evidence(command, resolution),
+                evidence=evidence,
                 comparison_id=resolution.comparison_id if resolution is not None else None,
                 basis=resolution.basis if resolution is not None else None,
             )
         )
         if resolution is not None and resolution.checked is not None:
+            sealed = self._sealed_excerpts(locked.id, planned.version, evidence, resolution.checked)
             self._records.append_excerpts(
                 locked.id,
                 planned.version,
-                resolution.checked.request_excerpt,
-                resolution.checked.response_excerpt,
+                sealed,
+                expires_at=self._clock() + self._excerpt_retention,
             )
         self._audit.record(
             action="finding.triage",
@@ -368,6 +453,26 @@ def _audit_changes(
         changes["request_excerpt_sha256"] = checked.request_sha256
         changes["response_excerpt_sha256"] = checked.response_sha256
     return changes
+
+
+def _matches(evidence: JsonObject, kind: ExcerptKind, content: bytes) -> bool:
+    """內容的 sha256 與長度等於事件 attestation 中記下的值。"""
+    attestation = evidence.get("attestation")
+    if not isinstance(attestation, dict):
+        return False
+    expected_sha = attestation.get(f"{kind.value}_excerpt_sha256")
+    expected_bytes = attestation.get(f"{kind.value}_excerpt_bytes")
+    return expected_sha == hashlib.sha256(content).hexdigest() and str(expected_bytes) == str(
+        len(content)
+    )
+
+
+def _excerpt_unreadable() -> AppError:
+    return AppError(
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        code=ErrorCode.INTERNAL_ERROR,
+        message="人工複測摘錄核對失敗。",
+    )
 
 
 def _constraint(error: IntegrityError) -> str | None:

@@ -44,8 +44,10 @@ pytestmark = pytest.mark.integration
 # T21 的 findings 3、finding_triage_events 12 與 finding_triage_excerpts 2（v0017，
 # test_triage_schema.py），reports 11 與 report_contents 1（v0018，test_reports_schema.py），
 # auth_profiles 的停用 1（v0019，test_auth_profile_disable.py）；T31 的引擎子預算 3（v0020，
-# test_engine_budget_schema.py）。
-EXPECTED_CHECK_COUNT = 197
+# test_engine_budget_schema.py）；T23a 的 run_evidence 5（v0021，test_evidence_schema.py），以及
+# reports 的期限 2、report_contents 的密文 1、摘錄的密文與清除 3，取代原本兩個明文的大小（v0022，
+# test_sealed_content_schema.py）。
+EXPECTED_CHECK_COUNT = 201
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "

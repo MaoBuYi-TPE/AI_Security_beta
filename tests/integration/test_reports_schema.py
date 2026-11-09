@@ -1,4 +1,9 @@
-"""T21 reports 的 DB 層強制（G3）：狀態轉換、終止不可修改、內容只寫一次與 commit 時的雙向核對。"""
+"""T21 reports 的 DB 層強制（G3）：狀態轉換、終止不可修改、內容只寫一次與 commit 時的雙向核對。
+
+T23a（v0022）之後內容是密文：DB 核對內容存在、是 Fernet token 的形狀；明文的 sha256 與大小改由
+worker 寫入、下載時解密之後核對（tests/integration/test_reports_api.py）。到期清除與換版的路徑見
+tests/integration/test_sealed_content_schema.py。
+"""
 
 import hashlib
 from uuid import UUID, uuid4
@@ -8,9 +13,11 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from secscan.reports.domain.model import MAX_REPORT_BYTES, report_context
 from tests.integration.api_support import Seeder, World
 from tests.integration.sql_support import INTEGRITY_CONSTRAINT_VIOLATION, violation
 from tests.integration.triage_support import Scenario, scenario
+from tests.secret_support import shared_content_cipher
 
 pytestmark = pytest.mark.integration
 
@@ -24,6 +31,7 @@ CLAIM = (
     "lease_expires_at = now() + interval '30 seconds' WHERE id = :id"
 )
 CONTENT = b"report-content"
+SQL_CHECK_VIOLATION = "23514"
 
 
 @pytest.fixture
@@ -56,22 +64,36 @@ def queued(session: Session, item: Scenario, world: World) -> UUID:
     return report
 
 
-def succeed(session: Session, report: UUID, content: bytes = CONTENT, sha: bytes = CONTENT) -> None:
+def sealed(report: UUID, content: bytes = CONTENT) -> bytes:
+    return shared_content_cipher().seal(
+        content, context=report_context(report), max_bytes=MAX_REPORT_BYTES
+    )
+
+
+def succeed(
+    session: Session, report: UUID, content: bytes = CONTENT, *, expires: str = "30 days"
+) -> None:
     session.execute(text(CLAIM), {"id": report})
     session.execute(
         text(
             "INSERT INTO report_contents (report_id, attempt, lease_owner, content) "
             "VALUES (:id, 1, 'w', :content)"
         ),
-        {"id": report, "content": content},
+        {"id": report, "content": sealed(report, content)},
     )
     session.execute(
         text(
             "UPDATE reports SET status = 'succeeded', lease_owner = NULL, lease_expires_at = NULL, "
             "data_as_of = now(), generated_at = now(), size_bytes = :size, sha256 = :sha, "
-            "truncated = false, omitted_findings = 0, finished_at = now() WHERE id = :id"
+            "truncated = false, omitted_findings = 0, finished_at = now(), "
+            "expires_at = clock_timestamp() + CAST(:expires AS interval) WHERE id = :id"
         ),
-        {"id": report, "size": len(content), "sha": hashlib.sha256(sha).hexdigest()},
+        {
+            "id": report,
+            "size": len(content),
+            "sha": hashlib.sha256(content).hexdigest(),
+            "expires": expires,
+        },
     )
 
 
@@ -119,13 +141,21 @@ def test_finished_reports_and_contents_are_immutable(
         session.commit()
         for statement in (
             "UPDATE reports SET status = 'failed', error_code = 'X1', size_bytes = NULL, "
-            "sha256 = NULL WHERE id = :id",
-            "UPDATE report_contents SET content = 'x' WHERE report_id = :id",
+            "sha256 = NULL, expires_at = NULL WHERE id = :id",
+            "UPDATE reports SET expires_at = expires_at + interval '1 day' WHERE id = :id",
+            "UPDATE reports SET content_purged_at = clock_timestamp() WHERE id = :id",
+            "UPDATE report_contents SET attempt = 2 WHERE report_id = :id",
             "DELETE FROM report_contents WHERE report_id = :id",
             "TRUNCATE report_contents",
         ):
             error = violation(session, statement, {"id": report})
             assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION, statement
+        error = violation(
+            session,
+            "UPDATE report_contents SET content = 'x' WHERE report_id = :id",
+            {"id": report},
+        )
+        assert error.sqlstate == SQL_CHECK_VIOLATION
 
 
 def test_content_and_success_are_checked_together_at_commit(
@@ -134,18 +164,13 @@ def test_content_and_success_are_checked_together_at_commit(
     sessions = sessionmaker(queue_engine)
     with sessions() as session:
         report = queued(session, item, world)
-        succeed(session, report, sha=b"different")
-        with pytest.raises(IntegrityError, match="matching sha256"):
-            session.commit()
-    with sessions() as session:
-        report = queued(session, item, world)
         session.execute(text(CLAIM), {"id": report})
         session.execute(
             text(
                 "INSERT INTO report_contents (report_id, attempt, lease_owner, content) "
-                "VALUES (:id, 1, 'w', 'x')"
+                "VALUES (:id, 1, 'w', :content)"
             ),
-            {"id": report},
+            {"id": report, "content": sealed(report)},
         )
         with pytest.raises(IntegrityError, match="succeeded report"):
             session.commit()
@@ -157,11 +182,11 @@ def test_content_and_success_are_checked_together_at_commit(
                 "UPDATE reports SET status = 'succeeded', lease_owner = NULL, "
                 "lease_expires_at = NULL, data_as_of = now(), generated_at = now(), "
                 "size_bytes = 1, sha256 = :sha, truncated = false, omitted_findings = 0, "
-                "finished_at = now() WHERE id = :id"
+                "finished_at = now(), expires_at = now() + interval '30 days' WHERE id = :id"
             ),
             {"id": report, "sha": "0" * 64},
         )
-        with pytest.raises(IntegrityError, match="need content"):
+        with pytest.raises(IntegrityError, match="need content from the same attempt"):
             session.commit()
 
 

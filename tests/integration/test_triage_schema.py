@@ -16,6 +16,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from secscan.findings.domain.triage import EXCERPT_MAX_BYTES, ExcerptKind, excerpt_context
 from secscan.findings.models import FindingModel
 from secscan.migrations import alembic_config
 from secscan.scans.domain.catalog import Engine as ScanEngine
@@ -27,6 +28,7 @@ from tests.integration.sql_support import (
     violation,
 )
 from tests.integration.triage_support import Scenario, eligible, scenario
+from tests.secret_support import shared_content_cipher
 
 pytestmark = pytest.mark.integration
 
@@ -228,40 +230,28 @@ def test_events_and_excerpts_are_append_only(
         assert code_of(error) == INTEGRITY_CONSTRAINT_VIOLATION, statement
 
 
-def test_excerpts_must_match_the_recorded_hash_and_be_complete(
+def _sealed(item: Scenario, kind: str, content: str) -> bytes:
+    finding_kind = ExcerptKind(kind)
+    return shared_content_cipher().seal(
+        content.encode(),
+        context=excerpt_context(item.sqli, 2, finding_kind),
+        max_bytes=EXCERPT_MAX_BYTES[finding_kind],
+    )
+
+
+SEALED_EXCERPT = (
+    "INSERT INTO finding_triage_excerpts (finding_id, sequence, kind, sealed_content, expires_at) "
+    "VALUES (:id, 2, :kind, :content, now() + interval '30 days')"
+)
+
+
+def test_excerpts_are_sealed_complete_and_immutable(
     queue_engine: Engine, item: Scenario, world: World
 ) -> None:
+    """TRIAGE-06（v0022 修訂）：摘錄必須是密文（Fernet token 的形狀）、每個人工複測事件恰好兩段，
+    之後只能換版或到期清除（見 test_sealed_content_schema.py）。明文的雜湊與長度改由 api 核對。"""
     comparison = eligible(queue_engine, item)
     sessions = sessionmaker(queue_engine)
-    attestation = (
-        '{"attestation": {"provenance": "operator_supplied", '
-        '"request_excerpt_sha256": "' + "0" * 64 + '", "request_excerpt_bytes": 3, '
-        '"response_excerpt_sha256": "' + "0" * 64 + '", "response_excerpt_bytes": 3}}'
-    )
-    resolve_values = params(
-        item,
-        world,
-        sequence=2,
-        previous_triage="confirmed",
-        lifecycle="resolved",
-        comparison=comparison,
-        basis="manual_retest",
-        evidence=attestation,
-    )
-    resolve = "UPDATE findings SET lifecycle_state = 'resolved', triage_version = 2 WHERE id = :id"
-    excerpt = (
-        "INSERT INTO finding_triage_excerpts (finding_id, sequence, kind, content) "
-        "VALUES (:id, 2, 'request', 'abc')"
-    )
-    with sessions() as opened:
-        confirm(opened, item, world)
-        opened.execute(text(resolve), resolve_values)
-        opened.execute(text(EVENT), resolve_values)
-        error = violation(opened, excerpt, resolve_values)
-        assert "recorded hash" in str(error)
-        with pytest.raises(IntegrityError, match="both excerpts"):
-            opened.commit()
-    # 雜湊與長度相符的兩段摘錄可以提交；之後不可修改、刪除或 TRUNCATE。
     request, response = "GET / HTTP/1.1", "HTTP/1.1 200"
     valid = json.dumps(
         {
@@ -274,21 +264,52 @@ def test_excerpts_must_match_the_recorded_hash_and_be_complete(
             }
         }
     )
+    resolve_values = params(
+        item,
+        world,
+        sequence=2,
+        previous_triage="confirmed",
+        lifecycle="resolved",
+        comparison=comparison,
+        basis="manual_retest",
+        evidence=valid,
+    )
+    resolve = "UPDATE findings SET lifecycle_state = 'resolved', triage_version = 2 WHERE id = :id"
     with sessions() as opened:
         confirm(opened, item, world)
         opened.execute(text(resolve), resolve_values)
-        opened.execute(text(EVENT), {**resolve_values, "evidence": valid})
+        opened.execute(text(EVENT), resolve_values)
+        plaintext = {"id": item.sqli, "kind": "request", "content": request.encode()}
+        assert code_of(violation(opened, SEALED_EXCERPT, plaintext)) == "23514"
+        empty = {"id": item.sqli, "kind": "request", "content": None}
+        error = violation(opened, SEALED_EXCERPT, empty)
+        assert "must be sealed" in str(error)
+        opened.execute(
+            text(SEALED_EXCERPT),
+            {"id": item.sqli, "kind": "request", "content": _sealed(item, "request", request)},
+        )
+        with pytest.raises(IntegrityError, match="both excerpts"):
+            opened.commit()
+    with sessions() as opened:
+        confirm(opened, item, world)
+        opened.execute(text(resolve), resolve_values)
+        opened.execute(text(EVENT), resolve_values)
         for kind, content in (("request", request), ("response", response)):
             opened.execute(
-                text(
-                    "INSERT INTO finding_triage_excerpts (finding_id, sequence, kind, content) "
-                    "VALUES (:id, 2, :kind, :content)"
-                ),
-                {"id": item.sqli, "kind": kind, "content": content},
+                text(SEALED_EXCERPT),
+                {"id": item.sqli, "kind": kind, "content": _sealed(item, kind, content)},
             )
         opened.commit()
+        error = violation(
+            opened,
+            "UPDATE finding_triage_excerpts SET sealed_content = 'x' WHERE finding_id = :id",
+            {"id": item.sqli},
+        )
+        assert code_of(error) == "23514"
         for statement in (
-            "UPDATE finding_triage_excerpts SET content = 'x' WHERE finding_id = :id",
+            "UPDATE finding_triage_excerpts SET expires_at = now() WHERE finding_id = :id",
+            "UPDATE finding_triage_excerpts SET sealed_content = NULL, purged_at = now() "
+            "WHERE finding_id = :id",
             "DELETE FROM finding_triage_excerpts WHERE finding_id = :id",
             "TRUNCATE finding_triage_excerpts",
         ):

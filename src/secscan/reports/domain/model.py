@@ -11,8 +11,16 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-# 每份報告的內容上限（以 UTF-8 編碼後的位元組計；DB 的 CHECK 相同）。
+from secscan.security.blob_cipher import max_sealed_blob_bytes
+
+# 每份報告的內容上限（以 UTF-8 編碼後的位元組計）。
 MAX_REPORT_BYTES = 8_388_608
+# 報告內容以 CONTENT_ENCRYPTION_KEYS 加密保存（docs/DECISIONS.md §30.4）：context 綁定報告，
+# 搬到別的報告就解不開。DB 的 CHECK 是密文的上限。
+REPORT_CONTEXT_PREFIX = "report:"
+MAX_SEALED_REPORT_BYTES = max_sealed_blob_bytes(
+    context_length=len(REPORT_CONTEXT_PREFIX) + 36, max_bytes=MAX_REPORT_BYTES
+)
 SCHEMA_VERSION = 1
 # 每個 finding 最多的樣本數、報告中最多的比較快照數、每個不可信字串的長度上限。
 MAX_SAMPLES = 3
@@ -35,6 +43,10 @@ class ReportStatus(StrEnum):
 
 TERMINAL_REPORT_STATUSES = frozenset({ReportStatus.SUCCEEDED, ReportStatus.FAILED})
 ACTIVE_REPORT_STATUSES = frozenset({ReportStatus.QUEUED, ReportStatus.GENERATING})
+
+
+def report_context(report_id: UUID) -> str:
+    return f"{REPORT_CONTEXT_PREFIX}{report_id}"
 
 
 class ReportErrorCode(StrEnum):

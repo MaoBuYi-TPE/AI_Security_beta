@@ -20,18 +20,20 @@ import signal
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from types import FrameType
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import SecretStr
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from secscan.audit.service import AuditTrail
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
+from secscan.core.json_types import JsonValue
 from secscan.findings.service import FindingLinker
 from secscan.migrations import head_revision
 from secscan.runner.config import RunnerSettings
@@ -61,6 +63,7 @@ from secscan.worker.artifacts import ArtifactReader
 from secscan.worker.config import WorkerSettings
 from secscan.worker.loop import WorkerLoop
 from secscan.worker.reports import ReportWorker
+from secscan.worker.retention import ContentRetention
 from secscan.worker.service import Worker
 from secscan.worker.telemetry import TelemetryReader
 
@@ -240,7 +243,13 @@ def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
                 _fleet(sessions, owner, InstanceRole.WORKER),
                 stop_requested=stop.is_set,
                 poll_seconds=WORKER_POLL_SECONDS,
-                reports=ReportWorker(sessions, owner=owner),
+                reports=ReportWorker(
+                    sessions,
+                    owner=owner,
+                    cipher=content,
+                    retention=timedelta(days=settings.report_retention_days),
+                ),
+                retention=ContentRetention(sessions),
             ).run(once=once, on_report=lambda item: report(describe(item)))
     except SQLAlchemyError as exc:
         report(f"資料庫發生錯誤（{type(exc).__name__}），已停止。")
@@ -294,6 +303,44 @@ def _runner_exit(
     if once and not reports:
         report("沒有排隊中的 run。")
     return EXIT_OK
+
+
+def with_database(
+    settings: Settings, report: Report, action: Callable[[Engine], int], *, application_name: str
+) -> int:
+    """本機管理指令：連線、確認 schema 是目前版本，再執行 action；DB 錯誤只報類別。"""
+    engine = create_db_engine(settings, application_name=application_name, pooled=False)
+    try:
+        if not _ready(engine, report):
+            return EXIT_FAILURE
+        return action(engine)
+    except SQLAlchemyError as exc:
+        report(f"資料庫發生錯誤（{type(exc).__name__}），已停止。")
+        return EXIT_FAILURE
+    finally:
+        engine.dispose()
+
+
+def audit_local(
+    engine: Engine,
+    action: str,
+    changes: dict[str, JsonValue],
+    *,
+    object_type: str,
+    object_id: UUID | None = None,
+    project_id: UUID | None = None,
+) -> None:
+    """本機管理指令的 audit（actor 是 null）：只記數量或雜湊，不記內容。"""
+    with Session(engine, expire_on_commit=False) as session, session.begin():
+        AuditTrail(session).record(
+            action=action,
+            object_type=object_type,
+            object_id=object_id,
+            actor_key_id=None,
+            project_id=project_id,
+            request_id=None,
+            changes=changes,
+        )
 
 
 def _ready(engine: Engine, report: Report) -> bool:

@@ -7,6 +7,7 @@
 - 完成：另一個 transaction 先以 SELECT … FOR UPDATE 鎖住仍持有 lease 的 generating 列（fencing：
   owner、attempt、未過期），再寫入內容並轉成 succeeded；被重新認領的舊 worker 在這一步失敗。內容
   帶著 attempt 與 lease_owner 寫入，DB 的 insert guard 也核對（v0018 的 fencing token）。
+  內容是 worker 加密好的密文（docs/DECISIONS.md §30.4）；sha256 與大小是明文的值，期限一起寫入。
 - 釋放：這一次嘗試失敗（不是 DB 的錯誤）時立即退回 queued，用盡時 failed。
 """
 
@@ -160,8 +161,10 @@ class ReportQueue:
         lease: ReportLease,
         rendered: Rendered,
         *,
+        sealed: bytes,
         data_as_of: datetime,
         generated_at: datetime,
+        expires_at: datetime,
     ) -> None:
         with self._sessions.begin() as session:
             held = session.execute(
@@ -174,7 +177,7 @@ class ReportQueue:
                     report_id=lease.report_id,
                     attempt=lease.attempt,
                     lease_owner=lease.owner,
-                    content=rendered.content,
+                    content=sealed,
                 )
             )
             session.execute(
@@ -192,5 +195,6 @@ class ReportQueue:
                     truncated=rendered.truncated,
                     omitted_findings=rendered.omitted_findings,
                     finished_at=func.clock_timestamp(),
+                    expires_at=expires_at,
                 )
             )

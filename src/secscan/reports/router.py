@@ -11,6 +11,7 @@ from secscan.core.db import DbSession
 from secscan.core.envelope import Envelope, ok
 from secscan.core.errors import AppError, ErrorCode
 from secscan.core.request_id import request_id_of
+from secscan.findings.content_cipher import CurrentContentCipher
 from secscan.reports.domain.model import ReportFormat
 from secscan.reports.schemas import ReportCreate, ReportOut
 from secscan.reports.service import Report, ReportService
@@ -80,10 +81,17 @@ def get_report(
     responses={HTTPStatus.OK: {"content": {"application/json": {}, "text/markdown": {}}}},
 )
 def download_report(
-    report_id: UUID, principal: CurrentPrincipal, session: DbSession, lab: CurrentLab
+    report_id: UUID,
+    principal: CurrentPrincipal,
+    session: DbSession,
+    lab: CurrentLab,
+    cipher: CurrentContentCipher,
 ) -> Response:
-    """平台產生的報告內容（附件下載）；只能以 report id 下載，送出前核對 sha256。"""
-    report, content = ReportService(session, lab=lab).download(principal, report_id)
+    """平台產生的報告內容（附件下載）；只能以 report id 下載，解密之後核對 sha256 才送出。
+
+    內容已過保留期限並清除時回 410（REPORT_EXPIRED）。
+    """
+    report, content = ReportService(session, lab=lab).download(principal, report_id, cipher)
     return Response(content=content, headers=download_headers(report))
 
 

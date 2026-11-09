@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import APIRouter, FastAPI
 from pydantic import SecretStr
@@ -75,6 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.secret_cipher = SecretCipher.from_setting(secret_keys)
     app.state.content_cipher = content_cipher(content_keys)
     check_held({SECRET_SETTING: secret_keys, CONTENT_SETTING: content_keys})
+    app.state.excerpt_retention = timedelta(days=resolved.excerpt_retention_days)
     # 後加入的在外層。順序：request_id → key 格式 → 大小上限（docs/DECISIONS.md §11.1）：
     # 沒有 key 的請求連 body 都不讀；錯誤回應也都帶 request_id。
     app.add_middleware(BodyLimitMiddleware)

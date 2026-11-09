@@ -4,8 +4,10 @@
   project，同一個 key、同樣的內容回原本的報告，內容不同（包含 format）回 409。scan 必須已終止。
   配額（每個 project 5 份進行中、每個 scan 20 份未失敗的報告）在鎖住 project 列之後計數與寫入，
   同時送出也不會超額。報告由 worker 產生，這裡只排入佇列（202）。
-- 下載：只有 succeeded 能下載；送出前重新核對 sha256，不符就回 500、不送出內容。只能以 report id
-  下載，沒有 path 或 storage_key 參數。
+- 下載：只有 succeeded 能下載；內容已過期清除時回 410（REPORT_EXPIRED）。解密（context 綁定這份
+  報告）之後重新核對 sha256，解不開或不符就回 500、不送出內容。只能以 report id 下載，沒有 path 或
+  storage_key 參數。
+- 每個 scan 的配額不計失敗與內容已清除的報告。
 """
 
 import hashlib
@@ -27,13 +29,16 @@ from secscan.core.pagination import Page, PageRequest
 from secscan.projects.models import ProjectModel
 from secscan.reports.domain.model import (
     ACTIVE_REPORT_STATUSES,
+    MAX_REPORT_BYTES,
     SCHEMA_VERSION,
     ReportFormat,
     ReportStatus,
+    report_context,
 )
 from secscan.reports.models import ReportContentModel, ReportModel
 from secscan.scans.domain.model import Scan
 from secscan.scans.service import ScanService
+from secscan.security.blob_cipher import BlobCipher, SealedDataUnreadableError
 from secscan.targets.domain import LabNetwork
 
 logger = logging.getLogger(__name__)
@@ -61,6 +66,8 @@ class Report:
     omitted_findings: int | None
     created_at: datetime
     finished_at: datetime | None
+    expires_at: datetime | None = None
+    content_purged_at: datetime | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -186,7 +193,9 @@ class ReportService:
         ).all()
         return Page(items=tuple(_report(model) for model in models), total=total or 0, request=page)
 
-    def download(self, principal: Principal, report_id: UUID) -> tuple[Report, bytes]:
+    def download(
+        self, principal: Principal, report_id: UUID, cipher: BlobCipher
+    ) -> tuple[Report, bytes]:
         report = self.get(principal, report_id)
         if report.status is not ReportStatus.SUCCEEDED:
             raise AppError(
@@ -194,9 +203,16 @@ class ReportService:
                 code=ErrorCode.REPORT_NOT_READY,
                 message="報告尚未產生完成或已失敗。",
             )
-        content = self._session.scalar(
+        if report.content_purged_at is not None:
+            raise AppError(
+                status_code=HTTPStatus.GONE,
+                code=ErrorCode.REPORT_EXPIRED,
+                message="報告內容已超過保留期限並清除（metadata 與 sha256 仍保留）。",
+            )
+        token = self._session.scalar(
             select(ReportContentModel.content).where(ReportContentModel.report_id == report_id)
         )
+        content = _opened(cipher, report_id, token)
         if content is None or hashlib.sha256(content).hexdigest() != report.sha256:
             logger.error("報告 %s 的內容與 sha256 不符：不送出內容", report_id)
             raise AppError(
@@ -223,6 +239,7 @@ class ReportService:
             .where(
                 ReportModel.scan_id == scan_id,
                 ReportModel.status != ReportStatus.FAILED.value,
+                ReportModel.content_purged_at.is_(None),
             )
         )
         if (active or 0) >= MAX_ACTIVE_PER_PROJECT or (per_scan or 0) >= MAX_PER_SCAN:
@@ -231,7 +248,7 @@ class ReportService:
                 code=ErrorCode.QUOTA_EXCEEDED,
                 message=(
                     f"報告數量超過上限（每個 project 同時 {MAX_ACTIVE_PER_PROJECT} 份進行中、"
-                    f"每個 scan {MAX_PER_SCAN} 份未失敗的報告）。"
+                    f"每個 scan {MAX_PER_SCAN} 份未失敗、內容未清除的報告）。"
                 ),
             )
 
@@ -254,4 +271,16 @@ def _report(model: ReportModel) -> Report:
         omitted_findings=model.omitted_findings,
         created_at=model.created_at,
         finished_at=model.finished_at,
+        expires_at=model.expires_at,
+        content_purged_at=model.content_purged_at,
     )
+
+
+def _opened(cipher: BlobCipher, report_id: UUID, token: bytes | None) -> bytes | None:
+    """解密報告內容；沒有內容或解不開（金鑰不對、被改過、屬於別的報告）時回 None。"""
+    if token is None:
+        return None
+    try:
+        return cipher.unseal(token, context=report_context(report_id), max_bytes=MAX_REPORT_BYTES)
+    except SealedDataUnreadableError:
+        return None
