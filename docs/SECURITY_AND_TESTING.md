@@ -437,6 +437,16 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 | BSEAL-02 | 讀取與 `bench-evaluate`：金鑰錯誤、遺失、截斷、竄改、改名或搬到別的結果目錄都清楚報錯、沒有部分輸出；拒絕有明文檔案的目錄 | unit：bench/test_sealing、test_results、test_cli |
 | BSEAL-03 | `bench-seal`：先核對原目錄的 `SHA256SUMS`、只寫 partial 目錄（O_EXCL），驗證之後才 rename；不碰原目錄；驗證失敗時刪掉 partial、中斷時留下 | unit：bench/test_sealing、test_cli、test_make_targets |
 
+審查之後新增的反例（`DECISIONS.md` §30.11）：
+- EVID-02、EVID-06：runs volume 不存在或不能寫時不記下任何 none 或 purged（5 種 vault 操作、keeper 的一輪、整合測試）；孤兒目錄的加密檔解不開、任何非預期的例外都不讓 keeper 的執行緒結束；正常停止保留最後一輪的結果；失敗的 run 與孤兒退避、不擋住其他 run，退避中仍不健康；退避的間隔倍增而且有上限。
+- EVID-03、EVID-05：掃描容器改成 000 的目錄與檔案照常加密；刪除明文之前先 fsync `sealed/`；`entries()` 超過上限就失敗（換版不截斷、不改任何檔案）。
+- EVID-04：worker 持有 run 的列鎖時，逾期處理不等鎖、不算失敗；沒有 collected 事件的 run 以建立的時間起算。
+- EVID-07：列表寫 audit `evidence.list`、以 ASCII 跳脫工具決定的檔名；還沒加密的目錄回明確的錯誤。
+- CONT-01、RET-01：清除在 API 讀完 metadata 之後才 commit 時回 410；金鑰不對與 sha256 不符分開記錄；一次清除處理多批；清除時的 DB 錯誤不讓 worker 結束。
+- RET-02：只寫 `content_purged_at`、沒有刪除內容的 transaction 在 commit 時被拒（`reports_purge_complete`）；報告、摘錄與 `run_evidence` 的清除時間不能晚於現在；v0021 有 sealed 或 purged 的紀錄時拒絕 downgrade；v0022 的密文上限常數和 domain 一致。
+- KEY-01：EVIDENCE 與 CONTENT 共用金鑰時，每個 admin 指令與 `make migrate` 都停止（格式錯誤留給各指令說明）。
+- BSEAL-01：bench 金鑰檔以 O_NOFOLLOW 開檔、對 fd 檢查（檢查之後換成 symlink 也讀不到別的檔案）；上層目錄別人可以寫入、是 symlink 或不存在時拒絕；放在結果目錄中時拒絕。
+
 空轉檢查（故意改壞之後必須有測試失敗，確認之後改回、不提交）：拿掉「先驗證才刪除」、容器確認刪除之前就加密、到期之前就清除、拿掉最後一塊的檢查、逾期改從最後一次 `collected` 起算、加密失敗時引擎仍然可用——六項都被抓到。Live 的證據斷言（`tests/live/evidence_assertions.py`：run 目錄只剩密文、沒有 canary、export 的 sha256 等於 artifact）已更新，**尚未執行**，需要使用者另外授權（§4.4）。
 
 ### 4.4 Live E2E
@@ -720,7 +730,9 @@ T31 的 manifest（`DECISIONS.md` §29.3）記錄規格的 sha256、種子與實
 4. **掃描容器的 json-file log** 在容器刪除之前可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
 5. **保持現狀的明文**：`observations` 中遮罩過的證據（含 Nuclei 擷取的 email 與卡號）、guard telemetry 的路徑（tmpfs、6 小時）、摘錄沒有加 salt 的雜湊；報告與摘錄下載的回應是明文（TLS 由部署負責）。
 6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 交給 T34。
-7. **金鑰在主機上**：`.env`（600）與家目錄中的 bench 金鑰檔；遺失之後尚未清除的資料都無法復原，備份由使用者負責。
+7. **單一 run 可以讓整個平台停止認領**：掃描容器建立超過深度（32）或條目數（20,000）上限的目錄樹時，keeper 對這個 run 永遠失敗；退避讓其他 run 仍會加密，但 runner 不認領新的 run，直到操作者手動處理。改成單一 run 的隔離狀態需要使用者決定（`DECISIONS.md` §30.11）。
+8. **runner 指到可寫、但不是 runs volume 的目錄**時，找不到目錄的 run 仍會被記成 none（DB 分不出「從來沒有目錄」與「目錄不見了」）。
+9. **金鑰在主機上**：`.env`（600）與家目錄中的 bench 金鑰檔；遺失之後尚未清除的資料都無法復原，備份由使用者負責。
 
 ## 9. 發布前 Gate
 

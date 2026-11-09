@@ -369,6 +369,7 @@ T23a 的離線實作已完成，**Live 尚未執行，T23a 與 SEC-14 都不標�
 - **原始證據（runs volume）是 run 結束之後才加密，不是全程靜態加密**：掃描、收集與等待解析期間是明文。run 結束（解析完成、失敗或逾期）、容器確認刪除之後，runner 的背景執行緒在約 10–20 秒內把目錄加密成 `sealed/`、驗證之後才刪除明文，7 天後刪除整個目錄。worker 停擺時，等待解析超過 60 分鐘的 run 以 `PARSE_DEADLINE_EXCEEDED` 結束並加密。加密失敗時明文保留、API 顯示 `pending`，runner 不認領新的 run（`GET /api/v1/scanners` 顯示 `EVIDENCE_SEALING_FAILED`）。
 - **API**：`GET /api/v1/scans/{id}` 的 `engines[].evidence`（none／pending／sealed／purged）；finding 來源追溯的 artifact 有 `encrypted`、`purged_at`。原始輸出沒有下載 API。
 - **報告與摘錄**：寫入 DB 之前加密，30 天後清除內容：報告下載回 410 `REPORT_EXPIRED`，摘錄的 `content` 變成 null；metadata 與 sha256 保留。
+- **升級**：`make migrate`（v0021、v0022）之前先 `make down` 停 api、worker 與 runner，再以 `make db-up` 只啟動資料庫（v0021 建立外鍵時會鎖住 `scanner_runs`，兩個 migration 在同一個 transaction 中執行）。既有的報告與摘錄在升級時加密，期限是升級時間加 30 天。
 - **保留期限**（1–365 天，`.env` 中可調整）：`EVIDENCE_RETENTION_DAYS`（預設 7）、`REPORT_RETENTION_DAYS`（30）、`EXCERPT_RETENTION_DAYS`（30）；`EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60）是等待解析的上限。既有的資料從升級之後才開始計時，升級不會立刻刪除任何東西。刪除只是 unlink，不抹除磁碟的資料區塊；DB 的 WAL 與備份會保留舊資料。
 - **管理指令**（`docs/API_CONTRACT.md` §20）：
   - `uv run secscan-admin check-encryption-keys`：檢查三組金鑰合法、互不共用，只顯示數量。

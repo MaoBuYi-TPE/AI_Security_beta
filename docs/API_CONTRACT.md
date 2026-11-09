@@ -1439,7 +1439,7 @@ uv run secscan-admin worker [--once]
 - `POST /api/v1/scans/{scan_id}/reports`：`{"format": "json" | "markdown"}`，必帶 `Idempotency-Key`（範圍是 project；同一個 key、同樣的內容回原本的報告，內容不同含 format 不同回 409 `IDEMPOTENCY_CONFLICT`）。scan 未終止 409 `SCAN_NOT_TERMINAL`。每個 project 同時最多 5 份 queued／generating、每個 scan 最多 20 份未失敗的報告（failed 與內容已清除的不計入，T23a），超過 409 `QUOTA_EXCEEDED`。新的回 202，重送已結束的回 200。
 - worker 在 REPEATABLE READ READ ONLY transaction 中讀快照，產生之後存 DB；最多嘗試 3 次，用盡時 `failed`：lease 一再過期是 `REPORT_ATTEMPTS_EXHAUSTED`，產生時一再出錯是 `REPORT_GENERATION_FAILED`。
 - `GET /api/v1/reports/{report_id}` 與 `GET /api/v1/scans/{scan_id}/reports`：`status`（queued／generating／succeeded／failed）、`format`、`schema_version`、`attempts`、`error_code`、`data_as_of`、`generated_at`、`size_bytes`、`sha256`、`truncated`、`omitted_findings`、`expires_at`（succeeded 才有：完成時間加 `REPORT_RETENTION_DAYS`，預設 30 天）、`content_purged_at`（內容已清除的時間；T23a）。`size_bytes`、`sha256` 是明文的值，清除之後仍保留。
-- `GET /api/v1/reports/{report_id}/download`：只有 succeeded 能下載（否則 409 `REPORT_NOT_READY`）；內容已清除回 410 `REPORT_EXPIRED`；T23a 起內容在 DB 中以 context `report:<id>` 加密，API 解密之後重新核對 sha256，解不開、屬於別的報告或不符回 500、不送出內容。Idempotency-Key 重送在清除之後仍回原本的 metadata。
+- `GET /api/v1/reports/{report_id}/download`：只有 succeeded 能下載（否則 409 `REPORT_NOT_READY`）；內容已清除回 410 `REPORT_EXPIRED`（「是否已清除」與內容以同一個 statement 讀取，清除剛好在下載途中 commit 也是 410）；T23a 起內容在 DB 中以 context `report:<id>` 加密，API 解密之後重新核對 sha256，解不開、屬於別的報告或不符回 500、不送出內容。Idempotency-Key 重送在清除之後仍回原本的 metadata。
 - 內容：固定說明（未經 triage 的告警不是已驗證的漏洞、零告警不代表沒有弱點、not_observed 不等於已修補、平台不提供自動修補驗證、報告時間不是發現或修補時間、遮罩不保證辨識所有秘密）、掃描與引擎狀態、授權成立時間（grant 的 `approved_at`）、覆蓋與預算用量、摘要（以全部 finding 計算）、逐 finding 的標籤與 resolved 的依據（人工複測只有 metadata 與摘錄的 sha256）、比較快照摘要。不含 key id、storage_key、密文、idempotency key 與複測摘錄的原文。
 - 大小上限 8,388,608 bytes（UTF-8）：超過時依優先順序以整個 finding 為單位省略，`truncated=true`、記下省略數，開頭與結尾都有說明。
 - 比較快照最多列出最新的 10 份；較舊的份數記在內容的 `truncation.comparisons_omitted`，Markdown 另有說明。
@@ -1459,14 +1459,14 @@ uv run secscan-admin worker [--once]
 
 ## 20. 資料保護的管理指令（T23a）
 
-設計與理由見 `DECISIONS.md` §30。金鑰與明文一律不輸出到終端或 log；audit 只記數量與 id。
+設計與理由見 `DECISIONS.md` §30。金鑰與明文一律不輸出到終端或 log；audit 只記數量與 id。主機上的 `.env` 三組金鑰都有：每個 `secscan-admin` 指令與 `make migrate` 都先確認三組之間沒有共用的金鑰，共用時停止、exit 1（§30.11）。
 
 | 指令 | 在哪裡執行 | 用途 |
 |---|---|---|
 | `uv run secscan-admin check-encryption-keys` | 主機 | 檢查三組平台金鑰（`SECRET_ENCRYPTION_KEYS`、`EVIDENCE_ENCRYPTION_KEYS`、`CONTENT_ENCRYPTION_KEYS`）都合法、互不共用；只顯示每組的數量，不連資料庫 |
 | `uv run secscan-admin rotate-content-keys` | 主機 | 以 `CONTENT_ENCRYPTION_KEYS` 的第一把重新加密所有報告內容與摘錄（報告一份一個 transaction、摘錄每批 100 段，已清除的略過）；解不開的保留原狀並列出 id、exit 1；audit `content_keys.rotate`（`reports`、`excerpts`、`failures`） |
-| `secscan-admin rotate-evidence-keys` | runner 容器內（`docker compose --profile app exec runner …`；compose 不能用時改用 `docker-compose`） | 以 `EVIDENCE_ENCRYPTION_KEYS` 的第一把重新加密 runs volume 的加密檔（暫存檔驗證之後才取代）；和 keeper 以 advisory lock 互斥，等不到鎖時不改任何檔案、exit 1；解不開的目錄保留原狀並列出 run_id、exit 1；audit `evidence_keys.rotate`（`files`、`failures`） |
-| `secscan-admin export-evidence --run <id>` | runner 容器內 | 列出這個 run 的加密檔的原本路徑、大小與 sha256（每行一個 JSON） |
+| `secscan-admin rotate-evidence-keys` | runner 容器內（`docker compose --profile app exec runner …`；compose 不能用時改用 `docker-compose`） | 以 `EVIDENCE_ENCRYPTION_KEYS` 的第一把重新加密 runs volume 的加密檔（暫存檔驗證之後才取代）；runs volume 的目錄數量超過上限或列不出來時不換版任何檔案、exit 1；和 keeper 以 advisory lock 互斥，等不到鎖時不改任何檔案、exit 1；解不開的目錄保留原狀並列出 run_id、exit 1；audit `evidence_keys.rotate`（`files`、`failures`） |
+| `secscan-admin export-evidence --run <id>` | runner 容器內 | 列出這個 run 的加密檔的原本路徑、大小與 sha256（每行一個 JSON，ASCII 跳脫；列表會解密驗證每個檔案，所以先寫 audit `evidence.list`：run_id 與檔案數）；還沒加密的 run 回錯誤、exit 1 |
 | `secscan-admin export-evidence --run <id> --path <原本的路徑>` | runner 容器內 | break-glass：先完整驗證，寫入 audit `evidence.export`（run_id、路徑的 sha256、大小；寫不進去就不匯出），才把明文寫到 stdout；不寫任何檔案。沒有這個 run 或這個檔案時 exit 1 |
 | `uv run secscan-admin retention-status` | 主機 | 唯讀：原始證據（執行中、逾期、待加密、沒有目錄、已加密、待清除、已清除）、報告內容與摘錄（保留中、待清除、已清除）的數量 |
 

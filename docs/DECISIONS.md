@@ -2833,17 +2833,18 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
   - 起算點是第一次進入 `collected` 的 `run.status` 事件（不用最後一次：每次重試都會再進入 `collected`，用最後一次會讓反覆失敗的解析無限期延長明文；以注入時間落在兩次 `collected` 之間的測試確認）。
   - 超過 `EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60，範圍 15–1440）仍是 `collected`，或是 `normalizing` 而 lease 已過期 → keeper 先鎖 scan 再鎖 run（和佇列相同的順序），鎖住之後重新確認條件，轉成 `failed`（新的錯誤碼 `PARSE_DEADLINE_EXCEEDED`），同一個 transaction 重算 scan 的狀態；之後同一輪加密。狀態機加上 `collected → failed`；錯誤碼的 DB CHECK 只檢查格式，不必改 migration。
   - 有效 lease 的解析不受影響。worker 之後以舊 lease 的寫入都會被 lease 的檢查擋下；已經存好的部分結果保留，所以這個錯誤碼的意思是「解析沒有在期限內完成」，不是「沒有結果」。
-  - 最壞情況：run 的時間 ＋ 60 分鐘 ＋ keeper 的一輪。
+  - 最壞情況：run 的時間 ＋ 60 分鐘 ＋ keeper 的一輪。例外：lease 一直有效（worker 持續心跳）的解析不受這個期限限制，長度由解析的輸入大小上限決定（安全審查的附註，§30.11）。沒有 collected 事件的舊資料以 run 建立的時間起算。
 - **反覆解析失敗**：達到 `MAX_PARSE_ATTEMPTS` 後是 `failed`，隨即加密。**沒有收集的 run**（取消、逾時、中斷、OOM…）直接進入終止狀態，下一輪就把沒有遮罩的殘留加密。**runner 當掉**：重啟之後先對帳（`interrupted`），keeper 再接著加密。**runner 停機，或 Docker 無法確認容器已刪除**：沒有程序能加密，明文一直留到恢復為止（§30.9）。
 - **從來沒有目錄的 run**（例如排隊中就取消、啟動之前就失敗）記為 `none`：不算失敗，也不會一直停在 `pending`。
 - **probe 的目錄**：capability probe 不送請求、沒有 secret，容器確認刪除之後由主迴圈刪除整個工作目錄（以 dir fd 加 O_NOFOLLOW，不跟隨 symlink）。刪不掉時由 keeper 當成孤兒目錄處理。
 - **孤兒目錄**（沒有 `scanner_runs` 紀錄的 UUID 目錄，例如 T23a 之前的 probe）：sealed/ 之外的所有條目超過 1 小時沒有變動才加密；加密檔標頭中已驗證的加密時間超過保留期限才刪除。**絕不在未加密時刪除。**
 
 **fail-closed（使用者要求：加密失敗不能靜默略過，也不能誤報成已受保護）**：
-- **先驗證才刪除**：寫進 `sealed/` 的暫存檔（`.sealing-<隨機>`，O_EXCL）→ fsync → rename → 串流解密，核對原本的路徑、大小與 sha256 → 才刪除明文 → 全部完成之後 fsync 目錄。任何一步失敗都保留明文、不寫入 `run_evidence`，API 如實顯示 `pending`；加密之後 sealed/ 之外仍有條目也算失敗。以故障注入（rename、fsync、fchmod、驗證失敗或不符）與「刪除每個明文時它的加密檔已驗證過」的測試確認（EVID-02）。
-- **加密失敗或 keeper 停止**：任何一個 run 失敗都繼續處理其他 run，但這一輪就不健康；不健康、執行緒停止、停擺（三輪的時間沒有完成一輪）或換版中（拿不到 advisory lock）時，runner 以新的 `CapabilityIssue.EVIDENCE_SEALING_FAILED` 把可用的引擎設成空的，不認領新的 run（比照 guard 停擺的 `require_guard`；執行中的 run 照常完成），`GET /scanners` 與 `/scan-profiles` 顯示原因。一輪沒有任何失敗之後才恢復。`--once` 結束時 keeper 不健康就 exit 1。log 只記 run_id 與錯誤的種類，不記路徑或內容；`retention-status` 列出積壓。
+- **runs volume 必須存在而且可寫**（§30.11）：每個操作都先開啟 runs volume 的根目錄（開不了就是錯誤），run 的目錄以根目錄的 dir fd 開啟；keeper 每一輪加密與清除之前先確認可寫。主機上執行、volume 沒有掛上時，找不到 run 的目錄不會被記成 none、到期的也不會被記成 purged。
+- **先驗證才刪除**：寫進 `sealed/` 的暫存檔（`.sealing-<隨機>`，O_EXCL）→ fsync → rename → 串流解密，核對原本的路徑、大小與 sha256 → fsync `sealed/`（目錄項目落盤）→ 才刪除明文 → 全部完成之後 fsync run 的目錄。任何一步失敗都保留明文、不寫入 `run_evidence`，API 如實顯示 `pending`；加密之後 sealed/ 之外仍有條目也算失敗。以故障注入（rename、fsync、fchmod、驗證失敗或不符）與「刪除每個明文時它的加密檔已驗證過」的測試確認（EVID-02）。
+- **加密失敗或 keeper 停止**：任何一個 run 失敗都繼續處理其他 run，但這一輪就不健康；任何例外都不會讓執行緒結束（非預期的例外只記類別）；失敗的 run 與孤兒退避（20 秒起倍增，最多 10 分鐘），不會每一輪重試、佔滿批次而讓其他 run 等不到加密，還在退避的仍算不健康；正常停止時保留最後一輪的結果（§30.11）。不健康、執行緒停止、停擺（三輪的時間沒有完成一輪）或換版中（拿不到 advisory lock）時，runner 以新的 `CapabilityIssue.EVIDENCE_SEALING_FAILED` 把可用的引擎設成空的，不認領新的 run（比照 guard 停擺的 `require_guard`；執行中的 run 照常完成），`GET /scanners` 與 `/scan-profiles` 顯示原因。一輪沒有任何失敗之後才恢復。`--once` 結束時 keeper 不健康就 exit 1。log 只記 run_id 與錯誤的種類，不記路徑或內容；`retention-status` 列出積壓。
 - **中斷恢復**：sealed/ 中殘留的 `.sealing-*`、`.rotating-*` 是不完整的密文，直接刪除；run 目錄的 `.masking-*` 是收集時只遮罩了一部分的明文暫存檔（不是證據），也直接刪除。加密到一半的目錄可以重複執行：加密檔的名稱由原本的路徑決定，rename 之後、刪除明文之前中斷時，下一輪重做同一個檔案並取代同一個加密檔，不會多一份。
-- **哪些東西會被加密**：一般檔案不論 link 數都加密（hardlink 只刪除 run 目錄中的這一個 link）；symlink 與特殊檔案不跟隨、直接刪除；完成之後刪掉空的子目錄。走訪有深度（32）與條目數（20,000）的上限，超過就 fail closed。
+- **哪些東西會被加密**：一般檔案不論 link 數都加密（hardlink 只刪除 run 目錄中的這一個 link）；symlink 與特殊檔案不跟隨、直接刪除；完成之後刪掉空的子目錄。掃描容器和 runner 是同一個 uid，可以把 `out/` 或檔案改成 000：走訪時先補回擁有者的權限（容器已確認刪除、worker 只能唯讀，期間沒有其他程序改這棵樹；§30.11）。走訪有深度（32）與條目數（20,000）的上限，超過就 fail closed。
 
 **加密檔的格式**（`security/blob_cipher.py`）：
 - 一個 run 目錄加密之後只剩 `sealed/`：每個原本的檔案各一個加密檔，檔名是原本相對路徑的 sha256（計畫第一版寫「以序號命名」；改成路徑的 sha256：一樣避免 ENAMETOOLONG，而且讓重做可以取代同一個檔案）。原本的路徑寫在已驗證的標頭中；超過 4,096 bytes 時改記 `overlong-path/<sha256>`。
@@ -2860,14 +2861,15 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 - **摘錄**：triage PATCH 時 API 先核對 sha256 與長度和事件 attestation 中記下的值相符，再以 context `excerpt:<finding>:<sequence>:<kind>` 加密，期限是建立時間加 `EXCERPT_RETENTION_DAYS`。`GET triage-events` 只為 operator／admin 解密，並再核對一次雜湊與長度；解不開或不符回 500。viewer 仍是事件層級的 null；寫入者看到的每一段加上 `expires_at`、`purged_at`，清除之後 `content` 是 null（tombstone）。
 - **DB（migration v0022）**：
   - `reports`：新增 `expires_at`（只在 generating → succeeded 時寫入）與 `content_purged_at`（只能寫一次，必須已到期、其他欄位都不變）；改寫 `reports_guard`。CHECK：succeeded ⇔ 有期限；清除不早於期限。
+  - `reports_purge_complete`（deferred constraint trigger，§30.11）：寫入 `content_purged_at` 的 transaction 結束時，內容必須已刪除；清除時間也不能晚於現在（trigger 檢查）。部分索引 `ix_reports_expiry`、`ix_finding_triage_excerpts_expiry` 給到期清除的查詢。
   - `reports_content_check`：重建成只在轉為 succeeded 時觸發（`OLD.status IS DISTINCT FROM 'succeeded'`），只核對這一次嘗試的內容存在；明文的 sha256 改由 app 核對（內容是密文，DB 算不出明文的雜湊）。
   - `report_contents`：改用自己的 `report_contents_guard`（不再用共用的 `scan_records_guard`）：只允許換版時更新 content（其他欄位不變、報告還沒清除），以及報告寫入 `content_purged_at` 之後刪除（同一個 transaction 先寫）。內容的 CHECK 改成 Fernet token 的形狀（`gAAAAA` 開頭）與密文的上限。
   - 摘錄：`sealed_content`（bytea）取代 `content`（TEXT），加上 `expires_at` 與 `purged_at`；改用自己的 `finding_triage_excerpts_guard`：只允許換版（密文換密文）與只能一次的清除（`sealed_content` 變成 NULL、必須已到期）。不能刪除：留下 tombstone，「每個人工複測事件恰好兩筆」的規則不變。新增時的 trigger 保留事件的檢查、要求新的摘錄是密文，拿掉明文雜湊的檢查。
   - **既有資料**（同一個 transaction）：舊報告與舊摘錄的期限一律是升級時間加 30 天；舊的明文在核對 sha256 與大小之後加密（context 和 app 相同，以 API 解得開的測試確認）。只有存在舊資料時才需要 CONTENT 金鑰；缺金鑰或舊內容和 sha256 不符時以清楚的訊息停止，整個升級回滾、資料不變（CONT-02）。
-  - **順序**：所有 ALTER TABLE 都在資料的 UPDATE 之前；回填期間暫停 `reports_guard` 與摘錄的 guard（同一個 transaction 內恢復），最後才刪除舊欄位、加上 NOT NULL 與 CHECK。之間沒有 deferred trigger 的 pending event（新的 `reports_content_check` 對已經 succeeded 的列不觸發）。
+  - **順序**：新增欄位、改寫 trigger 與函式 → 資料的 UPDATE（回填期間暫停 `reports_guard` 與摘錄的 guard，同一個 transaction 內恢復）→ 最後才刪除舊欄位、加上 NOT NULL、CHECK、索引與 `reports_purge_complete`。最後這幾個 ALTER TABLE 在 UPDATE 之後，所以不能有 pending 的 AFTER trigger event：新的 `reports_content_check` 對已經 succeeded 的列不觸發、外鍵欄位沒有改變、`report_contents_parent_check` 只在 INSERT 觸發、`reports_purge_complete` 在 UPDATE 之後才建立（第一版寫「所有 ALTER TABLE 都在 UPDATE 之前」不正確，資料庫審查 L2）。升級之前要停 api、worker 與 runner（0021 建立外鍵時鎖住 `scanner_runs`，`make migrate` 讓兩者在同一個 transaction 中執行；資料庫審查 L1）。
   - **金鑰的來源**：`migrations/env.py` 由設定放進 `config.attributes["content_encryption_keys"]`（呼叫端已經放了就不覆寫），測試以 `alembic_config(content_encryption_keys=…)` 注入；migration 不讀 `os.environ`。
   - **離線模式**（`--sql`）：不在 Python 中加密；產生的 SQL 先以 DO 區塊確認沒有既有的報告內容與摘錄，有就報錯（請改用線上升級）。
-  - **downgrade**：還有報告內容、摘錄或清除過的報告時拒絕（舊版本只認得明文），否則還原 v0018、v0017 的 trigger、函式、CHECK 與欄位。只用於開發與測試。
+  - **downgrade**：先以 ACCESS EXCLUSIVE 鎖住三張資料表再檢查；還有報告內容、摘錄或清除過的報告時拒絕（舊版本只認得明文），否則還原 v0018、v0017 的 trigger、函式、CHECK 與欄位。只用於開發與測試。
   - **例外**：v0022 import `secscan.security`（加密元件），打破「migration 不 import 應用程式的程式」的慣例：在 SQL 中做 Fernet 不可行，而另寫一份加密會讓格式分裂。只 import 加密元件與金鑰的規則，context 的格式在 migration 中另寫一份，以 API 解得開的測試核對兩者一致。
 - **API 的其他變更**：報告加上 `expires_at`、`content_purged_at`；每個 scan 的報告配額不計失敗與內容已清除的報告；Idempotency-Key 重送照舊回原本的 metadata（清除之後也是）。
 
@@ -2881,6 +2883,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 | guard telemetry | 不變 | 6 小時 | guard | — |
 | `benchmarks/results` | 不自動清除（T28 的研究資料） | — | 使用者 | — |
 
+- 一次清除處理到一批不滿為止（最多 20 秒）：v0022 給既有內容同一個期限，到期時會一次積壓；清除時 DB 出錯只記類別、下一個間隔再試，解析與報告照常（資料庫審查 L8）。
 - 範圍 1–365 天，可用環境變數調整。只清除內容：metadata、sha256、遮罩過的觀察、finding 與比較快照都保留。
 - worker 的迴圈原本沒有計時器：比照 runner 加上 monotonic 的間隔，開始時與之後每 10 分鐘清除一次；到期以 DB 的時鐘判斷（和 trigger 的檢查相同），每批最多 50 份，以 FOR UPDATE SKIP LOCKED 認領。
 - **只做邏輯清除**：刪除檔案只是 unlink，不會抹除磁碟上的資料區塊（SSD、APFS、overlay）；DB 的 dead tuple、WAL 與備份也還留著，直到 VACUUM 或備份輪替（比照 §12.3 揭露）。
@@ -2889,10 +2892,10 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 
 ### 30.6 換版
 
-- **`rotate-evidence-keys`**（在 runner 容器內執行）：逐檔串流重新加密到 `.rotating-*` 暫存檔、驗證之後才 rename；以 advisory lock 和 keeper 互斥（keeper 每一輪處理檔案時才持有，換版重試到拿到為止；換版期間 runner 不認領新的 run）；可以中斷後續跑；解不開的目錄保留原狀並列出 run_id、exit 1；audit 只記數量。
+- **`rotate-evidence-keys`**（在 runner 容器內執行）：逐檔串流重新加密到 `.rotating-*` 暫存檔、驗證之後才 rename；runs volume 的目錄數量超過上限或列不出來時，不截斷、不換版任何檔案並 exit 1；以 advisory lock 和 keeper 互斥（keeper 每一輪處理檔案時才持有，換版重試到拿到為止；換版期間 runner 不認領新的 run）；可以中斷後續跑；解不開的目錄保留原狀並列出 run_id、exit 1；audit 只記數量。
 - **`rotate-content-keys`**（在主機上執行）：報告一份一個 transaction（密文最大約 11 MiB，避開 30 秒的 statement 上限與記憶體上限），摘錄每批 100 段（keyset 分頁）；以 FOR UPDATE 和清除互斥；已清除的略過；解不開的保留原狀並列出 id、exit 1；audit 只記數量。
 - **步驟**（比照 §12.3）：新金鑰放在最前面 → 重啟持有它的容器 → 換版 → 移除舊金鑰、重啟 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。金鑰由使用者手動編輯，`make env` 從不輪替。`rotate-secret-keys` 不變。
-- **`export-evidence`**（break-glass，在 runner 容器內執行）：沒有 `--path` 時列出加密檔的原本路徑、大小與 sha256；有 `--path` 時先完整驗證、寫入 audit（記下 run_id、路徑的 sha256 與大小，寫不進去就不匯出），才把明文寫到 stdout，不寫任何檔案。
+- **`export-evidence`**（break-glass，在 runner 容器內執行）：沒有 `--path` 時列出加密檔的原本路徑、大小與 sha256（列表也會解密驗證每個檔案，所以先寫 audit `evidence.list`；檔名由工具決定，以 ASCII 跳脫輸出）；有 `--path` 時先完整驗證、寫入 audit（記下 run_id、路徑的 sha256 與大小，寫不進去就不匯出），才把明文寫到 stdout，不寫任何檔案。
 
 ### 30.7 `benchmarks/results` 的加密（使用者，2026-11-09；更正 §29.3、§29.6）
 
@@ -2923,7 +2926,9 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 4. **掃描容器的 json-file log**：在容器刪除之前，可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
 5. **其他保持現狀的明文**：`observations` 保留遮罩過的證據，包含 Nuclei 擷取的 email 與卡號；guard telemetry 的路徑以明文存在 tmpfs，保留 6 小時；摘錄的雜湊沒有加 salt，留在不可變的事件中（T21 的設計）；報告與摘錄在 API 的記憶體中解密，下載的回應是明文（TLS 由部署負責）。
 6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 中的明文交給 T34（使用者決定之前不修改或刪除）。
-7. **金鑰在主機上**：`.env` 是唯一的設定來源，三組金鑰都在裡面（600）；bench 的金鑰檔在使用者的家目錄。金鑰遺失之後，尚未清除的證據、報告、摘錄與 bench 結果都無法復原；備份金鑰由使用者負責。
+7. **單一 run 可以讓整個平台停止認領**（安全審查 M1，§30.11）：掃描容器在 `out/` 建立超過深度（32）或條目數（20,000）上限的目錄樹時，keeper 對這個 run 永遠失敗；退避讓其他 run 仍會加密，但 keeper 一直不健康，runner 不認領新的 run，直到操作者手動處理那個目錄。這是 fail closed 的取捨；「把單一 run 改成需要人工處理的隔離狀態、不阻擋全域」改變了核准的語意，交給使用者決定（§30.11 的待決定事項）。
+8. **runner 指到可寫、但不是 runs volume 的目錄**（例如主機上手動建立的空目錄）時，keeper 仍會把找不到目錄的 run 記成 none。DB 分不出「從來沒有目錄」與「目錄不見了」（容器名稱在建立工作目錄之前就寫入），所以沒有以 DB 判斷（§30.11）。
+9. **金鑰在主機上**：`.env` 是唯一的設定來源，三組金鑰都在裡面（600）；bench 的金鑰檔在使用者的家目錄。金鑰遺失之後，尚未清除的證據、報告、摘錄與 bench 結果都無法復原；備份金鑰由使用者負責。
 
 ### 30.10 交接
 
@@ -2932,3 +2937,64 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 - **T23c**：在最終版本重跑所有 live 套件，包含這次改成等加密完成、以 `export-evidence` 讀取原始輸出的那些。
 - **T23d**：乾淨環境的重建，包含 `make env` 產生三組金鑰。
 - **T27／T28**：原始證據 7 天後清除；需要人工複核原始輸出時，要在期限內進行（或事先調整 `EVIDENCE_RETENTION_DAYS`）。實驗結果以加密的 `benchmarks/results` 保存，金鑰檔要備份；T31 的 Live smoke 需要使用者先執行 `make bench-key`。
+
+### 30.11 審查與處理（2026-11-09）
+
+三份審查（子代理，opus），範圍是 `git diff main...HEAD`：
+
+| 審查 | CRITICAL | HIGH | MEDIUM | LOW |
+|---|---|---|---|---|
+| 程式碼 | 0 | 2 | 1 | 4 |
+| 安全 | 0 | 1 | 2 | 6（另有一則文件附註） |
+| 資料庫（v0021、v0022） | 0 | 0 | 3 | 10 |
+
+兩個 HIGH 被程式碼與安全審查同時找到，合併處理。三份審查都確認加密格式（context 綁定、分塊的順序／截斷／拼接防護、各組金鑰的 token 不互通）、compose 的金鑰分配、路徑處理、trigger 遇到 NULL 的行為、鎖的順序，以及 CHECK 和 ORM 一致，都沒有問題。
+
+**HIGH（都已修正，先寫會失敗的測試）**：
+
+| 問題 | 處理 | 測試 |
+|---|---|---|
+| 孤兒目錄的加密檔解不開時（金鑰移除、檔案損壞），`sealed_at()` 拋出的例外沒有被攔下，keeper 的執行緒結束：runner 永遠不認領新的 run，正在跑的 run 結束之後也沒人加密，明文一直留到重啟（程式碼 HIGH-1、安全 M2） | vault 的每個操作都以 `guarded()` 把檔案系統與解密的錯誤轉成 `EvidenceError`；`run_pass` 另外攔下所有例外（只記類別、這一輪不健康），執行緒不會結束 | `test_an_unreadable_sealed_header_is_an_evidence_error`、`test_an_unexpected_error_is_a_failure_not_a_dead_thread` |
+| runs volume 的根目錄不存在（在主機上執行 `runner --once`、volume 沒有掛上）時，找不到 run 的目錄被當成「從來沒有目錄」：待加密的 run 被永久記成 none、到期的記成 purged，trigger 又禁止更正，真正 volume 中的明文永遠不會加密（程式碼 HIGH-2、安全 H1） | 每個操作先開啟根目錄（開不了就是錯誤），run 的目錄以根目錄的 dir fd 開啟；keeper 每一輪加密與清除之前呼叫 `vault.check()`（根目錄存在而且可寫：沒有掛上 volume 時，runner 容器的 `/runs` 在唯讀的 rootfs 上，寫不進去） | `test_a_missing_runs_volume_is_an_error_not_a_missing_directory`（5 種操作）、`test_check_needs_a_writable_runs_volume`、`test_a_broken_runs_volume_records_nothing`、整合測試 `test_a_missing_runs_volume_records_nothing` |
+
+HIGH 的剩餘部分：runner 指到一個可寫、但不是 runs volume 的目錄時（例如主機上手動建立的空目錄），仍會誤記成 none。安全審查建議只在 DB 能證明「從來沒有建立工作目錄」時才寫 none；但容器名稱在建立工作目錄之前就寫入，`PLAN_REJECTED`、`SECRET_UNAVAILABLE`、取消等常見情況都是「有容器名稱、沒有目錄」，DB 分不出來，所以列為剩餘風險（§30.9 第 8 項）。
+
+**MEDIUM**：
+
+| 問題 | 處理 |
+|---|---|
+| 常駐的 runner 正常停止（`make down`）時，keeper 的執行緒已結束，`healthy` 是 false：一定印出「無法加密」並以 exit 1 結束（程式碼 M1） | 要求停止之後，`healthy` 回傳最後一輪的結果；只有沒被要求停止、執行緒卻結束了才算不健康 |
+| 掃描容器和 runner 是同一個 uid：`chmod 000 /scan/out`、超過深度或條目上限，都讓 keeper 對這個 run 永遠失敗、整個平台停止認領；一直失敗的 run 排在最前面（`sealable` 依結束時間排序），20 個以上時其他 run 得不到加密（安全 M1） | ① 走訪時補回擁有者的權限（目錄 rwx、檔案 r），000 不再能阻擋；② 失敗的 run 與孤兒退避（20 秒起倍增、最多 10 分鐘），`sealable`／`purgeable` 排除還在退避的 run，其他 run 照常加密；③ 還在退避的仍算不健康（不認領），保持 fail closed。**未處理**：超過深度（32）或條目數（20,000）上限的目錄仍會讓整個平台不認領，見下方的待決定事項 |
+| 報告下載與到期清除同時發生：API 先讀到「沒有清除」，worker 在下一個 statement 之前 commit 清除，結果回 500，log 寫「sha256 不符」（資料庫 M1） | 「是否已清除」與內容以同一個 statement 讀取（outer join），已清除就回 410；log 分開「沒有內容」「解不開（例如換版之後沒有重啟 api）」「sha256 不符」（也處理程式碼 LOW-1） |
+| DB 不保證「已寫入 `content_purged_at`」等於「內容已刪除」：只寫清除時間就 commit，API 回 410 而密文永遠留著（資料庫 M2） | v0022 新增 deferred constraint trigger `reports_purge_complete`：寫入 `content_purged_at` 的 transaction 結束時，這份報告的內容必須已刪除（v0022 還沒合併，直接修改） |
+| v0022 寫死的密文上限沒有測試保護，之後一邊改了另一邊沒改，ORM 的 CHECK 會默默和 DB 不同（資料庫 M3） | 單元測試載入 v0022，核對三個常數等於 domain 由 `max_sealed_blob_bytes` 算出的值 |
+
+**LOW**：
+
+| 問題 | 處理 |
+|---|---|
+| `export-evidence` 對還沒加密的目錄回 traceback（程式碼 LOW-2） | 由 `guarded()` 一併處理；沒有 `sealed/` 時回「這個 run 還沒有加密檔」 |
+| keeper 第一輪完成之前，引擎就顯示 `EVIDENCE_SEALING_FAILED`（程式碼 LOW-3） | **不處理**：啟動時 zap、nuclei 的 capability probe 要實際執行容器，比 keeper 的第一輪久，這段期間本來就是 `ENGINE_PROBE_PENDING`；只有 fake 會短暫顯示。不為此新增代碼 |
+| `runner/evidence.py` 406 行、`cli/__init__.py` 從 429 行變成 441 行（程式碼 LOW-4） | 加密檔的底層操作拆到 `runner/sealed_files.py`（`evidence.py` 283 行、`sealed_files.py` 172 行）；既有的 `rotate-secret-keys` 搬到 `cli/secret_keys.py`（行為不變），獨立模組的指令由 `cli/modules.py` 註冊與分派，`cli/__init__.py` 變成 380 行 |
+| 執行時沒有程序同時持有 EVIDENCE 與 CONTENT，兩者共用金鑰只有手動執行 `check-encryption-keys` 才會發現；共用時 worker 被入侵就能解開原始證據（安全 L1） | 主機上的 `.env` 三組都有：每個 admin 指令之前（`cli/modules.py`）與 `make migrate`（`migrations/keys.py`，只有 env.py import，api 不 import）都檢查三組沒有共用。格式錯誤留給各指令自己說明 |
+| `entries()` 超過 20,000 個目錄時靜默截斷，換版漏掉目錄卻回報成功（安全 L2） | 超過上限就失敗；`rotate-evidence-keys` 在換版任何檔案之前就停止、exit 1。沒有用到的 `EvidenceStore.sealed_runs()` 刪除 |
+| DB 沒有限制 `expires_at` 的下限，也沒有限制清除時間的上限（安全 L3、資料庫 L5） | 清除時間不能晚於現在：報告、摘錄與 `run_evidence` 的 trigger 都加上 `<= clock_timestamp()`。**期限的下限不加**：期限由 app 以 1–365 天的設定計算；DB 的下限會讓到期清除的測試只能停用 trigger 來製造過期的資料 |
+| rename 之後、刪除明文之前沒有 fsync `sealed/`：主機當機時明文與密文可能都不見（安全 L4） | 每個檔案在刪除明文之前先 fsync `sealed/` |
+| 列表把工具決定的檔名（控制字元、bidi）原樣印到終端；列表會解密驗證每個檔案，卻沒有 audit（安全 L5） | `ensure_ascii=True`；列表先寫 audit `evidence.list`（run_id 與檔案數） |
+| bench 金鑰檔只以 lstat 檢查最後一段路徑，之後的讀取會跟隨 symlink（TOCTOU）；沒有檢查上層目錄；`--results-root` 指到 repo 之外時不在禁止清單（安全 L6） | 以 O_NOFOLLOW 開檔、對 fd 檢查類型、擁有者與權限；上層目錄必須屬於目前的使用者，而且別人不能寫入（建立時也檢查）；實際的結果目錄（與 `bench-seal` 的來源）加進禁止清單 |
+| 文件寫「最壞情況：run 的時間 ＋ 60 分鐘」，但 lease 一直有效的解析不受期限限制（安全的附註） | §30.3 補上例外 |
+| 升級時 `run_evidence` 的外鍵會鎖住 `scanner_runs` 直到 v0022 完成，runner 的心跳會逾時（資料庫 L1） | 文件與 migration 的說明改成升級之前停 api、worker 與 runner。不改成每個 migration 一個 transaction（影響所有 migration） |
+| 文件說「所有 ALTER TABLE 都在 UPDATE 之前」，實際上最後幾個在 UPDATE 之後（資料庫 L2） | 更正說明，寫出為什麼沒有 pending event；新的 `reports_purge_complete` 在 UPDATE 之後才建立。不加 `SET CONSTRAINTS ALL IMMEDIATE`：它會影響同一個 transaction 中之後的 migration |
+| downgrade 先檢查、後動作，中間沒有鎖表；v0021 降級會丟掉 purged 的紀錄，再升級之後已清除的 run 會被記成「從來沒有目錄」（資料庫 L3） | 兩個 downgrade 都先以 ACCESS EXCLUSIVE 鎖表；v0021 有 sealed 或 purged 的紀錄時都拒絕 |
+| `report_contents_guard` 逐欄比較，之後新增的欄位換版時可以任意修改（資料庫 L4） | 改成 `to_jsonb(NEW) - 'content' = to_jsonb(OLD) - 'content'` |
+| keeper 的逾期處理會等 run 的列鎖（worker 還在寫入時最多 5 秒），等不到就讓這一輪不健康（資料庫 L6） | run 的鎖以 SKIP LOCKED 取得，拿不到就留到下一輪，不算失敗 |
+| advisory lock：unlock 失敗會蓋掉原本的例外；持有期間沒有確認鎖還在；不相容 PgBouncer 的 transaction pooling（資料庫 L7） | unlock 失敗時讓連線失效（關閉連線就會釋放鎖），不蓋掉原本的例外；說明寫明不支援 transaction pooling。**不處理**持有期間的確認：鎖靜默消失時，因為「先驗證才刪除」，結果只會是誤報失敗、不會遺失明文 |
+| 清除每 10 分鐘只處理一批；清除時的 DB 錯誤讓 worker 結束（資料庫 L8） | 見 §30.5 |
+| 逾期查詢用不到部分索引；到期清除沒有索引；沒有 collected 事件的 run 永遠不逾期（資料庫 L9） | 查詢加上 `lease_owner IS NOT NULL`；新增 `ix_reports_expiry`、`ix_finding_triage_excerpts_expiry`；沒有 collected 事件時以 run 建立的時間起算 |
+| `record()` 先查再新增（資料庫 L10） | 改成 `INSERT … ON CONFLICT DO NOTHING RETURNING` |
+
+**待使用者決定**：單一 run 可以讓整個平台停止認領（安全 M1 未處理的部分，§30.9 第 7 項）。可選的方向：
+- A（目前的做法）：維持全域 fail closed，由操作者手動處理那個目錄。
+- B：同一個 run 失敗 N 次之後，轉成明確的「需要人工處理」狀態，在 API 與 `retention-status` 顯示，不再阻擋其他 run 的認領；仍然不是靜默略過，但會讓「加密失敗時 runner 不認領」只限於還在重試的 run。需要新的 `run_evidence` 狀態（migration）與 API 欄位。
+
+在使用者決定之前維持 A。

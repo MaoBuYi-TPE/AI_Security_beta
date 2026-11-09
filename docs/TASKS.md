@@ -1562,8 +1562,9 @@
       - 報告與摘錄：寫入之前加密、30 天後清除（410 `REPORT_EXPIRED`、摘錄 tombstone）；migration v0022（既有的明文在升級時加密）；`rotate-content-keys`。
       - `benchmarks/results`：以本機的 bench 金鑰加密（manifest v2）；`make bench-key`、`make bench-seal`。
       - live 輔助程式改成等加密完成、以 `export-evidence` 讀原始輸出（`tests/live/evidence_assertions.py`），**未執行**。
-      - 測試：S&T §4.3 的 KEY-01 至 05、SEAL-01 至 02、EVID-01 至 07、CONT-01 至 02、RET-01 至 02、ROT-01、BSEAL-01 至 03；六項空轉檢查都被抓到。使用者執行 `make env` 之前只在 db-test 上直接執行 pytest（7174 passed、2 skipped，coverage 99%），**不是完整的 `make test`**。
-    - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`；審查；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
+      - 測試：S&T §4.3 的 KEY-01 至 05、SEAL-01 至 02、EVID-01 至 07、CONT-01 至 02、RET-01 至 02、ROT-01、BSEAL-01 至 03；六項空轉檢查都被抓到。使用者執行 `make env` 之前只在 db-test 上直接執行 pytest：審查修正之後 7269 passed、2 skipped、78 deselected（live），coverage 99.08%；branch：`blob_cipher` 72/72、`runner/evidence` 42/46、`keeper` 52/56、`worker/retention` 6/6、`benchmarks/sealing` 33/34。**這不是完整的 `make test`**。
+    - 審查（opus）：程式碼 2 HIGH＋1 MEDIUM＋4 LOW、安全 1 HIGH＋2 MEDIUM＋6 LOW、資料庫 3 MEDIUM＋10 LOW，沒有 CRITICAL；兩個 HIGH 兩份審查都有找到（runs volume 不存在時誤記成 none、孤兒目錄的加密檔解不開讓 keeper 的執行緒結束），都已修正。處理與不處理的理由見 `DECISIONS.md` §30.11。**待使用者決定**：單一 run 超過目錄樹的上限時，是否改成單一 run 的隔離狀態、不阻擋全域的認領（目前維持全域 fail closed）。
+    - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。
