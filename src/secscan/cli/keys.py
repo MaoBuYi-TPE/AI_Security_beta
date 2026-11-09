@@ -21,7 +21,12 @@ from sqlalchemy.orm import sessionmaker
 from secscan.cli.services import EXIT_FAILURE, EXIT_OK, Report, audit_local, with_database
 from secscan.core.config import Settings
 from secscan.security.blob_cipher import BlobCipher
-from secscan.security.key_rings import ALL_SETTINGS, CONTENT_SETTING, content_cipher
+from secscan.security.key_rings import (
+    ALL_SETTINGS,
+    CONTENT_SETTING,
+    content_cipher,
+    shared_rings,
+)
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, check_distinct_key_rings
 from secscan.worker.content_keys import ContentRotation
 
@@ -60,6 +65,15 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
     if args.command == ROTATE_COMMAND:
         return rotate_content_keys(settings, report)
     return None
+
+
+def refuse_shared_rings(settings: Settings, report: Report) -> int | None:
+    """每個 admin 指令之前：主機上的三組金鑰共用時停止（EXIT_FAILURE）；沒有問題回 None。"""
+    problem = shared_rings(_key_settings(settings))
+    if problem is None:
+        return None
+    report(f"{problem}。沒有執行任何指令。")
+    return EXIT_FAILURE
 
 
 def check_encryption_keys(settings: Settings, report: Report) -> int:

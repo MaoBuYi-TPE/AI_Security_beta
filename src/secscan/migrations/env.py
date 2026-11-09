@@ -13,6 +13,7 @@ from sqlalchemy import Connection
 from secscan.core.config import Settings
 from secscan.core.db import create_db_engine
 from secscan.migrations import CONTENT_KEYS_ATTRIBUTE, render_item
+from secscan.migrations.keys import migration_content_keys
 from secscan.migrations.metadata import target_metadata
 
 OFFLINE_URL = "postgresql+psycopg://"
@@ -47,7 +48,7 @@ def run_migrations_online() -> None:
         _run_with(shared)
         return
     settings = Settings()
-    context.config.attributes.setdefault(CONTENT_KEYS_ATTRIBUTE, settings.content_encryption_keys)
+    context.config.attributes.setdefault(CONTENT_KEYS_ATTRIBUTE, migration_content_keys(settings))
     engine = create_db_engine(settings, application_name=MIGRATION_APPLICATION_NAME, pooled=False)
     try:
         with engine.connect() as connection:

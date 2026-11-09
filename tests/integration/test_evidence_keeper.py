@@ -10,6 +10,7 @@ docs/DECISIONS.md §30.3、§30.5）。
 """
 
 import os
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -50,6 +51,13 @@ class Moment:
     now: datetime
 
 
+@dataclass
+class Ticker:
+    """keeper 的 monotonic（退避、每輪的上限與停擺都以它計算）。"""
+
+    now: float = 0.0
+
+
 @pytest.fixture
 def queue(queue_engine: Engine) -> ScanQueue:
     return ScanQueue(
@@ -80,17 +88,26 @@ def moment() -> Moment:
 
 
 @pytest.fixture
+def ticker() -> Ticker:
+    return Ticker()
+
+
+@pytest.fixture
 def store(queue_engine: Engine) -> EvidenceStore:
     return EvidenceStore(sessionmaker(queue_engine, expire_on_commit=False), engine=queue_engine)
 
 
+SETTINGS = KeeperSettings(retention_days=7, plaintext_max_minutes=60)
+
+
 @pytest.fixture
-def keeper(store: EvidenceStore, runs: Path, moment: Moment) -> EvidenceKeeper:
+def keeper(store: EvidenceStore, runs: Path, moment: Moment, ticker: Ticker) -> EvidenceKeeper:
     return EvidenceKeeper(
         store,
         EvidenceVault(runs, shared_evidence_cipher()),
-        KeeperSettings(retention_days=7, plaintext_max_minutes=60),
+        SETTINGS,
         clock=lambda: moment.now,
+        monotonic=lambda: ticker.now,
     )
 
 
@@ -305,20 +322,24 @@ def test_a_failure_keeps_the_plaintext_records_nothing_and_recovers(
     scannable: Scannable,
     runs: Path,
     keeper: EvidenceKeeper,
+    ticker: Ticker,
 ) -> None:
     lease = _claim(queue, queue_seed, world, scannable)
     root = _directory(runs, lease.run_id)
     _finish_failed(queue, lease)
-    (root / "out").chmod(0o500)
-    try:
-        report = keeper.run_pass()
-        assert report.failures == 1
-        assert keeper.healthy is False
-        assert _evidence(queue_seed, lease.run_id) is None
-        assert CANARY in (root / "out" / "report.json").read_bytes()
-    finally:
-        (root / "out").chmod(0o700)
+    # sealed/ 中有不認得的檔案：fail closed（缺少權限的目錄 keeper 會自己補上，§30.11）。
+    (root / SEALED_DIR).mkdir()
+    stray = root / SEALED_DIR / "unexpected"
+    stray.write_bytes(b"x")
 
+    report = keeper.run_pass()
+    assert report.failures == 1
+    assert keeper.healthy is False
+    assert _evidence(queue_seed, lease.run_id) is None
+    assert CANARY in (root / "out" / "report.json").read_bytes()
+
+    stray.unlink()
+    ticker.now += 2 * SETTINGS.interval_seconds
     keeper.run_pass()
 
     assert keeper.healthy is True
@@ -578,3 +599,98 @@ def test_a_failing_seal_stays_pending_in_the_api(
 
     assert report.failures == 1
     assert _shown(client, world, lease.scan_id)["status"] == "pending"
+
+
+# --- 審查之後（docs/DECISIONS.md §30.11）--------------------------------------------------------
+
+
+def test_a_missing_runs_volume_records_nothing(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    store: EvidenceStore,
+    tmp_path: Path,
+    moment: Moment,
+) -> None:
+    """主機上執行或 volume 沒有掛上時，已終止的 run 不能被記成 none（審查 HIGH-2）。"""
+    lease = _claim(queue, queue_seed, world, scannable)
+    _finish_failed(queue, lease)
+    keeper = EvidenceKeeper(
+        store,
+        EvidenceVault(tmp_path / "not-mounted", shared_evidence_cipher()),
+        SETTINGS,
+        clock=lambda: moment.now,
+    )
+
+    report = keeper.run_pass()
+
+    assert report.failures == 1
+    assert keeper.healthy is False
+    assert _evidence(queue_seed, lease.run_id) is None
+
+
+def test_expiry_does_not_wait_for_a_run_held_by_a_worker(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    store: EvidenceStore,
+    queue_engine: Engine,
+    moment: Moment,
+) -> None:
+    """worker 還在寫入（持有 run 的列鎖）時，keeper 不等鎖、這一輪不算失敗（資料庫審查 L6）。"""
+    lease = _claim(queue, queue_seed, world, scannable)
+    _collected(queue, lease)
+    run = EvidenceRun(lease.run_id, lease.scan_id)
+    later = moment.now + timedelta(minutes=61)
+    with queue_engine.connect() as holder:
+        holder.exec_driver_sql(
+            "SELECT 1 FROM scanner_runs WHERE id = %(id)s FOR UPDATE", {"id": lease.run_id}
+        )
+        started = time.monotonic()
+        assert store.expire(run, now=later, max_minutes=60) is False
+        assert time.monotonic() - started < 2
+        holder.rollback()
+
+    assert store.expire(run, now=later, max_minutes=60) is True
+
+
+def test_sealable_and_purgeable_skip_excluded_runs(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    store: EvidenceStore,
+) -> None:
+    lease = _claim(queue, queue_seed, world, scannable)
+    _finish_failed(queue, lease)
+    run = EvidenceRun(lease.run_id, lease.scan_id)
+
+    assert store.sealable(limit=5, exclude=()) == (run,)
+    assert store.sealable(limit=5, exclude={lease.run_id}) == ()
+    assert store.record(run, None) is True
+    assert store.record(run, None) is False
+
+
+def test_a_collected_run_without_a_collected_event_still_expires(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    store: EvidenceStore,
+    moment: Moment,
+) -> None:
+    """舊資料或手動資料沒有 collected 的事件時，以 run 建立的時間起算（不會永遠不逾期）。"""
+    lease = _claim(queue, queue_seed, world, scannable)
+    _collected(queue, lease)
+    queue_seed.execute_together(
+        "ALTER TABLE scan_events DISABLE TRIGGER USER",
+        "DELETE FROM scan_events WHERE scanner_run_id = :id",
+        "ALTER TABLE scan_events ENABLE TRIGGER USER",
+        id=lease.run_id,
+    )
+
+    overdue = store.overdue(now=moment.now + timedelta(days=1), max_minutes=60, limit=5)
+
+    assert [item.run_id for item in overdue] == [lease.run_id]

@@ -14,13 +14,19 @@ Create Date: 2026-11-09 12:00:00+00:00
   - trigger run_evidence_guard：
     - 新增：狀態只能是 none 或 sealed；run 必須已終止，而且沒有容器或容器已確認刪除
       （之後沒有任何程序會再寫這個目錄）。
-    - 修改：只允許 sealed → purged 一次（寫入清除時間），其他欄位完全不變（to_jsonb 比較）。
+    - 修改：只允許 sealed → purged 一次（寫入清除時間，不晚於現在），其他欄位完全不變（to_jsonb
+      比較）。
     - 刪除、TRUNCATE：一律拒絕。
   - 既有的資料不回填：升級之後 runner 的 keeper 會分批加密既有的 run 目錄（第一次加密時才開始
     計算 7 天的保留期限），不會一升級就刪除。
   - 錯誤碼 PARSE_DEADLINE_EXCEEDED 不需要 migration：scanner_runs 的 CHECK 只檢查錯誤碼的格式。
-- downgrade：已經有 sealed 的紀錄時拒絕（舊程式不認得加密檔，會把它們報成未加密、也不會清除）；
-  否則刪除 trigger、函式與資料表。只用於開發與測試。
+- 升級時先停 api、worker 與 runner：建立外鍵會鎖住 scanner_runs（SHARE ROW EXCLUSIVE），而
+  make migrate 讓 0021 與 0022 在同一個 transaction 中執行，鎖會持有到 0022 加密完既有的報告
+  （資料庫審查 L1）。
+- downgrade：先以 ACCESS EXCLUSIVE 鎖住資料表再檢查（檢查與刪除之間不會有新紀錄）。已經有 sealed 或
+  purged 的紀錄時拒絕：舊程式不認得加密檔（會把它們報成未加密、也不會清除）；purged 的紀錄刪掉
+  之後再升級，已清除的 run 會被記成「從來沒有目錄」。否則刪除 trigger、函式與資料表。只用於開發與
+  測試。
 """
 
 from collections.abc import Sequence
@@ -70,6 +76,7 @@ BEGIN
     END IF;
     IF TG_OP = 'UPDATE' THEN
         IF OLD.status = 'sealed' AND NEW.status = 'purged' AND NEW.purged_at IS NOT NULL
+            AND NEW.purged_at <= clock_timestamp()
             AND to_jsonb(NEW) - 'status' - 'purged_at' = to_jsonb(OLD) - 'status' - 'purged_at'
         THEN
             RETURN NEW;
@@ -90,11 +97,12 @@ _TRIGGERS = (
 _REFUSE_SEALED = """
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM run_evidence WHERE status = 'sealed') THEN
+    IF EXISTS (SELECT 1 FROM run_evidence WHERE status IN ('sealed', 'purged')) THEN
         RAISE EXCEPTION USING
             ERRCODE = 'object_in_use',
-            MESSAGE = 'run_evidence: sealed evidence exists; the previous version cannot read or '
-                || 'purge it';
+            MESSAGE = 'run_evidence: recorded evidence exists; the previous version cannot read or '
+                || 'purge sealed directories, and purged runs would later look like they never '
+                || 'had one';
     END IF;
 END;
 $$
@@ -141,6 +149,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("LOCK TABLE run_evidence IN ACCESS EXCLUSIVE MODE")
     op.execute(_REFUSE_SEALED)
     op.drop_table("run_evidence")
     op.execute("DROP FUNCTION run_evidence_guard()")

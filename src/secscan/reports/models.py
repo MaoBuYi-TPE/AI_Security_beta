@@ -49,6 +49,12 @@ class ReportModel(UuidPrimaryKeyMixin, Base):
             "queue_position",
             postgresql_where=text("status IN ('queued', 'generating')"),
         ),
+        # 到期清除（T23a，v0022）：還保留內容、已完成的報告依期限排序。
+        Index(
+            "ix_reports_expiry",
+            "expires_at",
+            postgresql_where=text("status = 'succeeded' AND content_purged_at IS NULL"),
+        ),
         CheckConstraint("format IN ('json', 'markdown')", name="format_valid"),
         CheckConstraint("schema_version = 1", name="schema_version_valid"),
         CheckConstraint(

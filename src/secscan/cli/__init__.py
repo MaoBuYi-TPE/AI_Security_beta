@@ -28,11 +28,7 @@ fake 引擎的 runner（docs/DECISIONS.md §13.7）：
 
     uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-300]
     uv run secscan-admin worker [--once]
-
-金鑰、原始證據與保留期限（docs/DECISIONS.md §30；見 secscan.cli.keys、secscan.cli.evidence）：
-
-    uv run secscan-admin check-encryption-keys | retention-status
-    secscan-admin rotate-evidence-keys | export-evidence --run <id> [--path <路徑>]（runner 容器內）
+金鑰換版、原始證據與保留期限的指令在 secscan.cli.modules（§12.3、§30）。
 """
 
 import argparse
@@ -60,8 +56,7 @@ from secscan.api_keys.domain import (
     IssuedApiKey,
 )
 from secscan.api_keys.service import ApiKeyService
-from secscan.auth_profiles.service import AuthProfileService, SecretRotationError
-from secscan.cli import evidence, keys, services
+from secscan.cli import modules, secret_keys, services
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
 from secscan.core.text import require_text
@@ -70,7 +65,6 @@ from secscan.runner.config import RunnerSettings
 from secscan.runner.fake import FakeRunner
 from secscan.scanners.domain.fake import MAX_HOLD_SECONDS, FakeOutcome, FakeScript
 from secscan.scans.queue import LeaseLostError, RunReport, ScanQueue
-from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
 from secscan.targets.domain import LabNetwork
 
 PROGRAM = "secscan-admin"
@@ -79,13 +73,12 @@ EXIT_OK = 0
 EXIT_FAILURE = 1
 EXIT_USAGE = 2  # argparse 的參數錯誤
 OUTPUT_FILE_MODE = 0o600
-ROTATE_COMMAND = "rotate-secret-keys"
 FAKE_RUNNER_COMMAND = "fake-runner"
 RUNNER_COMMAND = "runner"
 WORKER_COMMAND = "worker"
 FAKE_RUNNER_APPLICATION_NAME = "secscan-fake-runner"
-# 解不開時最多列出幾個 profile id（其餘以數量表示）。
-MAX_LISTED_PROFILES = 10
+# 解不開時最多列出幾個 profile id（定義在 secscan.cli.secret_keys）。
+MAX_LISTED_PROFILES = secret_keys.MAX_LISTED_PROFILES
 
 _NOT_READY = services.NOT_READY
 
@@ -137,13 +130,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         problems = "；".join(_describe(error) for error in exc.errors())
         _report(f"設定不正確（DB_* 環境變數或 .env）：{problems}")
         return EXIT_FAILURE
-    handled = keys.run(args, settings, _report)
-    if handled is None:
-        handled = evidence.run(args, settings, _report)
+    handled = modules.run(args, settings, _report)
     if handled is not None:
         return handled
-    if args.command == ROTATE_COMMAND:
-        return _rotate_secret_keys(settings)
     if args.command == FAKE_RUNNER_COMMAND:
         script = FakeScript(outcome=FakeOutcome(args.outcome), hold_seconds=args.hold_seconds)
         return _run_fake_runner(settings, script, once=args.once)
@@ -212,36 +201,6 @@ def _create_admin_key(
     return EXIT_OK
 
 
-def _rotate_secret_keys(settings: Settings) -> int:
-    keys = settings.secret_encryption_keys
-    try:
-        cipher = SecretCipher.from_setting(keys.get_secret_value() if keys is not None else None)
-    except InvalidEncryptionKeysError as exc:
-        _report(f"{exc}。")
-        return EXIT_FAILURE
-    engine = create_db_engine(settings, application_name=CLI_APPLICATION_NAME, pooled=False)
-    try:
-        status = probe_database(engine, head_revision())
-        if status is not DatabaseStatus.READY:
-            _report(_NOT_READY[status])
-            return EXIT_FAILURE
-        with Session(engine, expire_on_commit=False) as session, session.begin():
-            count = AuthProfileService(session, cipher=cipher).reencrypt_secrets()
-    except SecretRotationError as exc:
-        _report(_unreadable_message(exc.profile_ids))
-        return EXIT_FAILURE
-    except SQLAlchemyError as exc:
-        _report(f"重新加密時資料庫發生錯誤（{type(exc).__name__}），已回滾，沒有改變任何 secret。")
-        return EXIT_FAILURE
-    finally:
-        engine.dispose()
-    _report(
-        f"已以 SECRET_ENCRYPTION_KEYS 的第一個金鑰重新加密 {count} 份 secret。"
-        "現在可以移除其他金鑰；移除後請重啟 API，並再執行一次這個指令確認全部解得開。"
-    )
-    return EXIT_OK
-
-
 def _run_fake_runner(settings: Settings, script: FakeScript, *, once: bool) -> int:
     engine = create_db_engine(settings, application_name=FAKE_RUNNER_APPLICATION_NAME, pooled=False)
     try:
@@ -287,17 +246,6 @@ def _report_run(report: RunReport) -> None:
     )
 
 
-def _unreadable_message(profile_ids: Sequence[object]) -> str:
-    listed = "、".join(str(profile_id) for profile_id in profile_ids[:MAX_LISTED_PROFILES])
-    if len(profile_ids) > MAX_LISTED_PROFILES:
-        listed += f" 等 {len(profile_ids)} 個"
-    return (
-        f"有 {len(profile_ids)} 份 secret 無法以目前的金鑰解開（profile：{listed}），"
-        "已回滾，沒有改變任何 secret。請把加密它們的金鑰加回 SECRET_ENCRYPTION_KEYS 再執行；"
-        "密文被搬到其他 profile 時也會解不開。"
-    )
-
-
 def _issue(engine: Engine, *, name: str, lifetime_days: int) -> tuple[IssuedApiKey, datetime]:
     now = datetime.now(UTC)
     expires_at = now + timedelta(days=lifetime_days)
@@ -338,14 +286,6 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="把 key 寫進這個新檔案（權限 600；已存在就拒絕），不寫到 stdout",
-    )
-    commands.add_parser(
-        ROTATE_COMMAND,
-        help="以 SECRET_ENCRYPTION_KEYS 的第一個金鑰重新加密所有的 secret",
-        description=(
-            "以 SECRET_ENCRYPTION_KEYS 的第一個金鑰重新加密所有還在的 secret。"
-            "有任何一份解不開就全部回滾。"
-        ),
     )
     fake = commands.add_parser(
         FAKE_RUNNER_COMMAND,
@@ -395,8 +335,7 @@ def _parser() -> argparse.ArgumentParser:
         description="對帳過期的解析，再處理等待解析的 run。收到 SIGTERM 時停止。",
     )
     worker.add_argument("--once", action="store_true", help="最多處理一個 run 就結束")
-    keys.register(commands)
-    evidence.register(commands)
+    modules.register(commands)
     return parser
 
 

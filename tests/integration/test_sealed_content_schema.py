@@ -12,6 +12,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import Engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests.integration.api_support import Seeder, World
@@ -188,3 +189,48 @@ def test_excerpts_rotate_while_kept_and_are_purged_once(
         .one()
     )
     assert count == 2
+
+
+# --- 審查之後（docs/DECISIONS.md §30.11）--------------------------------------------------------
+
+
+def test_a_purge_must_delete_the_content_in_the_same_transaction(
+    queue_engine: Engine, item: Scenario, world: World
+) -> None:
+    """只寫入 content_purged_at、沒有刪除內容就 commit：API 會回 410 而密文永遠留著
+    （資料庫審查 M2）。"""
+    report = _report(queue_engine, item, world, expires="-1 second")
+
+    with sessionmaker(queue_engine)() as session:
+        session.execute(text(PURGE), {"id": report})
+        with pytest.raises(IntegrityError) as caught:
+            session.commit()
+    assert getattr(caught.value.orig, "sqlstate", None) == INTEGRITY_CONSTRAINT_VIOLATION
+    with sessionmaker(queue_engine)() as session:
+        purged, contents = session.execute(
+            text(
+                "SELECT r.content_purged_at, count(c.report_id) FROM reports AS r "
+                "LEFT JOIN report_contents AS c ON c.report_id = r.id WHERE r.id = :id "
+                "GROUP BY r.content_purged_at"
+            ),
+            {"id": report},
+        ).one()
+    assert (purged, contents) == (None, 1)
+
+
+def test_purge_times_cannot_be_in_the_future(
+    queue_engine: Engine, item: Scenario, world: World
+) -> None:
+    report = _report(queue_engine, item, world, expires="-1 second")
+    _expired_excerpts(queue_engine, item, world)
+    later = "clock_timestamp() + interval '1 day'"
+
+    with sessionmaker(queue_engine)() as session:
+        assert (
+            _code(session, PURGE.replace("clock_timestamp()", later), report)
+            == INTEGRITY_CONSTRAINT_VIOLATION
+        )
+        error = violation(
+            session, EXCERPT_PURGE.replace("clock_timestamp()", later), {"id": item.sqli}
+        )
+        assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION

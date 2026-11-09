@@ -5,15 +5,25 @@ Revises: 0021
 Create Date: 2026-11-09 18:00:00+00:00
 
 升降級說明：
-- 先停 api 與 worker；升級需要 CONTENT_ENCRYPTION_KEYS（只有在已經有報告或摘錄時才需要：
-  migrations/env.py 由設定放進 config.attributes，不讀 os.environ）。所有 ALTER TABLE 都在資料的
-  UPDATE 之前，最後才加上 CHECK 與 NOT NULL（之間沒有 deferred trigger 的 pending event）。
+- 先停 api、worker 與 runner（0021 建立外鍵時鎖住 scanner_runs，make migrate 讓兩者在同一個
+  transaction 中執行）；升級需要 CONTENT_ENCRYPTION_KEYS（只有在已經有報告或摘錄時才需要：
+  migrations/env.py 由設定放進 config.attributes，不讀 os.environ）。
+- 順序：新增欄位、改寫 trigger 與函式 → 資料的 UPDATE → 最後才刪除舊欄位、加上 NOT NULL、CHECK、
+  索引與清除完整性的 deferred trigger。最後這幾個 ALTER TABLE 在 UPDATE 之後，所以不能有 pending
+  的 AFTER trigger event：新的 reports_content_check 對已經 succeeded 的列不觸發、外鍵欄位沒有改變、
+  report_contents_parent_check 只在 INSERT 觸發、reports_purge_complete 在 UPDATE 之後才建立
+  （資料庫審查 L2）。
 - reports：
   - 新增 expires_at（只在 generating → succeeded 時寫入）與 content_purged_at（只能寫一次，必須已
     到期、其他欄位都不變）。改寫 reports_guard。
   - reports_content_check 改成只在轉為 succeeded 時觸發，只核對這一次嘗試的內容存在：內容是密文，
     明文的 sha256 與大小改由 worker 寫入、下載時解密後核對（app 層）。
-  - CHECK：succeeded ⇔ 有 expires_at；content_purged_at 不早於 expires_at。
+  - CHECK：succeeded ⇔ 有 expires_at；content_purged_at 不早於 expires_at；trigger 另外要求它不晚於
+    現在。
+  - reports_purge_complete（deferred constraint trigger）：寫入 content_purged_at 的 transaction
+    結束時，這份報告的內容必須已刪除（只寫清除時間、密文卻留著，會讓 API 回 410 而密文永遠留在
+    DB；資料庫審查 M2）。
+  - 部分索引 ix_reports_expiry、ix_finding_triage_excerpts_expiry：到期清除的查詢。
 - report_contents：改用自己的 report_contents_guard（不再用共用的 scan_records_guard）：只允許換版時
   更新 content（其他欄位不變、報告未清除），以及報告寫入 content_purged_at 之後刪除。內容的 CHECK
   改成 Fernet token 的形狀（gAAAAA 開頭）與密文的上限。
@@ -28,8 +38,8 @@ Create Date: 2026-11-09 18:00:00+00:00
   - 例外：這個 migration import secscan.security（加密元件；理由見 docs/DECISIONS.md §30.4）。
 - 離線模式（--sql）：不在 Python 中加密；產生的 SQL 先以 DO 區塊確認沒有既有的報告內容與摘錄，有就
   報錯（請改用線上升級）。
-- downgrade：還有報告內容或摘錄時拒絕（舊版本只認得明文）；否則還原 0018、0017 的 trigger、函式、
-  CHECK 與欄位。只用於開發與測試。
+- downgrade：先以 ACCESS EXCLUSIVE 鎖住三張資料表再檢查。還有報告內容或摘錄時拒絕（舊版本只認得
+  明文）；否則還原 0018、0017 的 trigger、函式、CHECK 與欄位。只用於開發與測試。
 """
 
 import hashlib
@@ -123,6 +133,7 @@ BEGIN
     -- 到期清除（v0022）：已完成的報告只能寫入一次 content_purged_at，其他欄位不變。
     IF OLD.status = 'succeeded' AND OLD.content_purged_at IS NULL
         AND NEW.content_purged_at IS NOT NULL AND OLD.expires_at <= clock_timestamp()
+        AND NEW.content_purged_at <= clock_timestamp()
         AND (to_jsonb(NEW) - 'content_purged_at') = (to_jsonb(OLD) - 'content_purged_at') THEN
         RETURN NEW;
     END IF;
@@ -189,8 +200,7 @@ BEGIN
     FROM public.reports AS report WHERE report.id = OLD.report_id;
     IF TG_OP = 'UPDATE' THEN
         -- 換版：只有內容（密文）可以換，報告必須是 succeeded 而且還沒清除。
-        IF NEW.report_id = OLD.report_id AND NEW.attempt = OLD.attempt
-            AND NEW.lease_owner = OLD.lease_owner
+        IF (to_jsonb(NEW) - 'content') = (to_jsonb(OLD) - 'content')
             AND parent_status = 'succeeded' AND parent_purged IS NULL THEN
             RETURN NEW;
         END IF;
@@ -246,7 +256,7 @@ BEGIN
         END IF;
         -- 到期清除：只能一次（留下 tombstone）。
         IF OLD.purged_at IS NULL AND NEW.purged_at IS NOT NULL AND NEW.sealed_content IS NULL
-            AND OLD.expires_at <= clock_timestamp()
+            AND OLD.expires_at <= clock_timestamp() AND NEW.purged_at <= clock_timestamp()
             AND (to_jsonb(NEW) - 'sealed_content' - 'purged_at')
                 = (to_jsonb(OLD) - 'sealed_content' - 'purged_at') THEN
             RETURN NEW;
@@ -257,6 +267,29 @@ BEGIN
 END;
 $$
 """
+_PURGE_COMPLETE = """
+CREATE FUNCTION reports_purge_complete() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM public.report_contents AS stored WHERE stored.report_id = NEW.id) THEN
+        RAISE EXCEPTION USING ERRCODE = 'integrity_constraint_violation',
+            MESSAGE = 'reports: a purged report must have its content deleted in the same '
+                || 'transaction';
+    END IF;
+    RETURN NULL;
+END;
+$$
+"""
+_PURGE_COMPLETE_TRIGGER = (
+    "CREATE CONSTRAINT TRIGGER reports_purge_complete AFTER UPDATE ON reports "
+    "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+    "WHEN (OLD.content_purged_at IS NULL AND NEW.content_purged_at IS NOT NULL) "
+    "EXECUTE FUNCTION reports_purge_complete()"
+)
+_EXPIRY_INDEXES = (
+    ("ix_reports_expiry", "reports", "status = 'succeeded' AND content_purged_at IS NULL"),
+    ("ix_finding_triage_excerpts_expiry", "finding_triage_excerpts", "purged_at IS NULL"),
+)
 _REFUSE_OFFLINE = """
 DO $$
 BEGIN
@@ -419,6 +452,10 @@ def _finish() -> None:
     op.create_check_constraint(
         op.f("ck_report_contents_content_sealed"), "report_contents", _CONTENT_CHECK
     )
+    for name, table_name, condition in _EXPIRY_INDEXES:
+        op.create_index(name, table_name, ["expires_at"], postgresql_where=sa.text(condition))
+    op.execute(_PURGE_COMPLETE)
+    op.execute(_PURGE_COMPLETE_TRIGGER)
 
 
 # --- downgrade：還原 0018、0017 的內容（migration 是當時的快照，不引用其他 migration）---------
@@ -526,7 +563,14 @@ $$
 
 
 def downgrade() -> None:
+    op.execute(
+        "LOCK TABLE reports, report_contents, finding_triage_excerpts IN ACCESS EXCLUSIVE MODE"
+    )
     op.execute(_REFUSE_DOWNGRADE)
+    op.execute("DROP TRIGGER reports_purge_complete ON reports")
+    op.execute("DROP FUNCTION reports_purge_complete()")
+    for name, table_name, _condition in _EXPIRY_INDEXES:
+        op.drop_index(name, table_name=table_name)
     table = "finding_triage_excerpts"
     for name in _EXCERPT_CHECKS:
         op.drop_constraint(op.f(f"ck_{table}_{name}"), table, type_="check")

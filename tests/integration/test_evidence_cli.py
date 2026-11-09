@@ -19,7 +19,7 @@ from sqlalchemy.orm import sessionmaker
 
 from secscan.cli import EXIT_FAILURE, EXIT_OK, main
 from secscan.cli import evidence as evidence_cli
-from secscan.runner.evidence import SEALED_DIR, EvidenceVault
+from secscan.runner.evidence import SEALED_DIR, EvidenceError, EvidenceVault
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.evidence_records import EvidenceRun, EvidenceStore
@@ -248,3 +248,71 @@ def test_retention_status_shows_only_counts(
     assert "報告內容：保留中 0" in err
     assert "人工複測摘錄：保留中 0" in err
     assert str(sealed_run.run_id) not in err
+
+
+# --- 審查之後（docs/DECISIONS.md §30.11）--------------------------------------------------------
+
+
+def test_listing_is_audited_and_escapes_tool_controlled_names(
+    environment: None,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    runs: Path,
+    old_key: str,
+    capsysbinary: pytest.CaptureFixture[bytes],
+) -> None:
+    """檔名由工具決定：列表以 ASCII 跳脫（控制字元與 bidi 不直接印到終端），而且也寫 audit
+    （列表會解密驗證每個檔案；安全審查 L5）。"""
+    queue = ScanQueue(
+        sessionmaker(queue_engine, expire_on_commit=False), lab=LAB, clock=lambda: datetime.now(UTC)
+    )
+    world = queue_seed.world()
+    queue_seed.scan(world.operator_a, queue_seed.scannable(world))
+    lease = queue.claim("runner-cli", FAKE)
+    assert lease is not None
+    tricky = "out/‮report\x1b[31m.json"
+    root = runs / str(lease.run_id)
+    (root / "out").mkdir(parents=True)
+    (root / tricky).write_bytes(REPORT)
+    EvidenceVault(runs, evidence_cipher(old_key)).seal(str(lease.run_id))
+
+    assert main(["export-evidence", "--run", str(lease.run_id)]) == EXIT_OK
+
+    out, _err = capsysbinary.readouterr()
+    assert out.isascii()
+    [line] = [json.loads(item) for item in out.decode().splitlines()]
+    assert line["path"] == tricky
+    [audit] = _audits(queue_seed, "evidence.list")
+    assert audit["object_id"] == lease.run_id
+    assert audit["redacted_changes"] == {"run_id": str(lease.run_id), "files": 1}
+
+
+def test_rotation_fails_without_changes_when_the_volume_cannot_be_listed(
+    sealed_run: EvidenceRun,
+    runs: Path,
+    old_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """runs volume 的目錄超過上限或列不出來時不能截斷、回報成功（安全審查 L2）。"""
+    before = {
+        path: path.read_bytes()
+        for path in (runs / str(sealed_run.run_id)).rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(evidence_cli, "EvidenceVault", _OverflowingVault)
+
+    assert main(["rotate-evidence-keys"]) == EXIT_FAILURE
+
+    assert "上限" in capsys.readouterr().err
+    after = {
+        path: path.read_bytes()
+        for path in (runs / str(sealed_run.run_id)).rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+class _OverflowingVault(EvidenceVault):
+    def entries(self) -> tuple[str, ...]:
+        raise EvidenceError("runs volume 中的目錄數量超過上限")

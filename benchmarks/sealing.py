@@ -4,8 +4,9 @@ benchmarks 中唯一使用 cryptography 的模組。
 
 
 - 金鑰檔：BENCH_KEY_FILE，預設 ~/.config/secscan/bench-keys；一行一把 Fernet 金鑰（1 到 4 把，
-  第一把用來加密，其餘只用來解密）。必須是一般檔案（不是 symlink）、只有擁有者能讀寫（0600 或
-  0400）、屬於目前的使用者，而且不在 repo（含結果目錄）之中。金鑰一律不輸出。
+  第一把用來加密，其餘只用來解密）。必須是一般檔案（以 O_NOFOLLOW 開檔、對 fd 檢查，不是
+  symlink）、只有擁有者能讀寫（0600 或 0400）、屬於目前的使用者；上層目錄屬於目前的使用者而且
+  別人不能寫入；不在 repo 與結果目錄之中。金鑰一律不輸出。
 - 每個結果檔加密成一個 Fernet token：明文是 `BENCH_MAGIC + context + "\\n" + 內容`，context 是
   `<結果目錄的名稱>/<檔名>`，改名或搬到別的結果目錄都解不開。
 - benchmarks 是黑箱、不 import secscan（BENCH-11）：這裡自己包裝 Fernet（和平台的
@@ -14,6 +15,7 @@ benchmarks 中唯一使用 cryptography 的模組。
 """
 
 import base64
+import errno
 import os
 import re
 import stat
@@ -33,6 +35,8 @@ _KEY = re.compile(r"[A-Za-z0-9_-]{43}=")
 _CONTEXT = re.compile(r"[A-Za-z0-9_.-]{1,128}/[A-Za-z0-9_.-]{1,128}")
 _PRIVATE_DIR = 0o700
 _PRIVATE_FILE = 0o600
+_MAX_KEY_FILE_BYTES = 4096
+_MISSING = f"找不到 bench 的金鑰檔：請先執行 make bench-key，或以 {KEY_FILE_VARIABLE} 指定"
 
 
 class SealingError(ValueError):
@@ -58,13 +62,11 @@ class BenchKeys:
 
     @classmethod
     def load(cls, path: Path, *, forbidden: Sequence[Path] = (REPO_ROOT,)) -> Self:
-        """讀金鑰檔（先檢查位置、類型、擁有者與權限）；不合規則時拋出 SealingError。"""
-        _check_key_file(path, forbidden)
-        try:
-            text = path.read_text(encoding="ascii")
-        except (OSError, UnicodeDecodeError) as error:
-            raise SealingError(f"bench 的金鑰檔讀不到（{type(error).__name__}）") from None
-        return cls(_parse(text))
+        """讀金鑰檔（先檢查位置與上層目錄，再以 O_NOFOLLOW 開檔、對 fd 檢查類型、擁有者與權限）；
+        不合規則時拋出 SealingError。"""
+        _check_location(path, forbidden)
+        _check_parent(path.parent)
+        return cls(_parse(_read_key_file(path)))
 
     def __repr__(self) -> str:
         return f"BenchKeys(keys={self._count})"
@@ -97,6 +99,7 @@ def create_key_file(path: Path, *, forbidden: Sequence[Path] = (REPO_ROOT,)) -> 
     """以 O_EXCL 建立新的金鑰檔（0600，上層目錄 0700）；已經存在就失敗，不覆寫。"""
     _check_location(path, forbidden)
     path.parent.mkdir(mode=_PRIVATE_DIR, parents=True, exist_ok=True)
+    _check_parent(path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     try:
         descriptor = os.open(path, flags, _PRIVATE_FILE)
@@ -125,20 +128,50 @@ def _parse(text: str) -> list[str]:
     return entries
 
 
-def _check_key_file(path: Path, forbidden: Sequence[Path]) -> None:
+def _read_key_file(path: Path) -> str:
+    """以 O_NOFOLLOW 開檔，對開好的 fd 檢查（檢查之後才換成 symlink 也讀不到別的檔案）。"""
     try:
-        info = path.lstat()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        raise SealingError(
-            f"找不到 bench 的金鑰檔：請先執行 make bench-key，或以 {KEY_FILE_VARIABLE} 指定"
-        ) from None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise SealingError(_MISSING) from None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise SealingError("bench 的金鑰檔必須是一般檔案（不可是 symlink）") from None
+        raise SealingError(f"bench 的金鑰檔讀不到（{type(error).__name__}）") from None
+    try:
+        _check_opened(os.fstat(descriptor))
+        content = os.read(descriptor, _MAX_KEY_FILE_BYTES)
+    except OSError as error:
+        raise SealingError(f"bench 的金鑰檔讀不到（{type(error).__name__}）") from None
+    finally:
+        os.close(descriptor)
+    try:
+        return content.decode("ascii")
+    except UnicodeDecodeError:
+        raise SealingError("bench 的金鑰檔讀不到（UnicodeDecodeError）") from None
+
+
+def _check_opened(info: os.stat_result) -> None:
+    if not stat.S_ISREG(info.st_mode):
         raise SealingError("bench 的金鑰檔必須是一般檔案（不可是 symlink）")
     if info.st_mode & 0o077:
         raise SealingError("bench 的金鑰檔只能由擁有者讀寫（權限 0600）")
     if info.st_uid != os.getuid():
         raise SealingError("bench 的金鑰檔必須屬於目前的使用者")
-    _check_location(path, forbidden)
+
+
+def _check_parent(directory: Path) -> None:
+    """上層目錄屬於目前的使用者，而且 group 與 other 不能寫入（否則金鑰檔可以被換掉）。"""
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        raise SealingError(_MISSING) from None
+    except OSError as error:
+        raise SealingError(f"bench 金鑰檔的上層目錄讀不到（{type(error).__name__}）") from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise SealingError("bench 金鑰檔的上層目錄必須是目錄（不可是 symlink）")
+    if info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise SealingError("bench 金鑰檔的上層目錄必須屬於目前的使用者，而且別人不能寫入")
 
 
 def _check_location(path: Path, forbidden: Sequence[Path]) -> None:

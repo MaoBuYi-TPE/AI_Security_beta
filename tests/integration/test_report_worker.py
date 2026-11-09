@@ -230,3 +230,40 @@ def test_the_worker_purges_expired_content_at_start_and_every_ten_minutes(
     loop.run()
 
     assert retention.calls == 3
+
+
+class FailingRetention(ContentRetention):
+    """清除時 DB 出錯（例如等換版的列鎖逾時）。"""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        super().__init__(sessions)
+        self.calls = 0
+
+    def purge(self) -> PurgeReport:
+        self.calls += 1
+        raise OperationalError("SELECT 1", {}, Exception("lock timeout"))
+
+
+def test_a_database_error_while_purging_does_not_stop_the_worker(
+    sessions: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """清除失敗只記類別、下一個間隔再試；解析與報告照常（資料庫審查 L8）。"""
+    clock = FakeClock()
+    queue = ScanQueue(sessions, lab=LAB, clock=lambda: datetime.now(UTC))
+    fleet = Fleet(sessions, owner="worker:loop", role=InstanceRole.WORKER, software_version="0.1.0")
+    retention = FailingRetention(sessions)
+    loop = WorkerLoop(
+        Worker(queue, owner="worker:loop", findings=None),
+        fleet,
+        stop_requested=lambda: clock.now >= 1_500,
+        sleep=clock.sleep,
+        poll_seconds=100,
+        retention=retention,
+        monotonic=clock.monotonic,
+    )
+
+    loop.run()
+
+    assert retention.calls == 3
+    assert "OperationalError" in caplog.text
+    assert "lock timeout" not in caplog.text

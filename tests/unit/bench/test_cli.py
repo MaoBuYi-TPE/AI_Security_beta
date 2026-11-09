@@ -360,9 +360,23 @@ def test_check_spec_needs_a_usable_key_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("BENCH_KEY_FILE", str(tmp_path / "missing"))
+    results = str(tmp_path / "results")
 
-    assert main(["check-spec", str(SMOKE), "x", "--results-root", str(tmp_path)]) == 2
+    assert main(["check-spec", str(SMOKE), "x", "--results-root", results]) == 2
     assert "make bench-key" in capsys.readouterr().err
+
+
+def test_a_key_file_inside_the_results_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """結果目錄（--results-root）可能在 repo 之外，也不能放金鑰檔（安全審查 L6）。"""
+    results = tmp_path / "results"
+    results.mkdir(mode=0o700)
+    create_key_file(results / "bench-keys", forbidden=())
+    monkeypatch.setenv("BENCH_KEY_FILE", str(results / "bench-keys"))
+
+    assert main(["check-spec", str(SMOKE), "x", "--results-root", str(results)]) == 2
+    assert "結果目錄" in capsys.readouterr().err
 
 
 def test_evaluate_refuses_the_wrong_key_without_partial_output(

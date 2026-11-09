@@ -12,11 +12,12 @@ import json
 import os
 import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
 
-from benchmarks import legacy
+from benchmarks import legacy, sealing
 from benchmarks.legacy import seal_legacy
 from benchmarks.results import (
     CHECKSUMS,
@@ -354,3 +355,120 @@ def test_an_interrupted_seal_leaves_a_marked_partial_directory(
     assert left.name.startswith("new.partial-")
     assert not (root / "new").exists()
     assert sorted(os.listdir(source)) == sorted(_snapshot(source))
+
+
+# --- 審查之後（docs/DECISIONS.md §30.11）--------------------------------------------------------
+
+
+def _private_key_file(directory: Path) -> Path:
+    path = directory / "bench-keys"
+    path.write_text(_key() + "\n")
+    path.chmod(0o600)
+    return path
+
+
+def test_a_key_file_in_a_shared_writable_directory_is_refused(tmp_path: Path) -> None:
+    """別人可以寫入上層目錄時，金鑰檔可以被換掉（安全審查 L6）。"""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    path = _private_key_file(shared)
+    shared.chmod(0o777)
+    try:
+        with pytest.raises(SealingError, match="上層目錄"):
+            BenchKeys.load(path, forbidden=())
+        with pytest.raises(SealingError, match="上層目錄"):
+            create_key_file(shared / "other", forbidden=())
+    finally:
+        shared.chmod(0o700)
+    assert not (shared / "other").exists()
+
+
+def test_the_key_file_is_checked_through_the_opened_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """檢查之後才換成 symlink（TOCTOU）也讀不到別的檔案：以 O_NOFOLLOW 開檔、對 fd 檢查。"""
+    path = _private_key_file(tmp_path)
+    target = tmp_path / "elsewhere"
+    target.write_text(_key() + "\n")
+    target.chmod(0o600)
+    real_open = os.open
+
+    def swap_then_open(file: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(file) == path:
+            path.unlink()
+            path.symlink_to(target)
+        return real_open(file, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_then_open)
+
+    with pytest.raises(SealingError, match="symlink"):
+        BenchKeys.load(path, forbidden=())
+
+
+def test_a_key_file_inside_the_results_root_is_refused(tmp_path: Path) -> None:
+    results = tmp_path / "results"
+    results.mkdir(mode=0o700)
+    path = _private_key_file(results)
+
+    with pytest.raises(SealingError, match="結果目錄"):
+        BenchKeys.load(path, forbidden=(results,))
+
+
+def test_a_missing_parent_directory_points_to_make_bench_key(tmp_path: Path) -> None:
+    with pytest.raises(SealingError, match="make bench-key"):
+        BenchKeys.load(tmp_path / "not-created" / "bench-keys", forbidden=())
+
+
+def test_a_symlinked_parent_directory_is_refused(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    _private_key_file(real)
+    (tmp_path / "linked").symlink_to(real)
+
+    with pytest.raises(SealingError, match="上層目錄必須是目錄"):
+        BenchKeys.load(tmp_path / "linked" / "bench-keys", forbidden=())
+
+
+def test_unreadable_or_non_ascii_key_files_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _private_key_file(tmp_path)
+    path.chmod(0)
+    try:
+        with pytest.raises(SealingError, match="讀不到（PermissionError）"):
+            BenchKeys.load(path, forbidden=())
+    finally:
+        path.chmod(0o600)
+    path.write_bytes("金鑰\n".encode())
+    with pytest.raises(SealingError, match="UnicodeDecodeError"):
+        BenchKeys.load(path, forbidden=())
+
+    def broken_read(*_args: Any) -> bytes:
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(os, "read", broken_read)
+    with pytest.raises(SealingError, match="讀不到（OSError）"):
+        BenchKeys.load(path, forbidden=())
+
+
+def test_a_key_file_owned_by_someone_else_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _private_key_file(tmp_path)
+    monkeypatch.setattr(sealing, "_check_parent", lambda _directory: None)
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(path).st_uid + 1)
+
+    with pytest.raises(SealingError, match="屬於目前的使用者"):
+        BenchKeys.load(path, forbidden=())
+
+
+def test_tokens_must_be_bench_tokens_in_a_valid_place(
+    monkeypatch: pytest.MonkeyPatch, keys: BenchKeys
+) -> None:
+    with pytest.raises(SealingError, match="至少要有一把"):
+        BenchKeys([])
+    with pytest.raises(SealingError, match="context"):
+        keys.seal(b"x", context="no-slash")
+    monkeypatch.setattr(sealing, "MAX_PLAINTEXT_BYTES", 3)
+    with pytest.raises(SealingError, match="不可超過"):
+        keys.seal(b"four", context="run/file.json")

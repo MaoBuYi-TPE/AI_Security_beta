@@ -110,14 +110,20 @@ class ScanProgress:
         return tuple(_run_state(row) for row in rows)
 
     def run(
-        self, run_id: UUID, *, conditions: tuple[ColumnElement[bool], ...] = ()
+        self,
+        run_id: UUID,
+        *,
+        conditions: tuple[ColumnElement[bool], ...] = (),
+        skip_locked: bool = False,
     ) -> RunState | None:
         """以新的 statement 讀 run 目前的狀態並鎖住它（呼叫端持有 scan 的鎖）。
 
-        conditions 不成立時回 None。
+        conditions 不成立時回 None；skip_locked 時別人持有鎖也回 None（不等鎖）。
         """
         row = self._session.execute(
-            _run_columns().where(ScannerRunModel.id == run_id, *conditions).with_for_update()
+            _run_columns()
+            .where(ScannerRunModel.id == run_id, *conditions)
+            .with_for_update(skip_locked=skip_locked)
         ).first()
         return _run_state(row) if row is not None else None
 

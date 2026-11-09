@@ -5,23 +5,28 @@ runner 的 keeper 與 admin 指令使用：
 - 逾期：第一次進入 collected 起算（看 run.status 事件；不用最後一次，否則每次重試都重新
   計時），超過期限仍在 collected，或在 normalizing 而 lease 已過期 → failed
   （PARSE_DEADLINE_EXCEEDED）。先鎖 scan 再鎖 run（和佇列相同的順序），鎖住之後重新確認條件，
-  同一個 transaction 重算 scan 的狀態。
+  同一個 transaction 重算 scan 的狀態。run 的鎖不等：worker 還在寫入時留到下一輪，不算失敗
+  （資料庫審查 L6）。沒有 collected 事件的舊資料以 run 建立的時間起算。
   之後 worker 以舊 lease 寫入都會被 lease 的檢查擋下；已經存好的部分結果保留。
 - 待加密：已終止，而且沒有容器或容器已確認刪除（之後沒有任何程序會再寫這個目錄），還沒有紀錄。
 - 待清除：sealed 而且加密時間早於保留期限。
 - keeper 處理檔案時與 rotate-evidence-keys 以 advisory lock 互斥（session 層級：transaction 結束之後
-  仍持有，連線閒置時不會被 idle_in_transaction 的逾時中止）。
+  仍持有，連線閒置時不會被 idle_in_transaction 的逾時中止；不支援 PgBouncer 的 transaction
+  pooling）。釋放失敗時讓連線失效（關閉連線就會釋放鎖）。
 - 時間（now）由呼叫端傳入，測試可以注入；DB 寫入的時間仍用 statement_timestamp()。
 """
 
+import logging
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Engine, and_, exists, func, insert, or_, select, update
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import ColumnElement, Connection, Engine, and_, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import InstrumentedAttribute, Session, sessionmaker
 
 from secscan.scans.domain.evidence import EvidenceStatus, SealedEvidence
 from secscan.scans.domain.lifecycle import TERMINAL_RUN_STATUSES, RunErrorCode, RunStatus
@@ -29,6 +34,8 @@ from secscan.scans.domain.model import EventType
 from secscan.scans.evidence_models import RunEvidenceModel
 from secscan.scans.models import ScanEventModel, ScannerRunModel
 from secscan.scans.progress import ScanProgress, now
+
+logger = logging.getLogger(__name__)
 
 # pg_advisory_lock 的鍵（任意固定的 64 位元整數；"secscan evidence" 的前 8 bytes）。
 EVIDENCE_LOCK_KEY = 0x73656373_63616E65
@@ -77,7 +84,9 @@ class EvidenceStore:
             scan = progress.lock_scan(run.scan_id)
             if scan is None:
                 return False
-            state = progress.run(run.run_id, conditions=(_overdue(now, max_minutes),))
+            state = progress.run(
+                run.run_id, conditions=(_overdue(now, max_minutes),), skip_locked=True
+            )
             if state is None:
                 return False
             progress.move(
@@ -88,11 +97,12 @@ class EvidenceStore:
 
     # --- 加密 ------------------------------------------------------------------------------
 
-    def sealable(self, *, limit: int) -> tuple[EvidenceRun, ...]:
+    def sealable(self, *, limit: int, exclude: Collection[UUID]) -> tuple[EvidenceRun, ...]:
+        """待加密的 run；exclude 是 keeper 還在退避的 run。"""
         with self._sessions() as session:
             rows = session.execute(
                 select(ScannerRunModel.id, ScannerRunModel.scan_id)
-                .where(_settled(), ~_recorded())
+                .where(_settled(), ~_recorded(), *_excluding(ScannerRunModel.id, exclude))
                 .order_by(ScannerRunModel.finished_at, ScannerRunModel.id)
                 .limit(limit)
             )
@@ -109,20 +119,26 @@ class EvidenceStore:
             "sealed_at": None if sealed is None else now(),
         }
         with self._sessions.begin() as session:
-            if session.get(RunEvidenceModel, run.run_id) is not None:
-                return False
-            session.execute(insert(RunEvidenceModel).values(**values))
-            return True
+            inserted = session.scalar(
+                insert(RunEvidenceModel)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=[RunEvidenceModel.scanner_run_id])
+                .returning(RunEvidenceModel.scanner_run_id)
+            )
+            return inserted is not None
 
     # --- 清除 ------------------------------------------------------------------------------
 
     def purgeable(
-        self, *, now: datetime, retention_days: int, limit: int
+        self, *, now: datetime, retention_days: int, limit: int, exclude: Collection[UUID]
     ) -> tuple[EvidenceRun, ...]:
         with self._sessions() as session:
             rows = session.execute(
                 select(RunEvidenceModel.scanner_run_id, RunEvidenceModel.scan_id)
-                .where(_due(now, retention_days))
+                .where(
+                    _due(now, retention_days),
+                    *_excluding(RunEvidenceModel.scanner_run_id, exclude),
+                )
                 .order_by(RunEvidenceModel.sealed_at, RunEvidenceModel.scanner_run_id)
                 .limit(limit)
             )
@@ -153,16 +169,6 @@ class EvidenceStore:
                 select(ScannerRunModel.id).where(ScannerRunModel.id.in_(list(run_ids)))
             )
             return frozenset(found)
-
-    def sealed_runs(self) -> tuple[EvidenceRun, ...]:
-        """所有 sealed 的 run（換版用）。"""
-        with self._sessions() as session:
-            rows = session.execute(
-                select(RunEvidenceModel.scanner_run_id, RunEvidenceModel.scan_id)
-                .where(RunEvidenceModel.status == EvidenceStatus.SEALED.value)
-                .order_by(RunEvidenceModel.scanner_run_id)
-            )
-            return tuple(EvidenceRun(row.scanner_run_id, row.scan_id) for row in rows)
 
     def summary(self, *, now: datetime, retention_days: int, max_minutes: int) -> EvidenceSummary:
         with self._sessions() as session:
@@ -208,8 +214,23 @@ class EvidenceStore:
                 yield acquired
             finally:
                 if acquired:
-                    connection.scalar(select(func.pg_advisory_unlock(EVIDENCE_LOCK_KEY)))
-                    connection.commit()
+                    _release(connection)
+
+
+def _release(connection: Connection) -> None:
+    """釋放 advisory lock；失敗時讓連線失效（關閉連線就會釋放），不蓋掉原本的例外。"""
+    try:
+        connection.scalar(select(func.pg_advisory_unlock(EVIDENCE_LOCK_KEY)))
+        connection.commit()
+    except SQLAlchemyError as exc:
+        logger.warning("無法釋放原始證據的 advisory lock（%s）：關閉這個連線", type(exc).__name__)
+        connection.invalidate()
+
+
+def _excluding(
+    column: InstrumentedAttribute[UUID], exclude: Collection[UUID]
+) -> list[ColumnElement[bool]]:
+    return [column.not_in(list(exclude))] if exclude else []
 
 
 def _first_collected() -> ColumnElement[datetime]:
@@ -230,10 +251,13 @@ def _overdue(now: datetime, max_minutes: int) -> ColumnElement[bool]:
         ScannerRunModel.status == RunStatus.COLLECTED.value,
         and_(
             ScannerRunModel.status == RunStatus.NORMALIZING.value,
+            # 寫出部分索引 ix_scanner_runs_lease_expires_at 的條件，planner 才用得到（L9）。
+            ScannerRunModel.lease_owner.is_not(None),
             ScannerRunModel.lease_expires_at <= func.clock_timestamp(),
         ),
     )
-    return and_(waiting, _first_collected() <= now - timedelta(minutes=max_minutes))
+    started = func.coalesce(_first_collected(), ScannerRunModel.created_at)
+    return and_(waiting, started <= now - timedelta(minutes=max_minutes))
 
 
 def _settled() -> ColumnElement[bool]:

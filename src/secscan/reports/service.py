@@ -203,23 +203,23 @@ class ReportService:
                 code=ErrorCode.REPORT_NOT_READY,
                 message="報告尚未產生完成或已失敗。",
             )
-        if report.content_purged_at is not None:
+        # 「是否已清除」與內容以同一個 statement 讀取：worker 在兩次讀取之間 commit 清除時，
+        # 回 410 而不是 500（資料庫審查 M1）。
+        stored = self._session.execute(
+            select(ReportModel.content_purged_at, ReportContentModel.content)
+            .outerjoin(ReportContentModel, ReportContentModel.report_id == ReportModel.id)
+            .where(ReportModel.id == report_id)
+        ).one()
+        if stored.content_purged_at is not None:
             raise AppError(
                 status_code=HTTPStatus.GONE,
                 code=ErrorCode.REPORT_EXPIRED,
                 message="報告內容已超過保留期限並清除（metadata 與 sha256 仍保留）。",
             )
-        token = self._session.scalar(
-            select(ReportContentModel.content).where(ReportContentModel.report_id == report_id)
-        )
-        content = _opened(cipher, report_id, token)
-        if content is None or hashlib.sha256(content).hexdigest() != report.sha256:
+        content = _opened(cipher, report_id, stored.content)
+        if hashlib.sha256(content).hexdigest() != report.sha256:
             logger.error("報告 %s 的內容與 sha256 不符：不送出內容", report_id)
-            raise AppError(
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                code=ErrorCode.INTERNAL_ERROR,
-                message="報告內容核對失敗。",
-            )
+            raise _check_failed()
         return report, content
 
     def _check_quota(self, project_id: UUID, scan_id: UUID) -> None:
@@ -276,11 +276,24 @@ def _report(model: ReportModel) -> Report:
     )
 
 
-def _opened(cipher: BlobCipher, report_id: UUID, token: bytes | None) -> bytes | None:
-    """解密報告內容；沒有內容或解不開（金鑰不對、被改過、屬於別的報告）時回 None。"""
+def _opened(cipher: BlobCipher, report_id: UUID, token: bytes | None) -> bytes:
+    """解密報告內容；沒有內容或解不開（金鑰不對、被改過、屬於別的報告）時記錄原因、回 500。"""
     if token is None:
-        return None
+        logger.error("報告 %s 沒有內容（也沒有清除紀錄）：不送出內容", report_id)
+        raise _check_failed()
     try:
         return cipher.unseal(token, context=report_context(report_id), max_bytes=MAX_REPORT_BYTES)
     except SealedDataUnreadableError:
-        return None
+        logger.error(
+            "報告 %s 的內容解不開（金鑰不對，例如換版之後沒有重啟 api；或內容被改過）：不送出內容",
+            report_id,
+        )
+        raise _check_failed() from None
+
+
+def _check_failed() -> AppError:
+    return AppError(
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        code=ErrorCode.INTERNAL_ERROR,
+        message="報告內容核對失敗。",
+    )

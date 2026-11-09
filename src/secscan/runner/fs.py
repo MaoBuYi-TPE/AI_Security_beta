@@ -82,16 +82,32 @@ def open_parent(root_fd: int, relative: str) -> tuple[int, str]:
     return current, name
 
 
-def list_tree(root_fd: int, limits: TreeLimits, *, skip: frozenset[str] = frozenset()) -> Tree:
-    """列出 root 底下的整棵樹（不跟隨 symlink）；skip 是 root 這一層要略過的名稱。"""
-    tree = Tree()
-    _list(root_fd, "", 0, tree, limits, skip)
-    return tree
+def list_tree(
+    root_fd: int,
+    limits: TreeLimits,
+    *,
+    skip: frozenset[str] = frozenset(),
+    restore_access: bool = False,
+) -> Tree:
+    """列出 root 底下的整棵樹（不跟隨 symlink）；skip 是 root 這一層要略過的名稱。
+
+    restore_access：目錄與一般檔案缺少擁有者的權限時先補上（目錄 rwx、檔案 r）。掃描容器和
+    runner 是同一個 uid，可以把 out/ 或其中的檔案改成 000；容器已確認刪除、worker 只能唯讀，
+    走訪期間沒有其他程序會改這棵樹（docs/DECISIONS.md §30.11）。
+    """
+    walk = _Walk(Tree(), limits, restore_access)
+    _list(walk, root_fd, "", 0, skip)
+    return walk.tree
 
 
-def _list(
-    dir_fd: int, prefix: str, depth: int, tree: Tree, limits: TreeLimits, skip: frozenset[str]
-) -> None:
+@dataclass(frozen=True, slots=True)
+class _Walk:
+    tree: Tree
+    limits: TreeLimits
+    restore_access: bool
+
+
+def _list(walk: _Walk, dir_fd: int, prefix: str, depth: int, skip: frozenset[str]) -> None:
     try:
         entries = os.scandir(dir_fd)
     except OSError as exc:
@@ -100,31 +116,51 @@ def _list(
         for entry in entries:
             if not prefix and entry.name in skip:
                 continue
-            tree.entries += 1
-            if tree.entries > limits.max_entries:
+            walk.tree.entries += 1
+            if walk.tree.entries > walk.limits.max_entries:
                 raise TreeError("目錄的條目超過上限")
-            _visit(dir_fd, entry.name, prefix, depth, tree, limits)
+            _visit(walk, dir_fd, entry.name, prefix, depth)
 
 
-def _visit(dir_fd: int, name: str, prefix: str, depth: int, tree: Tree, limits: TreeLimits) -> None:
+def _visit(walk: _Walk, dir_fd: int, name: str, prefix: str, depth: int) -> None:
     try:
         info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
         return
     except OSError as exc:
         raise TreeError(f"無法讀取條目（{reason(exc)}）") from None
+    tree = walk.tree
     relative = f"{prefix}{name}"
     tree.newest_mtime = max(tree.newest_mtime, info.st_mtime)
     if stat.S_ISREG(info.st_mode):
+        if walk.restore_access:
+            _grant(dir_fd, name, info.st_mode, _OWNER_READ)
         tree.files.append(relative)
     elif stat.S_ISDIR(info.st_mode):
-        if depth + 1 > limits.max_depth:
+        if depth + 1 > walk.limits.max_depth:
             raise TreeError("目錄的深度超過上限")
+        if walk.restore_access:
+            _grant(dir_fd, name, info.st_mode, PRIVATE_DIR)
         tree.directories.append(relative)
         with opened(open_child(name, dir_fd)) as child:
-            _list(child, f"{relative}/", depth + 1, tree, limits, frozenset())
+            _list(walk, child, f"{relative}/", depth + 1, frozenset())
     else:
         tree.others.append(relative)
+
+
+_OWNER_READ = 0o400
+
+
+def _grant(dir_fd: int, name: str, mode: int, needed: int) -> None:
+    """補上擁有者缺少的權限位元（呼叫端剛以 lstat 確認類型，不是 symlink）。"""
+    current = stat.S_IMODE(mode)
+    if current & needed == needed:
+        return
+    nofollow = os.chmod in os.supports_follow_symlinks
+    try:
+        os.chmod(name, current | needed, dir_fd=dir_fd, follow_symlinks=not nofollow)
+    except OSError as exc:
+        raise TreeError(f"無法恢復權限（{reason(exc)}）") from None
 
 
 def unlink_at(root_fd: int, relative: str) -> None:

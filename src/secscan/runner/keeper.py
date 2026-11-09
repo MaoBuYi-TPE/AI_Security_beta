@@ -7,11 +7,15 @@
 4. 孤兒：沒有 scanner_runs 紀錄的 UUID 目錄（舊的 probe…）：一小時沒有變動才加密，加密檔標頭中的
    時間超過保留期限才刪除；絕不在未加密時刪除。
 第 2 到 4 步持有 advisory lock，和 rotate-evidence-keys 互斥；拿不到鎖（換版中）時這一輪略過。
+這幾步之前先確認 runs volume 存在而且可寫（沒有掛上時，找不到目錄不能記成 none；§30.11）。
 
 keeper 有自己的 DB session，和主迴圈只共用健康狀態：主迴圈監看容器時加密照常進行，心跳、對帳與取消
 都不受影響。任何一個 run 失敗都保留明文、不記下 sealed、繼續處理其他 run；這一輪就不健康，主迴圈
 停止認領新的 run（CapabilityIssue.EVIDENCE_SEALING_FAILED），直到有一輪沒有任何失敗才恢復。
-執行緒停止、停擺（太久沒有完成一輪）或換版中也算不健康。log 只有 run_id 與錯誤的種類。
+執行緒意外結束、停擺（太久沒有完成一輪）或換版中也算不健康；正常停止時保留最後一輪的結果。
+任何例外都不會讓執行緒結束：非預期的例外只記類別，這一輪不健康（審查 HIGH-1）。
+失敗的 run 與孤兒目錄退避（20 秒起倍增，最多 10 分鐘）：不會每一輪都重試、佔滿批次而讓其他 run
+等不到加密；還在退避的仍算不健康（安全審查 M1）。log 只有 run_id 與錯誤的種類。
 """
 
 import logging
@@ -35,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 # 幾輪的時間沒有完成一輪就視為停擺。
 STALE_PASSES = 3
+MAX_BACKOFF_SECONDS = 600.0
 _KNOWN_BATCH = 500
 _FAILURES = (EvidenceError, TreeError, SQLAlchemyError, OSError)
 
@@ -48,12 +53,12 @@ class Store(Protocol):
 
     def expire(self, run: EvidenceRun, *, now: datetime, max_minutes: int) -> bool: ...
 
-    def sealable(self, *, limit: int) -> tuple[EvidenceRun, ...]: ...
+    def sealable(self, *, limit: int, exclude: Collection[UUID]) -> tuple[EvidenceRun, ...]: ...
 
     def record(self, run: EvidenceRun, sealed: SealedEvidence | None) -> bool: ...
 
     def purgeable(
-        self, *, now: datetime, retention_days: int, limit: int
+        self, *, now: datetime, retention_days: int, limit: int, exclude: Collection[UUID]
     ) -> tuple[EvidenceRun, ...]: ...
 
     def record_purged(self, run: EvidenceRun) -> bool: ...
@@ -65,6 +70,8 @@ class Store(Protocol):
 
 class Vault(Protocol):
     """檔案的部分（runner.evidence.EvidenceVault）。"""
+
+    def check(self) -> None: ...
 
     def entries(self) -> tuple[str, ...]: ...
 
@@ -96,11 +103,12 @@ class PassReport:
     orphans_sealed: int = 0
     orphans_purged: int = 0
     failures: int = 0
+    deferred: int = 0
     skipped: bool = False
 
     @property
     def clean(self) -> bool:
-        return self.failures == 0 and not self.skipped
+        return self.failures == 0 and self.deferred == 0 and not self.skipped
 
 
 class EvidenceKeeper:
@@ -123,14 +131,21 @@ class EvidenceKeeper:
         self._finished_at: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # 失敗的次數與下一次重試的時間（monotonic）：run 以 run_id、孤兒以目錄名稱為鍵。
+        self._backoff: dict[UUID | str, tuple[int, float]] = {}
 
     @property
     def healthy(self) -> bool:
-        """最近一輪沒有任何失敗，而且沒有停擺（執行緒模式：執行緒還在）。"""
+        """最近一輪沒有任何失敗，而且沒有停擺（執行緒模式：執行緒還在）。
+
+        要求停止之後是最後一輪的結果：正常停止不是失敗（審查 MEDIUM-1）。
+        """
         with self._state:
             if not self._healthy or self._finished_at is None:
                 return False
             finished_at = self._finished_at
+        if self._stop.is_set():
+            return True
         if self._thread is not None and not self._thread.is_alive():
             return False
         settings = self._settings
@@ -159,12 +174,17 @@ class EvidenceKeeper:
                     report.skipped = True
                     logger.warning("原始證據的金鑰換版中：這一輪不加密、不清除")
                 else:
+                    self._vault.check()
                     self._seal(report, deadline)
                     self._purge(report, deadline)
                     self._orphans(report, deadline)
         except _FAILURES as exc:
             report.failures += 1
-            logger.error("keeper 這一輪中止（%s）", type(exc).__name__)
+            logger.error("keeper 這一輪中止（%s）", _kind(exc))
+        except Exception as exc:  # noqa: BLE001 - 執行緒不能因為非預期的例外結束（只記類別）
+            report.failures += 1
+            logger.error("keeper 這一輪發生非預期的錯誤（%s）", type(exc).__name__)
+        report.deferred = len(self._backoff)
         self._finish(report)
         return report
 
@@ -191,7 +211,8 @@ class EvidenceKeeper:
                 logger.warning("run %s 等待解析逾期：已轉成 failed，接著加密", run.run_id)
 
     def _seal(self, report: PassReport, deadline: float) -> None:
-        for run in self._store.sealable(limit=self._settings.batch):
+        candidates = self._store.sealable(limit=self._settings.batch, exclude=self._waiting_runs())
+        for run in candidates:
             if self._monotonic() > deadline:
                 return
             try:
@@ -200,6 +221,7 @@ class EvidenceKeeper:
             except _FAILURES as exc:
                 self._failed(report, run.run_id, exc)
                 continue
+            self._backoff.pop(run.run_id, None)
             if sealed is None:
                 report.none += 1
             else:
@@ -208,7 +230,10 @@ class EvidenceKeeper:
     def _purge(self, report: PassReport, deadline: float) -> None:
         settings = self._settings
         candidates = self._store.purgeable(
-            now=self._clock(), retention_days=settings.retention_days, limit=settings.batch
+            now=self._clock(),
+            retention_days=settings.retention_days,
+            limit=settings.batch,
+            exclude=self._waiting_runs(),
         )
         for run in candidates:
             if self._monotonic() > deadline:
@@ -219,6 +244,7 @@ class EvidenceKeeper:
             except _FAILURES as exc:
                 self._failed(report, run.run_id, exc)
                 continue
+            self._backoff.pop(run.run_id, None)
             report.purged += 1
 
     def _orphans(self, report: PassReport, deadline: float) -> None:
@@ -226,16 +252,23 @@ class EvidenceKeeper:
         known: set[UUID] = set()
         for start in range(0, len(names), _KNOWN_BATCH):
             known |= self._store.known([UUID(name) for name in names[start : start + _KNOWN_BATCH]])
+        # 操作者已經刪掉的孤兒目錄不再算失敗。
+        present = set(names)
+        for key in [key for key in self._backoff if isinstance(key, str) and key not in present]:
+            del self._backoff[key]
+        waiting = self._waiting()
         handled = 0
         for name in names:
-            if UUID(name) in known:
+            if UUID(name) in known or name in waiting:
                 continue
             if self._monotonic() > deadline or handled >= self._settings.batch:
                 return
             try:
                 handled += self._orphan(report, name)
             except _FAILURES as exc:
-                self._failed(report, UUID(name), exc)
+                self._failed(report, UUID(name), exc, key=name)
+                continue
+            self._backoff.pop(name, None)
 
     def _orphan(self, report: PassReport, name: str) -> int:
         """處理了（加密或刪除）回 1，還沒到時間回 0。"""
@@ -264,9 +297,24 @@ class EvidenceKeeper:
 
     # --- 狀態 ------------------------------------------------------------------------------
 
-    def _failed(self, report: PassReport, run_id: UUID, exc: BaseException) -> None:
+    def _failed(
+        self, report: PassReport, run_id: UUID, exc: BaseException, *, key: UUID | str | None = None
+    ) -> None:
         report.failures += 1
-        logger.error("run %s 的原始證據無法處理（%s）：保留原狀，下一輪重試", run_id, _kind(exc))
+        failures = self._backoff.get(key or run_id, (0, 0.0))[0] + 1
+        delay = min(self._settings.interval_seconds * 2**failures, MAX_BACKOFF_SECONDS)
+        self._backoff[key or run_id] = (failures, self._monotonic() + delay)
+        logger.error(
+            "run %s 的原始證據無法處理（%s）：保留原狀，%.0f 秒後重試", run_id, _kind(exc), delay
+        )
+
+    def _waiting(self) -> frozenset[UUID | str]:
+        """還在退避、這一輪不重試的 run 與孤兒（仍算不健康）。"""
+        now = self._monotonic()
+        return frozenset(key for key, (_, retry_at) in self._backoff.items() if retry_at > now)
+
+    def _waiting_runs(self) -> frozenset[UUID]:
+        return frozenset(key for key in self._waiting() if isinstance(key, UUID))
 
     def _finish(self, report: PassReport) -> None:
         with self._state:

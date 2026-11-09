@@ -153,7 +153,10 @@ def test_the_runner_stops_claiming_when_evidence_cannot_be_sealed(
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """一個已終止的 run 的明文刪不掉：保留原狀、不記下 sealed；--once 不認領新的 run，exit 1。"""
+    """一個已終止的 run 無法加密：保留原狀、不記下 sealed；--once 不認領新的 run，exit 1。
+
+    sealed/ 中有不認得的檔案（fail closed；缺少權限的目錄 keeper 會自己補上，§30.11）。
+    """
     caplog.set_level(logging.ERROR)
     queue = ScanQueue(
         sessionmaker(queue_engine, expire_on_commit=False), lab=LAB, clock=lambda: datetime.now(UTC)
@@ -167,11 +170,11 @@ def test_the_runner_stops_claiming_when_evidence_cannot_be_sealed(
     queue.prepare(lease)
     queue.advance(lease, RunStatus.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
     second = queue_seed.scan(world.operator_a, queue_seed.scannable(world))
-    out.chmod(0o500)
-    try:
-        assert main(["runner", "--once"]) == EXIT_FAILURE
-    finally:
-        out.chmod(0o700)
+    sealed = out.parent / "sealed"
+    sealed.mkdir()
+    (sealed / "unexpected").write_bytes(b"x")
+
+    assert main(["runner", "--once"]) == EXIT_FAILURE
 
     err = capsys.readouterr().err
     assert "原始證據無法加密或清除" in err

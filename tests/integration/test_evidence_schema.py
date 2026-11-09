@@ -4,7 +4,7 @@
 - 修改：只允許 sealed → purged 一次，其他欄位不變；刪除與 TRUNCATE 一律拒絕。
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -31,8 +31,8 @@ INSERT = (
     "INSERT INTO run_evidence (scanner_run_id, scan_id, status, file_count, plaintext_bytes, "
     "sealed_at, purged_at) VALUES (:run, :scan, :status, :files, :bytes, :sealed, :purged)"
 )
-SEALED_AT = datetime(2030, 1, 1, tzinfo=UTC)
-PURGED_AT = datetime(2030, 1, 8, tzinfo=UTC)
+SEALED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+PURGED_AT = datetime(2026, 1, 8, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -146,7 +146,7 @@ def test_a_sealed_record_can_be_purged_once(
     lease = _sealed(queue, queue_seed, queue_engine)
     _purge(queue_engine, lease.run_id)
 
-    params = {"run": lease.run_id, "at": datetime(2030, 2, 1, tzinfo=UTC)}
+    params = {"run": lease.run_id, "at": datetime(2026, 2, 1, tzinfo=UTC)}
     assert _code(queue_engine, PURGE, params) == INTEGRITY_CONSTRAINT_VIOLATION
     back = "UPDATE run_evidence SET status = 'sealed', purged_at = NULL WHERE scanner_run_id = :run"
     assert _code(queue_engine, back, {"run": lease.run_id}) == INTEGRITY_CONSTRAINT_VIOLATION
@@ -185,7 +185,7 @@ def test_purging_cannot_precede_sealing(
 ) -> None:
     lease = _sealed(queue, queue_seed, queue_engine)
 
-    params = {"run": lease.run_id, "at": datetime(2029, 1, 1, tzinfo=UTC)}
+    params = {"run": lease.run_id, "at": datetime(2025, 1, 1, tzinfo=UTC)}
     assert _code(queue_engine, PURGE, params) == CHECK_VIOLATION
 
 
@@ -193,3 +193,13 @@ def test_truncate_is_refused(queue: ScanQueue, queue_seed: Seeder, queue_engine:
     _sealed(queue, queue_seed, queue_engine)
 
     assert _code(queue_engine, "TRUNCATE run_evidence", {}) == INTEGRITY_CONSTRAINT_VIOLATION
+
+
+def test_purging_cannot_be_dated_in_the_future(
+    queue: ScanQueue, queue_seed: Seeder, queue_engine: Engine
+) -> None:
+    """清除的時間不能晚於現在（資料庫審查 L5）。"""
+    lease = _sealed(queue, queue_seed, queue_engine)
+
+    params = {"run": lease.run_id, "at": datetime.now(UTC) + timedelta(days=1)}
+    assert _code(queue_engine, PURGE, params) == INTEGRITY_CONSTRAINT_VIOLATION

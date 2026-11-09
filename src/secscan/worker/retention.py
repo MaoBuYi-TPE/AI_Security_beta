@@ -6,10 +6,13 @@
 - 摘錄：還沒清除、expires_at 已過 → sealed_content 改成 NULL、寫入 purged_at（tombstone；事件中的
   雜湊與長度、「每個人工複測事件恰好兩筆」都不變）。
 - 到期以 DB 的時鐘判斷（和 trigger 的檢查相同）；每批有數量上限，以 FOR UPDATE SKIP LOCKED 認領，
-  和換版、其他 worker 不衝突。
+  和換版、其他 worker 不衝突。一次清除處理到一批不滿為止（最多 PURGE_MAX_SECONDS）：v0022 給既有
+  內容同一個期限，到期時會一次積壓（資料庫審查 L8）。
 - 只是刪除欄位與資料列：DB 的 dead tuple、WAL 與備份仍保留舊資料，直到 VACUUM 或備份輪替。
 """
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy import ColumnElement, and_, delete, func, select, tuple_, update
@@ -20,6 +23,7 @@ from secscan.reports.domain.model import ReportStatus
 from secscan.reports.models import ReportContentModel, ReportModel
 
 PURGE_EVERY_SECONDS = 600.0
+PURGE_MAX_SECONDS = 20.0
 BATCH = 50
 _EXCERPTS = FindingTriageExcerptModel
 
@@ -43,12 +47,31 @@ class ContentSummary:
 
 
 class ContentRetention:
-    def __init__(self, sessions: sessionmaker[Session], *, batch: int = BATCH) -> None:
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        *,
+        batch: int = BATCH,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._sessions = sessions
         self._batch = batch
+        self._monotonic = monotonic
 
     def purge(self) -> PurgeReport:
-        return PurgeReport(reports=self._reports(), excerpts=self._excerpts())
+        deadline = self._monotonic() + PURGE_MAX_SECONDS
+        return PurgeReport(
+            reports=self._drain(self._reports, deadline),
+            excerpts=self._drain(self._excerpts, deadline),
+        )
+
+    def _drain(self, step: Callable[[], int], deadline: float) -> int:
+        total = 0
+        while True:
+            count = step()
+            total += count
+            if count < self._batch or self._monotonic() > deadline:
+                return total
 
     def summary(self) -> ContentSummary:
         with self._sessions() as session:

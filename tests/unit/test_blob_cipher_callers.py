@@ -17,6 +17,7 @@ CONTENT_READERS = {
 }
 EVIDENCE_READERS = {
     "runner/evidence.py",
+    "runner/sealed_files.py",
     "cli/evidence.py",
 }
 
@@ -32,9 +33,10 @@ def test_only_report_downloads_and_triage_open_content() -> None:
 
 
 def test_only_the_evidence_vault_opens_raw_evidence() -> None:
-    """runner（加密之後的驗證、換版）與 CLI 的匯出都經由 runner/evidence.py。"""
-    assert _users("unseal_stream") == {"runner/evidence.py"}
-    assert _users("read_stream_header") == {"runner/evidence.py"}
+    """runner（加密之後的驗證、換版）與 CLI 的匯出都經由 runner/evidence.py（底層的讀取在
+    runner/sealed_files.py）。"""
+    assert _users("unseal_stream") == {"runner/evidence.py", "runner/sealed_files.py"}
+    assert _users("read_stream_header") == {"runner/sealed_files.py"}
     assert _users("unseal_stream") <= EVIDENCE_READERS
 
 
@@ -70,6 +72,13 @@ def test_the_api_and_the_worker_never_read_the_evidence_keys() -> None:
         for path in SOURCE_ROOT.rglob("*.py")
         if "evidence_encryption_keys" in path.read_text(encoding="utf-8")
     }
-    assert readers == {"core/config.py", "cli/services.py", "cli/evidence.py", "cli/keys.py"}
+    # migrations/keys.py：只有 make migrate（主機上）檢查三組金鑰沒有共用；api 不 import 它。
+    assert readers == {
+        "core/config.py",
+        "cli/services.py",
+        "cli/evidence.py",
+        "cli/keys.py",
+        "migrations/keys.py",
+    }
     for path in (SOURCE_ROOT / "runner").rglob("*.py"):
         assert "content_encryption_keys" not in path.read_text(encoding="utf-8"), path

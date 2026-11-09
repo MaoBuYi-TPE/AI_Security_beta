@@ -8,6 +8,8 @@ import logging
 import time
 from collections.abc import Callable
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from secscan.scanners.domain.instances import Capabilities
 from secscan.scanners.service import Fleet
 from secscan.scans.queue import RunReport
@@ -69,7 +71,12 @@ class WorkerLoop:
         if self._purged_at is not None and now - self._purged_at < PURGE_EVERY_SECONDS:
             return
         self._purged_at = now
-        purged = self._retention.purge()
+        try:
+            purged = self._retention.purge()
+        except SQLAlchemyError as exc:
+            # 例如等換版的列鎖逾時：只記類別，下一個間隔再試；解析與報告照常（資料庫審查 L8）。
+            logger.error("清除到期的內容失敗（%s）：下一次再試", type(exc).__name__)
+            return
         if purged.reports or purged.excerpts:
             logger.info(
                 "已清除到期的內容：報告 %s 份、人工複測摘錄 %s 段", purged.reports, purged.excerpts

@@ -38,6 +38,7 @@ from secscan.runner.config import RunnerSettings
 from secscan.runner.evidence import EvidenceError, EvidenceVault
 from secscan.scans.evidence_records import EvidenceStore
 from secscan.scans.models import ScanModel, ScannerRunModel
+from secscan.security.blob_cipher import StreamInfo
 from secscan.security.key_rings import EVIDENCE_SETTING, evidence_cipher
 from secscan.security.secret_cipher import InvalidEncryptionKeysError
 from secscan.worker.retention import ContentRetention
@@ -111,7 +112,12 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
 
 def _rotate(engine: Engine, vault: EvidenceVault, report: Report) -> int:
     store = EvidenceStore(sessionmaker(engine, expire_on_commit=False), engine=engine)
-    outcome = _rotate_locked(store, vault)
+    try:
+        outcome = _rotate_locked(store, vault)
+    except EvidenceError as exc:
+        # entries() 在換版任何檔案之前就失敗（列不出來、超過上限）：沒有改變任何檔案。
+        report(f"{exc}：沒有換版任何檔案。")
+        return EXIT_FAILURE
     if outcome is None:
         report("keeper 正在處理原始證據，等不到鎖：請稍後再執行（沒有改變任何檔案）。")
         return EXIT_FAILURE
@@ -170,10 +176,7 @@ def _export(
     name = str(run_id)
     try:
         if path is None:
-            for info in vault.listing(name):
-                line = {"path": info.path, "sha256": info.sha256, "size_bytes": info.size}
-                sys.stdout.write(json.dumps(line, ensure_ascii=False) + "\n")
-            return EXIT_OK
+            return _list(engine, vault.listing(name), run_id)
         verified = vault.export(name, path, _Discard())
     except EvidenceError as exc:
         report(f"{exc}。")
@@ -202,6 +205,23 @@ def _export(
         report("兩次解密的內容不同：輸出不可信，請丟棄。")
         return EXIT_FAILURE
     report(f"已匯出 {exported.size} bytes（sha256 {exported.sha256}）；這次存取已記入 audit。")
+    return EXIT_OK
+
+
+def _list(engine: Engine, infos: tuple[StreamInfo, ...], run_id: UUID) -> int:
+    """列表也解密驗證每個檔案，所以先寫 audit；檔名由工具決定，以 ASCII 跳脫（不把控制字元與
+    bidi 直接印到終端）。"""
+    audit_local(
+        engine,
+        "evidence.list",
+        {"run_id": str(run_id), "files": len(infos)},
+        object_type="run_evidence",
+        object_id=run_id,
+        project_id=_project_of(engine, run_id),
+    )
+    for info in infos:
+        line = {"path": info.path, "sha256": info.sha256, "size_bytes": info.size}
+        sys.stdout.write(json.dumps(line, ensure_ascii=True) + "\n")
     return EXIT_OK
 
 

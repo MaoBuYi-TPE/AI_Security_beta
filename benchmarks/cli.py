@@ -22,7 +22,7 @@ from benchmarks.ground_truth import load_adjudications, load_ground_truth, load_
 from benchmarks.legacy import seal_legacy
 from benchmarks.results import canonical_json
 from benchmarks.schedule import build_schedule
-from benchmarks.sealing import BenchKeys, create_key_file, key_file_path
+from benchmarks.sealing import REPO_ROOT, BenchKeys, create_key_file, key_file_path
 from benchmarks.spec import check_name, load_spec
 from benchmarks.stats import evaluation_json
 
@@ -75,7 +75,7 @@ def _check_spec(path: Path, name: str, root: Path) -> str:
     check_name(name)
     if (root / name).exists():
         raise ValueError("結果目錄已經存在；請換一個新的 BENCH_NAME")
-    BenchKeys.load(key_file_path())
+    BenchKeys.load(key_file_path(), forbidden=(REPO_ROOT, root))
     schedule = build_schedule(spec)
     hours = spec.worst_case_seconds() / 3600
     return (
@@ -91,14 +91,15 @@ def _create_key() -> str:
 
 
 def _seal_results(source: Path, name: str, root: Path) -> str:
-    keys = BenchKeys.load(key_file_path())
+    keys = BenchKeys.load(key_file_path(), forbidden=(REPO_ROOT, root, source))
     sealed = seal_legacy(source, root, name, keys)
     return f"已加密成 {sealed}；原目錄 {source} 沒有改變，確認之後再自行處理\n"
 
 
 def _evaluate(arguments: argparse.Namespace) -> str:
     name = check_name(arguments.name)
-    batch = load_batch(arguments.results_root / name, BenchKeys.load(key_file_path()))
+    keys = BenchKeys.load(key_file_path(), forbidden=(REPO_ROOT, arguments.results_root))
+    batch = load_batch(arguments.results_root / name, keys)
     inputs: dict[str, Any] = {"ground_truth": {}, "adjudications": None, "pair_labels": None}
     truths = []
     for path in arguments.truth:

@@ -382,6 +382,12 @@ class FindingTriageExcerptModel(Base):
             name="sealed_content_valid",
         ),
         CheckConstraint("purged_at IS NULL OR purged_at >= expires_at", name="purged_after_expiry"),
+        # 到期清除（T23a，v0022）：還沒清除的摘錄依期限排序。
+        Index(
+            "ix_finding_triage_excerpts_expiry",
+            "expires_at",
+            postgresql_where=text("purged_at IS NULL"),
+        ),
     )
 
     finding_id: Mapped[UUID]

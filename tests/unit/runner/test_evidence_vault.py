@@ -14,6 +14,7 @@ from uuid import UUID
 import pytest
 from cryptography.fernet import Fernet
 
+from secscan.runner import fs as fs_module
 from secscan.runner.evidence import SEALED_DIR, EvidenceError, EvidenceVault
 from secscan.runner.fs import TreeLimits
 from secscan.runner.workspace import Workspace
@@ -538,3 +539,118 @@ def test_errors_never_include_paths(runs: Path, key: str) -> None:
         root.chmod(0o700)
     assert str(runs) not in str(raised.value)
     assert RUN not in str(raised.value)
+
+
+# --- 審查之後（docs/DECISIONS.md §30.11）--------------------------------------------------------
+
+
+def test_an_unreadable_sealed_header_is_an_evidence_error(runs: Path, key: str) -> None:
+    """孤兒目錄的加密檔解不開（金鑰移除、損壞）時，sealed_at 不能讓例外跳出 keeper
+    （審查 HIGH-1）。"""
+    _run(runs)
+    _vault(runs, key).seal(RUN)
+
+    with pytest.raises(EvidenceError, match="解不開"):
+        _vault(runs, _key()).sealed_at(RUN)
+
+
+@pytest.mark.parametrize("operation", ["inspect", "sealed_at", "seal", "purge", "rotate"])
+def test_a_missing_runs_volume_is_an_error_not_a_missing_directory(
+    tmp_path: Path, key: str, operation: str
+) -> None:
+    """runs 的根目錄不存在（主機上執行、volume 沒有掛上）時不能回報成「沒有這個目錄」：否則
+    keeper 會把待加密的 run 永久記成 none（審查 HIGH-2）。"""
+    vault = _vault(tmp_path / "missing", key)
+
+    with pytest.raises(EvidenceError, match="runs volume"):
+        getattr(vault, operation)(RUN)
+
+
+def test_check_needs_a_writable_runs_volume(runs: Path, tmp_path: Path, key: str) -> None:
+    _vault(runs, key).check()
+    with pytest.raises(EvidenceError, match="runs volume"):
+        _vault(tmp_path / "missing", key).check()
+    runs.chmod(0o500)
+    try:
+        with pytest.raises(EvidenceError, match="runs volume"):
+            _vault(runs, key).check()
+    finally:
+        runs.chmod(0o700)
+    assert list(runs.iterdir()) == []
+
+
+def test_export_and_listing_of_an_unsealed_directory_are_evidence_errors(
+    runs: Path, key: str
+) -> None:
+    _run(runs)
+    vault = _vault(runs, key)
+
+    with pytest.raises(EvidenceError):
+        _export(vault, "out/zap-report.json")
+    with pytest.raises(EvidenceError):
+        vault.listing(RUN)
+
+
+def test_entries_over_the_limit_fail_instead_of_being_cut(runs: Path, key: str) -> None:
+    """超過上限時截斷會讓換版漏掉目錄、卻回報成功（安全審查 L2）。"""
+    _run(runs)
+    _run(runs, OTHER)
+
+    with pytest.raises(EvidenceError, match="上限"):
+        _vault(runs, key, limits=TreeLimits(max_entries=1)).entries()
+
+
+def test_entries_the_container_made_unreadable_are_sealed(runs: Path, key: str) -> None:
+    """掃描容器和 runner 是同一個 uid：chmod 000 的目錄與檔案不能讓 keeper 永久失敗
+    （安全審查 M1）。"""
+    root = _run(runs)
+    locked = [
+        root / "out" / "nested" / "deeper" / "messages.txt",
+        root / "out" / "nested",
+        root / "out",
+    ]
+    for path in locked:
+        path.chmod(0)
+    try:
+        sealed = _vault(runs, key).seal(RUN)
+    finally:
+        for path in reversed(locked):
+            if path.exists():
+                path.chmod(0o700)
+
+    assert sealed is not None
+    assert sealed.files == len(FILES)
+    assert _top(root) == {SEALED_DIR}
+    assert CANARY not in _all_bytes(root)
+    for relative, content in FILES.items():
+        assert _export(_vault(runs, key), relative) == content
+
+
+def test_the_sealed_directory_is_synced_before_plaintext_is_deleted(
+    runs: Path, key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rename 之後先讓 sealed/ 的目錄項目落盤，再刪除明文（安全審查 L4）。"""
+    _run(runs)
+    vault = _vault(runs, key)
+    events: list[str] = []
+    real_fsync = fs_module.fsync_directory
+    real_unlink = os.unlink
+
+    def fsync_directory(fd: int) -> None:
+        events.append("fsync")
+        real_fsync(fd)
+
+    def unlink(path: Any, *, dir_fd: int | None = None) -> None:
+        if any(Path(relative).name == path for relative in FILES):
+            events.append("unlink")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr("secscan.runner.evidence.fsync_directory", fsync_directory)
+    monkeypatch.setattr(os, "unlink", unlink)
+
+    vault.seal(RUN)
+
+    assert events.count("unlink") == len(FILES)
+    for index, event in enumerate(events):
+        if event == "unlink":
+            assert events[index - 1] == "fsync", events

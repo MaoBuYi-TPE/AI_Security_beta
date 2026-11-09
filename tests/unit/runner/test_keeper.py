@@ -3,6 +3,7 @@
 store 與 vault 都是記憶體中的替身；實際的 DB 與檔案見 tests/integration/test_evidence_keeper.py。
 """
 
+import itertools
 import logging
 import threading
 from collections.abc import Collection, Iterator
@@ -15,7 +16,12 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from secscan.runner.evidence import DirectoryState, EvidenceError
-from secscan.runner.keeper import EvidenceKeeper, KeeperSettings, PassReport
+from secscan.runner.keeper import (
+    MAX_BACKOFF_SECONDS,
+    EvidenceKeeper,
+    KeeperSettings,
+    PassReport,
+)
 from secscan.scans.domain.evidence import SealedEvidence
 from secscan.scans.evidence_records import EvidenceRun
 
@@ -55,25 +61,27 @@ class FakeStore:
         self.expired.append(run.run_id)
         return True
 
-    def sealable(self, *, limit: int) -> tuple[EvidenceRun, ...]:
+    def sealable(self, *, limit: int, exclude: Collection[UUID]) -> tuple[EvidenceRun, ...]:
         self._maybe_fail("sealable")
-        return tuple(self.sealable_runs[:limit])
+        return tuple(run for run in self.sealable_runs if run.run_id not in exclude)[:limit]
 
     def record(self, run: EvidenceRun, sealed: SealedEvidence | None) -> bool:
         self._maybe_fail("record")
         self.recorded[run.run_id] = sealed
+        self.sealable_runs = [item for item in self.sealable_runs if item != run]
         return True
 
     def purgeable(
-        self, *, now: datetime, retention_days: int, limit: int
+        self, *, now: datetime, retention_days: int, limit: int, exclude: Collection[UUID]
     ) -> tuple[EvidenceRun, ...]:
         self._maybe_fail("purgeable")
         assert retention_days == 7
-        return tuple(self.purgeable_runs[:limit])
+        return tuple(run for run in self.purgeable_runs if run.run_id not in exclude)[:limit]
 
     def record_purged(self, run: EvidenceRun) -> bool:
         self._maybe_fail("record_purged")
         self.purged.append(run.run_id)
+        self.purgeable_runs = [item for item in self.purgeable_runs if item != run]
         return True
 
     def known(self, run_ids: Collection[UUID]) -> frozenset[UUID]:
@@ -95,6 +103,12 @@ class FakeVault:
     sealed: list[str] = field(default_factory=list)
     purged: list[str] = field(default_factory=list)
     on_seal: list[object] = field(default_factory=list)
+    unexpected: BaseException | None = None
+    volume_error: EvidenceError | None = None
+
+    def check(self) -> None:
+        if self.volume_error is not None:
+            raise self.volume_error
 
     def entries(self) -> tuple[str, ...]:
         return tuple(sorted(self.states))
@@ -109,6 +123,8 @@ class FakeVault:
         for hook in self.on_seal:
             assert callable(hook)
             hook()
+        if self.unexpected is not None:
+            raise self.unexpected
         if name in self.failing:
             raise EvidenceError("加密檔驗證不通過")
         if name in self.missing:
@@ -180,14 +196,16 @@ def test_a_failed_run_is_kept_and_the_pass_is_unhealthy(caplog: pytest.LogCaptur
 
 
 def test_one_clean_pass_restores_health() -> None:
+    clock = Clock()
     broken = _run()
     store = FakeStore(sealable_runs=[broken])
     vault = FakeVault(failing={str(broken.run_id)})
-    keeper = _keeper(store, vault)
+    keeper = _keeper(store, vault, clock=clock)
     keeper.run_pass()
     assert keeper.healthy is False
 
     vault.failing.clear()
+    clock.now += 2 * SETTINGS.interval_seconds
     keeper.run_pass()
 
     assert keeper.healthy is True
@@ -345,7 +363,8 @@ def test_the_thread_runs_passes_until_stopped() -> None:
             keeper.start()
     finally:
         keeper.stop(timeout=5)
-    assert keeper.healthy is False
+    # 正常停止不是失敗：保留最後一輪的結果（審查 MEDIUM-1：否則每次 make down 都 exit 1）。
+    assert keeper.healthy is True
 
 
 def test_a_stalled_keeper_is_not_healthy() -> None:
@@ -361,3 +380,146 @@ def test_a_stalled_keeper_is_not_healthy() -> None:
 
 def test_stop_without_start_is_harmless() -> None:
     _keeper(FakeStore(), FakeVault()).stop(timeout=0.1)
+
+
+# --- 審查之後（docs/DECISIONS.md §30.11）--------------------------------------------------------
+
+
+def test_an_unexpected_error_is_a_failure_not_a_dead_thread(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """任何例外都不能讓 keeper 的執行緒結束（審查 HIGH-1）：記下類別、這一輪不健康。"""
+    vault = FakeVault(unexpected=RuntimeError("secret-looking detail"))
+    keeper = _keeper(FakeStore(sealable_runs=[_run()]), vault)
+    caplog.set_level(logging.ERROR)
+
+    report = keeper.run_pass()
+
+    assert report.failures == 1
+    assert keeper.healthy is False
+    assert "RuntimeError" in caplog.text
+    assert "secret-looking detail" not in caplog.text
+
+
+def test_a_broken_runs_volume_records_nothing() -> None:
+    """runs volume 不存在或不能寫時，不能把任何 run 記成 none 或 purged（審查 HIGH-2）。"""
+    store = FakeStore(sealable_runs=[_run()], purgeable_runs=[_run()])
+    vault = FakeVault(volume_error=EvidenceError("無法開啟 runs volume（ENOENT）"))
+    keeper = _keeper(store, vault)
+
+    report = keeper.run_pass()
+
+    assert report.failures == 1
+    assert keeper.healthy is False
+    assert (store.recorded, store.purged, vault.sealed, vault.purged) == ({}, [], [], [])
+
+
+def test_a_failed_last_pass_stays_unhealthy_after_stopping() -> None:
+    settings = KeeperSettings(retention_days=7, plaintext_max_minutes=60, interval_seconds=0.01)
+    broken = _run()
+    keeper = EvidenceKeeper(
+        FakeStore(sealable_runs=[broken]),
+        FakeVault(failing={str(broken.run_id)}),
+        settings,
+        clock=lambda: NOW,
+    )
+    keeper.start()
+    keeper.stop(timeout=5)
+
+    assert keeper.healthy is False
+
+
+def test_a_thread_that_ended_without_being_stopped_is_not_healthy() -> None:
+    keeper = _keeper(FakeStore(), FakeVault())
+    keeper.run_pass()
+    ended = threading.Thread(target=lambda: None)
+    ended.start()
+    ended.join()
+    keeper._thread = ended
+
+    assert keeper.healthy is False
+
+
+def test_failing_runs_back_off_without_starving_the_others() -> None:
+    """一直失敗的 run 排在最前面時，其他 run 仍然會被加密（安全審查 M1）；它還在退避時
+    keeper 仍然不健康（不認領新的 run）。"""
+    clock = Clock()
+    first, second, fine = _run(), _run(), _run()
+    store = FakeStore(sealable_runs=[first, second, fine])
+    vault = FakeVault(failing={str(first.run_id), str(second.run_id)})
+    settings = KeeperSettings(retention_days=7, plaintext_max_minutes=60, batch=2)
+    keeper = _keeper(store, vault, clock=clock, settings=settings)
+
+    assert keeper.run_pass().failures == 2
+    clock.now += settings.interval_seconds
+    report = keeper.run_pass()
+
+    assert vault.sealed == [str(fine.run_id)]
+    assert (report.failures, report.deferred) == (0, 2)
+    assert not report.clean
+    assert keeper.healthy is False
+
+    vault.failing.clear()
+    clock.now += 2 * settings.interval_seconds
+    keeper.run_pass()
+
+    assert set(store.recorded) == {first.run_id, second.run_id, fine.run_id}
+    assert keeper.healthy is True
+
+
+def test_a_failing_purge_backs_off_too() -> None:
+    clock = Clock()
+    broken = _run()
+    store = FakeStore(purgeable_runs=[broken])
+    vault = FakeVault(failing={str(broken.run_id)})
+    keeper = _keeper(store, vault, clock=clock)
+
+    keeper.run_pass()
+    clock.now += SETTINGS.interval_seconds
+    report = keeper.run_pass()
+
+    assert (report.failures, report.deferred) == (0, 1)
+    vault.failing.clear()
+    clock.now += 4 * SETTINGS.interval_seconds
+    keeper.run_pass()
+
+    assert store.purged == [broken.run_id]
+    assert keeper.healthy is True
+
+
+def test_an_orphan_removed_by_the_operator_is_forgotten() -> None:
+    clock = Clock()
+    name = str(uuid4())
+    vault = FakeVault(states={name: _state(plaintext=True, age=QUIET + 1)}, failing={name})
+    keeper = _keeper(FakeStore(), vault, clock=clock)
+    keeper.run_pass()
+    clock.now += SETTINGS.interval_seconds
+    assert keeper.run_pass().deferred == 1
+
+    del vault.states[name]
+    keeper.run_pass()
+
+    assert keeper.healthy is True
+
+
+def test_backoff_grows_and_is_capped() -> None:
+    clock = Clock()
+    broken = _run()
+    store = FakeStore(sealable_runs=[broken])
+    vault = FakeVault(failing={str(broken.run_id)})
+    keeper = _keeper(store, vault, clock=clock)
+    attempts: list[float] = []
+    original = vault.seal
+
+    def seal(name: str) -> SealedEvidence | None:
+        attempts.append(clock.now)
+        return original(name)
+
+    vault.seal = seal  # type: ignore[method-assign]
+    for _ in range(400):
+        keeper.run_pass()
+        clock.now += SETTINGS.interval_seconds
+
+    gaps = [later - earlier for earlier, later in itertools.pairwise(attempts)]
+    assert gaps[:3] == [20.0, 40.0, 80.0]
+    assert max(gaps) == MAX_BACKOFF_SECONDS

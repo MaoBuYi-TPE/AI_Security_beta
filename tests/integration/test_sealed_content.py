@@ -13,7 +13,9 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
@@ -257,3 +259,74 @@ def test_unexpired_excerpts_are_kept(
 
     events = _events(client, world, item.sqli).json()["data"]
     assert all(excerpt["content"] for excerpt in events[1]["excerpts"])
+
+
+# --- 審查之後（docs/DECISIONS.md §30.11）--------------------------------------------------------
+
+
+def test_a_purge_between_the_checks_is_reported_as_expired(
+    client: TestClient,
+    queue_engine: Engine,
+    world: World,
+    item: Scenario,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """worker 在 API 讀完 metadata 之後才 commit 清除：回 410，不是 500 加上「sha256 不符」
+    （資料庫審查 M1）。"""
+    headers = world.operator_a.headers
+    old = _create(client, item.baseline, headers).json()["data"]
+    assert _drain(queue_engine, days_ago=31) == 1
+    original = report_service.ReportService.get
+
+    def get_then_purge(self: Any, principal: Any, report_id: UUID) -> Any:
+        report = original(self, principal, report_id)
+        assert _purge(queue_engine) == (1, 0)
+        return report
+
+    monkeypatch.setattr(report_service.ReportService, "get", get_then_purge)
+
+    response = client.get(f"/api/v1/reports/{old['id']}/download", headers=headers)
+
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "REPORT_EXPIRED"
+    assert "sha256 不符" not in caplog.text
+
+
+def test_an_unreadable_report_is_logged_as_unreadable(
+    queue_database: ProvisionedDatabase,
+    queue_engine: Engine,
+    world: World,
+    item: Scenario,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """金鑰不對（換版之後沒有重啟 api）和內容被改過分開記錄（審查 LOW-1）。"""
+    other_keys = Fernet.generate_key().decode()
+    with TestClient(create_app(queue_database.app_settings())) as client:
+        old = _create(client, item.baseline, world.operator_a.headers).json()["data"]
+    assert _drain(queue_engine) == 1
+    settings = queue_database.app_settings().model_copy(
+        update={"content_encryption_keys": SecretStr(other_keys)}
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.get(
+            f"/api/v1/reports/{old['id']}/download", headers=world.operator_a.headers
+        )
+
+    assert response.status_code == 500
+    assert "解不開" in caplog.text
+    assert "sha256 不符" not in caplog.text
+
+
+def test_a_purge_drains_more_than_one_batch(
+    client: TestClient, queue_engine: Engine, world: World, item: Scenario
+) -> None:
+    """v0022 給既有內容同一個期限：到期時一次積壓，一輪要處理到一批不滿為止（資料庫審查 L8）。"""
+    headers = world.operator_a.headers
+    for _ in range(3):
+        assert _create(client, item.baseline, headers).status_code == 202
+    assert _drain(queue_engine, days_ago=31) == 3
+
+    purged = ContentRetention(sessionmaker(queue_engine, expire_on_commit=False), batch=1).purge()
+
+    assert (purged.reports, purged.excerpts) == (3, 0)

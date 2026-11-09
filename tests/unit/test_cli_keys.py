@@ -80,3 +80,35 @@ def test_a_malformed_ring_is_named_without_echoing_it(
     err = capsys.readouterr().err
     assert "EVIDENCE_ENCRYPTION_KEYS 的第 1 個金鑰" in err
     assert canary not in err
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["retention-status"], ["rotate-content-keys"], ["create-admin-key", "--name", "admin"]],
+)
+def test_every_command_refuses_shared_rings(
+    keys: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+) -> None:
+    """主機上的 .env 三組都有：EVIDENCE 與 CONTENT 共用金鑰時，worker 被入侵就能解開原始證據。
+    執行時只有主機上同時持有兩組，所以每個 admin 指令都先檢查（安全審查 L1）。"""
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", keys["EVIDENCE_ENCRYPTION_KEYS"].split(",")[0])
+
+    assert main(command) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "EVIDENCE_ENCRYPTION_KEYS 與 CONTENT_ENCRYPTION_KEYS 有相同的金鑰" in err
+    _no_keys_in(err, keys)
+
+
+def test_malformed_rings_are_left_to_each_command(
+    keys: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """格式錯誤由各指令自己說明（例如 runner 不啟動的原因），共用檢查不搶先回報。"""
+    monkeypatch.setenv("EVIDENCE_ENCRYPTION_KEYS", "not-a-key")
+
+    assert main(["check-encryption-keys"]) == EXIT_FAILURE
+
+    assert "EVIDENCE_ENCRYPTION_KEYS 的第 1 個金鑰不是有效的 Fernet 金鑰" in capsys.readouterr().err
