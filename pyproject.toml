@@ -164,7 +164,7 @@ layers = [
 # （CLAUDE.md §5）。規則一律放在 <feature>/domain.py，或拆成 <feature>/domain/ 套件（子模組也受檢查）。
 # 預設也檢查間接 import：只能用標準函式庫、security 與 core 中的純模組（json_types、text）；
 # 例外是 specs 的 domain 以 PyYAML 純 Python 的事件 API 解析 YAML（docs/DECISIONS.md §11.2），
-# 以及 security 以 cryptography 的 MultiFernet 加密目標的 secret（§12.1）。
+# 以及 security 以 cryptography 的 MultiFernet 加密目標的 secret（§12.1）、證據與報告內容（§30.4）。
 [[tool.importlinter.contracts]]
 name = "Domain and security modules stay free of frameworks, DB and Docker"
 type = "forbidden"
@@ -196,15 +196,19 @@ forbidden_modules = [
     "uvicorn",
 ]
 
-# 加密只經由 security.secret_cipher（docs/DECISIONS.md §12.2）：其他模組不得直接使用 cryptography，
-# 解密只能透過 SecretCipher.reveal（AST 測試確認 src 中沒有呼叫者），不會繞過去自己解。
-# 預設也檢查間接 import，所以只忽略 secret_cipher 自己的那一條。
+# 加密只經由 security.secret_cipher（目標的 secret，docs/DECISIONS.md §12.2）與 security.blob_cipher
+# （原始證據、報告內容與人工複測摘錄，§30.4）：其他模組不得直接使用 cryptography。解密只能透過
+# SecretCipher.reveal 與 BlobCipher 的 unseal／unseal_stream（AST 測試限定 src 中的呼叫者），
+# 不會繞過去自己解。預設也檢查間接 import，所以只忽略這兩個模組自己的那一條。
 [[tool.importlinter.contracts]]
-name = "Only security.secret_cipher uses cryptography"
+name = "Only security.secret_cipher and security.blob_cipher use cryptography"
 type = "forbidden"
 source_modules = ["secscan"]
 forbidden_modules = ["cryptography"]
-ignore_imports = ["secscan.security.secret_cipher -> cryptography"]
+ignore_imports = [
+    "secscan.security.secret_cipher -> cryptography",
+    "secscan.security.blob_cipher -> cryptography",
+]
 
 # Docker 只經由 runner.docker_runtime（CLAUDE.md §5、docs/DECISIONS.md §14.2）：api、worker 與其他模組
 # 都不能 import Docker SDK。預設也檢查間接 import，所以只忽略 docker_runtime 自己的那一條。

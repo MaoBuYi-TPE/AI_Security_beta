@@ -28,6 +28,10 @@ fake 引擎的 runner（docs/DECISIONS.md §13.7）：
 
     uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-300]
     uv run secscan-admin worker [--once]
+
+加密金鑰的檢查與換版（docs/DECISIONS.md §30；說明見 secscan.cli.keys）：
+
+    uv run secscan-admin check-encryption-keys
 """
 
 import argparse
@@ -56,7 +60,7 @@ from secscan.api_keys.domain import (
 )
 from secscan.api_keys.service import ApiKeyService
 from secscan.auth_profiles.service import AuthProfileService, SecretRotationError
-from secscan.cli import services
+from secscan.cli import keys, services
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
 from secscan.core.text import require_text
@@ -132,6 +136,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         problems = "；".join(_describe(error) for error in exc.errors())
         _report(f"設定不正確（DB_* 環境變數或 .env）：{problems}")
         return EXIT_FAILURE
+    handled = keys.run(args, settings, _report)
+    if handled is not None:
+        return handled
     if args.command == ROTATE_COMMAND:
         return _rotate_secret_keys(settings)
     if args.command == FAKE_RUNNER_COMMAND:
@@ -385,6 +392,7 @@ def _parser() -> argparse.ArgumentParser:
         description="對帳過期的解析，再處理等待解析的 run。收到 SIGTERM 時停止。",
     )
     worker.add_argument("--once", action="store_true", help="最多處理一個 run 就結束")
+    keys.register(commands)
     return parser
 
 

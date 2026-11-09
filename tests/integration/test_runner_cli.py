@@ -21,7 +21,11 @@ from tests.guard_support import GuardDouble
 from tests.integration.api_support import Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 from tests.runner_fakes import FakeContainerRuntime
-from tests.secret_support import TEST_SECRET_ENCRYPTION_KEYS
+from tests.secret_support import (
+    TEST_CONTENT_ENCRYPTION_KEYS,
+    TEST_EVIDENCE_ENCRYPTION_KEYS,
+    TEST_SECRET_ENCRYPTION_KEYS,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -61,6 +65,8 @@ def environment(
     monkeypatch.setenv("DB_USER", queue_database.user)
     monkeypatch.setenv("DB_PASSWORD", queue_database.password)
     monkeypatch.setenv("SECRET_ENCRYPTION_KEYS", TEST_SECRET_ENCRYPTION_KEYS)
+    monkeypatch.setenv("EVIDENCE_ENCRYPTION_KEYS", TEST_EVIDENCE_ENCRYPTION_KEYS)
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", TEST_CONTENT_ENCRYPTION_KEYS)
     monkeypatch.setenv("RUNNER_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("RUNNER_SECRETS_DIR", str(tmp_path / "secrets"))
     guard = GuardDouble.create(tmp_path)
@@ -210,6 +216,70 @@ def test_without_encryption_keys_authenticated_scans_fail(
     )
     assert (preflight.status, preflight.error_code) == ("failed", "SECRET_UNAVAILABLE")
     assert runtime.created == []
+
+
+# --- 金鑰（KEY-01；docs/DECISIONS.md §30.2）-------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, "not-a-key"])
+def test_the_runner_refuses_to_start_without_evidence_keys(
+    environment: Path,
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    if value is None:
+        monkeypatch.delenv("EVIDENCE_ENCRYPTION_KEYS")
+    else:
+        monkeypatch.setenv("EVIDENCE_ENCRYPTION_KEYS", value)
+
+    assert main(["runner", "--once"]) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "EVIDENCE_ENCRYPTION_KEYS" in err
+    assert "runner 不啟動" in err
+    assert runtime.created == []
+    assert TEST_SECRET_ENCRYPTION_KEYS not in err
+
+
+def test_the_runner_refuses_an_evidence_key_shared_with_the_secret_ring(
+    environment: Path,
+    runtime: FakeContainerRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ENCRYPTION_KEYS", TEST_SECRET_ENCRYPTION_KEYS)
+
+    assert main(["runner", "--once"]) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "相同的金鑰" in err
+    assert TEST_SECRET_ENCRYPTION_KEYS not in err
+    assert runtime.created == []
+
+
+@pytest.mark.parametrize("value", [None, "not-a-key"])
+def test_the_worker_refuses_to_start_without_content_keys(
+    environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+) -> None:
+    if value is None:
+        monkeypatch.delenv("CONTENT_ENCRYPTION_KEYS")
+    else:
+        monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", value)
+
+    assert main(["worker", "--once"]) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "CONTENT_ENCRYPTION_KEYS" in err
+    assert "worker 不啟動" in err
 
 
 @pytest.mark.parametrize(

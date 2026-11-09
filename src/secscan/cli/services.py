@@ -8,6 +8,8 @@
   一次（docs/DECISIONS.md §17.2）。
 - runner 經 RUNNER_DOCKER_URL（預設 socket-proxy）操作容器；SECRET_ENCRYPTION_KEYS 沒有設定時，
   需要 target 認證的 scan 會失敗（SECRET_UNAVAILABLE），其他照常。
+- 金鑰（docs/DECISIONS.md §30.2）：runner 沒有合法的 EVIDENCE_ENCRYPTION_KEYS、worker 沒有合法的
+  CONTENT_ENCRYPTION_KEYS 就不啟動；runner 持有的兩組不得共用金鑰。
 - --once：最多處理一個 run 就結束。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。
 """
 
@@ -21,6 +23,7 @@ from importlib.metadata import version
 from types import FrameType
 from uuid import uuid4
 
+from pydantic import SecretStr
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -39,6 +42,14 @@ from secscan.scanners.domain.fake import FakeScript
 from secscan.scanners.domain.instances import InstanceRole
 from secscan.scanners.service import Fleet
 from secscan.scans.queue import RunReport, ScanQueue
+from secscan.security.blob_cipher import BlobCipher
+from secscan.security.key_rings import (
+    EVIDENCE_SETTING,
+    SECRET_SETTING,
+    check_held,
+    content_cipher,
+    evidence_cipher,
+)
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
 from secscan.targets.domain import LabNetwork
 from secscan.worker.artifacts import ArtifactReader
@@ -89,12 +100,15 @@ def run_runner(
     once: bool,
     report: Report,
 ) -> int:
+    cipher = _optional_cipher(settings, report)
+    evidence = _evidence_cipher(settings, cipher, report)
+    if evidence is None:
+        return EXIT_FAILURE
     try:
         runtime = DockerRuntime.connect(runner_settings.docker_url)
     except ValueError as exc:
         report(f"RUNNER_DOCKER_URL 不正確：{exc}。")
         return EXIT_FAILURE
-    cipher = _optional_cipher(settings, report)
     engine = create_db_engine(settings, application_name=RUNNER_APPLICATION_NAME, pooled=False)
     try:
         if not _ready(engine, report):
@@ -156,6 +170,9 @@ def _runner_loop(
 
 
 def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
+    content = _content_cipher(settings, report)
+    if content is None:
+        return EXIT_FAILURE
     engine = create_db_engine(settings, application_name=WORKER_APPLICATION_NAME, pooled=False)
     try:
         if not _ready(engine, report):
@@ -220,12 +237,41 @@ def _ready(engine: Engine, report: Report) -> bool:
 
 
 def _optional_cipher(settings: Settings, report: Report) -> SecretCipher | None:
-    keys = settings.secret_encryption_keys
     try:
-        return SecretCipher.from_setting(keys.get_secret_value() if keys is not None else None)
+        return SecretCipher.from_setting(_setting(settings.secret_encryption_keys))
     except InvalidEncryptionKeysError as exc:
         report(f"{exc}；需要 target 認證的 scan 會失敗（SECRET_UNAVAILABLE）。")
         return None
+
+
+def _evidence_cipher(
+    settings: Settings, secret: SecretCipher | None, report: Report
+) -> BlobCipher | None:
+    """原始證據的金鑰：缺少、不合規則，或和目標 secret 的金鑰共用時，runner 不啟動。"""
+    keys = _setting(settings.evidence_encryption_keys)
+    rings = {EVIDENCE_SETTING: keys}
+    if secret is not None:
+        rings[SECRET_SETTING] = _setting(settings.secret_encryption_keys)
+    try:
+        cipher = evidence_cipher(keys)
+        check_held(rings)
+    except InvalidEncryptionKeysError as exc:
+        report(f"{exc}；runner 不啟動（沒有它就無法加密 runs volume 中的原始證據）。")
+        return None
+    return cipher
+
+
+def _content_cipher(settings: Settings, report: Report) -> BlobCipher | None:
+    """報告內容的金鑰：缺少或不合規則時，worker 不啟動。"""
+    try:
+        return content_cipher(_setting(settings.content_encryption_keys))
+    except InvalidEncryptionKeysError as exc:
+        report(f"{exc}；worker 不啟動（沒有它就無法加密報告內容）。")
+        return None
+
+
+def _setting(value: SecretStr | None) -> str | None:
+    return value.get_secret_value() if value is not None else None
 
 
 def _queue(sessions: sessionmaker[Session], settings: Settings) -> ScanQueue:

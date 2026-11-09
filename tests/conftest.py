@@ -10,7 +10,7 @@ from secscan.core.config import AppEnv, Settings
 from secscan.main import create_app
 from secscan.runner.config import RunnerSettings
 from secscan.worker.config import WorkerSettings
-from tests.secret_support import encryption_keys
+from tests.secret_support import content_keys, encryption_keys
 
 # tests.isolation：測試程序連不到 Docker daemon（docs/DECISIONS.md §14.9）。
 pytest_plugins = ("pytester", "tests.isolation")
@@ -115,6 +115,7 @@ def make_client() -> Iterator[ClientFactory]:
             db_port=UNREACHABLE_DB_PORT,
             db_password=SecretStr("not-a-real-password"),
             secret_encryption_keys=encryption_keys(),
+            content_encryption_keys=content_keys(),
             _env_file=None,
         )
         test_client = TestClient(create_app(settings))
