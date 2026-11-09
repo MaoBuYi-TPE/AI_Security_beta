@@ -93,7 +93,7 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
 | `db-test` | 55433 | 整合測試 | tmpfs，停掉就清空 |
 
 - **密碼**：都在 `.env`（權限 600，不進 git）。`make env` 只會補上缺少的隨機值，不會覆寫既有的值；`dev`、`db-up`、`test-db-up`、`test` 會自動呼叫它。
-- **加密金鑰**：`make env` 也會在 `.env` 產生 `SECRET_ENCRYPTION_KEYS`（加密認證設定的 secret；API 沒有它就不會啟動）。**請備份這一行**：遺失之後，已保存的 secret 都解不開，只能重新設定。換版的做法見下方「認證設定」。
+- **加密金鑰**：`make env` 也會在 `.env` 產生三組平台金鑰，各自只交給需要的容器：`SECRET_ENCRYPTION_KEYS`（認證設定的 secret；api、runner）、`EVIDENCE_ENCRYPTION_KEYS`（runs volume 的原始證據；只有 runner）、`CONTENT_ENCRYPTION_KEYS`（報告內容與人工複測摘錄；api、worker）。缺少自己的那一組時程序不會啟動。`make env` 只補上缺少的那一行，不改、不重設、不輪替既有的值，也不在終端顯示金鑰（T23a 之前建立的 `.env` 要再執行一次 `make env` 補上兩組新金鑰）。**請備份這三行**：遺失之後，已保存的 secret、尚未清除的原始證據、報告與摘錄都解不開。換版的做法見下方「認證設定」與「資料保護」。
 - **連線角色**：應用程式與 migration 用非 superuser 的 `secscan_app`。superuser 只給容器初始化與手動維運。
 - **整合測試**：每次 session 都在 db-test 建立專屬角色與全新資料庫，結束時刪除。只接受 `cluster_name=secscan-test` 的伺服器，不會碰到開發資料庫。
 - **停止**：`make db-down` 停止兩者，但保留開發資料。
@@ -333,7 +333,7 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - `GET /api/v1/scan-comparisons/{comparison_id}`：摘要、差異理由、分類數量、人工確認提示；同專案 viewer 可讀。
 - `GET /api/v1/scan-comparisons/{comparison_id}/findings`：不可變逐 finding 證據摘要，支援 `classification`、`page`、`limit`；後續 scan 不改變舊比較。
 - **not_observed 不等於已修補**，比較不修改生命週期。位置有回應、規則完整執行、身分／參數可比缺一不可；目前實測尚無足夠的規則完成證據，因此真正的單側未命中維持 inconclusive 或 not_comparable，而非假稱驗證修補；也因此這一版不計算「自動驗證修補成功率」。
-- 新位置表只保存 path 的 SHA-256 相等性索引，不是加密；不保存參數名稱或值，比較 API 不輸出 path/digest 或 raw evidence。舊觀察與原始 artifact 的資料保護仍待 T23。
+- 新位置表只保存 path 的 SHA-256 相等性索引，不是加密；不保存參數名稱或值，比較 API 不輸出 path/digest 或 raw evidence。原始輸出的加密與保留期限見下方「資料保護（T23a）」；觀察保留遮罩過的證據、不加密。
 - `X-ZAP-Scan-ID` 是內部保留 header，不接受新的目標認證設定；舊 profile 可讀取、換金鑰及修復，但不能用來掃描。Nuclei matcher error 會標示引擎失敗，不把零告警當成完整成功。
 - `ENABLE_LIVE_LAB_TESTS=1 make test-live-fixture-rescan LIVE_PYTEST_ENV="SECSCAN_RECORD_DIR=$PWD/recordings/fixture-rescan/run-name"`：同一隔離 target 的弱點→弱點、弱點→修補、小預算複掃。每次把 `run-name` 換成尚未存在的目錄；既有目錄或檔案會被拒絕，不覆寫歷史量測。不與其他 live 指令同時執行。結果在 gitignore 的 `recordings/fixture-rescan/`。三次有效校準與最終執行都通過（每次約 32 分鐘）：弱點→弱點、弱點→修補皆 comparable，小預算需人工確認；new／not_observed 一律為 0；已自動對應的 6 個修補案例（20 個 finding）都是 inconclusive，另 6 個案例沒有自動對應、未逐一驗證。細節見 `DECISIONS.md` §27.14。
 - v0016 升級保留既有 run 的未知 provenance，不回填；downgrade 會刪除新快照／位置／版本資料，僅供已備份的開發測試 DB。
@@ -349,7 +349,7 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - `GET /api/v1/findings/{id}/triage-events`：不可修改的事件；摘錄內容只給 operator/admin。
 - 報告：`POST /api/v1/scans/{id}/reports`（必帶 `Idempotency-Key`、scan 必須已終止，回 202）→ worker 產生 → `GET /api/v1/reports/{id}/download`（只能以 report id 下載平台產生的報告；JSON 或 Markdown，≤ 8 MiB，超過時截斷並標示）。工具的原始輸出不提供下載。
 - 管理檢視（platform_admin）：`GET /api/v1/audit-events`、`GET /api/v1/scope-grants/pending`；`POST /api/v1/auth-profiles/{id}/disable` 停用認證設定（終止狀態）。
-- **資料保護尚未完成**：報告內容與人工複測摘錄在 DB 中沒有加密、沒有保留期限，原始證據的加密也還沒做（T23a）。
+- 資料保護：T23a 起報告內容與人工複測摘錄在 DB 中加密、30 天後清除（見下方「資料保護（T23a）」）。
 - Gate D（去重、複掃與報告的驗收）2026-11-08 通過，採用有文件記錄的替代證據：partially_completed 與 timed_out 的報告由兩次 Live 複掃驗證；completed 的報告由 DB 整合測試驗證（真實的 API、worker、渲染與下載，合成的觀察），**沒有 completed 的 Live 端到端驗證**。Gate D 通過不代表 M5 或資料保護已完成（`docs/DECISIONS.md` §28.17）。
 - migration v0017–v0019；契約見 `docs/API_CONTRACT.md` §19，決策見 `docs/DECISIONS.md` §28，反例見 `docs/SECURITY_AND_TESTING.md` §4.3 的 TRIAGE／REPORT 表。
 
@@ -358,9 +358,26 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - **引擎子預算**：多引擎的 scan 可以在建立時選填 `engine_budgets`，凍結每個引擎的 `max_requests`、`max_duration_seconds`。每個 run 取「scan 剩下的」與「這個引擎的上限」的較小值，沒用完的份額作廢、不轉給後面的引擎；只會讓配額變小，總額與 guard 的強制不變。省略時行為和之前相同。`engines[].budget` 列出上限，`engines[].usage` 列出每個 run 分到的配額與 guard 計數（被 runner 停止、沒有收集的 run 也有）。migration v0020。
 - **harness**（`benchmarks/`，不進 wheel）：只吃平台 API 的 JSON。實驗規格（`benchmarks/experiments/*.yaml`）只能指定 fixture、juice_shop、vampi 三種靶場，所有組別共用同一份總預算；排程由種子決定；`evaluate.py` 是純函式（recall 以案例、precision 以議題計，分母為 0 或還有未裁定的 finding 是 N/A）。
 - `make bench-check BENCH_SPEC=… BENCH_NAME=…`：離線檢查規格與結果目錄的名稱。
-- `ENABLE_LIVE_LAB_TESTS=1 make bench BENCH_SPEC=benchmarks/experiments/t31-smoke.yaml BENCH_NAME=<新名稱>`：先做上面的檢查，再以 `test-live-runner` 的同一個隔離 stack 與清理範圍經 API 跑完排程，結果寫到 gitignore 的 `benchmarks/results/<新名稱>/`（0700／0600、不覆寫、寫入前檢查秘密，**沒有加密**）。不自動重試；環境故障整批作廢、換新名稱重跑。**T31 的 Live smoke 尚未執行（需要另外授權）**，Juice Shop、VAmPI 的路徑要到 T28 才第一次執行。
+- `ENABLE_LIVE_LAB_TESTS=1 make bench BENCH_SPEC=benchmarks/experiments/t31-smoke.yaml BENCH_NAME=<新名稱>`：先做上面的檢查，再以 `test-live-runner` 的同一個隔離 stack 與清理範圍經 API 跑完排程，結果寫到 gitignore 的 `benchmarks/results/<新名稱>/`（0700／0600、不覆寫、寫入前檢查秘密；T23a 起以本機的 bench 金鑰加密，見下方「資料保護（T23a）」）。不自動重試；環境故障整批作廢、換新名稱重跑。**T31 的 Live smoke 尚未執行（需要另外授權）**，Juice Shop、VAmPI 的路徑要到 T28 才第一次執行。
 - `make bench-evaluate BENCH_NAME=… BENCH_TRUTH=<ground truth>`：離線、只讀結果目錄，評估以 JSON 寫到 stdout（另有選填的 `BENCH_ADJUDICATIONS`、`BENCH_PAIR_LABELS`、`BENCH_INCLUDE_HOLDOUT`）。正式的 ground truth 比對檔與預算由 T27 凍結；smoke 的數字不是實驗結果。
 - 決策見 `docs/DECISIONS.md` §29，契約見 `docs/API_CONTRACT.md` §17.1，測試見 `docs/SECURITY_AND_TESTING.md` §4.3 的 BUDGET／BENCH 表。
+
+#### 資料保護（T23a，進行中）
+
+T23a 的離線實作已完成，**Live 尚未執行，T23a 與 SEC-14 都不標完成**。設計見 `docs/DECISIONS.md` §30，測試見 `docs/SECURITY_AND_TESTING.md` §4.3 的 KEY／SEAL／EVID／CONT／RET／ROT／BSEAL 表，剩餘風險見同一份文件的 §8。
+
+- **原始證據（runs volume）是 run 結束之後才加密，不是全程靜態加密**：掃描、收集與等待解析期間是明文。run 結束（解析完成、失敗或逾期）、容器確認刪除之後，runner 的背景執行緒在約 10–20 秒內把目錄加密成 `sealed/`、驗證之後才刪除明文，7 天後刪除整個目錄。worker 停擺時，等待解析超過 60 分鐘的 run 以 `PARSE_DEADLINE_EXCEEDED` 結束並加密。加密失敗時明文保留、API 顯示 `pending`，runner 不認領新的 run（`GET /api/v1/scanners` 顯示 `EVIDENCE_SEALING_FAILED`）。
+- **API**：`GET /api/v1/scans/{id}` 的 `engines[].evidence`（none／pending／sealed／purged）；finding 來源追溯的 artifact 有 `encrypted`、`purged_at`。原始輸出沒有下載 API。
+- **報告與摘錄**：寫入 DB 之前加密，30 天後清除內容：報告下載回 410 `REPORT_EXPIRED`，摘錄的 `content` 變成 null；metadata 與 sha256 保留。
+- **保留期限**（1–365 天，`.env` 中可調整）：`EVIDENCE_RETENTION_DAYS`（預設 7）、`REPORT_RETENTION_DAYS`（30）、`EXCERPT_RETENTION_DAYS`（30）；`EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60）是等待解析的上限。既有的資料從升級之後才開始計時，升級不會立刻刪除任何東西。刪除只是 unlink，不抹除磁碟的資料區塊；DB 的 WAL 與備份會保留舊資料。
+- **管理指令**（`docs/API_CONTRACT.md` §20）：
+  - `uv run secscan-admin check-encryption-keys`：檢查三組金鑰合法、互不共用，只顯示數量。
+  - `uv run secscan-admin retention-status`：各狀態的數量（唯讀）。
+  - `uv run secscan-admin rotate-content-keys`：報告與摘錄的換版。
+  - `docker compose --profile app exec runner secscan-admin rotate-evidence-keys`：原始證據的換版（只有 runner 容器有這組金鑰）。
+  - `docker compose --profile app exec runner secscan-admin export-evidence --run <id> [--path <路徑>]`：break-glass，列出加密檔，或先寫 audit 再把一個檔案的明文寫到 stdout。
+- **換版**：新金鑰放在那一組的最前面（逗號分隔）→ 重啟持有它的容器 → 執行換版 → 移除舊金鑰、重啟 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。
+- **bench 結果**：`make bench-key` 建立本機的金鑰檔（預設 `~/.config/secscan/bench-keys`，可用 `BENCH_KEY_FILE` 指定；不可放在 repo 中；已經存在就失敗、不覆寫）。之後 `make bench` 寫出的每個檔案都是 `<名稱>.sealed`，`bench-evaluate` 先核對 `SHA256SUMS`、解密、再核對明文的 sha256 才評估。T23a 之前的明文結果目錄以 `make bench-seal BENCH_SOURCE=<原目錄> BENCH_NAME=<新名稱>` 轉成新的加密目錄，原目錄不修改也不刪除。**金鑰檔遺失之後結果無法復原，請另外備份。**
 
 #### 隔離 lab 靶場（T03）
 

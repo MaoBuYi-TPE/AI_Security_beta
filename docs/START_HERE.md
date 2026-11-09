@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立；`test-live-fixture` 已在 T30 建立；`nuclei-templates`、`nuclei-templates-check` 已在 T17 建立；`test-live-fixture-nuclei` 已在 T18 建立；`owasp-top10`、`owasp-top10-check`、`test-live-fixture-findings` 已在 T19 建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立；`test-live-fixture` 已在 T30 建立；`nuclei-templates`、`nuclei-templates-check` 已在 T17 建立；`test-live-fixture-nuclei` 已在 T18 建立；`owasp-top10`、`owasp-top10-check`、`test-live-fixture-findings` 已在 T19 建立；`bench-key`、`bench-seal` 與 `secscan-admin` 的 `check-encryption-keys`、`rotate-content-keys`、`rotate-evidence-keys`、`export-evidence`、`retention-status` 已在 T23a 建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -94,12 +94,17 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make lab-net | M2（T11 已建立） | 建立或檢查 lab_net（internal＋isolated＋10.89.7.0/24＋只配發下半段的 ip-range）；egress guard 固定在 .254。舊的 lab_net 沒有 ip-range 時會失敗，刪除後重建（README） |
 | make lab-up | M0（T03 已建立） | 以 compose profile 啟動 lab 靶機（只接 internal network，不發布 port）；T11 起先執行 make lab-net |
 | make lab-down | M0（T03 已建立） | 停止並移除 lab（先停 spike 再執行） |
-| make env | M1（T04 已建立） | 建立或補齊 `.env`（權限 600）中缺少的本機 DB 密碼（隨機值），不覆寫既有的值 |
+| make env | M1（T04 已建立） | 建立或補齊 `.env`（權限 600）中缺少的本機 DB 密碼與加密金鑰（隨機值；T23a 加上 `EVIDENCE_ENCRYPTION_KEYS`、`CONTENT_ENCRYPTION_KEYS`），不覆寫、不輪替既有的值，不在終端顯示金鑰 |
 | make db-up／make db-down | M1（T04 已建立） | 啟動開發用 PostgreSQL（只綁 127.0.0.1:55432）／停止 db 與 db-test（保留開發資料） |
 | make test-db-up | M1（T04 已建立） | 啟動整合測試用 PostgreSQL（tmpfs，只綁 127.0.0.1:55433） |
 | make migrate | M1（T04 已建立） | 執行 Alembic upgrade head，並印出目前版本；不含破壞性重置 |
 | uv run secscan-admin create-admin-key --name … [--output PATH] | M1（T05 已建立） | 建立 platform_admin key（預設 90 天、最多 365 天）；完整的 key 只寫出一次（stdout，或新建、權限 600 的檔案），DB 只存 hash（`API_CONTRACT.md` §13.4） |
 | uv run secscan-admin rotate-secret-keys | M1（T08 已建立） | 以 `SECRET_ENCRYPTION_KEYS` 的第一個金鑰重新加密所有的 secret；有任何一份解不開就全部回滾（`API_CONTRACT.md` §16.6） |
+| uv run secscan-admin check-encryption-keys | M5（T23a 已建立） | 檢查三組平台金鑰都合法、互不共用；只顯示數量，不連資料庫（`API_CONTRACT.md` §20） |
+| uv run secscan-admin rotate-content-keys | M5（T23a 已建立） | 以 `CONTENT_ENCRYPTION_KEYS` 的第一個金鑰重新加密報告內容與人工複測摘錄；解不開的保留原狀、列出 id、exit 1 |
+| secscan-admin rotate-evidence-keys | M5（T23a 已建立） | 在 runner 容器內執行：以 `EVIDENCE_ENCRYPTION_KEYS` 的第一個金鑰重新加密 runs volume 的加密檔；和 keeper 互斥 |
+| secscan-admin export-evidence --run ID [--path P] | M5（T23a 已建立） | 在 runner 容器內執行：列出一個 run 的加密檔，或先驗證、寫 audit 再把一個檔案的明文寫到 stdout（break-glass） |
+| uv run secscan-admin retention-status | M5（T23a 已建立） | 唯讀：原始證據、報告與摘錄各保留狀態的數量 |
 | uv run secscan-admin fake-runner [--outcome succeed\|fail] [--hold-seconds N] [--once] | M1（T09 已建立） | 對帳 lease 過期的 fake run，再處理排隊中的 fake run；不連任何位址，結果標為 fixture（`API_CONTRACT.md` §17.5） |
 | uv run secscan-admin runner [--once] [--outcome succeed\|fail] [--hold-seconds N] | M2（T10 已建立） | 容器版的 runner：經 socket-proxy 啟動強化的單次容器（T10 只有 fake），收集輸出；SIGTERM 時停止並刪除容器（`API_CONTRACT.md` §18.1） |
 | uv run secscan-admin worker [--once] | M2（T10 已建立） | 對帳過期的解析，再處理 collected 的 run（fake、preflight，T15 加上 zap；`API_CONTRACT.md` §18.2） |
@@ -119,7 +124,9 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make test-live-fixture-findings | M4（T19 已建立，T20 擴充） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個 scan 以真的 ZAP 與 Nuclei 掃 fixture app 的弱點版與修補版，驗證 worker 連結 finding（佐證合併、CORS 只標示相關、最高等級與衝突、每個觀察連結一次）；T20 加上追溯 API 的驗證與小時間預算的部分失敗情境；錄製到 `recordings/fixture-findings/`（gitignore） |
 | make record-fixtures | M3（T15 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：只在 live lab 網路重新錄製 ZAP 的輸出到 `recordings/zap/`（gitignore），人工審查之後才搬進 `tests/fixtures/zap/`；約 8 分鐘 |
 | make bench-check | M5（T31 已建立） | 離線檢查實驗規格（`BENCH_SPEC`）與結果目錄的名稱（`BENCH_NAME`，已存在就失敗）；不連網、不碰 Docker |
-| make bench | M5（T31 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：先做 bench-check，再以 test-live-runner 的同一個隔離 stack 與清理範圍，經自己的 API 依規格跑完排程，結果寫到 `benchmarks/results/<BENCH_NAME>/`（gitignore、沒有加密）。Live smoke 尚未執行（需要另外授權） |
-| make bench-evaluate | M5（T31 已建立） | 離線、只讀一個完整的結果目錄，評估以 JSON 寫到 stdout；選填 `BENCH_TRUTH`、`BENCH_ADJUDICATIONS`、`BENCH_PAIR_LABELS`、`BENCH_INCLUDE_HOLDOUT` |
+| make bench | M5（T31 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：先做 bench-check，再以 test-live-runner 的同一個隔離 stack 與清理範圍，經自己的 API 依規格跑完排程，結果寫到 `benchmarks/results/<BENCH_NAME>/`（gitignore；T23a 起以本機的 bench 金鑰加密）。Live smoke 尚未執行（需要另外授權） |
+| make bench-evaluate | M5（T31 已建立） | 離線、只讀一個完整的結果目錄，評估以 JSON 寫到 stdout；選填 `BENCH_TRUTH`、`BENCH_ADJUDICATIONS`、`BENCH_PAIR_LABELS`、`BENCH_INCLUDE_HOLDOUT`；T23a 起先核對 `SHA256SUMS`、解密、核對明文的 sha256 才評估 |
+| make bench-key | M5（T23a 已建立） | 以 O_EXCL 建立本機的 bench 金鑰檔（`BENCH_KEY_FILE`，預設 `~/.config/secscan/bench-keys`，0600；不可在 repo 中），已經存在就失敗；不輸出金鑰。遺失之後結果無法復原 |
+| make bench-seal | M5（T23a 已建立） | 把 T23a 之前的明文結果目錄（`BENCH_SOURCE`）轉成新的加密結果目錄（`BENCH_NAME`）：先寫 partial、驗證之後才改名；原目錄不修改也不刪除 |
 
 不得建立一個表面上回 exit 0、實際上沒有驗證的 target，只為了讓命令「看起來都有」。測試不能用時，要明確失敗，或列出有理由的 skip。

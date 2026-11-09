@@ -595,9 +595,9 @@ T08 不發出任何流量：preflight 只定義、不執行，T12 才會實際�
 
 - **沒有讀回 secret 的方式**：
   - 回應、audit、log 都沒有 secret，也沒有由它衍生的值。不存 hash：cookie 的值可能是低熵的，hash 會被暴力猜出。
-  - API 從不解密：新版本沿用 secret 時，直接複製密文。
+  - API 從不解密：新版本沿用 secret 時，直接複製密文。（T23a 更新：API 仍從不解密**目標的 secret**；另外持有報告內容與人工複測摘錄的金鑰，只在報告下載與 triage 事件中解密，見 §30.2。）
   - 以 AST 測試固定：src 中沒有任何模組呼叫 `reveal`（做法同 §9.1 的 `issue_admin_key`）。M2 的 runner 會是唯一的例外，屆時更新測試。
-  - 以 import-linter 固定：只有 `security.secret_cipher` 可以 import `cryptography`，其他模組無法繞過 `SecretCipher` 自己解密（含間接 import）。
+  - 以 import-linter 固定：只有 `security.secret_cipher` 可以 import `cryptography`，其他模組無法繞過 `SecretCipher` 自己解密（含間接 import）。（T23a 更新：另加 `security.blob_cipher`，見 §30.2。）
 - **audit 中的 preflight**：記錄 method、path、expected_status 與 JSON Pointer，不記期望值。path 是實際會送出的請求，T09 要拿它和 grant 比對、事後也要能追查，所以照原樣記錄，和 grant 的 path 相同；它可能含帳號名稱（例如 `/users/v1/name1`，審查時指出）。期望值是用來辨識身分的回應內容（帳號、email），不是請求的一部分，所以不記。
 - **最小權限**（審查後補上）：只有建立與 PATCH 的路由拿到加密元件；查詢的路由與 service 沒有它，在查詢的 service 上呼叫寫入的方法，會在動到 DB 之前就失敗。
 - **不寫入 log**：
@@ -1092,7 +1092,7 @@ DB 只檢查錯誤碼的格式（§13.4），不必改 migration。
 - 兩種 fake runner 擇一執行。
 - out/ 的用量是軟性的上限（每秒檢查）；硬性的磁碟配額在 M3。
 - `prepare_launch` 的 `FOR SHARE` 只保證到 commit：之後 PATCH 清除 secret，不會讓已經啟動的 run 失效（同 §13.11 的語意）。
-- api 與 runner 都持有 `SECRET_ENCRYPTION_KEYS` 與同一個 DB 角色：「只有 runner 呼叫 reveal」是程式層級的約束（AST 測試），不是權限邊界。分開金鑰與 DB 角色在 T23。
+- api 與 runner 都持有 `SECRET_ENCRYPTION_KEYS` 與同一個 DB 角色：「只有 runner 呼叫 reveal」是程式層級的約束（AST 測試），不是權限邊界。分開金鑰與 DB 角色在 T23。（T23a 更新：新增的原始證據金鑰只給 runner、內容金鑰只給 api 與 worker，見 §30.2；`SECRET_ENCRYPTION_KEYS` 仍由 api 與 runner 共用，DB 角色的分開仍在 T23b。）
 - runs volume 中每個 run 的目錄不會被刪除（保留期限在 M5／T23 定義）。
 
 不在 T10 範圍：
@@ -2725,7 +2725,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
   - 有效的樣本只能以工具或預算的結果結束（允許清單）：`BUDGET_EXHAUSTED`、`ENGINE_TIMEOUT`、`TIME_LIMIT_EXCEEDED`、`ENGINE_FAILED`、`ENGINE_REPORTED_ERRORS`、`OUTPUT_INVALID`、`NO_TARGET_TRAFFIC`、`RESOURCE_LIMIT_EXCEEDED`、`ARTIFACT_REJECTED`。
   - 其他錯誤碼都是平台、授權、設定或環境的問題（例如 `PLAN_REJECTED`、`SCOPE_EXPIRED`、`LEASE_EXPIRED`、`GUARD_UNAVAILABLE`），加上 interrupted、cancelled 的 scan，讓整批作廢，以新的名稱重跑，不計次數，也不挑掉個別樣本。第一版用的是環境錯誤的排除清單，程式碼審查指出 grant 在兩個引擎之間到期、plan 被拒絕這類失敗會被當成 recall 偏低的有效樣本，改成允許清單。
   - harness 的 grant 有效期涵蓋最壞情況的整個 session（每個 scan 都用滿總秒數加 900 秒）再加一天：grant 不會在 session 中到期，ZAP 的 plan 也不會被「grant 快到期」截短。規格的最壞情況超過 29 天（grant 最長 30 天）時，`bench-check` 就拒絕。
-- **結果目錄**（`benchmarks/results/<name>/`，已在 gitignore）：O_EXCL 獨占建立、不覆寫，目錄 0700、檔案 0600；寫入前檢查平台 key 的格式、Bearer、JWT 與這次 session 建立的 key 原值；只保存 scan、finding 與比較快照的 JSON，不保存觀察的 evidence。**沒有加密**（T23a 的範圍），manifest 一律揭露。
+- **結果目錄**（`benchmarks/results/<name>/`，已在 gitignore）：O_EXCL 獨占建立、不覆寫，目錄 0700、檔案 0600；寫入前檢查平台 key 的格式、Bearer、JWT 與這次 session 建立的 key 原值；只保存 scan、finding 與比較快照的 JSON，不保存觀察的 evidence。**沒有加密**（T23a 的範圍），manifest 一律揭露。（T23a 更新：結果檔以本機的 bench 金鑰加密、manifest 升到版本 2，見 §30.7。）
 - **manifest**（§8）：規格的 sha256、種子、排程與實際順序；每個 scan 的預算、上限、分到的配額、guard 計數與狀態；比較快照；每個檔案的 sha256；`complete`；固定的揭露清單。API 拿得到的身分（`GET /scanners`、`GET /scan-profiles`、每個 run 的 `plan_hash`）照原樣記下；拿不到的由 harness 記下並標明來源：commit 與是否有未提交的修改、guard 與 fixture 執行用的本機映像 ID、fixture 原始碼的雜湊、靶機映像的參照、strict-1（path 規則沒有執行期的版本代號，以 commit 與 guard 映像識別）。
 - **指令**：`make bench BENCH_SPEC=… BENCH_NAME=…` 的前置是 `ENABLE_LIVE_LAB_TESTS`、規格與結果目錄名稱（只收英數字、`-`、`_`，已存在就停止）的檢查；都通過之後，recipe 才遞迴執行 `test-live-runner`（以 `make -j` 執行也不會先啟動 stack；安全審查 L2）。建立、測試與清理完全沿用同一個隔離 stack 與範圍（Makefile 測試確認）。使用者給的值以環境變數交給 recipe、由 shell 展開，不以 make 的變數嵌進 shell 的文字（安全審查 L1）；Live 測試從環境變數讀規格的路徑與名稱，規格只讀一次（解析、sha256 與複本來自同一份位元組；安全審查 L3）。`make bench-check` 與 `make bench-evaluate` 是離線的；後者只讀結果目錄，評估以 canonical JSON 寫到 stdout，選填的 `BENCH_TRUTH`、`BENCH_ADJUDICATIONS`、`BENCH_PAIR_LABELS`、`BENCH_INCLUDE_HOLDOUT`。
 
@@ -2752,7 +2752,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 
 ### 29.6 限制
 
-- 結果目錄沒有加密（T23a）。報告不列總預算的上限與子預算。strict-1 的 path 規則沒有執行期的版本代號。
+- 結果目錄沒有加密（T23a）。（T23a 更新：已加密，見 §30.7。）報告不列總預算的上限與子預算。strict-1 的 path 規則沒有執行期的版本代號。
 - harness 本身還沒有 Live 驗證：Live smoke 通過之前 T31 不標完成。Juice Shop、VAmPI 的路徑要到 T28 才第一次執行。
 - 只有匿名掃描：Nuclei 不能和 auth profile 一起用（§24.1），主要比較三組都用匿名。
 
@@ -2783,3 +2783,152 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 - **資料庫審查（database-reviewer）**：6 個 LOW。
   - 修正：配額只寫一次的條件收緊，並拒絕 INSERT 預填（LOW-1）；`engine_budget_valid` 改成允許清單（LOW-2）；downgrade 在還有未結束、帶上限的 run 時拒絕（LOW-3）；preflight 共用總額的偏差寫進 §29.1（LOW-4）；補上舊資料列經 repository 讀回、downgrade 拒絕與成功後 trigger 函式都移除的測試（LOW-6 的一部分）。
   - 接受：升級的鎖與掃描成本（LOW-5，依既有程序先停服務）；ORM 與 migration 的 CHECK 文字沒有自動比對（LOW-6 的另一部分：審查已人工逐字核對，專案既有的測試也只比對名稱）。
+
+## 30. T23a：原始證據的加密與保留期限、報告與摘錄的加密、金鑰分組與換版（SEC-14 的一部分，2026-11-09 開始）
+
+細部計畫第一版經一次獨立審查（Plan 子代理，opus）。使用者 2026-11-09 決定：保留期限 7／30／30 天、兩組平台金鑰分開（最小權限）、`benchmarks/results` 也加密、`make env` 由使用者自己執行；並核准離線的實作、測試、文件、分支、PR 與合併。**核准不包含**：任何 Live、由開發代理修改 `.env`（包括經 `make test` 間接觸發 `make env`）、執行 `make bench-key`、修改或清除既有的金鑰，以及修改或刪除 `recordings/`、`runs/spike-t03/work/`、既有的研究資料與開發環境的資料。
+
+**這一節的用語**：原始證據是「run 結束（解析完成、失敗或逾期）之後加密」，**不是全程靜態加密**；執行、收集、等待解析期間是明文（§30.3 的時間表與 §30.9 的剩餘風險）。
+
+### 30.1 範圍
+
+- 做：三組平台金鑰的分配與啟動檢查（§30.2）；runs volume 的加密生命週期、逾期處理與 fail-closed（§30.3）；報告內容與人工複測摘錄的加密（§30.4）；保留期限與清除（§30.5）；換版（§30.6）；`benchmarks/results` 的加密與遷移工具（§30.7）。
+- 不做：加密 `observations`（一般 API 的遮罩檢視；Nuclei 擷取的 email 與卡號照 TOOLS §2.1.2 記為限制）；guard telemetry（tmpfs、6 小時）；DDL／DML 分權、compose secrets、掃描容器的 log driver、uid 分離與主機全碟加密的要求（T23b）；最終 Live 重跑（T23c）；乾淨環境重建（T23d）；`recordings/` 與 spike 檔（T34）；原始輸出的下載 API（T21 已移除，不恢復）。
+
+### 30.2 三組金鑰與權限邊界（使用者，2026-11-09；取代 §12.2、§14.12 的對應句子）
+
+| 金鑰 | 設定 | 容器 | 用途 | 不得持有 |
+|---|---|---|---|---|
+| 目標的 secret（既有） | `SECRET_ENCRYPTION_KEYS` | api（只加密）、runner（解密後注入掃描容器） | auth profile 的 secret | worker |
+| 原始證據（新） | `EVIDENCE_ENCRYPTION_KEYS` | runner；runner 容器內的 admin 指令 | runs volume 的原始證據 | api、worker |
+| 報告內容（新） | `CONTENT_ENCRYPTION_KEYS` | api、worker；主機上的換版指令與 migration | 報告內容、人工複測摘錄 | runner |
+| bench（新，本機） | 金鑰檔（`BENCH_KEY_FILE`，預設 `~/.config/secscan/bench-keys`） | 開發機上的 bench harness 與 `bench-evaluate` | `benchmarks/results` | 平台的任何容器 |
+
+- **格式**：每組 1 到 4 把 Fernet 金鑰（url-safe base64 的 32 bytes），第一把加密、每一把都能解密，規則同 §12.1。`parse_keys` 加上設定名稱的參數，錯誤訊息指出是哪一組的第幾把，不含金鑰。
+- **互不共用**：`check_distinct_key_rings` 以解碼後的 bytes 比對（base64 最後一個字元有未使用的位元，不同寫法可能是同一把金鑰），訊息只列出兩組的名稱。每個程序檢查自己持有的幾組；`secscan-admin check-encryption-keys` 在主機上一次檢查三組，只顯示數量、不連資料庫。
+- **啟動時缺金鑰就停止**：api 需要 SECRET 與 CONTENT（`app.state.content_cipher`）；worker 需要 CONTENT；runner 需要 EVIDENCE（runner 沒有 SECRET 照舊可以啟動，需要認證的 scan 以 `SECRET_UNAVAILABLE` 失敗）。
+- **compose 的分配**：只把各自需要的那幾組傳進容器（部署測試 KEY-02 核對，沒有任何服務用 `env_file`）。主機上的 `.env` 是唯一的設定來源、三組都在裡面，所以主機上的 admin 指令與 migration 由操作者執行；「只給某個程序」指的是容器拿到的金鑰。保留期限也只傳給套用它的程序（runner：`EVIDENCE_RETENTION_DAYS`、`EVIDENCE_PLAINTEXT_MAX_MINUTES`；worker：`REPORT_RETENTION_DAYS`；api：`EXCERPT_RETENTION_DAYS`）。
+- **`make env`**：比照既有的寫法，以 `openssl rand -base64 32` 產生、轉成 url-safe、檢查長度 44；冪等，只附加缺少的那一行；任何一個是空值時在寫入之前就停止；不改、不重設、不輪替既有的值；終端只顯示名稱；`umask 077` 與 `chmod 600` 照舊（KEY-05 在暫存目錄執行真的 recipe，不碰真正的 `.env`）。
+- **金鑰不外流**：設定一律是 `SecretStr`；repr 只顯示設定名稱與數量；錯誤與 log 不含金鑰、明文或密文（canary 測試）；bench 結果寫入前的秘密檢查加上 Fernet 金鑰的形狀與 bench 金鑰本身。
+- **「API 從不解密」的修正**：
+  - 保留：API 從不解密**目標的 secret**（`reveal` 仍只在 `runner/service.py`）。
+  - 新增：API 只解密 CONTENT 加密的內容，而且只在報告下載（`reports/service.py`）與 triage 事件（`triage/service.py`）。AST 測試（KEY-03）限定 `unseal` 只有這兩個呼叫者、`unseal_stream`／`read_stream_header` 只在 `runner/evidence.py`、`CurrentContentCipher` 只到報告與 triage 的路由、`content_cipher(...)` 只由 api、worker、本機指令與 v0022 建立。換版用 `rotate`，不回傳明文。
+- **import-linter**：`cryptography` 只能由 `security.secret_cipher` 與新的 `security.blob_cipher` 使用。
+
+### 30.3 原始證據的生命週期（runs volume）
+
+**加密由 runner 程序內的背景執行緒（keeper，`runner/keeper.py`）負責**。它有自己的 DB session，和主迴圈只共用一個健康狀態：主迴圈監看容器時（最長約 1,500 秒、單一執行緒、期間不做維護）加密照常進行，主迴圈的心跳、對帳與取消不受影響（runner 超過 30 秒沒有心跳就會被當成停擺）。每 10 秒一輪，每輪最多 30 秒、每一步最多 20 個 run。`secscan-admin runner --once` 不啟動執行緒，改成在處理之前與結束之前各同步跑一輪。
+
+| 階段 | 誰 | 檔案狀態 | 上限 |
+|---|---|---|---|
+| 1. 準備 `in/` | runner | 明文（輸入不含 secret；secret 在 tmpfs 的 secrets volume，容器結束就刪） | 到第 5 階段 |
+| 2. 容器執行，寫入 `out/` | 掃描容器 | 明文、沒有遮罩 | run 的時間上限 |
+| 3. 收集：就地遮罩、寫 manifest | runner 主迴圈 | 明文（已遮罩已知的 secret） | 數秒 |
+| 4. 等待解析、解析 | worker（唯讀） | 明文 | 平常數秒；逾期規則見下 |
+| 5. 加密 | keeper | 只剩加密檔 | run 進入終止狀態、容器確認刪除之後的下一輪（約 10–20 秒） |
+| 6. 清除 | keeper | 刪除整個目錄 | 加密後 7 天 |
+
+- **待加密的條件**：run 已終止，而且沒有容器或容器已確認刪除（`container_removed_at`；`prepare_launch` 先在 DB 記下容器才呼叫 create，所以有容器的 run 一定有名稱）。之後沒有任何程序會再寫這個目錄。v0021 的 trigger 也只允許這樣的 run 新增紀錄。
+- **worker 停擺或異常**（使用者要求明文不能因為 worker 等待或異常而無限期保留）：
+  - 起算點是第一次進入 `collected` 的 `run.status` 事件（不用最後一次：每次重試都會再進入 `collected`，用最後一次會讓反覆失敗的解析無限期延長明文；以注入時間落在兩次 `collected` 之間的測試確認）。
+  - 超過 `EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60，範圍 15–1440）仍是 `collected`，或是 `normalizing` 而 lease 已過期 → keeper 先鎖 scan 再鎖 run（和佇列相同的順序），鎖住之後重新確認條件，轉成 `failed`（新的錯誤碼 `PARSE_DEADLINE_EXCEEDED`），同一個 transaction 重算 scan 的狀態；之後同一輪加密。狀態機加上 `collected → failed`；錯誤碼的 DB CHECK 只檢查格式，不必改 migration。
+  - 有效 lease 的解析不受影響。worker 之後以舊 lease 的寫入都會被 lease 的檢查擋下；已經存好的部分結果保留，所以這個錯誤碼的意思是「解析沒有在期限內完成」，不是「沒有結果」。
+  - 最壞情況：run 的時間 ＋ 60 分鐘 ＋ keeper 的一輪。
+- **反覆解析失敗**：達到 `MAX_PARSE_ATTEMPTS` 後是 `failed`，隨即加密。**沒有收集的 run**（取消、逾時、中斷、OOM…）直接進入終止狀態，下一輪就把沒有遮罩的殘留加密。**runner 當掉**：重啟之後先對帳（`interrupted`），keeper 再接著加密。**runner 停機，或 Docker 無法確認容器已刪除**：沒有程序能加密，明文一直留到恢復為止（§30.9）。
+- **從來沒有目錄的 run**（例如排隊中就取消、啟動之前就失敗）記為 `none`：不算失敗，也不會一直停在 `pending`。
+- **probe 的目錄**：capability probe 不送請求、沒有 secret，容器確認刪除之後由主迴圈刪除整個工作目錄（以 dir fd 加 O_NOFOLLOW，不跟隨 symlink）。刪不掉時由 keeper 當成孤兒目錄處理。
+- **孤兒目錄**（沒有 `scanner_runs` 紀錄的 UUID 目錄，例如 T23a 之前的 probe）：sealed/ 之外的所有條目超過 1 小時沒有變動才加密；加密檔標頭中已驗證的加密時間超過保留期限才刪除。**絕不在未加密時刪除。**
+
+**fail-closed（使用者要求：加密失敗不能靜默略過，也不能誤報成已受保護）**：
+- **先驗證才刪除**：寫進 `sealed/` 的暫存檔（`.sealing-<隨機>`，O_EXCL）→ fsync → rename → 串流解密，核對原本的路徑、大小與 sha256 → 才刪除明文 → 全部完成之後 fsync 目錄。任何一步失敗都保留明文、不寫入 `run_evidence`，API 如實顯示 `pending`；加密之後 sealed/ 之外仍有條目也算失敗。以故障注入（rename、fsync、fchmod、驗證失敗或不符）與「刪除每個明文時它的加密檔已驗證過」的測試確認（EVID-02）。
+- **加密失敗或 keeper 停止**：任何一個 run 失敗都繼續處理其他 run，但這一輪就不健康；不健康、執行緒停止、停擺（三輪的時間沒有完成一輪）或換版中（拿不到 advisory lock）時，runner 以新的 `CapabilityIssue.EVIDENCE_SEALING_FAILED` 把可用的引擎設成空的，不認領新的 run（比照 guard 停擺的 `require_guard`；執行中的 run 照常完成），`GET /scanners` 與 `/scan-profiles` 顯示原因。一輪沒有任何失敗之後才恢復。`--once` 結束時 keeper 不健康就 exit 1。log 只記 run_id 與錯誤的種類，不記路徑或內容；`retention-status` 列出積壓。
+- **中斷恢復**：sealed/ 中殘留的 `.sealing-*`、`.rotating-*` 是不完整的密文，直接刪除；run 目錄的 `.masking-*` 是收集時只遮罩了一部分的明文暫存檔（不是證據），也直接刪除。加密到一半的目錄可以重複執行：加密檔的名稱由原本的路徑決定，rename 之後、刪除明文之前中斷時，下一輪重做同一個檔案並取代同一個加密檔，不會多一份。
+- **哪些東西會被加密**：一般檔案不論 link 數都加密（hardlink 只刪除 run 目錄中的這一個 link）；symlink 與特殊檔案不跟隨、直接刪除；完成之後刪掉空的子目錄。走訪有深度（32）與條目數（20,000）的上限，超過就 fail closed。
+
+**加密檔的格式**（`security/blob_cipher.py`）：
+- 一個 run 目錄加密之後只剩 `sealed/`：每個原本的檔案各一個加密檔，檔名是原本相對路徑的 sha256（計畫第一版寫「以序號命名」；改成路徑的 sha256：一樣避免 ENAMETOOLONG，而且讓重做可以取代同一個檔案）。原本的路徑寫在已驗證的標頭中；超過 4,096 bytes 時改記 `overlong-path/<sha256>`。
+- 分塊的 Fernet：第一行是格式標記（不加密），第一個 token 是標頭（context `evidence:<run_id>`、原本的路徑、加密時間與隨機的 stream id 的 JSON），之後每 1 MiB 一個 token，明文以**標頭明文的 sha256**、塊的序號與「最後一塊」旗標開頭。竄改、截斷、調換順序、重複、少了最後一塊，或把一塊、整個檔案搬到別的檔案或別的 run，都解不開。記憶體用量有上限（runner 的 `mem_limit` 是 256m）。
+- 只用 Fernet 做加密與驗證；Hypothesis 的任意切塊往返、各種竄改，以及持有金鑰者偽造的標頭與塊（驗證不只靠 HMAC）都有測試（SEAL-01），`blob_cipher` 的 branch coverage 100%。
+
+**DB（migration v0021）**：`run_evidence`（主鍵 `scanner_run_id`，以 `(scanner_run_id, scan_id)` 引用 `scanner_runs`）：`status`（none／sealed／purged）、`file_count`、`plaintext_bytes`、`sealed_at`、`purged_at`、`recorded_at`；CHECK 狀態與時間、數量一致；部分索引 `ix_run_evidence_sealed`。trigger：新增只能是 none 或 sealed，而且 run 必須已終止、容器已確認刪除；修改只允許 sealed → purged 一次，其他欄位完全不變；刪除與 TRUNCATE 一律拒絕。既有的資料不回填（升級之後 keeper 分批加密既有的 run 目錄，第一次加密時才開始計算 7 天）。downgrade：已經有 sealed 的紀錄時拒絕。
+
+**API**：`engines[].evidence` 列出 `status`（none／pending／sealed／purged，沒有紀錄是 pending）、`sealed_at`、`purged_at`；finding 來源追溯的 artifact metadata 的 `encrypted` 改由 `run_evidence` 推導（sealed、purged 是 true），另加 `purged_at`。DB 的 `artifacts.encrypted` 不改，是從來沒有寫入過的舊欄位。
+
+### 30.4 報告內容與人工複測摘錄（DB，CONTENT 金鑰）
+
+- **報告**：worker 渲染、驗證之後以 context `report:<id>` 加密再寫入；`reports.sha256`、`size_bytes` 仍是明文的值。下載時 API 先檢查是否已清除（是的話回 410 `REPORT_EXPIRED`，新錯誤碼），再解密並沿用既有的 sha256 核對；解不開、屬於別的報告或不符一律回 500、不送出內容（CONT-01：把另一份報告的密文搬過來也一樣）。
+- **摘錄**：triage PATCH 時 API 先核對 sha256 與長度和事件 attestation 中記下的值相符，再以 context `excerpt:<finding>:<sequence>:<kind>` 加密，期限是建立時間加 `EXCERPT_RETENTION_DAYS`。`GET triage-events` 只為 operator／admin 解密，並再核對一次雜湊與長度；解不開或不符回 500。viewer 仍是事件層級的 null；寫入者看到的每一段加上 `expires_at`、`purged_at`，清除之後 `content` 是 null（tombstone）。
+- **DB（migration v0022）**：
+  - `reports`：新增 `expires_at`（只在 generating → succeeded 時寫入）與 `content_purged_at`（只能寫一次，必須已到期、其他欄位都不變）；改寫 `reports_guard`。CHECK：succeeded ⇔ 有期限；清除不早於期限。
+  - `reports_content_check`：重建成只在轉為 succeeded 時觸發（`OLD.status IS DISTINCT FROM 'succeeded'`），只核對這一次嘗試的內容存在；明文的 sha256 改由 app 核對（內容是密文，DB 算不出明文的雜湊）。
+  - `report_contents`：改用自己的 `report_contents_guard`（不再用共用的 `scan_records_guard`）：只允許換版時更新 content（其他欄位不變、報告還沒清除），以及報告寫入 `content_purged_at` 之後刪除（同一個 transaction 先寫）。內容的 CHECK 改成 Fernet token 的形狀（`gAAAAA` 開頭）與密文的上限。
+  - 摘錄：`sealed_content`（bytea）取代 `content`（TEXT），加上 `expires_at` 與 `purged_at`；改用自己的 `finding_triage_excerpts_guard`：只允許換版（密文換密文）與只能一次的清除（`sealed_content` 變成 NULL、必須已到期）。不能刪除：留下 tombstone，「每個人工複測事件恰好兩筆」的規則不變。新增時的 trigger 保留事件的檢查、要求新的摘錄是密文，拿掉明文雜湊的檢查。
+  - **既有資料**（同一個 transaction）：舊報告與舊摘錄的期限一律是升級時間加 30 天；舊的明文在核對 sha256 與大小之後加密（context 和 app 相同，以 API 解得開的測試確認）。只有存在舊資料時才需要 CONTENT 金鑰；缺金鑰或舊內容和 sha256 不符時以清楚的訊息停止，整個升級回滾、資料不變（CONT-02）。
+  - **順序**：所有 ALTER TABLE 都在資料的 UPDATE 之前；回填期間暫停 `reports_guard` 與摘錄的 guard（同一個 transaction 內恢復），最後才刪除舊欄位、加上 NOT NULL 與 CHECK。之間沒有 deferred trigger 的 pending event（新的 `reports_content_check` 對已經 succeeded 的列不觸發）。
+  - **金鑰的來源**：`migrations/env.py` 由設定放進 `config.attributes["content_encryption_keys"]`（呼叫端已經放了就不覆寫），測試以 `alembic_config(content_encryption_keys=…)` 注入；migration 不讀 `os.environ`。
+  - **離線模式**（`--sql`）：不在 Python 中加密；產生的 SQL 先以 DO 區塊確認沒有既有的報告內容與摘錄，有就報錯（請改用線上升級）。
+  - **downgrade**：還有報告內容、摘錄或清除過的報告時拒絕（舊版本只認得明文），否則還原 v0018、v0017 的 trigger、函式、CHECK 與欄位。只用於開發與測試。
+  - **例外**：v0022 import `secscan.security`（加密元件），打破「migration 不 import 應用程式的程式」的慣例：在 SQL 中做 Fernet 不可行，而另寫一份加密會讓格式分裂。只 import 加密元件與金鑰的規則，context 的格式在 migration 中另寫一份，以 API 解得開的測試核對兩者一致。
+- **API 的其他變更**：報告加上 `expires_at`、`content_purged_at`；每個 scan 的報告配額不計失敗與內容已清除的報告；Idempotency-Key 重送照舊回原本的 metadata（清除之後也是）。
+
+### 30.5 保留期限與清除
+
+| 資料 | 起算 | 預設 | 執行者 | 清除後保留 |
+|---|---|---|---|---|
+| run 目錄與孤兒目錄 | 加密時間（`run_evidence.sealed_at`，或加密檔標頭中已驗證的時間） | 7 天（`EVIDENCE_RETENTION_DAYS`） | keeper | artifact metadata 與 sha256、觀察、finding、比較快照、`run_evidence` |
+| 報告內容 | 完成時寫入的 `expires_at` | 30 天（`REPORT_RETENTION_DAYS`） | worker 的定期步驟 | `reports` 列、sha256、audit |
+| 人工複測摘錄 | 建立時寫入的 `expires_at` | 30 天（`EXCERPT_RETENTION_DAYS`） | worker 的定期步驟 | 事件中的雜湊與長度、tombstone |
+| guard telemetry | 不變 | 6 小時 | guard | — |
+| `benchmarks/results` | 不自動清除（T28 的研究資料） | — | 使用者 | — |
+
+- 範圍 1–365 天，可用環境變數調整。只清除內容：metadata、sha256、遮罩過的觀察、finding 與比較快照都保留。
+- worker 的迴圈原本沒有計時器：比照 runner 加上 monotonic 的間隔，開始時與之後每 10 分鐘清除一次；到期以 DB 的時鐘判斷（和 trigger 的檢查相同），每批最多 50 份，以 FOR UPDATE SKIP LOCKED 認領。
+- **只做邏輯清除**：刪除檔案只是 unlink，不會抹除磁碟上的資料區塊（SSD、APFS、overlay）；DB 的 dead tuple、WAL 與備份也還留著，直到 VACUUM 或備份輪替（比照 §12.3 揭露）。
+- **既有資料從升級之後起算**：舊的 run 目錄在第一次加密時才開始計時；舊報告與舊摘錄由 v0022 設成升級時間加 30 天。使用者之後升級開發環境時（`make migrate`、`make up`），既有的報告與摘錄會被加密、run 目錄會分批加密，都不會一升級就刪除。
+- `secscan-admin retention-status`：唯讀，列出原始證據（執行中、逾期、待加密、沒有目錄、已加密、待清除、已清除）、報告內容與摘錄（保留中、待清除、已清除）的數量，不含路徑或內容。
+
+### 30.6 換版
+
+- **`rotate-evidence-keys`**（在 runner 容器內執行）：逐檔串流重新加密到 `.rotating-*` 暫存檔、驗證之後才 rename；以 advisory lock 和 keeper 互斥（keeper 每一輪處理檔案時才持有，換版重試到拿到為止；換版期間 runner 不認領新的 run）；可以中斷後續跑；解不開的目錄保留原狀並列出 run_id、exit 1；audit 只記數量。
+- **`rotate-content-keys`**（在主機上執行）：報告一份一個 transaction（密文最大約 11 MiB，避開 30 秒的 statement 上限與記憶體上限），摘錄每批 100 段（keyset 分頁）；以 FOR UPDATE 和清除互斥；已清除的略過；解不開的保留原狀並列出 id、exit 1；audit 只記數量。
+- **步驟**（比照 §12.3）：新金鑰放在最前面 → 重啟持有它的容器 → 換版 → 移除舊金鑰、重啟 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。金鑰由使用者手動編輯，`make env` 從不輪替。`rotate-secret-keys` 不變。
+- **`export-evidence`**（break-glass，在 runner 容器內執行）：沒有 `--path` 時列出加密檔的原本路徑、大小與 sha256；有 `--path` 時先完整驗證、寫入 audit（記下 run_id、路徑的 sha256 與大小，寫不進去就不匯出），才把明文寫到 stdout，不寫任何檔案。
+
+### 30.7 `benchmarks/results` 的加密（使用者，2026-11-09；更正 §29.3、§29.6）
+
+- **金鑰檔**：預設 `~/.config/secscan/bench-keys`，可用 `BENCH_KEY_FILE` 指定，內容是 1 到 4 把 Fernet 金鑰（一行一把）。必須是一般檔案（不是 symlink）、只有擁有者可讀寫、屬於目前的使用者，而且不在 repo（含結果目錄）之中。`make bench-key` 以 O_EXCL 建立（0600、上層目錄 0700），已經存在就失敗；由使用者執行。`bench-check` 在啟動 stack 之前檢查金鑰檔。金鑰一律不輸出。單元測試只用暫存目錄中的金鑰檔，不讀預設的位置。
+- **`benchmarks/sealing.py`** 是 `benchmarks/` 中唯一可以 import `cryptography` 的模組（BENCH-11 的 AST 測試改成依模組允許）；因為 `benchmarks` 不能 import `secscan`，自己包裝 Fernet，以 context `<結果目錄的名稱>/<檔名>` 綁定內容。
+- **寫入**：在 `results.write_bytes` 檢查秘密（明文）之後加密，以 O_EXCL 寫成 `<檔名>.sealed`（0600）並 fsync；所有檔案（含規格與 manifest）都經過這一條路，磁碟上沒有明文、也沒有明文的暫存檔。原本的 `seal()`（寫 `SHA256SUMS`）改名為 `write_checksums()`，避免和加密混淆。
+- **完整性與可重現性**：明文的 `SHA256SUMS` 列出各加密檔的 sha256，沒有金鑰也能核對；manifest 的版本升到 2，`files` 記下每個檔案明文與密文的 sha256；揭露項目把 `results_not_encrypted` 換成 `results_encrypted_with_local_bench_key` 與 `bench_key_loss_makes_results_unrecoverable`。規格的 sha256、種子與實際順序照舊記在 manifest 中，可重現性不變。
+- **讀取**：`bench-evaluate` 先核對 `SHA256SUMS`，再解密、核對明文的 sha256 與 manifest，然後才評估；金鑰錯誤、遺失、檔案被截斷或竄改、改名或搬到別的結果目錄都清楚報錯，不輸出任何部分結果；結果目錄中有明文的檔案時拒絕。
+- **既有的明文結果**：`make bench-seal BENCH_SOURCE=… BENCH_NAME=…` 先核對原目錄的 `SHA256SUMS`，寫到 `<名稱>.partial-<隨機值>`（O_EXCL 建立），驗證之後才 rename 成正式的名稱，所以正式名稱存在就代表完整；manifest 升到版本 2 並記下原本 manifest 的 sha256。原目錄不修改也不刪除。驗證失敗時刪掉這次產生的 partial 目錄；程序被中斷時 partial 目錄留著（名稱已標示），不自動刪除。實作時以唯讀方式確認過：目前沒有任何結果目錄（T31 的 Live smoke 還沒執行）。
+- **金鑰遺失**：結果無法復原，必須另外備份金鑰檔。`benchmarks/collect.py` 只取指定的欄位，API 新增的欄位不影響它（BENCH-04）。
+
+### 30.8 測試與驗證
+
+- 新的測試表見 SECURITY_AND_TESTING §4：KEY-01 至 05、SEAL-01 至 02、EVID-01 至 07、CONT-01 至 02、RET-01 至 02、ROT-01、BSEAL-01 至 03；修訂 TRIAGE-06、REPORT-04（DB 改成只允許換版與到期清除，雜湊改在 app 中核對）。
+- 空轉檢查（故意改壞之後必須有測試失敗，確認之後改回、不提交）：拿掉「先驗證才刪除」、容器確認刪除之前就加密、到期之前就清除、拿掉最後一塊的檢查、逾期改從最後一次 `collected` 起算、加密失敗時引擎仍然可用——六項都被測試抓到。
+- 驗證的過程依使用者的要求分兩段：使用者執行 `make env` 之前，只跑不碰 `.env` 的檢查（`make lint`、`make typecheck`、在已經運作的 db-test 上直接執行 pytest），不宣稱完整的 `make test` 已通過；使用者執行之後才跑完整的 `make test`。
+
+### 30.9 SEC-14 的剩餘風險與改善方向（使用者要求寫進 DECISIONS 與 SECURITY_AND_TESTING）
+
+**T23a 完成也不代表 SEC-14 完成**：
+
+1. **加密時間點的限制**：run 執行、收集、等待解析期間是明文。
+   - 平常是 run 的時間加上數十秒；worker 異常時最多再加 60 分鐘（`EVIDENCE_PLAINTEXT_MAX_MINUTES`）；runner 停機或 Docker 無法確認容器已刪除時，持續到恢復為止。
+   - 原因：ZAP 與 Nuclei 只能寫一般檔案，而 runner 必須在容器結束之後讀取並遮罩；worker 再讀取同一份檔案解析。
+   - 改善方向：主機的全碟加密（macOS 的 FileVault 涵蓋 OrbStack 的磁碟映像；Linux 用 LUKS），列為 T23b 的部署要求。未來：每個 run 一個 tmpfs 的 `out/` volume，由輔助容器讀出並加密；或讓工具的輸出流經會加密的 sidecar；或讓 worker 直接讀取加密檔（worker 需要證據的金鑰，和目前的最小權限分配衝突，需要另外取捨）。
+2. **刪除只是 unlink**：資料區塊沒有抹除（SSD、APFS、overlay）。DB 的 dead tuple、WAL 與備份會保留舊的報告與摘錄，直到 VACUUM 或備份輪替。
+3. **權限隔離有限**：所有服務都是 uid 10001，隔離只靠掛載；DB 只有一個角色，可以停用 trigger（v0022 的回填與測試就是這樣做的）；金鑰以 compose 的環境變數傳入，`docker inspect` 看得到。這些都屬於 T23b。
+4. **掃描容器的 json-file log**：在容器刪除之前，可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
+5. **其他保持現狀的明文**：`observations` 保留遮罩過的證據，包含 Nuclei 擷取的 email 與卡號；guard telemetry 的路徑以明文存在 tmpfs，保留 6 小時；摘錄的雜湊沒有加 salt，留在不可變的事件中（T21 的設計）；報告與摘錄在 API 的記憶體中解密，下載的回應是明文（TLS 由部署負責）。
+6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 中的明文交給 T34（使用者決定之前不修改或刪除）。
+7. **金鑰在主機上**：`.env` 是唯一的設定來源，三組金鑰都在裡面（600）；bench 的金鑰檔在使用者的家目錄。金鑰遺失之後，尚未清除的證據、報告、摘錄與 bench 結果都無法復原；備份金鑰由使用者負責。
+
+### 30.10 交接
+
+- **T34（新增，獨立於 T23 的 DoD）**：本機研究資料的安全盤點（`recordings/`、`runs/spike-t03/work/`）：逐項列出路徑、大小、類型、是否可能含憑證或敏感資料、被哪些文件引用為證據，提出處理建議（保留、加密或刪除）由使用者決定。盤點必須讀取可能含憑證的檔案，開始之前另外授權；未經決定不修改或刪除。
+- **T23b**：主機全碟加密的部署要求、compose secrets、DDL／DML 分權、掃描容器的 log driver、uid 分離、以每個 key 計的速率限制。
+- **T23c**：在最終版本重跑所有 live 套件，包含這次改成等加密完成、以 `export-evidence` 讀取原始輸出的那些。
+- **T23d**：乾淨環境的重建，包含 `make env` 產生三組金鑰。
+- **T27／T28**：原始證據 7 天後清除；需要人工複核原始輸出時，要在期限內進行（或事先調整 `EVIDENCE_RETENTION_DAYS`）。實驗結果以加密的 `benchmarks/results` 保存，金鑰檔要備份；T31 的 Live smoke 需要使用者先執行 `make bench-key`。

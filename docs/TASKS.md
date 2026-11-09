@@ -1555,10 +1555,22 @@
 - [ ] T23 完成所有 P0 的安全、故障、整合測試，並在乾淨環境重建。
   - 因資料保護、部署與最終驗收涉及不同界線，拆成以下四項，各自細化後實作：
   - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）；含 T21 的人工複測摘錄與報告內容。
+    - 2026-11-09：使用者決定保留期限 7／30／30 天、兩組平台金鑰分開（最小權限）、`benchmarks/results` 也加密、`make env` 由使用者自己執行；核准細部計畫第一版的離線範圍（程式、測試、文件、分支、PR 與合併）。**不包含**：任何 Live、由開發代理修改 `.env`（包括經 `make test` 間接觸發 `make env`）、執行 `make bench-key`、修改或清除既有的金鑰、修改或刪除 `recordings/`、`runs/spike-t03/work/` 與既有的研究、開發資料。決策見 `DECISIONS.md` §30。
+    - 2026-11-09：離線實作（分支 `feat/t23a-evidence-encryption`）：
+      - 金鑰：`EVIDENCE_ENCRYPTION_KEYS`（只給 runner）、`CONTENT_ENCRYPTION_KEYS`（api、worker），`make env` 冪等地補上；各程序的啟動檢查、`check-encryption-keys`。
+      - 原始證據：runner 的 keeper 在 run 結束、容器確認刪除之後加密、驗證之後才刪除明文，7 天後清除；等待解析超過 60 分鐘的 run 以 `PARSE_DEADLINE_EXCEEDED` 結束；加密失敗時不認領新的 run（`EVIDENCE_SEALING_FAILED`）；migration v0021；`engines[].evidence`；`rotate-evidence-keys`、`export-evidence`、`retention-status`。
+      - 報告與摘錄：寫入之前加密、30 天後清除（410 `REPORT_EXPIRED`、摘錄 tombstone）；migration v0022（既有的明文在升級時加密）；`rotate-content-keys`。
+      - `benchmarks/results`：以本機的 bench 金鑰加密（manifest v2）；`make bench-key`、`make bench-seal`。
+      - live 輔助程式改成等加密完成、以 `export-evidence` 讀原始輸出（`tests/live/evidence_assertions.py`），**未執行**。
+      - 測試：S&T §4.3 的 KEY-01 至 05、SEAL-01 至 02、EVID-01 至 07、CONT-01 至 02、RET-01 至 02、ROT-01、BSEAL-01 至 03；六項空轉檢查都被抓到。使用者執行 `make env` 之前只在 db-test 上直接執行 pytest（7174 passed、2 skipped，coverage 99%），**不是完整的 `make test`**。
+    - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`；審查；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。
   - DoD：安全負向測試全通過；整體 coverage ≥ 80%、核心模組 branch coverage ≥ 90%；原始證據加密；文件與 API 一致；乾淨環境重建通過。
+- [ ] T34 本機研究資料的安全盤點（2026-11-09 由 T23a 新增，獨立於 T23 的 DoD；`DECISIONS.md` §30.10）。
+  - 對象：`recordings/`、`runs/spike-t03/work/`。逐項列出路徑、大小、類型、是否可能含憑證或敏感資料，以及被哪些文件引用為證據；提出處理建議（保留、加密或刪除），由使用者決定。
+  - 盤點必須讀取可能含憑證的檔案，開始之前另外授權；未經使用者決定不修改或刪除任何檔案。
 
 放行規則：M5 通過（Gate A–D 與 T23 DoD，含 Gate E）後，才能啟動 M6 的第三引擎；沒通過時，M6 改為補強期。
 
