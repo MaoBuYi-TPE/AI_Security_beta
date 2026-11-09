@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import yaml
 
+from secscan.core.config import Settings
 from secscan.guard.config import GUARD_PORT
 from secscan.runner.config import RunnerSettings
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy
@@ -440,3 +441,64 @@ def test_the_preview_switch_is_gone() -> None:
     """T15 開放 zap 時移除（docs/DECISIONS.md §19.10）：部署的設定不留下這個開關。"""
     assert "PREVIEW_ENGINES" not in (ROOT / "compose.yaml").read_text(encoding="utf-8")
     assert "PREVIEW_ENGINES" not in MAKEFILE
+
+
+# --- 加密金鑰與保留期限的分配（KEY-02；docs/DECISIONS.md §30.2）---------------------------------
+
+# 每個容器只拿到自己需要的金鑰：worker 沒有目標 secret 與原始證據的金鑰，api 沒有原始證據的金鑰，
+# runner 沒有報告內容的金鑰。主機上的 .env 有全部三組（admin 指令與 migration 由操作者執行）。
+SERVICE_KEYS = {
+    "api": {"SECRET_ENCRYPTION_KEYS", "CONTENT_ENCRYPTION_KEYS"},
+    "runner": {"SECRET_ENCRYPTION_KEYS", "EVIDENCE_ENCRYPTION_KEYS"},
+    "worker": {"CONTENT_ENCRYPTION_KEYS"},
+}
+SERVICE_RETENTION = {
+    "api": {"EXCERPT_RETENTION_DAYS": "excerpt_retention_days"},
+    "runner": {
+        "EVIDENCE_RETENTION_DAYS": "evidence_retention_days",
+        "EVIDENCE_PLAINTEXT_MAX_MINUTES": "evidence_plaintext_max_minutes",
+    },
+    "worker": {"REPORT_RETENTION_DAYS": "report_retention_days"},
+}
+_FERNET_SHAPED = re.compile(r"[A-Za-z0-9_-]{43}=")
+
+
+def _environment(name: str) -> dict[str, str]:
+    return {key: str(value) for key, value in SERVICES[name].get("environment", {}).items()}
+
+
+@pytest.mark.parametrize("name", sorted(SERVICES))
+def test_each_service_gets_only_its_own_encryption_keys(name: str) -> None:
+    held = {key for key in _environment(name) if "ENCRYPTION_KEYS" in key}
+
+    assert held == SERVICE_KEYS.get(name, set())
+    assert "env_file" not in SERVICES[name]
+
+
+def test_the_keys_must_come_from_the_env_file() -> None:
+    """沒有預設值：.env 缺少金鑰時 compose 直接失敗，不會以空值啟動。"""
+    for name, keys in SERVICE_KEYS.items():
+        environment = _environment(name)
+        for key in keys:
+            assert environment[key] == f"${{{key}:?請先執行 make env 產生 .env}}", (name, key)
+
+
+@pytest.mark.parametrize("name", sorted(SERVICES))
+def test_retention_settings_go_to_the_process_that_applies_them(name: str) -> None:
+    environment = _environment(name)
+    held = {key for key in environment if key.endswith(("_RETENTION_DAYS", "_MAX_MINUTES"))}
+    expected = SERVICE_RETENTION.get(name, {})
+
+    assert held == set(expected)
+    for key, field in expected.items():
+        assert _default(environment[key]) == str(Settings.model_fields[field].default), key
+
+
+def test_the_env_example_names_the_keys_without_values() -> None:
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    lines = example.splitlines()
+
+    for key in ("SECRET_ENCRYPTION_KEYS", "EVIDENCE_ENCRYPTION_KEYS", "CONTENT_ENCRYPTION_KEYS"):
+        assert any(line.startswith(f"# {key}=") for line in lines), key
+    assert all(line.startswith("#") or not line.strip() for line in lines)
+    assert _FERNET_SHAPED.search(example) is None

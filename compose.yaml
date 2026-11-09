@@ -120,9 +120,13 @@ services:
       context: .
     command:
       ["uvicorn", "--factory", "secscan.main:create_app", "--host", "0.0.0.0", "--port", "8000"]
+    # 金鑰只傳各程序需要的那幾組（docs/DECISIONS.md §30.2）：api 持有目標 secret 的金鑰（只加密）與
+    # 報告／人工複測摘錄的內容金鑰，沒有原始證據的金鑰。
     environment:
       <<: *app-env
       SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      CONTENT_ENCRYPTION_KEYS: ${CONTENT_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      EXCERPT_RETENTION_DAYS: ${EXCERPT_RETENTION_DAYS:-30}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     networks: [default, control_net]
@@ -143,9 +147,14 @@ services:
   runner:
     <<: *app
     command: ["secscan-admin", "runner"]
+    # runner 持有目標 secret 的金鑰（解密後注入掃描容器）與原始證據的金鑰（加密 runs volume），
+    # 沒有報告內容的金鑰（docs/DECISIONS.md §30.2）。
     environment:
       <<: *app-env
       SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      EVIDENCE_ENCRYPTION_KEYS: ${EVIDENCE_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      EVIDENCE_RETENTION_DAYS: ${EVIDENCE_RETENTION_DAYS:-7}
+      EVIDENCE_PLAINTEXT_MAX_MINUTES: ${EVIDENCE_PLAINTEXT_MAX_MINUTES:-60}
       RUNNER_DOCKER_URL: tcp://socket-proxy:2375
       RUNNER_SCAN_NETWORK: ${SECSCAN_SCAN_NET:-secscan_scan_net}
       RUNNER_RUNS_VOLUME: ${SECSCAN_RUNS_VOLUME:-secscan_runs}
@@ -172,8 +181,12 @@ services:
   worker:
     <<: *app
     command: ["secscan-admin", "worker"]
+    # worker 只持有報告／人工複測摘錄的內容金鑰（加密報告、清除到期內容），沒有目標 secret 與
+    # 原始證據的金鑰（docs/DECISIONS.md §30.2）。
     environment:
       <<: *app-env
+      CONTENT_ENCRYPTION_KEYS: ${CONTENT_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      REPORT_RETENTION_DAYS: ${REPORT_RETENTION_DAYS:-30}
     # runner 收集好的輸出（preflight 的回應；docs/DECISIONS.md §16.5）與 guard 的 telemetry
     # （coverage；§16.6）：都唯讀。
     volumes:
