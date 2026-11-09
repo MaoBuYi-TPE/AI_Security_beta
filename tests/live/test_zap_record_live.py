@@ -22,7 +22,6 @@ import pytest
 
 from tests.live.support import TELEMETRY_VOLUME, Api, admin_key, scan_containers, wait_for
 from tests.live.zap_support import (
-    RUNS_VOLUME,
     SITE_IP,
     SITE_PORT,
     Lab,
@@ -30,6 +29,7 @@ from tests.live.zap_support import (
     lab,
     now,
     requests_since,
+    run_file,
     start_site,
     stop_site,
     volume_file,
@@ -77,14 +77,14 @@ def _record(
 ) -> dict[str, Any]:
     destination = _destination(scenario)
     engine = item.finished_zap(scan_id)
+    # 原本的檔案在 run 結束之後只剩加密檔：等加密完成，再以 export-evidence 讀出（T23a）。
     copies = {
-        "manifest.json": (RUNS_VOLUME, f"{uuid.UUID(run_id)}/manifest.json"),
-        "report.json": (RUNS_VOLUME, f"{uuid.UUID(run_id)}/out/zap-report.json"),
-        "zap.log": (RUNS_VOLUME, f"{uuid.UUID(run_id)}/out/zap.log"),
-        "telemetry.jsonl": (TELEMETRY_VOLUME, f"{uuid.UUID(run_id)}.jsonl"),
+        "manifest.json": run_file(run_id, "manifest.json"),
+        "report.json": run_file(run_id, "out/zap-report.json"),
+        "zap.log": run_file(run_id, "out/zap.log"),
+        "telemetry.jsonl": volume_file(TELEMETRY_VOLUME, f"{uuid.UUID(run_id)}.jsonl"),
     }
-    for name, (volume, path) in copies.items():
-        content = volume_file(volume, path)
+    for name, content in copies.items():
         if content is not None:
             (destination / name).write_bytes(content)
     ours = {run_id, None}

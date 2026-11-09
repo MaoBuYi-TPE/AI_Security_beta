@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from tests.live.engine_assertions import assert_engine_outcome
+from tests.live.evidence_assertions import assert_scan_sealed
 from tests.live.lab_support import Target, fixture_records, lab_call, start_fixture, stop_target
 from tests.live.recordings import reserve_recording_directory, write_measurement
 from tests.live.report_assertions import (
@@ -217,6 +218,10 @@ def test_same_target_control_patch_and_partial_scans_never_claim_false_repair() 
     assert incomplete["snapshot"]["counts"]["not_observed"] == 0
     _check_reopen(admin, item, partial, resolved)
     _check_reports(item, (baseline, partial))
+    # T23a（DECISIONS §30.3、§30.4）：原始證據只剩密文；報告解密之後的 sha256 已在
+    # check_headers 核對。
+    for scanned in (baseline, partial):
+        assert_scan_sealed(item.operator, scanned.scan["id"], [item.host.encode()])
     # 後續 scan 更新 target 的 finding 聚合後，原本比較快照與分頁內容仍原封不動。
     snapshot = unchanged["snapshot"]
     assert item.operator.data("GET", f"{URL}/{snapshot['id']}") == snapshot
@@ -412,6 +417,8 @@ def _check_reports(item: Lab, scans: tuple[Combined, ...]) -> None:
                 interval=2,
             )
             assert meta["status"] == "succeeded", meta
+            assert meta["expires_at"] is not None
+            assert meta["content_purged_at"] is None
             code, headers, content = download(API, item.operator.key, report_id)
             assert code == 200
             check_headers(meta, headers, content)

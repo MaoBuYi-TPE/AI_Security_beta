@@ -37,18 +37,18 @@ from secscan.runner.plans import ENGINE_IMAGES
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from tests.dedup_support import FindingView, ObservationView, assert_no_false_merges
 from tests.live.engine_assertions import assert_engine_outcome
+from tests.live.evidence_assertions import assert_scan_sealed
 from tests.live.lab_support import Target, start_fixture, stop_target
 from tests.live.recordings import write_measurement
 from tests.live.support import Api, admin_key, scan_containers, wait_for
 from tests.live.test_lab_zap_live import Measured, _assert_invariants
 from tests.live.zap_support import (
     RUN_TIMEOUT,
-    RUNS_VOLUME,
     Lab,
     lab,
     now,
     requests_since,
-    volume_file,
+    run_file,
     wait_for_zap,
 )
 
@@ -304,7 +304,7 @@ def _trace(item: Lab, findings: list[dict[str, Any]]) -> dict[str, Traced]:
 
 
 def _file_digest(run_id: str, path: str) -> tuple[str, int]:
-    content = volume_file(RUNS_VOLUME, f"{uuid.UUID(run_id)}/out/{path}")
+    content = run_file(run_id, f"out/{path}")
     assert content is not None, (run_id, path)
     return hashlib.sha256(content).hexdigest(), len(content)
 
@@ -437,6 +437,9 @@ class TestFixtureVulnerable:
         _assert_common(combined, vuln, definitions)
         observed = {engine: run.observations for engine, run in combined.runs.items()}
         _assert_traced(combined.scan, observed, traced)
+        # T23a（DECISIONS §30.3）：run 結束之後原始證據只剩密文；上面的 artifact sha256 已經以
+        # export-evidence 解密核對。
+        assert_scan_sealed(item.operator, combined.scan["id"], [item.host.encode()])
         multi = _assert_real_counterexamples(combined.label, traced)
         # DEDUP-01 的真實版本：POST /login 的 SQLi 在 username 與 password 上是不同的 finding。
         login = multi.get(("zap-sql-injection", "POST", "/login"), {})
