@@ -7,13 +7,16 @@
 - DB 的 findings_guard 以同樣的規則再檢查一次（migration v0017）。
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from uuid import UUID
 
 from secscan.core.json_types import JsonObject
 from secscan.findings.domain.model import LifecycleState, TriageState
+from secscan.security.blob_cipher import max_sealed_blob_bytes
 
 # 人工理由的長度上限（DB 的 CHECK 相同）。
 REASON_MAX_LENGTH = 2000
@@ -196,6 +199,47 @@ class ExcerptKind(StrEnum):
     RESPONSE = "response"
 
 
+# 摘錄以 CONTENT_ENCRYPTION_KEYS 加密保存（docs/DECISIONS.md §30.4）：context 綁定 finding、事件與
+# 種類。context 最長 73 個字元（sequence 是 bigint），密文的上限以 80 計算。
+EXCERPT_CONTEXT_MAX_LENGTH = 80
+EXCERPT_MAX_BYTES: Mapping[ExcerptKind, int] = MappingProxyType(
+    {
+        ExcerptKind.REQUEST: REQUEST_EXCERPT_MAX_BYTES,
+        ExcerptKind.RESPONSE: RESPONSE_EXCERPT_MAX_BYTES,
+    }
+)
+MAX_SEALED_EXCERPT_BYTES: Mapping[ExcerptKind, int] = MappingProxyType(
+    {
+        kind: max_sealed_blob_bytes(context_length=EXCERPT_CONTEXT_MAX_LENGTH, max_bytes=limit)
+        for kind, limit in EXCERPT_MAX_BYTES.items()
+    }
+)
+
+
+def excerpt_context(finding_id: UUID, sequence: int, kind: ExcerptKind) -> str:
+    return f"excerpt:{finding_id}:{sequence}:{kind.value}"
+
+
+@dataclass(frozen=True, slots=True)
+class SealedExcerpt:
+    """DB 中的一段摘錄：密文（清除之後是 None）與期限。"""
+
+    kind: ExcerptKind
+    token: bytes | None
+    expires_at: datetime
+    purged_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class Excerpt:
+    """API 顯示的一段摘錄：解密並核對過雜湊與長度；清除之後 content 是 None（tombstone）。"""
+
+    kind: ExcerptKind
+    content: str | None
+    expires_at: datetime
+    purged_at: datetime | None
+
+
 @dataclass(frozen=True, slots=True)
 class NewTriageEvent:
     """要寫入的事件；sequence 必須等於 finding 更新後的 triage_version（DB 的事件鏈檢查）。"""
@@ -239,7 +283,10 @@ class TriageEvent:
     scan_id: UUID | None
     evidence: JsonObject
     created_at: datetime
-    excerpts: tuple[tuple[ExcerptKind, str], ...] | None = None
+    # DB 讀出的密文（records 填入）與解密後給 API 的內容（service 填入）；都是 None 表示呼叫者
+    # 沒有寫入權限（viewer）。
+    sealed_excerpts: tuple[SealedExcerpt, ...] | None = None
+    excerpts: tuple[Excerpt, ...] | None = None
 
     @property
     def provenance(self) -> EvidenceProvenance | None:

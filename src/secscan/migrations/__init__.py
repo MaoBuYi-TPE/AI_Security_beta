@@ -17,13 +17,24 @@ from secscan.core.db import UtcDateTime
 MIGRATIONS_DIR = Path(__file__).resolve().parent
 
 
-def alembic_config(*, connection: Connection | None = None) -> Config:
-    """不讀設定檔的 Alembic Config；傳入 connection 時，env.py 會直接使用它。"""
+# v0022 讀取 CONTENT_ENCRYPTION_KEYS 的位置（env.py 由 Settings 放入；測試直接傳入）。
+CONTENT_KEYS_ATTRIBUTE = "content_encryption_keys"
+
+
+def alembic_config(
+    *, connection: Connection | None = None, content_encryption_keys: str | None = None
+) -> Config:
+    """不讀設定檔的 Alembic Config；傳入 connection 時，env.py 會直接使用它。
+
+    content_encryption_keys：v0022 加密既有的報告與摘錄時用的金鑰（只有已經有資料時才需要）。
+    """
     config = Config()
     # Config 以 configparser 讀值，路徑中的 % 必須跳脫。
     config.set_main_option("script_location", str(MIGRATIONS_DIR).replace("%", "%%"))
     if connection is not None:
         config.attributes["connection"] = connection
+    if content_encryption_keys is not None:
+        config.attributes[CONTENT_KEYS_ATTRIBUTE] = content_encryption_keys
     return config
 
 

@@ -19,11 +19,12 @@ from secscan.reports.domain.render import Rendered
 from secscan.reports.queue import LeaseLostError, ReportQueue
 from secscan.reports.service import ReportService
 from secscan.triage.service import TriageCommand, TriageService
-from secscan.worker.reports import ReportWorker
 from tests.integration.api_support import LAB, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 from tests.integration.locks import Race, wait_until_waiting_for_a_lock
+from tests.integration.report_support import complete, opened, report_worker
 from tests.integration.triage_support import Scenario, scenario
+from tests.secret_support import shared_content_cipher
 
 pytestmark = pytest.mark.integration
 CONTENT = Rendered(b'{"x":1}', truncated=False, omitted_findings=0)
@@ -104,10 +105,10 @@ def test_a_stale_worker_cannot_complete_after_reclaim(
     fresh = queue.claim("worker-b")
     assert fresh is not None
     with pytest.raises(LeaseLostError):
-        queue.complete(stale, CONTENT, data_as_of=_now(queue_seed), generated_at=_now(queue_seed))
+        complete(queue, stale, CONTENT, at=_now(queue_seed))
     with pytest.raises(LeaseLostError):
         queue.heartbeat(stale)
-    queue.complete(fresh, CONTENT, data_as_of=_now(queue_seed), generated_at=_now(queue_seed))
+    complete(queue, fresh, CONTENT, at=_now(queue_seed))
     assert status(queue_seed, report) == ("succeeded", 2, None)
     [row] = queue_seed.query("SELECT sha256 FROM reports WHERE id = :id", id=report)
     assert row.sha256 == hashlib.sha256(CONTENT.content).hexdigest()
@@ -150,14 +151,14 @@ def test_a_failure_after_writing_content_rolls_back(
     # 寫入內容之後、轉成 succeeded 之前失敗（complete 中第一個 update 就是狀態轉換）。
     monkeypatch.setattr("secscan.reports.queue.update", failing)
     with pytest.raises(InjectedError):
-        queue.complete(lease, CONTENT, data_as_of=_now(queue_seed), generated_at=_now(queue_seed))
+        complete(queue, lease, CONTENT, at=_now(queue_seed))
     monkeypatch.undo()
     assert status(queue_seed, report) == ("generating", 1, None)
     [row] = queue_seed.query(
         "SELECT count(*) AS n FROM report_contents WHERE report_id = :id", id=report
     )
     assert row.n == 0
-    queue.complete(lease, CONTENT, data_as_of=_now(queue_seed), generated_at=_now(queue_seed))
+    complete(queue, lease, CONTENT, at=_now(queue_seed))
     assert status(queue_seed, report)[0] == "succeeded"
 
 
@@ -178,23 +179,23 @@ def test_the_snapshot_is_consistent_while_triage_changes(
         if not changed:
             command = TriageCommand(expected_version=0, reason="確認", triage=TriageState.CONFIRMED)
             with sessions.begin() as other:
-                TriageService(other).change(
+                TriageService(other, cipher=shared_content_cipher()).change(
                     world.operator_a.principal, item.sqli, command, request_id=None
                 )
             changed.append(True)
         return result
 
     monkeypatch.setattr(ScopeGrantRepository, "get", get_then_patch)
-    worker = ReportWorker(sessions, owner="worker-r")
+    worker = report_worker(sessions, owner="worker-r")
     assert worker.drain() == 1
     monkeypatch.undo()
     enqueue(sessions, world, item.baseline)
     assert worker.drain() == 1
     documents = [
-        json.loads(bytes(row.content))
+        json.loads(opened(row.report_id, row.content))
         for row in queue_seed.query(
-            "SELECT c.content FROM report_contents c JOIN reports r ON r.id = c.report_id "
-            "ORDER BY r.queue_position"
+            "SELECT c.report_id, c.content FROM report_contents c "
+            "JOIN reports r ON r.id = c.report_id ORDER BY r.queue_position"
         )
     ]
     states = [
@@ -248,7 +249,7 @@ def test_failures_release_the_attempt_immediately_until_exhausted(
         raise InjectedError
 
     monkeypatch.setattr("secscan.worker.reports.render", broken)
-    worker = ReportWorker(sessions, owner="worker-r")
+    worker = report_worker(sessions, owner="worker-r")
     assert worker.drain(limit=1) == 0
     assert status(queue_seed, report) == ("queued", 1, None)
     assert worker.drain() == 0
@@ -266,6 +267,6 @@ def test_an_expired_lease_cannot_heartbeat_or_complete_before_reconcile(
     with pytest.raises(LeaseLostError):
         queue.heartbeat(lease)
     with pytest.raises(LeaseLostError):
-        queue.complete(lease, CONTENT, data_as_of=_now(queue_seed), generated_at=_now(queue_seed))
+        complete(queue, lease, CONTENT, at=_now(queue_seed))
     assert queue.release(lease) is False
     assert status(queue_seed, report) == ("generating", 1, None)

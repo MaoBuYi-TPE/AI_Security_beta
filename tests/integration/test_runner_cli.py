@@ -3,25 +3,36 @@
 Docker 以記憶體中的假 runtime 取代（測試程序連不到 daemon）；每個測試用自己的資料庫。
 """
 
+import logging
 import os
 import signal
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import sessionmaker
 
 from secscan.cli import EXIT_FAILURE, EXIT_OK, main
 from secscan.cli.services import stop_signals
 from secscan.runner.docker_runtime import DockerRuntime
 from secscan.runner.loop import RunnerLoop
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
+from secscan.scans.domain.catalog import Engine as ScanEngine
+from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
+from secscan.scans.queue import ScanQueue
 from secscan.worker.loop import WorkerLoop
 from tests.guard_support import GuardDouble
-from tests.integration.api_support import Scannable, Seeder, World
+from tests.integration.api_support import LAB, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
 from tests.runner_fakes import FakeContainerRuntime
-from tests.secret_support import TEST_SECRET_ENCRYPTION_KEYS
+from tests.secret_support import (
+    TEST_CONTENT_ENCRYPTION_KEYS,
+    TEST_EVIDENCE_ENCRYPTION_KEYS,
+    TEST_SECRET_ENCRYPTION_KEYS,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -61,6 +72,8 @@ def environment(
     monkeypatch.setenv("DB_USER", queue_database.user)
     monkeypatch.setenv("DB_PASSWORD", queue_database.password)
     monkeypatch.setenv("SECRET_ENCRYPTION_KEYS", TEST_SECRET_ENCRYPTION_KEYS)
+    monkeypatch.setenv("EVIDENCE_ENCRYPTION_KEYS", TEST_EVIDENCE_ENCRYPTION_KEYS)
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", TEST_CONTENT_ENCRYPTION_KEYS)
     monkeypatch.setenv("RUNNER_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("RUNNER_SECRETS_DIR", str(tmp_path / "secrets"))
     guard = GuardDouble.create(tmp_path)
@@ -100,6 +113,80 @@ def test_the_runner_and_the_worker_finish_a_fake_scan(
     assert len(runtime.created) == 1
     [row] = queue_seed.query("SELECT count(*) AS n FROM runner_instances")
     assert row.n == 2
+
+
+def test_the_next_runner_pass_seals_the_finished_run(
+    environment: Path,
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--once 在處理之前與結束之前各跑一輪 keeper（docs/DECISIONS.md §30.3）：解析完成之後的下一次
+    runner 加密這個 run 的目錄，之後只剩 sealed/。"""
+    scan = queue_seed.scan(world.operator_a, scannable)
+    assert main(["runner", "--once"]) == EXIT_OK
+    [run] = queue_seed.query("SELECT id FROM scanner_runs WHERE scan_id = :id", id=scan.id)
+    root = environment / "runs" / str(run.id)
+    assert (root / "manifest.json").exists()
+    assert main(["worker", "--once"]) == EXIT_OK
+
+    assert main(["runner", "--once"]) == EXIT_OK
+
+    [evidence] = queue_seed.query(
+        "SELECT status, file_count FROM run_evidence WHERE scanner_run_id = :id", id=run.id
+    )
+    assert evidence.status == "sealed"
+    assert evidence.file_count >= 1
+    assert {entry.name for entry in root.iterdir()} == {"sealed"}
+    capsys.readouterr()
+
+
+def test_the_runner_stops_claiming_when_evidence_cannot_be_sealed(
+    environment: Path,
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    world: World,
+    scannable: Scannable,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """一個已終止的 run 無法加密：保留原狀、不記下 sealed；--once 不認領新的 run，exit 1。
+
+    sealed/ 中有不認得的檔案（fail closed；缺少權限的目錄 keeper 會自己補上，§30.11）。
+    """
+    caplog.set_level(logging.ERROR)
+    queue = ScanQueue(
+        sessionmaker(queue_engine, expire_on_commit=False), lab=LAB, clock=lambda: datetime.now(UTC)
+    )
+    queue_seed.scan(world.operator_a, scannable)
+    lease = queue.claim("runner-elsewhere", frozenset({ScanEngine.FAKE}))
+    assert lease is not None
+    out = environment / "runs" / str(lease.run_id) / "out"
+    out.mkdir(parents=True)
+    (out / "report.json").write_bytes(b"canary-unsealable")
+    queue.prepare(lease)
+    queue.advance(lease, RunStatus.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
+    second = queue_seed.scan(world.operator_a, queue_seed.scannable(world))
+    sealed = out.parent / "sealed"
+    sealed.mkdir()
+    (sealed / "unexpected").write_bytes(b"x")
+
+    assert main(["runner", "--once"]) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "原始證據無法加密或清除" in err
+    assert str(lease.run_id) in caplog.text
+    assert str(environment) not in caplog.text
+    assert (out / "report.json").read_bytes() == b"canary-unsealable"
+    assert (
+        queue_seed.query("SELECT 1 FROM run_evidence WHERE scanner_run_id = :id", id=lease.run_id)
+        == []
+    )
+    assert _run_status(queue_seed, second.id) == ("queued", None)
+    assert runtime.created == []
 
 
 @pytest.mark.parametrize(
@@ -210,6 +297,70 @@ def test_without_encryption_keys_authenticated_scans_fail(
     )
     assert (preflight.status, preflight.error_code) == ("failed", "SECRET_UNAVAILABLE")
     assert runtime.created == []
+
+
+# --- 金鑰（KEY-01；docs/DECISIONS.md §30.2）-------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, "not-a-key"])
+def test_the_runner_refuses_to_start_without_evidence_keys(
+    environment: Path,
+    runtime: FakeContainerRuntime,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    if value is None:
+        monkeypatch.delenv("EVIDENCE_ENCRYPTION_KEYS")
+    else:
+        monkeypatch.setenv("EVIDENCE_ENCRYPTION_KEYS", value)
+
+    assert main(["runner", "--once"]) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "EVIDENCE_ENCRYPTION_KEYS" in err
+    assert "runner 不啟動" in err
+    assert runtime.created == []
+    assert TEST_SECRET_ENCRYPTION_KEYS not in err
+
+
+def test_the_runner_refuses_an_evidence_key_shared_with_the_secret_ring(
+    environment: Path,
+    runtime: FakeContainerRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ENCRYPTION_KEYS", TEST_SECRET_ENCRYPTION_KEYS)
+
+    assert main(["runner", "--once"]) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "相同的金鑰" in err
+    assert TEST_SECRET_ENCRYPTION_KEYS not in err
+    assert runtime.created == []
+
+
+@pytest.mark.parametrize("value", [None, "not-a-key"])
+def test_the_worker_refuses_to_start_without_content_keys(
+    environment: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+) -> None:
+    if value is None:
+        monkeypatch.delenv("CONTENT_ENCRYPTION_KEYS")
+    else:
+        monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", value)
+
+    assert main(["worker", "--once"]) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "CONTENT_ENCRYPTION_KEYS" in err
+    assert "worker 不啟動" in err
 
 
 @pytest.mark.parametrize(

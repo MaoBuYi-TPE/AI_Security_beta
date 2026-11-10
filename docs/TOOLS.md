@@ -72,7 +72,7 @@
 - **證據存在哪裡**：nuclei 的 JSONL（含 request／response）在 runs volume 的 `<run_id>/out/`；解析後的觀察在 DB 的 `observations`（`evidence` 是 extracted-results，`other_info` 是 matched-at）。runner 收集時以位元組遮罩這個 run 的 secret 與 proxy token；parser 另以文字遮罩憑證形狀的值。
 - **遮罩的限制**：`email-extractor`、`credit-card-number-detect` 擷取到的 email 與卡號本身是偵測目標，目前以原文存在 `evidence` 與 runs volume。lab 的資料都是靶機的合成種子資料（Juice Shop、VAmPI、fixture app），不掃描真實的個人資料。
 - **誰看得到**：`GET /scans/{id}/observations` 只給同一個 project 的 key（其他 project 與不存在的一樣 404）；finding 的 API 不輸出 `evidence`（只有來源的規則、等級與 CWE）；報告（T21）要遮罩與編碼證據。
-- **保存期限與加密**：runs volume 的目錄目前不會刪除；原始證據的加密保存、保存期限與刪除流程在 T23（DoD：原始證據以加密方式保存）。在那之前只用於 lab，不放真實資料。
+- **保存期限與加密**（T23a，`DECISIONS.md` §30.3、§30.5）：run 結束（解析完成、失敗或逾期）、容器確認刪除之後，runner 把 `<run_id>/` 加密成 `sealed/`（只有 runner 有金鑰），7 天後刪除整個目錄；之後只剩 DB 的 artifact metadata、sha256 與觀察。**執行、收集與等待解析期間是明文**，不是全程靜態加密。`observations` 的 `evidence`（含擷取到的 email 與卡號）不加密，照上一項的限制處理。只用於 lab，不放真實資料。
 
 ## 3. 網路拓撲與隔離（DoD：直連必須失敗）
 

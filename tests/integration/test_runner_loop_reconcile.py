@@ -119,6 +119,7 @@ def loop(
         reconciler=reconciler,
         policy=POLICY,
         stop_requested=lambda: clock.now >= 25,
+        evidence_ready=lambda: True,
         sleep=clock.sleep,
         monotonic=clock.monotonic,
         poll_seconds=2,

@@ -46,11 +46,11 @@ from tests.live.support import (
     wait_for,
 )
 from tests.live.zap_support import (
-    RUNS_VOLUME,
     Lab,
     lab,
     now,
     requests_since,
+    run_file,
     volume_file,
     wait_for_zap,
 )
@@ -282,7 +282,7 @@ def _run_scan(
     engine = item.finished_zap(scan_id, timeout=RUN_TIMEOUT)
     memory = sampler.stop()
     run_id = container.removeprefix("secscan-run-")
-    report = volume_file(RUNS_VOLUME, f"{uuid.UUID(run_id)}/out/zap-report.json")
+    report = run_file(run_id, "out/zap-report.json")
     measured = Measured(
         label=label,
         scan_id=scan_id,
@@ -339,8 +339,8 @@ def _record(measured: Measured, report: bytes | None) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     run = uuid.UUID(measured.run_id)
     files = {
-        "manifest.json": volume_file(RUNS_VOLUME, f"{run}/manifest.json"),
-        "zap.log": volume_file(RUNS_VOLUME, f"{run}/out/zap.log"),
+        "manifest.json": run_file(str(run), "manifest.json"),
+        "zap.log": run_file(str(run), "out/zap.log"),
         "telemetry.jsonl": volume_file(TELEMETRY_VOLUME, f"{run}.jsonl"),
         "summary.json": volume_file(TELEMETRY_VOLUME, f"{run}.summary.json"),
         "report.json": report,

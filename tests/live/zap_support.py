@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from tests.live.evidence_assertions import run_file as evidence_run_file
 from tests.live.guard_support import HERE, guard_log
 from tests.live.support import BUSYBOX, GUARD_IMAGE, LAB_NET, Api, docker, wait_for
 
@@ -184,31 +185,19 @@ def lab(
 
 
 def run_file(run_id: str, path: str) -> bytes | None:
-    """runs volume 中這個 run 的檔案（唯讀掛載的輔助容器；不存在時是 None）。"""
-    output = docker(
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        # run 的目錄是 0700、屬於 10001：沒有 capability 的 root 讀不了。
-        "--user",
-        "10001:10001",
-        "-v",
-        f"{RUNS_VOLUME}:/runs:ro",
-        "--entrypoint",
-        "sh",
-        BUSYBOX,
-        "-c",
-        f'cat "/runs/{uuid.UUID(run_id)}/{path}" 2>/dev/null || true',
-    )
-    return output.encode() if output else None
+    """run 目錄中一個原本的檔案（例如 manifest.json、out/zap.log）；不存在時是 None。
+
+    T23a 起 runs volume 在 run 結束之後只剩加密檔（docs/DECISIONS.md §30.3）：先等 keeper 加密完成，
+    再以 runner 容器內的 export-evidence 解密讀出（tests/live/evidence_assertions.py）。
+    """
+    return evidence_run_file(run_id, path)
 
 
 def volume_file(volume: str, path: str) -> bytes | None:
-    """volume 中的檔案（唯讀掛載的輔助容器；以 bytes 讀出，不存在時是 None）。"""
+    """volume 中的檔案（唯讀掛載的輔助容器；以 bytes 讀出，不存在時是 None）。
+
+    runs volume 中的原本檔案要用 run_file（加密之後這裡只讀得到密文）；這裡用於 guard 的 telemetry。
+    """
     result = subprocess.run(  # noqa: S603 - 固定的 docker 指令與測試自己組的參數
         [  # noqa: S607
             "docker",

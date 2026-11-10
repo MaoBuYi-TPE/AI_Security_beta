@@ -14,6 +14,7 @@ from secscan.grants.domain.matching import IneligibleReason
 from secscan.grants.domain.scope import Budget
 from secscan.scans.domain.allocation import NO_ENGINE_BUDGETS, SCANNING_ENGINES, EngineBudget
 from secscan.scans.domain.catalog import Engine, PlannedRun, ScanProfile
+from secscan.scans.domain.evidence import PENDING_EVIDENCE, EvidenceState
 from secscan.scans.domain.lifecycle import (
     ERROR_REQUIRED_RUN_STATUSES,
     TERMINAL_SCAN_STATUSES,
@@ -90,6 +91,8 @@ class ScannerRun:
     budget: EngineBudget | None = None
     requests_allotted: int | None = None
     seconds_allotted: int | None = None
+    # runs volume 中原始證據的狀態（docs/DECISIONS.md §30.3）；沒有紀錄是 pending。
+    evidence: EvidenceState = PENDING_EVIDENCE
 
     def __post_init__(self) -> None:
         if (self.status in ERROR_REQUIRED_RUN_STATUSES) != (self.error_code is not None):

@@ -50,6 +50,8 @@ APP_TABLES = {
     "finding_triage_excerpts",
     "reports",
     "report_contents",
+    "run_evidence",
+    "evidence_holds",
 }
 TRIGGER_FUNCTIONS = (
     "audit_events_reject_mutation",
@@ -80,6 +82,12 @@ TRIGGER_FUNCTIONS = (
     "auth_profiles_disabled_erased",
     "scanner_runs_engine_budget_frozen",
     "scanner_runs_allotment_once",
+    "run_evidence_guard",
+    "report_contents_guard",
+    "finding_triage_excerpts_guard",
+    "reports_purge_complete",
+    "evidence_holds_guard",
+    "run_evidence_hold_check",
 )
 
 
@@ -202,5 +210,106 @@ def test_downgrade_refuses_unfinished_runs_with_engine_budgets(
         assert _current_revisions(engine) == ["0019"]
         removed = {"scanner_runs_engine_budget_frozen", "scanner_runs_allotment_once"}
         assert not removed & _existing_functions(engine)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("purged", [False, True])
+def test_downgrade_refuses_recorded_evidence(
+    fresh_database: ProvisionedDatabase, purged: bool
+) -> None:
+    """v0021：有 sealed 的紀錄時舊程式讀不了加密檔；有 purged 的紀錄時，降級再升級之後已清除的
+    run 會被記成「從來沒有目錄」（資料庫審查 L3）。兩者都拒絕。"""
+    engine = app_engine(fresh_database)
+    try:
+        _migrate(engine, "up", "head")
+        with Session(engine) as session, session.begin():
+            world, scan = web_scan(session, engines=(ScanEngine.ZAP,))
+            ScanService(session, lab=LAB).cancel(world.operator, scan.id, request_id=None)
+        with Session(engine) as session, session.begin():
+            run_id, scan_id = session.execute(
+                text("SELECT id, scan_id FROM scanner_runs WHERE scan_id = :scan"),
+                {"scan": scan.id},
+            ).one()
+            session.execute(
+                text(
+                    "INSERT INTO run_evidence (scanner_run_id, scan_id, status, file_count, "
+                    "plaintext_bytes, sealed_at) VALUES (:run, :scan, 'sealed', 1, 1, "
+                    "now() - interval '8 days')"
+                ),
+                {"run": run_id, "scan": scan_id},
+            )
+            if purged:
+                session.execute(
+                    text(
+                        "UPDATE run_evidence SET status = 'purged', purged_at = now() "
+                        "WHERE scanner_run_id = :run"
+                    ),
+                    {"run": run_id},
+                )
+
+        with pytest.raises(DBAPIError, match="recorded evidence exists"):
+            _migrate(engine, "down", "0020")
+        assert _current_revisions(engine) == [head_revision()]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("resolved", [False, True])
+def test_downgrade_refuses_evidence_holds(
+    fresh_database: ProvisionedDatabase, resolved: bool
+) -> None:
+    """v0023：舊程式不認得隔離，會讓 keeper 再次一直加密失敗；已解除的紀錄是處置的稽核依據
+    （docs/DECISIONS.md §30.12）。兩者都拒絕，沒有紀錄時可以降級。"""
+    engine = app_engine(fresh_database)
+    try:
+        _migrate(engine, "up", "head")
+        with Session(engine) as session, session.begin():
+            world, scan = web_scan(session, engines=(ScanEngine.ZAP,))
+            ScanService(session, lab=LAB).cancel(world.operator, scan.id, request_id=None)
+        with Session(engine) as session, session.begin():
+            run_id, scan_id = session.execute(
+                text("SELECT id, scan_id FROM scanner_runs WHERE scan_id = :scan"),
+                {"scan": scan.id},
+            ).one()
+            session.execute(
+                text(
+                    "INSERT INTO evidence_holds (directory, scanner_run_id, scan_id, error_code, "
+                    "attempts) VALUES (:run, :run, :scan, 'EVIDENCE_TREE_TOO_DEEP', 3)"
+                ),
+                {"run": run_id, "scan": scan_id},
+            )
+            if resolved:
+                session.execute(
+                    text(
+                        "INSERT INTO run_evidence (scanner_run_id, scan_id, status, file_count, "
+                        "plaintext_bytes, sealed_at) VALUES (:run, :scan, 'sealed', 1, 1, now())"
+                    ),
+                    {"run": run_id, "scan": scan_id},
+                )
+                session.execute(
+                    text(
+                        "UPDATE evidence_holds SET resolved_at = clock_timestamp() "
+                        "WHERE directory = :run"
+                    ),
+                    {"run": run_id},
+                )
+
+        with pytest.raises(DBAPIError, match="holds exist"):
+            _migrate(engine, "down", "0022")
+        assert _current_revisions(engine) == [head_revision()]
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_without_holds_removes_the_table(fresh_database: ProvisionedDatabase) -> None:
+    engine = app_engine(fresh_database)
+    try:
+        _migrate(engine, "up", "head")
+        _migrate(engine, "down", "0022")
+
+        assert _current_revisions(engine) == ["0022"]
+        assert "evidence_holds" not in _tables(engine)
+        assert not {"evidence_holds_guard", "run_evidence_hold_check"} & _existing_functions(engine)
     finally:
         engine.dispose()

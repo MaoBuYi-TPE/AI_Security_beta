@@ -38,6 +38,10 @@ class ReportOut(BaseModel):
     omitted_findings: int | None
     created_at: datetime
     finished_at: datetime | None
+    # 保留期限（docs/DECISIONS.md §30.5）：succeeded 才有；清除之後下載回 410，
+    # metadata 與 sha256 保留。
+    expires_at: datetime | None
+    content_purged_at: datetime | None
 
     @classmethod
     def of(cls, report: Report) -> Self:
@@ -57,4 +61,6 @@ class ReportOut(BaseModel):
             omitted_findings=report.omitted_findings,
             created_at=report.created_at,
             finished_at=report.finished_at,
+            expires_at=report.expires_at,
+            content_purged_at=report.content_purged_at,
         )

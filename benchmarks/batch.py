@@ -5,9 +5,12 @@
   評估時再以 benchmarks.collect 正規化，和 Live 收集時走同一段程式。
 - comparison-<id>.json：比較快照與它的 finding。
 - manifest.json、SHA256SUMS。
+T23a 起每個檔案都加密成 `<檔名>.sealed`（docs/DECISIONS.md §30.7）：讀回時先核對 SHA256SUMS
+（密文），再解密、核對 manifest 記下的明文 sha256。
 """
 
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,8 +19,9 @@ from typing import Any
 from benchmarks.collect import CollectError, normalize_comparison, normalize_scan
 from benchmarks.manifest import MANIFEST_FILE, check_manifest
 from benchmarks.models import ComparisonRecord, LabeledScan
-from benchmarks.results import read_json, verify
+from benchmarks.results import read_bytes, read_json, sealed_name, verify
 from benchmarks.schedule import ScheduledScan
+from benchmarks.sealing import BenchKeys
 
 SPEC_FILE = "spec.yaml"
 
@@ -99,22 +103,33 @@ def labeled_scan(document: Mapping[str, Any]) -> LabeledScan:
     )
 
 
-def load_batch(directory: Path) -> Batch:
-    """核對 SHA256SUMS 與 manifest（session 必須完整），再讀回每個 scan 與比較快照。"""
-    verify(directory)
-    manifest = check_manifest(read_json(directory, MANIFEST_FILE))
-    spec_digest = hashlib.sha256((directory / SPEC_FILE).read_bytes()).hexdigest()
+def load_batch(directory: Path, keys: BenchKeys) -> Batch:
+    """核對 SHA256SUMS 與 manifest（session 必須完整），再解密、核對並讀回每個 scan 與比較快照。"""
+    checksums = verify(directory)
+    manifest = check_manifest(read_json(directory, MANIFEST_FILE, keys=keys))
+    files: Mapping[str, Mapping[str, str]] = manifest["files"]
+
+    def opened(name: str) -> bytes:
+        expected = files.get(name)
+        if expected is None or expected["sealed_sha256"] != checksums.get(sealed_name(name)):
+            raise CollectError(f"{name} 和 manifest 不符")
+        content = read_bytes(directory, name, keys=keys)
+        if hashlib.sha256(content).hexdigest() != expected["sha256"]:
+            raise CollectError(f"{name} 解密之後和 manifest 的 sha256 不符")
+        return content
+
+    spec_digest = hashlib.sha256(opened(SPEC_FILE)).hexdigest()
     if spec_digest != manifest["spec_sha256"]:
         raise CollectError("spec.yaml 和 manifest 的 sha256 不符")
     scans = []
     for entry in manifest["scans"]:
-        item = labeled_scan(read_json(directory, scan_file(entry["position"])))
+        item = labeled_scan(json.loads(opened(scan_file(entry["position"]))))
         if (item.position, item.scan.id) != (entry["position"], entry["scan_id"]):
             raise CollectError("scan 檔和 manifest 不符")
         scans.append(item)
     comparisons = []
     for entry in manifest["comparisons"]:
-        document = read_json(directory, comparison_file(entry["comparison"]))
+        document = json.loads(opened(comparison_file(entry["comparison"])))
         record = normalize_comparison(document["snapshot"], document["findings"])
         if record.id != entry["id"]:
             raise CollectError("比較檔和 manifest 不符")

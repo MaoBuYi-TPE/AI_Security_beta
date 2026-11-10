@@ -2,8 +2,10 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import APIRouter, FastAPI
+from pydantic import SecretStr
 
 # 載入所有 ORM model：跨功能的 FK（例如 api_keys → projects）以資料表名稱引用，
 # 被引用的 model 必須已在 metadata 裡。每個使用 ORM 的程序入口（API、CLI、worker、runner）
@@ -30,6 +32,7 @@ from secscan.reports.router import router as reports_router
 from secscan.scanners.router import profiles_router as scan_profiles_router
 from secscan.scanners.router import router as scanners_router
 from secscan.scans.router import router as scans_router
+from secscan.security.key_rings import CONTENT_SETTING, SECRET_SETTING, check_held, content_cipher
 from secscan.security.secret_cipher import SecretCipher
 from secscan.specs.router import router as specs_router
 from secscan.targets.domain import LabNetwork
@@ -66,11 +69,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.db = DatabaseResources(engine=engine, schema_revision=head_revision())
     # LAB_ONLY 時 target 與 grant 的 IP 必須在這個網段內（docs/DECISIONS.md §10.1）。
     app.state.lab = LabNetwork(resolved.lab_cidr)
-    # 目標 secret 的加密（docs/DECISIONS.md §12.1）：沒有或不合法的金鑰，啟動就失敗。
-    keys = resolved.secret_encryption_keys
-    app.state.secret_cipher = SecretCipher.from_setting(
-        keys.get_secret_value() if keys is not None else None
-    )
+    # 目標 secret 的加密（docs/DECISIONS.md §12.1）與報告內容、人工複測摘錄的加密（§30.2）：
+    # 沒有或不合法的金鑰、兩組共用金鑰時，啟動就失敗。API 沒有原始證據的金鑰。
+    secret_keys = _setting(resolved.secret_encryption_keys)
+    content_keys = _setting(resolved.content_encryption_keys)
+    app.state.secret_cipher = SecretCipher.from_setting(secret_keys)
+    app.state.content_cipher = content_cipher(content_keys)
+    check_held({SECRET_SETTING: secret_keys, CONTENT_SETTING: content_keys})
+    app.state.excerpt_retention = timedelta(days=resolved.excerpt_retention_days)
     # 後加入的在外層。順序：request_id → key 格式 → 大小上限（docs/DECISIONS.md §11.1）：
     # 沒有 key 的請求連 body 都不讀；錯誤回應也都帶 request_id。
     app.add_middleware(BodyLimitMiddleware)
@@ -80,6 +86,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(_api_v1())
     return app
+
+
+def _setting(value: SecretStr | None) -> str | None:
+    return value.get_secret_value() if value is not None else None
 
 
 def _api_v1() -> APIRouter:

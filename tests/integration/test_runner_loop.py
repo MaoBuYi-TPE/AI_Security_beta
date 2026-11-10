@@ -119,6 +119,7 @@ def _runner_loop(
         reconciler=ContainerReconciler(queue, runtime, workspace, channel),
         policy=POLICY,
         stop_requested=stop_requested,
+        evidence_ready=lambda: True,
         sleep=clock.sleep,
         monotonic=clock.monotonic,
         poll_seconds=2,
@@ -312,6 +313,7 @@ def test_a_loop_needs_a_runner(
         reconciler=ContainerReconciler(queue, runtime, workspace, guard.channel()),
         policy=POLICY,
         stop_requested=lambda: False,
+        evidence_ready=lambda: True,
         poll_seconds=2,
     )
 

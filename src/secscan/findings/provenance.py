@@ -30,13 +30,16 @@ from secscan.findings.domain.provenance import (
 from secscan.findings.models import FindingModel, FindingObservationModel
 from secscan.findings.repository import finding_of, later_mapping_differs
 from secscan.scans.domain.catalog import Engine
+from secscan.scans.domain.evidence import EvidenceStatus
 from secscan.scans.domain.observation import ArtifactClassification, ArtifactKind
+from secscan.scans.evidence_models import RunEvidenceModel
 from secscan.scans.models import ArtifactModel, ObservationModel, ScanModel, ScannerRunModel
 from secscan.scans.repository import observation_of
 
 _SEVERITIES = tuple(Severity)
 _SEVERITY_RANK = {severity.value: rank for rank, severity in enumerate(_SEVERITIES)}
 _LINKS = FindingObservationModel
+_ENCRYPTED = frozenset({EvidenceStatus.SEALED.value, EvidenceStatus.PURGED.value})
 _ARTIFACT_COLUMNS = (
     ArtifactModel.id.label("artifact_id"),
     ArtifactModel.kind.label("artifact_kind"),
@@ -45,7 +48,10 @@ _ARTIFACT_COLUMNS = (
     ArtifactModel.size.label("artifact_size"),
     ArtifactModel.redactions.label("artifact_redactions"),
     ArtifactModel.classification.label("artifact_classification"),
-    ArtifactModel.encrypted.label("artifact_encrypted"),
+    # 原始檔案是否只剩加密檔，由 run_evidence 推導（docs/DECISIONS.md §30.3；artifacts.encrypted
+    # 是 T23a 之前的舊欄位，從來沒有寫入過）。
+    RunEvidenceModel.status.label("evidence_status"),
+    RunEvidenceModel.purged_at.label("evidence_purged_at"),
 )
 
 
@@ -166,6 +172,9 @@ class ProvenanceRepository:
             .join(ObservationModel, ObservationModel.id == _LINKS.observation_id)
             .join(ScannerRunModel, ScannerRunModel.id == ObservationModel.scanner_run_id)
             .outerjoin(ArtifactModel, ArtifactModel.id == ObservationModel.report_artifact_id)
+            .outerjoin(
+                RunEvidenceModel, RunEvidenceModel.scanner_run_id == ArtifactModel.scanner_run_id
+            )
             .where(*conditions)
         )
         total = self._session.scalar(
@@ -313,5 +322,6 @@ def _artifact(row: Row[*tuple[Any, ...]]) -> ArtifactRecord | None:
         size=row.artifact_size,
         redactions=row.artifact_redactions,
         classification=ArtifactClassification(row.artifact_classification),
-        encrypted=row.artifact_encrypted,
+        encrypted=row.evidence_status in _ENCRYPTED,
+        purged_at=row.evidence_purged_at,
     )

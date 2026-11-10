@@ -256,7 +256,7 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
 - **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；**T18 涵蓋 Nuclei 的 JSONL（逐行嚴格解析、壞行整份 OUTPUT_INVALID、大小上限）**；**T21 涵蓋平台報告的安全呈現**（§4.3 的 REPORT 表：JSON 跳脫、Markdown 以 CommonMark 實際解析的 token 不變式、Hypothesis 與惡意輸入集合、8 MiB 上限）；Schemathesis 的輸出在 M6 之後。
-- **SEC-14**：T21 補上平台報告這一側（canary 不出現在 JSON 與 Markdown，§4.3 的 REPORT-01）；raw 證據的受限加密仍在 T23a，**SEC-14 不標完成**。T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；**T18 完成 Nuclei 的 JSONL 輸出與觀察（runner 以 `SecretMasker` 做位元組級遮罩、parser 以 `redact_text`／`redact_url` 做文字層遮罩，涵蓋 extracted-results／request／response／curl-command，`DECISIONS.md` §24.3）**；Schemathesis 的 token 在 M6 之後，不標成完成。
+- **SEC-14**：T21 補上平台報告這一側（canary 不出現在 JSON 與 Markdown，§4.3 的 REPORT-01）；**T23a 的離線部分已實作（`DECISIONS.md` §30）：原始證據在 run 結束（解析完成、失敗或逾期）之後以只給 runner 的金鑰加密、7 天後清除；報告內容與人工複測摘錄以只給 api 與 worker 的金鑰加密、30 天後清除；三組平台金鑰分開、可換版；`benchmarks/results` 以本機的 bench 金鑰加密（§4.3 的 KEY、SEAL、EVID、CONT、RET、ROT、BSEAL 表）。這不是全程靜態加密：執行、收集與等待解析期間是明文（§8 的剩餘風險）。T23a 的 Live 尚未執行，**SEC-14 不標完成**。**T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；**T18 完成 Nuclei 的 JSONL 輸出與觀察（runner 以 `SecretMasker` 做位元組級遮罩、parser 以 `redact_text`／`redact_url` 做文字層遮罩，涵蓋 extracted-results／request／response／curl-command，`DECISIONS.md` §24.3）**；Schemathesis 的 token 在 M6 之後，不標成完成。
 - **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。Nuclei 模板的 allowlist 已在 **T17** 凍結（清單＋每檔 sha256＋`-ni -duc -pt http` 等執行設定，`DECISIONS.md` §23；清單外的模板一律不執行）；**T18 把凍結的 42 個模板以 InputFile 掛進 `/scan/in`、admission 以每檔 `ContentDigest` 核准（清單外的模板無法掛載，不用 `-id`），並加 `-dut` 只跑簽章模板（§24.2）**。
 - **SEC-18**：T10 涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；T15 涵蓋遮罩的兩階段與 worker 只讀 manifest 列出的檔案；**T21 不提供 artifact 下載**（只能以 report id 下載平台產生的報告，`?path=`、`?storage_key=` 不影響結果，`/artifacts/{id}/download` 回 404，§4.3 的 REPORT-05）。
@@ -367,12 +367,12 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 | TRIAGE-03 | 人工複測聲明的每一項一致性檢查（route、Host 與 absolute-form 的 authority、參數名稱（query 的名稱；位置不明時另有 header 名稱與 body 的鍵名，不做子字串比對）、狀態列、身分、過時或未來的時間、結果、空白或過大的摘錄、client 自填平台欄位）；遮罩後才計算雜湊；`platform_checks` 只列實際執行的檢查；縮排的 header 與 target 的自訂 header 名稱也遮罩；`observation_ids` 只接受這個 finding 的觀察 | unit：triage/test_attestation；integration：triage_api；live 的反例斷言拒絕原因只來自平台條件 |
 | TRIAGE-04 | 比較之後的新觀察、target 有進行中的 scan → 拒絕；比較快照在人工 resolve 之後不變 | integration：triage_api、test_triage_races |
 | TRIAGE-05 | 自動重開（R1–R4）：較新的 scan 再現才重開，failed／timed_out 的 run 也算；沒觀察到不重開也不關閉；mapping 不同不重開但標示需要人工確認；重試不重複；重開之後可再 resolve | integration：finding_linker_reopen |
-| TRIAGE-06 | DB 層繞過：未升版、跳版、升版沒有事件、事件鏈不符、事件／摘錄被修改或刪除、摘錄雜湊不符或缺少、系統事件引用其他 target、resolved 不是 confirmed、watermark 由 trigger 寫入、新 finding 版本不是 0、有資料時 downgrade | integration：triage_schema |
+| TRIAGE-06 | DB 層繞過：未升版、跳版、升版沒有事件、事件鏈不符、事件被修改或刪除、摘錄缺少、系統事件引用其他 target、resolved 不是 confirmed、watermark 由 trigger 寫入、新 finding 版本不是 0、有資料時 downgrade。T23a 起摘錄是密文：DB 只允許換版（密文換密文）與到期之後只能一次的清除，不能刪除；明文雜湊改由 API 在加密之前與解密之後核對（§4.3 的 CONT、RET 表） | integration：triage_schema、sealed_content_schema |
 | TRIAGE-07 | 併發（G1）：同版本兩個 PATCH、人工與自動重開互搶、resolve 期間建立的 scan、比較快照與 linker 的鎖；故障注入（G2）：每一步之間拋錯整筆回滾、重試只重開一次 | integration：triage_races、triage_transactions（各連續 5 次） |
 | REPORT-01 | 不可信字串只在 code token 中、沒有連結／圖片／HTML／URL 樣式；JSON 跳脫；canary 不出現；白名單欄位與 golden JSON Schema | unit：reports/test_encoding、test_document；contract：test_report_schema |
 | REPORT-02 | 截斷以整個 finding 為單位、摘要計數不變、開頭與結尾都有說明；真實的 8 MiB 與多位元組字元；大小分布偏斜時截斷點等於逐一嘗試的結果、每個 finding 只投影與渲染一次（成本與分布無關）；比較快照只列最新的 10 份並揭露省略數；先遮罩再截斷 | unit：reports/test_document、test_render |
 | REPORT-03 | 用語：平台文字的誇大字詞只在否定說明中；需要人工確認的 resolved 不算 resolved | unit：reports/test_document；live 的報告核對；integration：reports_api（completed 與 timed_out 直接套用 live 的報告核對） |
-| REPORT-04 | 佇列：SKIP LOCKED、舊 worker 重新認領之後不能完成、最多 3 次、內容寫入後失敗整筆回滾、快照與 PATCH 隔離、同時建立的配額；報告專屬的 DB 錯誤立即釋放、其他 DB 錯誤讓 worker 結束、lease 失效留給對帳；failed 不計入每個 scan 的配額；WorkerLoop 每圈一份 | integration：report_queue、report_worker；reports_schema（狀態轉換、內容只寫一次、雙向核對） |
+| REPORT-04 | 佇列：SKIP LOCKED、舊 worker 重新認領之後不能完成、最多 3 次、內容寫入後失敗整筆回滾、快照與 PATCH 隔離、同時建立的配額；報告專屬的 DB 錯誤立即釋放、其他 DB 錯誤讓 worker 結束、lease 失效留給對帳；failed 不計入每個 scan 的配額；WorkerLoop 每圈一份 | integration：report_queue、report_worker；reports_schema（狀態轉換、內容只寫一次、雙向核對；T23a 起內容是密文，DB 只核對內容存在、只允許換版與到期之後的清除，明文的 sha256 改由 API 下載時核對，§4.3 的 CONT、RET 表） |
 | REPORT-05 | 下載：只以 report id、sha 不符不送出內容、header（nosniff、CSP sandbox 與 frame-ancestors、no-store、ASCII 檔名）、其他 project 404、viewer 不能建立 | integration：reports_api |
 
 正例保留：兩側有觀察且版本可靠 → persistent；純函式所有層證據完整時可得到 new/not_observed，移除必要證據就不再成立。這些人工構造的正例不是工具完成證據。實際 producer 的負面分類不放寬；端點請求與工具退出碼均不能代替完整性。
@@ -398,7 +398,7 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 |---|---|---|
 | BENCH-01 | 實驗規格的嚴格檢查：未知欄位、靶場只能三種（不接受 URL）、總預算不超過平台 grant、引擎依平台的執行順序、子預算依平台規則、experiment 的份額凍結且合計等於總額、重複次數、quota、最壞情況的總時間在 grant 的有效期內；YAML 的重複鍵、別名、多份文件、過大、`!!set` 等其他型別 | unit：bench/test_spec |
 | BENCH-02 | 排程由種子決定；任何種子都是同一組 scan 的排列；比較區塊整塊移動、baseline 在前 | unit：bench/test_schedule（Hypothesis） |
-| BENCH-03 | 結果目錄獨占建立、0700／0600、不覆寫；秘密檢查（key 格式、Bearer、JWT、session 的原值）不回顯值；SHA256SUMS 偵測修改、多出與缺少；manifest 欄位齊全、不完整的 session 不評估 | unit：bench/test_results、test_manifest、test_cli |
+| BENCH-03 | 結果目錄獨占建立、0700／0600、不覆寫；秘密檢查（key 格式、Bearer、JWT、session 的原值；T23a 加上 Fernet 金鑰的形狀與 bench 金鑰本身）不回顯值；SHA256SUMS 偵測修改、多出與缺少（T23a 起列的是加密檔）；manifest 欄位齊全（T23a 起是版本 2，每個檔案有明文與密文的 sha256）、不完整的 session 不評估 | unit：bench/test_results、test_manifest、test_cli |
 | BENCH-04 | API 的 JSON → 紀錄：缺欄位、型別不符、分頁不一致、未結束、fixture 一律失敗；樣本先通過平台真正的輸出 schema；經真的 API 收集有子預算的 scan 與比較快照 | unit：bench/test_collect；integration：bench_collection（TestClient 與 db-test） |
 | BENCH-05 | 偵測指標：recall 以案例、precision 以議題；未裁定、分母 0、holdout、平台阻擋、不支援、auth role、修補版的 FP；歧義停止評估 | unit：bench/test_evaluate、test_ground_truth（含 Hypothesis 的性質） |
 | BENCH-06 | 引擎歸屬：各引擎偵測、獨有、聯集；2 個以上引擎的 finding 另算 precision | unit：bench/test_evaluate |
@@ -406,9 +406,50 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 | BENCH-08 | 去重：跨引擎合併的 precision／recall（標記完整才算）、誤合併、漏合併、有 2 個以上觀察的 finding、列表壓縮比例 | unit：bench/test_scoring |
 | BENCH-09 | 複掃：誤判已修補（仍存在卻 not_observed）；inconclusive 不算；修補版上仍 persistent 另列；holdout 等被排除的案例只計數（和偵測相同的排除規則） | unit：bench/test_rescan |
 | BENCH-10 | 跨重複：中位數、範圍，IQR 在 n ≥ 4 時才算，N/A 另計；smoke 與未凍結的 ground truth 標明不是正式結果 | unit：bench/test_stats |
-| BENCH-11 | `benchmarks/` 不 import `secscan`、`tests`、DB、Web 框架、Docker、網路與子程序；純函式的模組不碰檔案 | unit：bench/test_black_box（AST） |
+| BENCH-11 | `benchmarks/` 不 import `secscan`、`tests`、DB、Web 框架、Docker、網路與子程序；純函式的模組不碰檔案；`cryptography` 只有 `benchmarks/sealing.py` 可以 import（T23a） | unit：bench/test_black_box（AST） |
 | BENCH-12 | `make bench` 的前置是 `ENABLE_LIVE_LAB_TESTS`、規格與名稱的檢查，recipe 只遞迴執行 `test-live-runner`；使用者給的值以環境變數交給 shell；`bench-check`、`bench-evaluate` 離線 | unit：bench/test_make_targets、test_cli |
 | BENCH-13 | Live smoke：經 API 跑完 A、B、C 與一個比較區塊，manifest 與 guard 計數齊全，子預算在真實執行中有效 | live：test_bench_live（**需要使用者另外授權；尚未執行**） |
+
+**原始證據與內容的加密（KEY、SEAL、EVID、CONT、RET、ROT、BSEAL；T23a，`DECISIONS.md` §30）**：
+
+| 編號 | 反例 | 測試 |
+|---|---|---|
+| KEY-01 | 三組平台金鑰的格式、數量（1–4）、互不共用（以解碼後的 bytes 比對）；錯誤訊息指出是哪一組的第幾把、不含金鑰；api、worker、runner 缺自己的金鑰就停止；`check-encryption-keys` 只顯示數量 | unit：security/test_key_rings、test_cli_keys；api：test_app_factory；integration：runner_cli |
+| KEY-02 | compose：worker 沒有 SECRET 與 EVIDENCE、api 沒有 EVIDENCE、runner 沒有 CONTENT；保留期限只傳給套用它的程序；沒有服務用 `env_file` | unit：test_deployment |
+| KEY-03 | AST：`reveal` 仍只在 runner；`unseal` 只在報告下載與 triage；`unseal_stream`／`read_stream_header` 只在 `runner/evidence.py`；`CurrentContentCipher` 只到報告與 triage 的路由；`content_cipher(...)` 只由 api、worker、本機指令與 v0022 建立；`cryptography` 只在兩個加密模組（import-linter） | unit：test_blob_cipher_callers、test_secret_reveal_callers、test_cipher_dependency |
+| KEY-04 | 金鑰、明文、密文不出現在 repr、錯誤訊息、log 與 API 回應（canary） | unit：security/test_blob_cipher、test_key_rings；integration：sealed_content、evidence_cli |
+| KEY-05 | `make env`：在暫存目錄執行真的 recipe；冪等、只附加缺少的金鑰、任何一個是空值時在寫入之前停止、不改既有的值、終端不顯示金鑰、檔案 600；不碰真正的 `.env` | unit：test_make_env |
+| SEAL-01 | 單一 token 與分塊兩種格式的往返（Hypothesis 的任意切塊）；context 或路徑不符；竄改、截斷、調換順序、重複、少了最後一塊、把一塊或整個檔案搬到別的檔案或 run、持有金鑰者偽造的標頭與塊都解不開；大小上限；超長路徑 | unit：security/test_blob_cipher |
+| SEAL-02 | 換版：新金鑰在前時改用新金鑰、舊金鑰移除之後解不開的會報錯；錯誤不回顯內容 | unit：security/test_blob_cipher |
+| EVID-01 | 每一種終止狀態（含沒有收集、取消、沒有 manifest 的殘留）都會加密；非終止狀態、容器還沒確認刪除的不加密；沒有目錄的記為 `none` | integration：evidence_keeper、evidence_schema |
+| EVID-02 | 先驗證才刪除：暫存檔、fsync、rename、fchmod、驗證任何一步失敗都保留明文、不寫 `run_evidence`、引擎變成不可用（`EVIDENCE_SEALING_FAILED`），一輪成功之後恢復；API 如實顯示 pending | unit：runner/test_evidence_vault、test_keeper；integration：evidence_keeper |
+| EVID-03 | 中斷恢復：`.sealing-*`、`.rotating-*`、`.masking-*` 的處理；rename 之後、刪除明文之前中斷時重做同一個檔案；長檔名、hardlink、symlink、特殊檔案、深度與條目數上限 | unit：runner/test_evidence_vault、test_fs |
+| EVID-04 | 逾期：從第一次 `collected` 起算（注入時間落在兩次 `collected` 之間）；`collected` 或 lease 過期的 `normalizing` 超過期限 → `failed`／`PARSE_DEADLINE_EXCEEDED` 並加密、scan 狀態重算；鎖住之後重新確認條件；有效 lease 的解析不受影響；worker 舊 lease 的寫入被拒 | unit：scans/test_lifecycle；integration：evidence_keeper |
+| EVID-05 | 加密之後整個目錄的位元組中沒有明文的 canary；孤兒目錄先加密才清除；probe 的目錄評估完就刪除 | unit：runner/test_evidence_vault；integration：evidence_keeper、runner_loop_probe |
+| EVID-06 | keeper：每輪的時間與數量上限、停止、例外（變成不健康）、停擺判斷、換版中拿不到 lock 也算不健康；不阻擋主迴圈的心跳；`--once` 結束時不健康就 exit 1 | unit：runner/test_keeper；integration：runner_loop、runner_cli |
+| EVID-07 | API 的 `engines[].evidence`、artifact 的 `encrypted`／`purged_at` 如實反映狀態；`export-evidence` 先驗證、寫 audit 才輸出，解密之後和 artifact 的 sha256 相符；解不開時不輸出任何內容 | integration：evidence_keeper、evidence_cli、finding_provenance_api |
+| EVID-08 | 隔離（`DECISIONS.md` §30.12）：同一個目錄連續 3 次因為深度、條目數或路徑總長度超過上限而加密失敗才隔離，2 次不會；三種上限共用連續的計數、各有錯誤代碼；中間有其他種類的失敗就重新計數、成功就清除；其他種類的失敗、清除時的失敗、runs volume 的目錄數量超過上限都不會隔離；孤兒目錄也會隔離；寫入隔離紀錄失敗時維持不健康、之後重試；隔離後下一輪恢復健康、其他 run 照常加密，之後每一輪（含重啟的 keeper）都跳過這個目錄；明文保留原狀（canary 還在）；API 顯示 `manual_intervention_required`、`hold` 與 `encrypted: false`；audit `evidence.hold`；log 不含路徑；退避的次方有上限；隔離已 commit、回應卻遺失時，下一輪依 DB 清掉退避、恢復健康；路徑總長度第一次超過就停止走訪 | unit：runner/test_backoff、test_keeper_holds、test_fs、test_evidence_vault、scans/test_evidence_hold；integration：evidence_holds |
+| EVID-09 | DB 與人工復原：trigger 只允許已終止、容器已刪除、沒有 `run_evidence` 的 run，或沒有 run 紀錄的孤兒目錄被隔離；新的隔離不能已解除；`resolved_at` 只能寫一次，run 必須已有 sealed（不是 none）的紀錄，同時改其他欄位被拒；`held_at`、`resolved_at` 由 DB 決定；隔離中的 run 新增 none 或 sealed 的 `run_evidence` 在 commit 時被拒，兩邊以交易鎖串行化（`lock_timeout` 確認會等）；外鍵的 scan 必須相符；其他修改、DELETE、TRUNCATE 被拒；5 個 CHECK，錯誤代碼的清單和 domain 一致；有紀錄時拒絕 downgrade。第二次解除得到 `HoldNotActiveError`。`retry-evidence`：沒有隔離時 exit 1、沒有任何改變；audit 寫不進去就不開始；等不到鎖時不動檔案；仍然超過上限時保留隔離與明文、寫 audit；指定較高的上限之後 `run_evidence` 是 sealed、隔離已解除、audit 完整，之後照常到期清除；孤兒目錄；目錄不存在時不記成 none；加密之後 DB 寫入失敗時寫入結果的 audit（`EVIDENCE_SEALED_NOT_RECORDED`），再執行一次就完成；參數的範圍（含 `--max-path-chars` 的絕對上限）與理由的檢查（含無法以 UTF-8 表示的字元）；路徑總長度超過預設上限時，以較高的上限重試才成功。API 的顯示以還沒解除的隔離優先。retention-status 的數量、錯誤代碼與目錄名稱（不含路徑）。`sealed/` 超過條目上限的目錄可以清除，其中有子目錄時 fail closed | integration：evidence_holds、evidence_retry、migrations、schema_constraints；unit：runner/test_evidence_vault |
+| CONT-01 | DB 中報告與摘錄的位元組沒有明文的 canary；下載與 triage-events 解密正確；把別的報告或摘錄的密文搬過來時回 500、不送出內容 | integration：sealed_content、reports_api |
+| CONT-02 | v0022：降到 0021 塞入舊格式的列再升級 → 舊明文被加密、期限是升級時間加 30 天；有舊資料而缺金鑰、舊內容和 sha256 不符時停止且資料不變；沒有舊資料時不需要金鑰；`--sql` 模式拒絕舊資料；有密文時拒絕 downgrade | integration：content_migration、migrations |
+| RET-01 | 只清除到期的：run 目錄（7 天）、報告內容（410、配額不計、重送照舊）、摘錄（tombstone、事件不變）；時間可注入 | integration：evidence_keeper、sealed_content |
+| RET-02 | trigger：`run_evidence` 只能 sealed → purged 一次；報告內容只允許換版與到期之後的清除；摘錄只允許換版與只能一次的清除；其他 UPDATE、DELETE、TRUNCATE 被拒 | integration：evidence_schema、sealed_content_schema、reports_schema、triage_schema |
+| ROT-01 | 證據與內容的換版：全部換成新金鑰、沒有舊金鑰時保留原狀並列出、和 keeper 互斥（拿不到 lock 時不改任何檔案）、已清除的略過、audit 只記數量 | integration：evidence_cli、rotate_content_keys_cli |
+| BSEAL-01 | 結果加密：磁碟上沒有明文與明文暫存，結果目錄的位元組中沒有明文的 canary；`SHA256SUMS` 與 manifest v2 的雙重 sha256；金鑰檔的權限、擁有者、symlink 與位置（repo 之外）的檢查；`create-key` 不覆寫 | unit：bench/test_sealing、test_results、test_manifest |
+| BSEAL-02 | 讀取與 `bench-evaluate`：金鑰錯誤、遺失、截斷、竄改、改名或搬到別的結果目錄都清楚報錯、沒有部分輸出；拒絕有明文檔案的目錄 | unit：bench/test_sealing、test_results、test_cli |
+| BSEAL-03 | `bench-seal`：先核對原目錄的 `SHA256SUMS`、只寫 partial 目錄（O_EXCL），驗證之後才 rename；不碰原目錄；驗證失敗時刪掉 partial、中斷時留下 | unit：bench/test_sealing、test_cli、test_make_targets |
+
+審查之後新增的反例（`DECISIONS.md` §30.11）：
+- EVID-02、EVID-06：runs volume 不存在或不能寫時不記下任何 none 或 purged（5 種 vault 操作、keeper 的一輪、整合測試）；孤兒目錄的加密檔解不開、任何非預期的例外都不讓 keeper 的執行緒結束；正常停止保留最後一輪的結果；失敗的 run 與孤兒退避、不擋住其他 run，退避中仍不健康；退避的間隔倍增而且有上限。
+- EVID-03、EVID-05：掃描容器改成 000 的目錄與檔案照常加密；刪除明文之前先 fsync `sealed/`；`entries()` 超過上限就失敗（換版不截斷、不改任何檔案）。
+- EVID-04：worker 持有 run 的列鎖時，逾期處理不等鎖、不算失敗；沒有 collected 事件的 run 以建立的時間起算。
+- EVID-07：列表寫 audit `evidence.list`、以 ASCII 跳脫工具決定的檔名；還沒加密的目錄回明確的錯誤。
+- CONT-01、RET-01：清除在 API 讀完 metadata 之後才 commit 時回 410；金鑰不對與 sha256 不符分開記錄；一次清除處理多批；清除時的 DB 錯誤不讓 worker 結束。
+- RET-02：只寫 `content_purged_at`、沒有刪除內容的 transaction 在 commit 時被拒（`reports_purge_complete`）；報告、摘錄與 `run_evidence` 的清除時間不能晚於現在；v0021 有 sealed 或 purged 的紀錄時拒絕 downgrade；v0022 的密文上限常數和 domain 一致。
+- KEY-01：EVIDENCE 與 CONTENT 共用金鑰時，每個 admin 指令與 `make migrate` 都停止（格式錯誤留給各指令說明）。
+- BSEAL-01：bench 金鑰檔以 O_NOFOLLOW 開檔、對 fd 檢查（檢查之後換成 symlink 也讀不到別的檔案）；上層目錄別人可以寫入、是 symlink 或不存在時拒絕；放在結果目錄中時拒絕。
+
+空轉檢查（故意改壞之後必須有測試失敗，確認之後改回、不提交）：拿掉「先驗證才刪除」、容器確認刪除之前就加密、到期之前就清除、拿掉最後一塊的檢查、逾期改從最後一次 `collected` 起算、加密失敗時引擎仍然可用——六項都被抓到。Live 的證據斷言（`tests/live/evidence_assertions.py`：run 目錄只剩密文、沒有 canary、export 的 sha256 等於 artifact）已更新，**尚未執行**，需要使用者另外授權（§4.4）。
 
 ### 4.4 Live E2E
 
@@ -669,9 +710,31 @@ T22 的量測需分開列出 persistent、inconclusive、not_comparable 與需�
 
 每次實驗記錄 run_manifest、程式 commit、映像 digest、模板/spec hash、靶場 snapshot、seed、時間、預算、實際請求、狀態與標記表。原始資料只存隔離受限環境，加密且設定留存；公開附件以遮罩且去識別化資料為限。
 
-T31 的 manifest（`DECISIONS.md` §29.3）記錄規格的 sha256、種子與實際順序、每個 scan 的預算、子預算、分到的配額、guard 計數與狀態、比較快照、每個檔案的 sha256 與 session 是否完整；API 拿不到的身分（commit、本機映像 ID、fixture 原始碼的雜湊、strict-1）由 harness 記下並標明來源。結果目錄只保存 scan、finding 與比較快照的 JSON，不保存觀察的 evidence，目錄 0700、檔案 0600、寫入前檢查秘密；**目前沒有加密、沒有留存期限**（T23a），不得宣稱已完成保護。
+T31 的 manifest（`DECISIONS.md` §29.3）記錄規格的 sha256、種子與實際順序、每個 scan 的預算、子預算、分到的配額、guard 計數與狀態、比較快照、每個檔案的 sha256 與 session 是否完整；API 拿不到的身分（commit、本機映像 ID、fixture 原始碼的雜湊、strict-1）由 harness 記下並標明來源。結果目錄只保存 scan、finding 與比較快照的 JSON，不保存觀察的 evidence，目錄 0700、檔案 0600、寫入前檢查秘密；**T23a 起以本機的 bench 金鑰加密**（`DECISIONS.md` §30.7；金鑰檔在 repo 之外、遺失就無法復原），沒有自動的留存期限（T28 的研究資料，由使用者自行處理）。
 
 建議遮罩 fixture 至少含一組可檢查的 synthetic secret，CI 搜尋它是否出現在不允許的輸出。不能只測 Authorization header，還需測 Cookie、query、body、stack trace、重現命令。
+
+**平台的資料保護（T23a，`DECISIONS.md` §30）**：
+
+| 資料 | 加密 | 金鑰（持有的容器） | 明文期間 | 保留期限 |
+|---|---|---|---|---|
+| runs volume 的原始證據 | run 結束（解析完成、失敗或逾期）、容器確認刪除之後的下一輪 | EVIDENCE（runner） | 執行、收集與等待解析；worker 異常時最多再加 60 分鐘 | 加密後 7 天 |
+| 報告內容 | worker 寫入之前 | CONTENT（api、worker） | 只在 worker 渲染與 API 下載時的記憶體中 | 完成後 30 天 |
+| 人工複測摘錄 | API 寫入之前 | CONTENT（api、worker） | 只在 API 的記憶體中 | 建立後 30 天 |
+| `benchmarks/results` | 寫入之前 | 本機的 bench 金鑰檔 | 只在 harness 的記憶體中 | 不自動清除 |
+
+清除只刪除內容：metadata、sha256、遮罩過的觀察、finding 與比較快照都保留。`secscan-admin retention-status` 列出各狀態的數量。
+
+**SEC-14 的剩餘風險（T23a 之後；`DECISIONS.md` §30.9）**：
+1. **不是全程靜態加密**：run 執行、收集、等待解析期間是明文；runner 停機或 Docker 無法確認容器已刪除時持續到恢復為止。原因是 ZAP 與 Nuclei 只能寫一般檔案，runner 要在容器結束之後讀取並遮罩、worker 再讀取解析。改善方向：主機全碟加密（FileVault／LUKS，T23b 的部署要求）；未來以每個 run 的 tmpfs `out/` 加輔助容器加密、加密的 sidecar，或讓 worker 讀加密檔（和目前的最小權限分配衝突）。
+2. **刪除只是 unlink**：磁碟的資料區塊、DB 的 dead tuple、WAL 與備份會保留舊資料，直到 VACUUM 或備份輪替。
+3. **權限隔離有限**：所有服務都是 uid 10001、隔離只靠掛載；DB 只有一個角色、可以停用 trigger；金鑰以 compose 的環境變數傳入（T23b）。
+4. **掃描容器的 json-file log** 在容器刪除之前可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
+5. **保持現狀的明文**：`observations` 中遮罩過的證據（含 Nuclei 擷取的 email 與卡號）、guard telemetry 的路徑（tmpfs、6 小時）、摘錄沒有加 salt 的雜湊；報告與摘錄下載的回應是明文（TLS 由部署負責）。
+6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 交給 T34。
+7. **超過上限的單一目錄**（使用者決定方案 B，`DECISIONS.md` §30.12）：深度、條目數或路徑總長度超過上限時，keeper 連續 3 次失敗之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄保留明文直到有人以 `retry-evidence` 處理，而且**在完成掛載範圍的隔離之前 worker 仍讀得到**（使用者決定的安全驗收阻擋條件；DB 的隔離只是工作流程的隔離）；不做全域熔斷，告警在 T35；計數只在記憶體中（重啟會重新計數，`runner --once` 不會隔離）；超過深度 64、條目 50,000 或路徑總長度 16M 字元的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密；runs volume 的目錄數量超過上限、清除失敗與其他種類的加密失敗仍然全域 fail closed。
+8. **runner 指到可寫、但不是 runs volume 的目錄**時，找不到目錄的 run 仍會被記成 none（DB 分不出「從來沒有目錄」與「目錄不見了」）。
+9. **金鑰在主機上**：`.env`（600）與家目錄中的 bench 金鑰檔；遺失之後尚未清除的資料都無法復原，備份由使用者負責。
 
 ## 9. 發布前 Gate
 
@@ -681,7 +744,7 @@ Gate B：SEC-01 至 SEC-20 適用測試有結果；未支援能力明確關閉�
 
 Gate C：取消/故障/重送/partial 狀態測試通過。
 
-Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者審閱樣本報告的結論是核心安全語意通過、有條件通過，兩個措辭已修正（§28.17）。**通過（2026-11-08，接受有文件記錄的替代證據，`DECISIONS.md` §28.17）**：partially_completed 與 timed_out 由兩次 Live rescan 驗證；fixture 的 Live 不會產生 completed 的 scan，completed 改以 DB 整合測試驗證，走真實的 API、worker、渲染與下載流程，並直接套用 Live 的報告核對（§4.3 的 REPORT-03）。這個替代方案只適用於 Gate D 的報告正確性與措辭驗收，不宣稱已完成 completed 的 Live 端到端驗證。Gate D 通過不代表 M5 完成：SEC-14（T23a）、權限與速率限制（T23b）、Gate E（T23d）與 T23 的 DoD 仍未完成，Gate A–C 尚未正式判定。）
+Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者審閱樣本報告的結論是核心安全語意通過、有條件通過，兩個措辭已修正（§28.17）。**通過（2026-11-08，接受有文件記錄的替代證據，`DECISIONS.md` §28.17）**：partially_completed 與 timed_out 由兩次 Live rescan 驗證；fixture 的 Live 不會產生 completed 的 scan，completed 改以 DB 整合測試驗證，走真實的 API、worker、渲染與下載流程，並直接套用 Live 的報告核對（§4.3 的 REPORT-03）。這個替代方案只適用於 Gate D 的報告正確性與措辭驗收，不宣稱已完成 completed 的 Live 端到端驗證。Gate D 通過不代表 M5 完成：SEC-14（T23a 的離線部分已實作、Live 尚未執行，SEC-14 仍不標完成）、權限與速率限制（T23b）、Gate E（T23d）與 T23 的 DoD 仍未完成，Gate A–C 尚未正式判定。）
 
 Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 

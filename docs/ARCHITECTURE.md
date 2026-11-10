@@ -60,6 +60,16 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 
 全部非 root、唯讀 rootfs、`cap_drop: ALL`、`no-new-privileges`，並有記憶體與 pids 上限。`make dev` 仍在宿主執行 API（開發用），不具這樣的權限隔離。
 
+**T23a 的金鑰分配**（`DECISIONS.md` §30.2）：compose 只把各自需要的金鑰傳進容器，沒有服務用 `env_file`（部署測試 KEY-02 核對）。主機上的 `.env`（600）是唯一的設定來源、三組都在裡面，主機上的 admin 指令與 migration 由操作者執行。
+
+| 金鑰 | api | worker | runner | 用途 |
+|---|---|---|---|---|
+| `SECRET_ENCRYPTION_KEYS` | 只加密 | — | 解密後注入掃描容器 | 目標的 secret |
+| `CONTENT_ENCRYPTION_KEYS` | 加密摘錄、解密報告與摘錄 | 加密報告、到期清除 | — | 報告內容、人工複測摘錄 |
+| `EVIDENCE_ENCRYPTION_KEYS` | — | — | keeper、`export-evidence`、`rotate-evidence-keys` | runs volume 的原始證據 |
+
+每個程序啟動時檢查自己持有的金鑰（缺少或格式不合就停止）與互不共用；`secscan-admin check-encryption-keys` 在主機上一次檢查三組。bench 的金鑰檔在開發機的家目錄，平台的任何容器都拿不到。
+
 **T11 已實作**（`DECISIONS.md` §15.6）：lab_net 與 scan_net 都由 Makefile 建立（`make lab-net`、`make scan-net`：internal、gateway isolated、固定網段、`--ip-range` 只配發下半段），compose 只以 external 引用。guard 固定在兩個網段的最後一個主機位址：guard 停機時，掃描容器也拿不到它的 IP。LAB_CIDR 的最後一個主機位址保留給 guard，target 與 grant 都不能用。runner 另外掛 guard_policies（讀寫）與 guard_status（唯讀）。
 
 ### 掃描容器
@@ -73,12 +83,14 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 
 - 唯一有 Docker API 權限的程序，而且只能經 docker-socket-proxy 存取，只開放容器相關的 API 區段（不開 exec、volumes、networks、build 等）。[S27]
 - socket-proxy 只依 API 區段與 HTTP method 過濾，不檢查 request body，所以擋不住 container create 裡的 bind mount。這部分由 runner 的 ExecutionPlan 驗證負責，而 runner 本身不解析任何不可信資料。
+- **T23a**（`DECISIONS.md` §30.3）：runner 程序內另有背景執行緒 keeper（自己的 DB session，和主迴圈只共用健康狀態）：每 10 秒把已終止、容器已確認刪除的 run 目錄加密成 `sealed/`、驗證之後才刪除明文，加密後 7 天清除，並把等待解析太久的 run 轉成 failed。加密失敗或 keeper 停擺時 runner 不認領新的 run（`EVIDENCE_SEALING_FAILED`）。
 - **T10 已實作**（`DECISIONS.md` §14.1）：改用 wollomatic/socket-proxy [S83]，逐一放行 method＋path：只有 version、映像／scan_net／兩個 volume 的查詢，與 `secscan-run-<uuid>` 容器的建立、啟動、停止、刪除；只接受 runner 連線；host bind mount 在 proxy 也會被拒絕（它檢查 create 的 body 中的 bind）。proxy 不檢查 privileged、namespace、capability，這些只由 runner 的驗證負責（§4）。
 
 ### worker
 
 - 負責解析不可信的工具輸出，但沒有 Docker 權限，對 runs volume 只有唯讀權限。
 - **T12 已實作**（`DECISIONS.md` §16.5、§16.6）：worker 唯讀掛載 runs 與 guard 的 telemetry volume。preflight 的回應依 manifest 讀取（大小與 sha256 相符、不跟隨 symlink），以 §12.5 的純函式判斷；每個 run 的轉送請求對應到凍結的 operation，寫入 `run_coverage`。不掛 secrets、policy 與 status。
+- **T23a**：worker 只在 run 加密之前讀明文；`collected` 超過 `EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60）或 lease 過期的 `normalizing` 由 runner 的 keeper 轉成 failed 並加密，worker 之後以舊 lease 的寫入一律被拒。worker 沒有原始證據的金鑰，讀不了加密檔；它持有內容金鑰，加密報告並每 10 分鐘清除到期的報告與摘錄。
 
 ### egress guard
 
@@ -219,7 +231,7 @@ TLS 代理會影響憑證類的檢測。本版不做以下檢測，並在報告�
 T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
 
 - **domain 規則放在固定位置**：`<feature>/domain.py`，或拆成 `<feature>/domain/` 套件。import-linter 只檢查這兩種位置，以及共用的 `security/`。
-- **模組之間依呼叫關係分層**：`main | cli → migrations → health | runner → scans → specs | auth_profiles → grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06–T09 的更新見 `DECISIONS.md` §10.7、§11.7、§12.7、§13.9）。`security/` 放 API key 的產生與雜湊、遮罩，以及目標 secret 的加密（MultiFernet，T08），和 domain 一樣不得依賴框架、DB 與 Docker。
+- **模組之間依呼叫關係分層**：`main | cli → migrations → health | runner → scans → specs | auth_profiles → grants → targets → projects → api_keys → audit → security → core`，上層可以 import 下層（T06–T09 的更新見 `DECISIONS.md` §10.7、§11.7、§12.7、§13.9）。`security/` 放 API key 的產生與雜湊、遮罩，以及目標 secret 的加密（MultiFernet，T08）、證據與內容的加密（`blob_cipher`、`key_rings`，T23a），和 domain 一樣不得依賴框架、DB 與 Docker。
 - **跨功能的 FK 以資料表名稱引用**，不 import 對方的 model。所有 model 登記在 `secscan.migrations.metadata`；API（`main`）、CLI（`cli`）、worker、runner 等每個使用 ORM 的程序入口都必須 import 它。
 - **驗證與授權（T05）**：
   - `/api/v1` 在 router 層強制平台 key 驗證（`authenticated_router`），新增的路由不會意外變成公開端點。
@@ -240,8 +252,8 @@ T04 起的實作慣例（理由見 `DECISIONS.md` §8、§9）：
   - path 與 method 的比對在 `grants/domain/matching.py`（`covers()`、`ScopeRules`），M2 的 guard 也用它比對實際的請求。
   - 上傳先檢查權限、再解析，解析完才以 `FOR UPDATE` 鎖 target 取 version，不拖長鎖住 target 的時間。
 - **認證設定與 secret（T08，`DECISIONS.md` §12）**：
-  - `SecretCipher`（`security/secret_cipher.py`，MultiFernet）由 `create_app` 依 `SECRET_ENCRYPTION_KEYS` 建立，放在 `app.state.secret_cipher`，只有建立與 PATCH 的路由以 `CurrentCipher` 取得（查詢的路由沒有它）；沒有金鑰或格式不合時 API 不會啟動。只有 `security.secret_cipher` 可以 import `cryptography`（import-linter）。
-  - 加密的內容綁定 `auth_profile:<id>:<type>:<header_name 或 ->`（context）。API 只加密、不解密：新版本沿用 secret 時直接複製密文；以 AST 測試確認 src 中沒有任何模組呼叫 `reveal`（M2 的 runner 會是唯一的呼叫者）。
+  - `SecretCipher`（`security/secret_cipher.py`，MultiFernet）由 `create_app` 依 `SECRET_ENCRYPTION_KEYS` 建立，放在 `app.state.secret_cipher`，只有建立與 PATCH 的路由以 `CurrentCipher` 取得（查詢的路由沒有它）；沒有金鑰或格式不合時 API 不會啟動。只有 `security.secret_cipher` 可以 import `cryptography`（import-linter；T23a 加上 `security.blob_cipher`）。
+  - 加密的內容綁定 `auth_profile:<id>:<type>:<header_name 或 ->`（context）。API 只加密、不解密**目標的 secret**：新版本沿用 secret 時直接複製密文；以 AST 測試確認只有 `runner/service.py` 呼叫 `reveal`。T23a 起 API 另外以內容金鑰解密報告與摘錄，只在報告下載與 triage 事件兩個 service（AST 測試 KEY-03，`DECISIONS.md` §30.2）。
   - 認證類型、secret 的格式、preflight 與 PATCH 的規則都在 `auth_profiles/domain/`，不依賴框架與 DB。schema 只限制型別與長度，規則在權限檢查之後驗證。
   - 鎖的順序：建立以 `FOR UPDATE` 鎖 target（數量上限）；PATCH 以 `FOR UPDATE` 先鎖 profile，再鎖目前的版本列才讀密文。金鑰換版（`secscan-admin rotate-secret-keys`，只有 CLI 呼叫）同樣先鎖 profile（依 id 的順序、`FOR SHARE`），再鎖版本列：順序相同，所以不會死結，而且兩個方向都互斥（PATCH 等換版，換版也等還沒 commit 的 PATCH）。
 - **scan 與工作佇列（T09，`DECISIONS.md` §13）**：
@@ -348,11 +360,13 @@ ExecutionPlan 只能包含：
 | findings | id、target_id、fingerprint（`(target_id, fingerprint)` 唯一）、kind、category（v0014）、rule_group、title、method、route 與 route_source、參數位置與名稱、resource、auth_role、auth_verified、normalized_severity、severity_conflict、needs_review、cwe_id 與 cwe_source、owasp_top10_2025 與來源、owasp_api_2023 與來源、mapping_version、taxonomy_sha256、triage_state、lifecycle_state、first/last seen 的 run 與 scan、last_seen_at（T19 新增） |
 | finding_observations | observation_id（主鍵：每個觀察最多連結一次）、finding_id、連結時的 normalized_severity、normalized_confidence、needs_review、taxonomy_sha256（T19 新增；append-only） |
 | observations | id、scan_id、scanner_run_id、ordinal、source_event_id、source_index、source_rule、rule_variant、title、raw_severity、severity_label、raw_confidence、confidence_label、CWE、WASC、method、path、query、parameter 與位置、attack、evidence、other_info（遮罩並截斷）、auth_role、report_artifact_id、parser_version（T15 新增；T19 不加欄位，連結在 finding_observations，`DECISIONS.md` §25.2） |
-| artifacts | id、scanner_run_id、scan_id、kind（input/output）、path、sha256、size、redactions、classification、encrypted、storage_key（T15 新增；保留期限在 T23） |
-| reports | id、project／target／scan、format（json/markdown；P1 加 sarif）、status、queue_position、idempotency_key 與 request_sha256、attempts、lease 欄位、error_code、data_as_of、generated_at、size_bytes、sha256、truncated、omitted_findings；同時是 worker 的工作佇列（T21，v0018） |
-| report_contents | report_id、content（bytea ≤ 8 MiB；只寫一次）（T21，v0018） |
+| artifacts | id、scanner_run_id、scan_id、kind（input/output）、path、sha256、size、redactions、classification、encrypted、storage_key（T15 新增；`encrypted` 是從來沒有寫入過的舊欄位，API 的 `encrypted` 改由 `run_evidence` 推導，T23a） |
+| run_evidence | scanner_run_id（主鍵）、scan_id、status（none／sealed／purged；沒有紀錄是 pending）、file_count、plaintext_bytes、sealed_at、purged_at、recorded_at；只有已終止、容器已確認刪除的 run 能新增；只允許 sealed → purged 一次（T23a，v0021） |
+| evidence_holds | directory（主鍵，runs volume 的目錄名稱）、scanner_run_id、scan_id（只有 run 的目錄有；孤兒目錄是 NULL）、error_code（`EVIDENCE_TREE_TOO_DEEP`／`EVIDENCE_TREE_TOO_MANY_ENTRIES`／`EVIDENCE_TREE_PATHS_TOO_LONG`）、attempts、held_at、resolved_at；keeper 連續 3 次超過上限時新增（run 必須已終止、容器已刪除、還沒有 run_evidence）；`resolved_at` 只能寫一次，run 必須已有 sealed 的 run_evidence；不能刪除（T23a 方案 B，v0023，`DECISIONS.md` §30.12） |
+| reports | id、project／target／scan、format（json/markdown；P1 加 sarif）、status、queue_position、idempotency_key 與 request_sha256、attempts、lease 欄位、error_code、data_as_of、generated_at、size_bytes、sha256（明文的值）、truncated、omitted_findings、expires_at、content_purged_at；同時是 worker 的工作佇列（T21，v0018；到期與清除在 T23a，v0022） |
+| report_contents | report_id、content（T23a 起是 Fernet token、context `report:<id>`；只允許換版與報告清除之後刪除）（T21，v0018；T23a，v0022） |
 | finding_triage_events | (finding_id, sequence)、actor（key 或 system）、前後的 triage 與 lifecycle、reason_code、reason、comparison_id、resolution_basis、系統重開的 run 與 scan、evidence（白名單鍵）；append-only（T21，v0017） |
-| finding_triage_excerpts | (finding_id, sequence, kind)、遮罩後的人工複測摘錄（T21，v0017；T23a 加密與清除時只改這張表） |
+| finding_triage_excerpts | (finding_id, sequence, kind)、遮罩後的人工複測摘錄：sealed_content（密文，清除後是 NULL 的 tombstone）、expires_at、purged_at；只允許換版與只能一次的清除（T21，v0017；T23a，v0022） |
 | scan_events | scan_id、sequence（每個 scan 各自連號）、event_type、scanner_run_id、payload（只由 enum 與 id 組成）、時間；供輪詢使用（T09 已建立） |
 | audit_events | actor_key_id、project、action、object_ref、redacted_changes、時間 |
 
@@ -420,6 +434,10 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
   - artifacts、observations：只以複合 FK `(scanner_run_id, scan_id)` 引用 scanner_runs，不直接引用 scans（對帳先鎖 scans 再鎖 run）；不可修改、刪除或 TRUNCATE。
 - **T19（migration `0013`）**：findings 與 finding_observations（`DECISIONS.md` §25.8）。findings 的 first/last seen 以複合 FK 引用 scanner_runs、不直接引用 scans（同 observations 的鎖序理由）；trigger `findings_guard` 讓身分、對應、triage 與 lifecycle 不可修改，只有 last seen 與三個聚合可以更新而且只會往上，不能刪除。finding_observations append-only。
 - **T21（migration `0017`–`0019`）**：triage 的版本與事件、人工複測摘錄（0017）；reports 與 report_contents（0018）；auth profile 的停用與全域稽核的索引（0019）。findings 的 `findings_guard` 改版為只允許版本恰好 +1 的 triage 變更（`DECISIONS.md` §28）。
+- **T23a（migration `0021`、`0022`，`DECISIONS.md` §30.3、§30.4）**：
+  - 0021：`run_evidence` 與它的 trigger（新增只能是 none 或 sealed、run 必須已終止而且容器已確認刪除；只允許 sealed → purged 一次；不能刪除或 TRUNCATE）；既有資料不回填。有 sealed 的紀錄時拒絕 downgrade。
+  - 0023（方案 B，§30.12）：`evidence_holds` 與它的 trigger（新增、只能一次的解除、時間由 DB 決定、不能刪除或 TRUNCATE），5 個 CHECK、部分索引 `ix_evidence_holds_active`；`run_evidence` 加上 deferred constraint trigger `run_evidence_hold_check`（隔離中的 run 不能有紀錄，除非同一個 transaction 中解除），兩邊以 run 為鍵的交易鎖串行化；有任何紀錄時拒絕 downgrade。0021、0022 不變。
+  - 0022：reports 加上 `expires_at` 與 `content_purged_at`；`report_contents` 與摘錄改用各自的 guard function（只允許換版與到期之後的清除）、內容的 CHECK 改成 Fernet token；摘錄以 `sealed_content` 取代 `content`。既有的明文在同一個 transaction 中加密、期限是升級時間加 30 天；只有存在舊資料時才需要內容金鑰，金鑰由 `migrations/env.py` 從設定放進 `config.attributes`；`--sql` 模式遇到舊資料就報錯；有密文時拒絕 downgrade。這個 migration import 加密元件，是「migration 不 import 應用程式的程式」的例外。
 
 ## 7. ScanPlan 與執行快照
 
@@ -471,6 +489,7 @@ T09 已實作（`DECISIONS.md` §13.4）：
 - run 的轉換表在 `scans/domain/lifecycle.py`，表外的轉換一律拒絕，終止狀態不能再轉換；failed、timed_out、interrupted 必須有錯誤碼。
 - scan 的狀態不獨立轉換：每次 run 轉換之後，由所有 run 的狀態與「是否要求過取消」以純函式 `aggregate()` 重新算出，在同一個 transaction 寫入。全部終止時的優先順序：要求過取消 → cancelled；interrupted；timed_out；全部 succeeded → completed；有 succeeded → partially_completed；其他 → failed。
 - 後面的引擎要等前面的引擎都不再送出流量（collected、normalizing 或終止）才能開始；失敗的引擎不擋住後面的引擎。
+- T23a 加上 `collected → failed`：從第一次進入 `collected` 起算超過 `EVIDENCE_PLAINTEXT_MAX_MINUTES`，或 `normalizing` 而 lease 已過期，runner 的 keeper 以 `PARSE_DEADLINE_EXCEEDED` 結束這個 run（先鎖 scan 再鎖 run、鎖住之後重新確認、同一個 transaction 重算 scan 的狀態），然後加密它的目錄（`DECISIONS.md` §30.3）。
 
 **例外處理**：
 
@@ -639,7 +658,7 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 - runner 與 plan 同次凍結 `rule_set` 和 `rule_set_sha256`；linker 在連結交易凍結 `link_mapping_version`、`link_taxonomy_sha256`、`locations_recorded`。版本、映像 tag+digest、parser、profile 定義、components、規則集構成引擎可比身分。缺失不從目前設定回填。
 - worker 位置摘要只在 telemetry 和 summary 嚴格一致時保存，和 mapping/finding links 同一個 fenced transaction；parser 的 observation/artifact 交易在它之前。終止前所有資料都應完成；比較另核對 observation_count、實際觀察數及已連結數，避免把連結不完整當成零告警。
 - linker 重試仍先驗證 lease 並鎖 run：已凍結 mapping 且無未連結觀察時，直接沿用原版本與位置，不因部署換版失敗；若仍有未連結觀察而 mapping/version/hash 不同，拋 `MappingChangedError`，不以新版補寫。首次零觀察仍記錄 mapping，重試不能補上先前未知的位置證據。
-- 位置表不存明文 path，只有 SHA-256；低熵 path 仍可被猜測，不能視為加密。比對時用既有 observation 的字面 path 計算摘要，核對每一個原始物件；不以同樣板另一個物件代替。原 observation/raw artifact 的加密與保留期限仍在 T23。
+- 位置表不存明文 path，只有 SHA-256；低熵 path 仍可被猜測，不能視為加密。比對時用既有 observation 的字面 path 計算摘要，核對每一個原始物件；不以同樣板另一個物件代替。原始輸出（raw artifact）的加密與保留期限在 T23a 實作（§12）；observation 保留遮罩過的證據、不加密（`DECISIONS.md` §30.1）。
 - 三層證據分開：位置回應、規則完成、身分／參數可比。ZAP 規則 header 在 guard 中剝除後只作歸屬；不帶 header 不等於探索。Nuclei false 事件無法證明模板對位置完成，不建立 observation、不保存 URL 到覆蓋表。目前 rule_completed=false，採核准的 inconclusive 退路；不保存參數名稱或值。
 - `scan_comparisons` 以 ON CONFLICT 唯一鍵處理重複建立；建立者寫所有明細、seal 與 audit 才提交。deferred constraint trigger 拒絕未封存提交；父列不可見時明細插入立即拒絕。後續 finding 聚合不改變快照，T22 不變更 finding 生命週期。
 - 重新識別含 related 及 corroborated_by 成員原群組；只有保存的 mapping/hash 和目前分類表一致時才使用該表的關係，不拿新表重解釋舊 scan。位置＋群組索引及每個 run 的回應集合只建立一次，避免 finding 之間的平方比對與重掃全部位置。
@@ -667,6 +686,21 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 - 原始輸出寫入受限的暫存區並計算 hash，再加密存成受限的 evidence。
 - 一般查詢只回傳遮罩後的摘要。
 
+**T23a 的實作**（`DECISIONS.md` §30.3、§30.5；**run 結束之後才加密，不是全程靜態加密**）：
+
+| 階段 | 誰 | 檔案狀態 |
+|---|---|---|
+| 準備 `in/`、容器寫入 `out/` | runner、掃描容器 | 明文（`out/` 沒有遮罩） |
+| 收集：就地遮罩、寫 manifest | runner 主迴圈 | 明文（已遮罩已知的 secret） |
+| 等待解析、解析 | worker（唯讀） | 明文；最多 `EVIDENCE_PLAINTEXT_MAX_MINUTES` |
+| 加密 | runner 的 keeper，run 已終止、容器確認刪除之後的下一輪 | 只剩 `sealed/` |
+| 清除 | keeper，加密後 7 天 | 刪除整個目錄 |
+
+- 加密檔：每個原本的檔案一個，檔名是原本相對路徑的 sha256；分塊的 Fernet（每塊 1 MiB），標頭與每一塊綁定 `evidence:<run_id>`、原本的路徑、塊的序號與最後一塊旗標。先寫暫存檔、fsync、rename、串流解密核對 sha256，才刪除明文；任何一步失敗都保留明文、API 顯示 pending、runner 不認領新的 run。
+- 沒有 `scanner_runs` 紀錄的孤兒目錄超過 1 小時沒有變動才加密，絕不在未加密時刪除；probe 的目錄評估完就刪除。
+- 需要讀原始輸出時，只能在 runner 容器內以 `secscan-admin export-evidence` 解密到 stdout（先寫 audit），沒有 API。
+- 超過深度（32）、條目數（20,000）或路徑總長度（8M 字元）上限的單一目錄（§30.12）：keeper 在記憶體中計算連續的上限失敗（`runner/backoff.py`），第 3 次寫入 `evidence_holds` 與 audit，之後跳過這個目錄、不再算不健康，其他 run 照常認領；明文保留原狀，API 顯示 `manual_intervention_required`。操作者在 runner 容器內以 `secscan-admin retry-evidence` 用較高的上限（深度 64、條目 50,000 以內）重試，加密驗證通過才解除（同一個 transaction 寫入 sealed 的 `run_evidence`）。清除時先逐一刪除 `sealed/`，以較高上限加密的目錄也能清除。路徑總長度的上限讓整棵樹列在記憶體中時不會超過 runner 的記憶體上限。**隔離是工作流程的隔離，不是檔案的機密性隔離**：worker 以唯讀掛載整個 runs volume，仍讀得到隔離中的明文；改成掛載範圍的隔離是 T23a 安全驗收的阻擋條件（§30.12）。
+
 **報告內容**：
 
 - 工具與版本、範圍、auth 狀態
@@ -688,4 +722,4 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 - 單一報告的錯誤（含這份報告專屬的 DB 錯誤：違反 CHECK、commit 時核對失敗、快照查詢逾時 57014）只記類別與位置，立即釋放這一次嘗試（退回 queued，用盡時 `REPORT_GENERATION_FAILED`）；連線中斷、等鎖逾時等其他 DB 錯誤讓 worker 程序結束（§17.6），報告留在 generating，lease 到期後由對帳處理。lease 已失效時不算完成、也不釋放。
 - worker 在 REPEATABLE READ READ ONLY transaction 中分頁讀快照，每頁之間以另一個短 transaction 心跳；以純函式投影成白名單欄位、再遮罩一次，渲染 JSON（`ReportDocumentV1` 驗證）或 Markdown（不可信的值只在 code span 或最上層的 fenced block）；完成時以 fenced transaction 寫入內容，deferred 檢查雙向核對內容、sha256 與狀態。
 - 只能以 report id 下載，送出前重新核對 sha256；`/artifacts/{id}/download` 已從契約移除，工具輸出只提供 metadata。
-- 報告內容與人工複測摘錄在 DB 中沒有加密、沒有保留期限（T23a）；T21 完成不代表資料保護已完成（`DECISIONS.md` §28.9）。
+- T23a 起報告內容與人工複測摘錄在 DB 中以內容金鑰加密（context `report:<id>`、`excerpt:<finding>:<sequence>:<kind>`），30 天後由 worker 清除：報告回 410 `REPORT_EXPIRED`、摘錄留下 tombstone，metadata 與 sha256 保留（`DECISIONS.md` §30.4、§30.5）。資料保護的剩餘風險見 `SECURITY_AND_TESTING.md` §8。

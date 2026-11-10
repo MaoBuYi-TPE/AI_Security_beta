@@ -10,6 +10,8 @@ make bench 以環境變數傳入（不經 shell 文字）。流程：
 4. 結構斷言：不是 fake、每個容器 run 都有 guard 計數、分到的等於 min（剩下的, 上限）、轉送數不超過
    分到的、guard 只看到靶機。不斷言偵測數（smoke 的數字不是實驗結果）。
 5. 不論成功或失敗都寫 manifest（失敗時 complete 是 false）與 SHA256SUMS；不自動重試。
+每個結果檔都以 bench 的金鑰（BENCH_KEY_FILE，預設 ~/.config/secscan/bench-keys）加密寫入，磁碟上
+沒有明文（docs/DECISIONS.md §30.7）；make bench-check 在啟動 stack 之前先確認金鑰檔。
 
 全部在同一個 pytest session 中完成：make test-live-runner 結束時 down -v 會清掉 DB。
 """
@@ -32,9 +34,10 @@ from benchmarks.batch import (
 )
 from benchmarks.collect import collect_comparison, collect_scan, normalize_comparison
 from benchmarks.manifest import MANIFEST_FILE, build_manifest
-from benchmarks.models import ComparisonRecord, LabeledScan
-from benchmarks.results import reserve, seal, write_bytes, write_json
+from benchmarks.models import ComparisonRecord, FileDigests, LabeledScan
+from benchmarks.results import reserve, write_bytes, write_checksums, write_json
 from benchmarks.schedule import ScheduledScan, build_schedule
+from benchmarks.sealing import BenchKeys, key_file_path
 from benchmarks.spec import ExperimentSpec, check_name, parse_spec
 from tests.live.bench_support import (
     Placement,
@@ -62,12 +65,13 @@ RESULTS_ROOT = Path(__file__).resolve().parents[2] / "benchmarks" / "results"
 class Session:
     """一次 make bench：已寫入的檔案、收集到的 scan 與比較快照，以及這次建立的秘密。"""
 
-    def __init__(self, spec: ExperimentSpec, digest: str, directory: Path) -> None:
+    def __init__(self, spec: ExperimentSpec, digest: str, directory: Path, keys: BenchKeys) -> None:
         self.spec = spec
         self.digest = digest
         self.directory = directory
+        self.keys = keys
         self.schedule = build_schedule(spec)
-        self.files: dict[str, str] = {}
+        self.files: dict[str, FileDigests] = {}
         self.scans: list[LabeledScan] = []
         self.comparisons: list[tuple[str, ComparisonRecord]] = []
         self.secrets: list[str] = []
@@ -75,7 +79,9 @@ class Session:
         self.placements: dict[tuple[str, str], Placement] = {}
 
     def write(self, name: str, document: object) -> None:
-        self.files[name] = write_json(self.directory, name, document, known=self.secrets)
+        self.files[name] = write_json(
+            self.directory, name, document, keys=self.keys, known=self.secrets
+        )
 
     def finish(self, *, complete: bool, stopped_reason: str | None) -> None:
         manifest = build_manifest(
@@ -89,8 +95,8 @@ class Session:
             complete=complete,
             stopped_reason=stopped_reason,
         )
-        write_json(self.directory, MANIFEST_FILE, manifest, known=self.secrets)
-        seal(self.directory)
+        write_json(self.directory, MANIFEST_FILE, manifest, keys=self.keys, known=self.secrets)
+        write_checksums(self.directory)
 
 
 def _required(name: str) -> str:
@@ -105,9 +111,10 @@ def session() -> Session:
     # 規格只讀一次：解析、sha256 與複本都來自同一份位元組。
     content = Path(_required("BENCH_SPEC")).read_bytes()
     spec = parse_spec(content)
+    keys = BenchKeys.load(key_file_path())
     directory = reserve(RESULTS_ROOT, check_name(_required("BENCH_NAME")))
-    current = Session(spec, hashlib.sha256(content).hexdigest(), directory)
-    current.files[SPEC_FILE] = write_bytes(directory, SPEC_FILE, content)
+    current = Session(spec, hashlib.sha256(content).hexdigest(), directory, keys)
+    current.files[SPEC_FILE] = write_bytes(directory, SPEC_FILE, content, keys=keys)
     return current
 
 

@@ -8,6 +8,7 @@ KEY SHARE 相容）。
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import Row, and_, func, insert, select, update
@@ -22,6 +23,7 @@ from secscan.findings.domain.triage import (
     NewTriageEvent,
     Resolution,
     ResolutionBasis,
+    SealedExcerpt,
     TriageEvent,
     TriageReasonCode,
     TriageStatus,
@@ -113,12 +115,26 @@ class TriageRecords:
             )
         )
 
-    def append_excerpts(self, finding_id: UUID, sequence: int, request: str, response: str) -> None:
+    def append_excerpts(
+        self,
+        finding_id: UUID,
+        sequence: int,
+        sealed: Sequence[tuple[ExcerptKind, bytes]],
+        *,
+        expires_at: datetime,
+    ) -> None:
+        """寫入加密好的摘錄（docs/DECISIONS.md §30.4）；明文的雜湊與長度在事件中。"""
         self._session.execute(
             insert(FindingTriageExcerptModel),
             [
-                {"finding_id": finding_id, "sequence": sequence, "kind": kind, "content": text}
-                for kind, text in ((ExcerptKind.REQUEST, request), (ExcerptKind.RESPONSE, response))
+                {
+                    "finding_id": finding_id,
+                    "sequence": sequence,
+                    "kind": kind.value,
+                    "sealed_content": token,
+                    "expires_at": expires_at,
+                }
+                for kind, token in sealed
             ],
         )
 
@@ -179,14 +195,17 @@ class TriageRecords:
 
     def _excerpts(
         self, finding_id: UUID, sequences: Sequence[int]
-    ) -> dict[int, tuple[tuple[ExcerptKind, str], ...]]:
+    ) -> dict[int, tuple[SealedExcerpt, ...]]:
+        """密文、期限與清除時間（解密在 triage 的 service）。"""
         if not sequences:
             return {}
         rows = self._session.execute(
             select(
                 FindingTriageExcerptModel.sequence,
                 FindingTriageExcerptModel.kind,
-                FindingTriageExcerptModel.content,
+                FindingTriageExcerptModel.sealed_content,
+                FindingTriageExcerptModel.expires_at,
+                FindingTriageExcerptModel.purged_at,
             )
             .where(
                 FindingTriageExcerptModel.finding_id == finding_id,
@@ -194,15 +213,22 @@ class TriageRecords:
             )
             .order_by(FindingTriageExcerptModel.sequence, FindingTriageExcerptModel.kind)
         )
-        excerpts: dict[int, list[tuple[ExcerptKind, str]]] = {}
+        excerpts: dict[int, list[SealedExcerpt]] = {}
         for row in rows:
-            excerpts.setdefault(row.sequence, []).append((ExcerptKind(row.kind), row.content))
+            excerpts.setdefault(row.sequence, []).append(
+                SealedExcerpt(
+                    kind=ExcerptKind(row.kind),
+                    token=row.sealed_content,
+                    expires_at=row.expires_at,
+                    purged_at=row.purged_at,
+                )
+            )
         return {sequence: tuple(items) for sequence, items in excerpts.items()}
 
 
 def _event(
     row: Row[FindingTriageEventModel, str | None, str | None],
-    excerpts: tuple[tuple[ExcerptKind, str], ...] | None,
+    excerpts: tuple[SealedExcerpt, ...] | None,
 ) -> TriageEvent:
     model: FindingTriageEventModel = row[0]
     return TriageEvent(
@@ -224,5 +250,5 @@ def _event(
         scan_id=model.scan_id,
         evidence=model.evidence,
         created_at=model.created_at,
-        excerpts=excerpts,
+        sealed_excerpts=excerpts,
     )

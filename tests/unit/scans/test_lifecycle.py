@@ -33,7 +33,7 @@ ALLOWED: dict[RunStatus, frozenset[RunStatus]] = {
     R.RUNNING: frozenset({R.COLLECTING, R.FAILED, R.TIMED_OUT, R.CANCELLING, R.INTERRUPTED}),
     R.COLLECTING: frozenset({R.COLLECTED, R.FAILED, R.CANCELLING, R.INTERRUPTED}),
     R.CANCELLING: frozenset({R.CANCELLED, R.INTERRUPTED}),
-    R.COLLECTED: frozenset({R.NORMALIZING}),
+    R.COLLECTED: frozenset({R.NORMALIZING, R.FAILED}),
     # ZAP 在 plan 的 maxDuration 自行停止：解析之後才知道（§19.2）。
     R.NORMALIZING: frozenset({R.SUCCEEDED, R.FAILED, R.TIMED_OUT, R.COLLECTED}),
     R.SUCCEEDED: frozenset(),

@@ -1555,10 +1555,41 @@
 - [ ] T23 完成所有 P0 的安全、故障、整合測試，並在乾淨環境重建。
   - 因資料保護、部署與最終驗收涉及不同界線，拆成以下四項，各自細化後實作：
   - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）；含 T21 的人工複測摘錄與報告內容。
+    - 2026-11-09：使用者決定保留期限 7／30／30 天、兩組平台金鑰分開（最小權限）、`benchmarks/results` 也加密、`make env` 由使用者自己執行；核准細部計畫第一版的離線範圍（程式、測試、文件、分支、PR 與合併）。**不包含**：任何 Live、由開發代理修改 `.env`（包括經 `make test` 間接觸發 `make env`）、執行 `make bench-key`、修改或清除既有的金鑰、修改或刪除 `recordings/`、`runs/spike-t03/work/` 與既有的研究、開發資料。決策見 `DECISIONS.md` §30。
+    - 2026-11-09：離線實作（分支 `feat/t23a-evidence-encryption`）：
+      - 金鑰：`EVIDENCE_ENCRYPTION_KEYS`（只給 runner）、`CONTENT_ENCRYPTION_KEYS`（api、worker），`make env` 冪等地補上；各程序的啟動檢查、`check-encryption-keys`。
+      - 原始證據：runner 的 keeper 在 run 結束、容器確認刪除之後加密、驗證之後才刪除明文，7 天後清除；等待解析超過 60 分鐘的 run 以 `PARSE_DEADLINE_EXCEEDED` 結束；加密失敗時不認領新的 run（`EVIDENCE_SEALING_FAILED`）；migration v0021；`engines[].evidence`；`rotate-evidence-keys`、`export-evidence`、`retention-status`。
+      - 報告與摘錄：寫入之前加密、30 天後清除（410 `REPORT_EXPIRED`、摘錄 tombstone）；migration v0022（既有的明文在升級時加密）；`rotate-content-keys`。
+      - `benchmarks/results`：以本機的 bench 金鑰加密（manifest v2）；`make bench-key`、`make bench-seal`。
+      - live 輔助程式改成等加密完成、以 `export-evidence` 讀原始輸出（`tests/live/evidence_assertions.py`），**未執行**。
+      - 測試：S&T §4.3 的 KEY-01 至 05、SEAL-01 至 02、EVID-01 至 07、CONT-01 至 02、RET-01 至 02、ROT-01、BSEAL-01 至 03；六項空轉檢查都被抓到。使用者執行 `make env` 之前只在 db-test 上直接執行 pytest：審查修正之後 7269 passed、2 skipped、78 deselected（live），coverage 99.08%；branch：`blob_cipher` 72/72、`runner/evidence` 42/46、`keeper` 52/56、`worker/retention` 6/6、`benchmarks/sealing` 33/34。**這不是完整的 `make test`**。
+    - 審查（opus）：程式碼 2 HIGH＋1 MEDIUM＋4 LOW、安全 1 HIGH＋2 MEDIUM＋6 LOW、資料庫 3 MEDIUM＋10 LOW，沒有 CRITICAL；兩個 HIGH 兩份審查都有找到（runs volume 不存在時誤記成 none、孤兒目錄的加密檔解不開讓 keeper 的執行緒結束），都已修正。處理與不處理的理由見 `DECISIONS.md` §30.11。單一 run 超過目錄樹的上限時的處理，使用者決定改成方案 B（下一項）。
+    - 2026-11-09／10：使用者選擇方案 B 並給了五個條件（N = 3、fail-closed、故障隔離、可觀測性、人工復原），核准細部計畫（離線的程式、測試、文件、審查、PR 與合併；不包含 Live、修改 `.env`、`make bench-key`、修改或清除既有的金鑰）。實作（同一個分支，`DECISIONS.md` §30.12）：
+      - 同一個目錄連續 3 次因為深度、條目數或路徑總長度超過上限而加密失敗，keeper 寫入 `evidence_holds`（migration v0023）與 audit `evidence.hold`，之後跳過這個目錄、恢復健康，其他 run 照常認領；明文保留原狀，不會被記成已加密。
+      - API：`engines[].evidence.status` 新增 `manual_intervention_required`，新欄位 `engines[].evidence.hold`；`retention-status` 新增需要人工處理的段落（數量、錯誤代碼、最早的 10 個目錄名稱）。
+      - 人工復原：`secscan-admin retry-evidence`（runner 容器內；先寫 audit、以較高的上限加密、驗證通過才在同一個 transaction 寫入 sealed 的 `run_evidence` 與解除）。沒有不加密就解除或刪除目錄的指令。
+      - 連帶修正：清除時先逐一刪除 `sealed/`，以較高上限加密的目錄也能清除；退避拆到 `runner/backoff.py`，次方加上上限。
+      - 測試：S&T §4.3 的 EVID-08、EVID-09；七項空轉檢查都被抓到。使用者執行 `make env` 之前只在 db-test 上直接執行 pytest：審查修正之後 7352 passed、2 skipped、78 deselected（live），coverage 99.04%；keeper 98%、backoff 100%、`scans/evidence_holds` 100%、`sealed_files` 94%、`fs` 95%、`cli/evidence_holds` 95%（statement＋branch）。**這不是完整的 `make test`**。
+      - 審查（opus）：程式碼 1 MEDIUM＋1 LOW、安全 2 MEDIUM＋5 LOW、資料庫 2 MEDIUM＋6 LOW，沒有 CRITICAL 或 HIGH。已修正：keeper 依 DB 清掉已隔離的退避項目、`run_evidence` 也由 DB 拒絕隔離中的 run（deferred constraint trigger 與交易鎖）、時間由 DB 決定、trigger 每個分支的測試、路徑總長度的上限、`resolve` 先鎖住隔離、加密後 DB 失敗的結果 audit、理由的 UTF-8 檢查、顯示以隔離優先；十項空轉檢查都被抓到。處理與不處理的理由見 `DECISIONS.md` §30.12。
+    - 2026-11-10：使用者判定方案 B「功能實作基本達標，但尚未通過最終驗收」，決定審查留下的三個問題（`DECISIONS.md` §30.12）：
+      - 自動熔斷：T23a 不做全域熔斷（維持條件 3）；告警與有範圍的停用改成後續任務 T35。
+      - 路徑總長度：改成第三種可隔離的上限（`EVIDENCE_TREE_PATHS_TOO_LONG`），`retry-evidence` 加上 `--max-path-chars`（8M 到 16M 字元的絕對上限）；開 PR 之前完成，三項空轉檢查都被抓到。
+      - [ ] **隔離目錄的機密性隔離（T23a 安全驗收的阻擋條件）**：worker 以唯讀掛載整個 runs volume，仍讀得到隔離中的明文；DB 的隔離只是工作流程的隔離。要以掛載範圍隔離（不能只依賴 chmod）：隔離時把目錄移到只有 keeper 與授權的復原程序能存取、不在 worker 掛載範圍內的位置，並驗證搬移與 DB 狀態的一致性、失敗復原與既有的檔案描述符；隔離無法撤銷 worker 之前已經讀到的內容。2026-11-10 使用者決定以另一個 PR 實作做法 A（`DECISIONS.md` §30.12）：
+        - runs volume 分成 `active/`／`held/`，worker 只掛載 `active/`；以隔離的中間狀態、原子 rename、重啟對帳與完整的 crash recovery 測試，保證 DB 與檔案系統一致；檢查 symlink、hard link、已開啟的檔案描述符與 runner／keeper 的權限邊界；搬移失敗不影響其他 run。
+        - 既有資料由使用者在服務停止、migration 完成之後手動執行管理員指令搬移（可重複執行、dry-run、audit、路徑驗證、中斷復原、只搬 UUID 目錄）；搬移沒有完成時，服務不得以新的目錄結構啟動；不允許 runner 自動搬移。
+        - 細部計畫先提出、由使用者核准。目前的 PR 合併不代表這一項完成：**新 PR 驗收之前，禁止把沒有這項防護的功能正式部署**；完成之前 T23a 不通過安全驗收、不宣稱風險已消失，T23a 與 SEC-14 都不標完成。
+    - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`（含方案 B）；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。
   - DoD：安全負向測試全通過；整體 coverage ≥ 80%、核心模組 branch coverage ≥ 90%；原始證據加密；文件與 API 一致；乾淨環境重建通過。
+- [ ] T34 本機研究資料的安全盤點（2026-11-09 由 T23a 新增，獨立於 T23 的 DoD；`DECISIONS.md` §30.10）。
+  - 對象：`recordings/`、`runs/spike-t03/work/`。逐項列出路徑、大小、類型、是否可能含憑證或敏感資料，以及被哪些文件引用為證據；提出處理建議（保留、加密或刪除），由使用者決定。
+  - 盤點必須讀取可能含憑證的檔案，開始之前另外授權；未經使用者決定不修改或刪除任何檔案。
+- [ ] T35 隔離的告警與有範圍的停用（2026-11-10 由 T23a 方案 B 新增；`DECISIONS.md` §30.12）。
+  - 第一次隔離就產生安全告警；例如 15 分鐘內 3 個不同目錄被隔離時，升級成高優先級告警，但不自動停機（門檻是初始建議，依實際執行量調整）。
+  - 「有範圍的熔斷」：針對異常的 scanner、worker 或來源停止認領，而不是停止整個 keeper；不做全域自動熔斷（少數異常目錄就讓整個系統停止，會形成新的 DoS 攻擊面）。
+  - 細部計畫另外提出、由使用者核准。
 
 放行規則：M5 通過（Gate A–D 與 T23 DoD，含 Gate E）後，才能啟動 M6 的第三引擎；沒通過時，M6 改為補強期。
 

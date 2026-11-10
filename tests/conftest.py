@@ -9,7 +9,8 @@ from pydantic import SecretStr
 from secscan.core.config import AppEnv, Settings
 from secscan.main import create_app
 from secscan.runner.config import RunnerSettings
-from tests.secret_support import encryption_keys
+from secscan.worker.config import WorkerSettings
+from tests.secret_support import content_keys, encryption_keys
 
 # tests.isolation：測試程序連不到 Docker daemon（docs/DECISIONS.md §14.9）。
 pytest_plugins = ("pytester", "tests.isolation")
@@ -34,9 +35,20 @@ DB_ENV_KEYS = (
     "DB_LOCK_TIMEOUT_SECONDS",
     "DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS",
 )
-# 目標 secret 的加密金鑰也一樣不沿用（shell 或 .env 裡可能是真的金鑰）；
-# 需要的 fixture 帶測試用的金鑰。
-SECRET_ENV_KEYS = ("SECRET_ENCRYPTION_KEYS",)
+# 三組加密金鑰也一樣不沿用（shell 或 .env 裡可能是真的金鑰）；需要的 fixture 帶測試用的金鑰。
+SECRET_ENV_KEYS = (
+    "SECRET_ENCRYPTION_KEYS",
+    "EVIDENCE_ENCRYPTION_KEYS",
+    "CONTENT_ENCRYPTION_KEYS",
+)
+# 保留期限、明文期限與 bench 的金鑰檔（docs/DECISIONS.md §30）：測試以預設值或自己指定的值執行。
+RETENTION_ENV_KEYS = (
+    "EVIDENCE_RETENTION_DAYS",
+    "REPORT_RETENTION_DAYS",
+    "EXCERPT_RETENTION_DAYS",
+    "EVIDENCE_PLAINTEXT_MAX_MINUTES",
+    "BENCH_KEY_FILE",
+)
 # runner 的設定（RUNNER_*）同樣不沿用：可能指向真的 Docker 或掛載的目錄。
 RUNNER_ENV_KEYS = (
     "RUNNER_DOCKER_URL",
@@ -63,14 +75,14 @@ class DatabaseAccessBlockedError(RuntimeError):
 
 @pytest.fixture(autouse=True)
 def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Settings 與 RunnerSettings 不讀 .env（pytest 在 repo 根目錄執行，那裡有真實的本機密碼），
-    也不讀 DB_*、RUNNER_* 等環境變數。
+    """Settings、RunnerSettings 與 WorkerSettings 不讀 .env（pytest 在 repo 根目錄執行，那裡有真實的
+    本機密碼與金鑰），也不讀 DB_*、RUNNER_*、金鑰與保留期限等環境變數。
 
     要測 .env 讀取行為的測試，自行把 env_file 設回來。
     """
-    monkeypatch.setitem(Settings.model_config, "env_file", None)
-    monkeypatch.setitem(RunnerSettings.model_config, "env_file", None)
-    for key in (*DB_ENV_KEYS, *SECRET_ENV_KEYS, *RUNNER_ENV_KEYS):
+    for settings_class in (Settings, RunnerSettings, WorkerSettings):
+        monkeypatch.setitem(settings_class.model_config, "env_file", None)
+    for key in (*DB_ENV_KEYS, *SECRET_ENV_KEYS, *RETENTION_ENV_KEYS, *RUNNER_ENV_KEYS):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -103,6 +115,7 @@ def make_client() -> Iterator[ClientFactory]:
             db_port=UNREACHABLE_DB_PORT,
             db_password=SecretStr("not-a-real-password"),
             secret_encryption_keys=encryption_keys(),
+            content_encryption_keys=content_keys(),
             _env_file=None,
         )
         test_client = TestClient(create_app(settings))

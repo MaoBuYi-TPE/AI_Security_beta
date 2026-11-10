@@ -18,3 +18,19 @@ def modules_using(attribute: str) -> set[str]:
         ):
             users.add(path.relative_to(SOURCE_ROOT).as_posix())
     return users
+
+
+def modules_calling(name: str) -> set[str]:
+    """src 中以名稱呼叫 name（例如 `evidence_cipher(...)`）或以屬性存取它的模組。"""
+    users: set[str] = set()
+    for path in SOURCE_ROOT.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            called = isinstance(node, ast.Call) and (
+                (isinstance(node.func, ast.Name) and node.func.id == name)
+                or (isinstance(node.func, ast.Attribute) and node.func.attr == name)
+            )
+            if called:
+                users.add(path.relative_to(SOURCE_ROOT).as_posix())
+                break
+    return users

@@ -44,8 +44,10 @@ pytestmark = pytest.mark.integration
 # T21 的 findings 3、finding_triage_events 12 與 finding_triage_excerpts 2（v0017，
 # test_triage_schema.py），reports 11 與 report_contents 1（v0018，test_reports_schema.py），
 # auth_profiles 的停用 1（v0019，test_auth_profile_disable.py）；T31 的引擎子預算 3（v0020，
-# test_engine_budget_schema.py）。
-EXPECTED_CHECK_COUNT = 192
+# test_engine_budget_schema.py）；T23a 的 run_evidence 5（v0021，test_evidence_schema.py），以及
+# reports 的期限 2、report_contents 的密文 1、摘錄的密文與清除 3，取代原本兩個明文的大小（v0022，
+# test_sealed_content_schema.py）。
+EXPECTED_CHECK_COUNT = 206
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "
@@ -337,6 +339,7 @@ def test_audit_events_are_append_only(db_session: Session, statement: str) -> No
         ("uq_scan_operations_scan_id_method_path", "(scan_id, method, path)"),
         ("uq_runner_instances_owner", "(owner)"),
         ("ix_runner_instances_role_heartbeat_at", "(role, heartbeat_at)"),
+        ("ix_evidence_holds_active", "(held_at) WHERE (resolved_at IS NULL)"),
     ],
 )
 def test_expected_indexes_exist(db_session: Session, index_name: str, definition: str) -> None:

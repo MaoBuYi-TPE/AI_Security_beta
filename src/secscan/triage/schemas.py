@@ -89,10 +89,14 @@ class TriageChangeIn(BaseModel):
 
 
 class ExcerptOut(BaseModel):
+    """一段人工複測摘錄（解密並核對過）；保留期限到了清除之後 content 是 null。"""
+
     model_config = ConfigDict(frozen=True)
 
     kind: ExcerptKind
-    content: str
+    content: str | None
+    expires_at: datetime
+    purged_at: datetime | None
 
 
 class TriageEventOut(BaseModel):
@@ -145,7 +149,15 @@ class TriageEventOut(BaseModel):
             evidence=event.evidence,
             created_at=event.created_at,
             excerpts=(
-                [ExcerptOut(kind=kind, content=content) for kind, content in event.excerpts]
+                [
+                    ExcerptOut(
+                        kind=item.kind,
+                        content=item.content,
+                        expires_at=item.expires_at,
+                        purged_at=item.purged_at,
+                    )
+                    for item in event.excerpts
+                ]
                 if event.excerpts is not None
                 else None
             ),

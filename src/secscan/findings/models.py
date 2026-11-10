@@ -19,6 +19,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    LargeBinary,
     PrimaryKeyConstraint,
     String,
     Text,
@@ -46,9 +47,9 @@ from secscan.findings.domain.taxonomy import (
 )
 from secscan.findings.domain.triage import (
     EVIDENCE_MAX_BYTES,
+    MAX_SEALED_EXCERPT_BYTES,
     REASON_MAX_LENGTH,
-    REQUEST_EXCERPT_MAX_BYTES,
-    RESPONSE_EXCERPT_MAX_BYTES,
+    ExcerptKind,
 )
 from secscan.scans.domain.observation import (
     OBSERVATION_METHODS,
@@ -355,7 +356,11 @@ class FindingTriageEventModel(Base):
 
 
 class FindingTriageExcerptModel(Base):
-    """人工複測的遮罩摘錄（v0017）：和事件分開存放，T23a 加密與清除時不必修改事件。"""
+    """人工複測的遮罩摘錄（v0017）：和事件分開存放，加密與清除時不必修改事件（v0022）。
+
+    sealed_content 是 CONTENT_ENCRYPTION_KEYS 加密的 Fernet token；到期清除時改成 NULL、寫入
+    purged_at（tombstone，「每個人工複測事件恰好兩筆」不變）。明文的雜湊與長度在事件的 evidence。
+    """
 
     __tablename__ = "finding_triage_excerpts"
     __table_args__ = (
@@ -367,14 +372,27 @@ class FindingTriageExcerptModel(Base):
         ),
         CheckConstraint("kind IN ('request', 'response')", name="kind_valid"),
         CheckConstraint(
-            f"octet_length(content) >= 1 AND octet_length(content) <= CASE kind "
-            f"WHEN 'request' THEN {REQUEST_EXCERPT_MAX_BYTES} "
-            f"ELSE {RESPONSE_EXCERPT_MAX_BYTES} END",
-            name="content_size",
+            "(sealed_content IS NULL) = (purged_at IS NOT NULL)", name="purged_matches_content"
+        ),
+        CheckConstraint(
+            "sealed_content IS NULL OR (substring(sealed_content FROM 1 FOR 6) = 'gAAAAA'::bytea "
+            "AND octet_length(sealed_content) <= CASE kind "
+            f"WHEN 'request' THEN {MAX_SEALED_EXCERPT_BYTES[ExcerptKind.REQUEST]} "
+            f"ELSE {MAX_SEALED_EXCERPT_BYTES[ExcerptKind.RESPONSE]} END)",
+            name="sealed_content_valid",
+        ),
+        CheckConstraint("purged_at IS NULL OR purged_at >= expires_at", name="purged_after_expiry"),
+        # 到期清除（T23a，v0022）：還沒清除的摘錄依期限排序。
+        Index(
+            "ix_finding_triage_excerpts_expiry",
+            "expires_at",
+            postgresql_where=text("purged_at IS NULL"),
         ),
     )
 
     finding_id: Mapped[UUID]
     sequence: Mapped[int] = mapped_column(BigInteger)
     kind: Mapped[str] = mapped_column(String(16))
-    content: Mapped[str] = mapped_column(Text)
+    sealed_content: Mapped[bytes | None] = mapped_column(LargeBinary)
+    expires_at: Mapped[datetime]
+    purged_at: Mapped[datetime | None]

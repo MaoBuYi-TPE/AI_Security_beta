@@ -30,12 +30,11 @@ from tests.live.support import Api, admin_key, scan_containers, wait_for
 from tests.live.test_lab_zap_live import Measured, _assert_invariants
 from tests.live.zap_support import (
     RUN_TIMEOUT,
-    RUNS_VOLUME,
     Lab,
     lab,
     now,
     requests_since,
-    volume_file,
+    run_file,
     wait_for_zap,
 )
 
@@ -172,8 +171,8 @@ def _record(measured: Measured) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     run = uuid.UUID(measured.run_id)
     files = {
-        "manifest.json": volume_file(RUNS_VOLUME, f"{run}/manifest.json"),
-        "results.jsonl": volume_file(RUNS_VOLUME, f"{run}/out/results.jsonl"),
+        "manifest.json": run_file(str(run), "manifest.json"),
+        "results.jsonl": run_file(str(run), "out/results.jsonl"),
     }
     for name, content in files.items():
         if content is not None:

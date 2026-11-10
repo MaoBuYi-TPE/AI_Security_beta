@@ -29,6 +29,17 @@ DEFAULT_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
 MAX_DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 3_600
 MAX_TCP_PORT = 65535
 
+# 保留期限與明文期限（docs/DECISIONS.md §30.5）：原始證據在加密之後 7 天清除，報告內容與人工複測摘錄
+# 30 天；worker 停擺時，已收集的明文最多保留 60 分鐘就轉成失敗並加密（§30.3）。
+DEFAULT_EVIDENCE_RETENTION_DAYS = 7
+DEFAULT_REPORT_RETENTION_DAYS = 30
+DEFAULT_EXCERPT_RETENTION_DAYS = 30
+MIN_RETENTION_DAYS = 1
+MAX_RETENTION_DAYS = 365
+DEFAULT_EVIDENCE_PLAINTEXT_MAX_MINUTES = 60
+MIN_EVIDENCE_PLAINTEXT_MAX_MINUTES = 15
+MAX_EVIDENCE_PLAINTEXT_MAX_MINUTES = 1_440
+
 # 靶場網段（docs/DECISIONS.md §10.1）：預設是 lab_net（make lab-net）。規則在 core/network.py，
 # egress guard 也用同一個函式檢查。
 DEFAULT_LAB_CIDR = IPv4Network("10.89.7.0/24")
@@ -72,6 +83,27 @@ class Settings(BaseSettings):
     # Fernet 金鑰，第一個用來加密。這裡只讀入；API 與金鑰換版的 CLI 在啟動時檢查格式，
     # 建立 admin key 的 CLI 不需要它。
     secret_encryption_keys: SecretStr | None = None
+    # 另外兩組金鑰（docs/DECISIONS.md §30.2），格式同上：原始證據（EVIDENCE_ENCRYPTION_KEYS，只給
+    # runner）與報告／人工複測摘錄的內容（CONTENT_ENCRYPTION_KEYS，只給 api 與 worker）。
+    # 各程序在啟動時檢查自己持有的那幾組。
+    evidence_encryption_keys: SecretStr | None = None
+    content_encryption_keys: SecretStr | None = None
+
+    # 保留期限（天）與已收集明文的期限（分鐘）。
+    evidence_retention_days: int = Field(
+        default=DEFAULT_EVIDENCE_RETENTION_DAYS, ge=MIN_RETENTION_DAYS, le=MAX_RETENTION_DAYS
+    )
+    report_retention_days: int = Field(
+        default=DEFAULT_REPORT_RETENTION_DAYS, ge=MIN_RETENTION_DAYS, le=MAX_RETENTION_DAYS
+    )
+    excerpt_retention_days: int = Field(
+        default=DEFAULT_EXCERPT_RETENTION_DAYS, ge=MIN_RETENTION_DAYS, le=MAX_RETENTION_DAYS
+    )
+    evidence_plaintext_max_minutes: int = Field(
+        default=DEFAULT_EVIDENCE_PLAINTEXT_MAX_MINUTES,
+        ge=MIN_EVIDENCE_PLAINTEXT_MAX_MINUTES,
+        le=MAX_EVIDENCE_PLAINTEXT_MAX_MINUTES,
+    )
 
     # 掃描範圍的上限（環境變數 LAB_ONLY、LAB_CIDR）。P0 只掃 lab，LAB_ONLY 不能關閉。
     lab_only: bool = True

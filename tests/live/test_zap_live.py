@@ -31,7 +31,6 @@ from tests.live.run_support import ContainerEvents, PolicyWatch, borrow, first, 
 from tests.live.support import Api, admin_key, docker, inspect, scan_containers, wait_for
 from tests.live.zap_support import (
     CANARY_IP,
-    RUNS_VOLUME,
     SITE_IP,
     SITE_PORT,
     ZAP_VERSION,
@@ -44,7 +43,6 @@ from tests.live.zap_support import (
     run_file,
     start_site,
     stop_site,
-    volume_file,
     wait_for_zap,
 )
 
@@ -191,7 +189,7 @@ def _assert_closed_loop(
     received = {(r["method"], urlsplit(r["path"]).path) for r in site.records()}
     assert {(o["method"], o["path"]) for o in observations} <= received
     for entry in document["files"]:
-        content = volume_file(RUNS_VOLUME, f"{run_id}/out/{entry['path']}")
+        content = run_file(str(run_id), f"out/{entry['path']}")
         assert content is not None
         assert hashlib.sha256(content).hexdigest() == entry["sha256"]
 

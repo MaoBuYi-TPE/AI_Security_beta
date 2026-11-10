@@ -117,6 +117,10 @@ class RunErrorCode(StrEnum):
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     # 解析 MAX_PARSE_ATTEMPTS 次都沒有在 lease 內完成（docs/DECISIONS.md §17.6）。
     PARSE_ATTEMPTS_EXHAUSTED = "PARSE_ATTEMPTS_EXHAUSTED"
+    # 已收集的原始輸出等待解析超過期限（EVIDENCE_PLAINTEXT_MAX_MINUTES，從第一次進入 collected
+    # 起算；docs/DECISIONS.md §30.3）：runner 的 keeper 轉成 failed 並加密。已經存好的部分結果保留，
+    # 所以意思是「解析沒有在期限內完成」，不是「沒有結果」。
+    PARSE_DEADLINE_EXCEEDED = "PARSE_DEADLINE_EXCEEDED"
     # 引擎輸出的判定（docs/DECISIONS.md §19.2）：輸出缺少、不合法、版本不支援或和退出碼矛盾；
     # 引擎回報錯誤（部分結果入庫）；guard 沒有轉送任何請求；引擎在自己的時間上限停止（timed_out）。
     OUTPUT_INVALID = "OUTPUT_INVALID"
@@ -163,7 +167,8 @@ _RUN_TRANSITIONS: Mapping[RunStatus, frozenset[RunStatus]] = MappingProxyType(
             {RunStatus.COLLECTED, RunStatus.FAILED, RunStatus.CANCELLING, RunStatus.INTERRUPTED}
         ),
         RunStatus.CANCELLING: frozenset({RunStatus.CANCELLED, RunStatus.INTERRUPTED}),
-        RunStatus.COLLECTED: frozenset({RunStatus.NORMALIZING}),
+        # failed：等待解析逾期（PARSE_DEADLINE_EXCEEDED，§30.3），明文不能無限期等 worker。
+        RunStatus.COLLECTED: frozenset({RunStatus.NORMALIZING, RunStatus.FAILED}),
         # lease 過期時退回 collected：解析不可變的 artifact 可以安全重試（CLAUDE.md §8）。
         # timed_out：引擎在自己的時間上限停止，解析輸出之後才知道（§19.2）。
         RunStatus.NORMALIZING: frozenset(

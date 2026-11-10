@@ -24,7 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secscan.core.db import Base, UuidPrimaryKeyMixin
-from secscan.reports.domain.model import MAX_REPORT_BYTES
+from secscan.reports.domain.model import MAX_REPORT_BYTES, MAX_SEALED_REPORT_BYTES
 
 _RESULT_NULL = (
     "data_as_of IS NULL AND generated_at IS NULL AND size_bytes IS NULL AND sha256 IS NULL "
@@ -48,6 +48,12 @@ class ReportModel(UuidPrimaryKeyMixin, Base):
             "ix_reports_active_queue",
             "queue_position",
             postgresql_where=text("status IN ('queued', 'generating')"),
+        ),
+        # 到期清除（T23a，v0022）：還保留內容、已完成的報告依期限排序。
+        Index(
+            "ix_reports_expiry",
+            "expires_at",
+            postgresql_where=text("status = 'succeeded' AND content_purged_at IS NULL"),
         ),
         CheckConstraint("format IN ('json', 'markdown')", name="format_valid"),
         CheckConstraint("schema_version = 1", name="schema_version_valid"),
@@ -90,6 +96,15 @@ class ReportModel(UuidPrimaryKeyMixin, Base):
             "AND finished_at IS NOT NULL)",
             name="failed_shape",
         ),
+        # 到期與清除（v0022；docs/DECISIONS.md §30.5）：succeeded 才有期限；清除不早於期限。
+        CheckConstraint(
+            "(status = 'succeeded') = (expires_at IS NOT NULL)", name="expires_matches_status"
+        ),
+        CheckConstraint(
+            "content_purged_at IS NULL "
+            "OR (status = 'succeeded' AND content_purged_at >= expires_at)",
+            name="purged_after_expiry",
+        ),
     )
 
     queue_position: Mapped[int] = mapped_column(
@@ -119,14 +134,20 @@ class ReportModel(UuidPrimaryKeyMixin, Base):
     omitted_findings: Mapped[int | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     finished_at: Mapped[datetime | None]
+    expires_at: Mapped[datetime | None]
+    content_purged_at: Mapped[datetime | None]
 
 
 class ReportContentModel(Base):
+    """報告的內容：CONTENT_ENCRYPTION_KEYS 加密的 Fernet token（v0022）。明文的 sha256 與大小在
+    reports；換版時只能換 content，到期清除時整列刪除（v0022 的 trigger）。"""
+
     __tablename__ = "report_contents"
     __table_args__ = (
         CheckConstraint(
-            f"octet_length(content) >= 1 AND octet_length(content) <= {MAX_REPORT_BYTES}",
-            name="content_size",
+            f"octet_length(content) >= 1 AND octet_length(content) <= {MAX_SEALED_REPORT_BYTES} "
+            "AND substring(content FROM 1 FOR 6) = 'gAAAAA'::bytea",
+            name="content_sealed",
         ),
     )
 

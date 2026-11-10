@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -6,8 +7,14 @@ from pydantic import SecretStr, ValidationError
 
 from secscan.core.config import Settings
 from secscan.main import create_app
+from secscan.security.blob_cipher import BlobCipher
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
-from tests.secret_support import TEST_SECRET_ENCRYPTION_KEYS, encryption_keys
+from tests.secret_support import (
+    TEST_CONTENT_ENCRYPTION_KEYS,
+    TEST_SECRET_ENCRYPTION_KEYS,
+    content_keys,
+    encryption_keys,
+)
 
 
 def test_create_app_without_settings_hides_docs_by_default(
@@ -17,6 +24,7 @@ def test_create_app_without_settings_hides_docs_by_default(
     monkeypatch.delenv("APP_ENV", raising=False)
     monkeypatch.setenv("DB_PASSWORD", "prod-requires-a-password")
     monkeypatch.setenv("SECRET_ENCRYPTION_KEYS", TEST_SECRET_ENCRYPTION_KEYS)
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", TEST_CONTENT_ENCRYPTION_KEYS)
     monkeypatch.chdir(tmp_path)
 
     with TestClient(create_app()) as client:
@@ -30,6 +38,7 @@ def test_create_app_without_settings_reads_environment(
     """make dev 以 `uvicorn --factory` 呼叫不帶參數的 create_app()，設定要從環境變數讀取。"""
     monkeypatch.setenv("APP_ENV", "dev")
     monkeypatch.setenv("SECRET_ENCRYPTION_KEYS", TEST_SECRET_ENCRYPTION_KEYS)
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", TEST_CONTENT_ENCRYPTION_KEYS)
     monkeypatch.chdir(tmp_path)
 
     with TestClient(create_app()) as client:
@@ -50,8 +59,16 @@ def test_create_app_fails_fast_in_prod_without_db_password(
 # --- 目標 secret 的加密金鑰（docs/DECISIONS.md §12.1）---------------------------------------
 
 
-def _settings(keys: SecretStr | None) -> Settings:
-    return Settings(app_env="test", secret_encryption_keys=keys, _env_file=None)
+def _settings(
+    keys: SecretStr | None,
+    content: SecretStr | None = content_keys(),  # noqa: B008
+) -> Settings:
+    return Settings(
+        app_env="test",
+        secret_encryption_keys=keys,
+        content_encryption_keys=content,
+        _env_file=None,
+    )
 
 
 def test_create_app_fails_fast_without_encryption_keys() -> None:
@@ -72,6 +89,33 @@ def test_create_app_keeps_the_cipher_in_app_state() -> None:
     app = create_app(_settings(encryption_keys()))
 
     assert isinstance(app.state.secret_cipher, SecretCipher)
+    assert isinstance(app.state.content_cipher, BlobCipher)
+    assert app.state.content_cipher.setting_name == "CONTENT_ENCRYPTION_KEYS"
+    assert app.state.excerpt_retention == timedelta(days=30)
+
+
+# --- 報告內容與人工複測摘錄的金鑰（KEY-01；docs/DECISIONS.md §30.2）---------------------------
+
+
+def test_create_app_fails_fast_without_content_keys() -> None:
+    with pytest.raises(InvalidEncryptionKeysError, match="缺少 CONTENT_ENCRYPTION_KEYS"):
+        create_app(_settings(encryption_keys(), None))
+
+
+def test_create_app_rejects_invalid_content_keys_without_echoing_them() -> None:
+    setting = "not-a-fernet-key-but-maybe-a-secret"
+
+    with pytest.raises(InvalidEncryptionKeysError, match="CONTENT_ENCRYPTION_KEYS") as raised:
+        create_app(_settings(encryption_keys(), SecretStr(setting)))
+
+    assert setting not in str(raised.value)
+
+
+def test_create_app_refuses_a_key_shared_with_the_secret_ring() -> None:
+    with pytest.raises(InvalidEncryptionKeysError, match="相同的金鑰") as raised:
+        create_app(_settings(encryption_keys(), encryption_keys()))
+
+    assert TEST_SECRET_ENCRYPTION_KEYS not in str(raised.value)
 
 
 def test_framework_telemetry_is_disabled() -> None:

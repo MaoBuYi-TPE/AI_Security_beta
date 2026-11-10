@@ -17,6 +17,12 @@ from secscan.core.json_types import JsonObject
 from secscan.grants.schemas import BudgetIn, BudgetOut
 from secscan.scans.domain.allocation import EngineBudget, EngineBudgetRequest
 from secscan.scans.domain.catalog import Engine, ScanProfile
+from secscan.scans.domain.evidence import (
+    EvidenceHold,
+    EvidenceHoldCode,
+    EvidenceState,
+    EvidenceStatus,
+)
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Scan, ScanEvent, ScannerRun
 from secscan.scans.domain.observation import Observation, ParameterLocation, RunResult
@@ -226,6 +232,58 @@ class RunUsageOut(BaseModel):
         )
 
 
+class RunEvidenceHoldOut(BaseModel):
+    """keeper 的隔離紀錄（docs/DECISIONS.md §30.12）：目錄連續超過資源上限而加密失敗。
+
+    error_code：深度（EVIDENCE_TREE_TOO_DEEP）、條目數（EVIDENCE_TREE_TOO_MANY_ENTRIES）或路徑
+    總長度（EVIDENCE_TREE_PATHS_TOO_LONG）。
+
+    resolved_at：人工以 `secscan-admin retry-evidence` 加密成功的時間；還沒解除是 null。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    error_code: EvidenceHoldCode
+    attempts: int
+    held_at: datetime
+    resolved_at: datetime | None
+
+    @classmethod
+    def of(cls, hold: EvidenceHold) -> Self:
+        return cls(
+            error_code=hold.code,
+            attempts=hold.attempts,
+            held_at=hold.held_at,
+            resolved_at=hold.resolved_at,
+        )
+
+
+class RunEvidenceOut(BaseModel):
+    """runs volume 中原始證據的狀態（docs/DECISIONS.md §30.3、§30.12）。
+
+    none：從來沒有目錄；pending：還沒加密（執行中、等待解析，或加密失敗後等待重試）；
+    sealed：只剩加密檔（run 結束之後才加密，不是全程靜態加密）；purged：保留期限到了已刪除；
+    manual_intervention_required：目錄超過上限、連續加密失敗而被隔離，明文保留、等待人工處理
+    （不是加密成功）。hold：隔離紀錄，從來沒有隔離是 null，解除之後仍保留。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    status: EvidenceStatus
+    sealed_at: datetime | None
+    purged_at: datetime | None
+    hold: RunEvidenceHoldOut | None
+
+    @classmethod
+    def of(cls, state: EvidenceState) -> Self:
+        return cls(
+            status=state.status,
+            sealed_at=state.sealed_at,
+            purged_at=state.purged_at,
+            hold=RunEvidenceHoldOut.of(state.hold) if state.hold is not None else None,
+        )
+
+
 class EngineRunOut(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -244,6 +302,7 @@ class EngineRunOut(BaseModel):
     # 引擎子預算（T31）：建立時凍結的上限；沒有指定是 null（分到剩下的全部）。
     budget: EngineBudgetOut | None
     usage: RunUsageOut
+    evidence: RunEvidenceOut
 
     @classmethod
     def of(cls, run: ScannerRun) -> Self:
@@ -259,6 +318,7 @@ class EngineRunOut(BaseModel):
             result=RunResultOut.of(run.result) if run.result is not None else None,
             budget=EngineBudgetOut.of(run.budget) if run.budget is not None else None,
             usage=RunUsageOut.of(run),
+            evidence=RunEvidenceOut.of(run.evidence),
         )
 
 

@@ -3,8 +3,10 @@
 - 加密的是 `{"context": …, "v": 1, "value": …}` 的 JSON：Fernet 沒有 associated data，以 context
   把密文綁定在它的位置（例如 `auth_profile:<id>`），搬到別處就解不開。
 - 金鑰的設定（SECRET_ENCRYPTION_KEYS）：逗號分隔、1 到 4 個、不可重複，每個都是 url-safe base64
-  的 32 bytes（44 個字元）。訊息只說是第幾個，不含金鑰。
-- `reveal` 只給要把 secret 送出去的程序使用（M2 的 runner）；API 從不解密，
+  的 32 bytes（44 個字元）。訊息只說是哪一組的第幾個，不含金鑰。原始證據與報告內容的金鑰
+  （EVIDENCE_、CONTENT_ENCRYPTION_KEYS，docs/DECISIONS.md §30.2）用同一套規則，
+  三組之間不得共用金鑰。
+- `reveal` 只給要把 secret 送出去的程序使用（M2 的 runner）；API 從不解密目標的 secret，
   tests/unit/test_secret_reveal_callers.py 檢查 src 中的呼叫者。
 - 例外不帶明文、金鑰或密文，也不接上 cryptography 的原始例外。
 """
@@ -12,7 +14,7 @@
 import base64
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Self
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
@@ -98,28 +100,45 @@ class SecretCipher:
         return _unwrap(plaintext, context)
 
 
-def parse_keys(setting: str) -> tuple[Fernet, ...]:
-    """SECRET_ENCRYPTION_KEYS 的內容；不合規則時拋出 InvalidEncryptionKeysError（不含金鑰）。"""
+def parse_keys(setting: str, setting_name: str = SETTING_NAME) -> tuple[Fernet, ...]:
+    """一組金鑰的設定內容；不合規則時拋出 InvalidEncryptionKeysError（只說是哪一組的第幾個）。"""
+    return tuple(Fernet(base64.urlsafe_b64encode(raw)) for raw in _raw_keys(setting, setting_name))
+
+
+def check_distinct_key_rings(settings: Mapping[str, str]) -> None:
+    """每一組都合乎規則，而且不同組之間沒有相同的金鑰（docs/DECISIONS.md §30.2）。
+
+    settings 是 {設定名稱: 內容}；訊息只說是哪兩組，不含金鑰。
+    """
+    owners: dict[bytes, str] = {}
+    for name, setting in settings.items():
+        for raw in _raw_keys(setting, name):
+            other = owners.setdefault(raw, name)
+            if other != name:
+                raise InvalidEncryptionKeysError(
+                    f"{other} 與 {name} 有相同的金鑰：每一組都必須各自產生（make env 會分別產生）"
+                )
+
+
+def _raw_keys(setting: str, setting_name: str) -> list[bytes]:
     entries = setting.split(",")
     if len(entries) > MAX_KEYS:
         raise InvalidEncryptionKeysError(
-            f"{SETTING_NAME} 最多 {MAX_KEYS} 個金鑰（換版時只需要新、舊兩個）"
+            f"{setting_name} 最多 {MAX_KEYS} 個金鑰（換版時只需要新、舊兩個）"
         )
-    seen: set[bytes] = set()
-    keys: list[Fernet] = []
+    keys: list[bytes] = []
     for position, entry in enumerate(entries, start=1):
         if _KEY_TEXT.fullmatch(entry) is None:
             raise InvalidEncryptionKeysError(
-                f"{SETTING_NAME} 的第 {position} 個金鑰不是有效的 Fernet 金鑰"
+                f"{setting_name} 的第 {position} 個金鑰不是有效的 Fernet 金鑰"
                 "（url-safe base64 編碼的 32 bytes，共 44 個字元；"
                 "金鑰之間只用逗號分隔，不可有空白）"
             )
         raw = base64.urlsafe_b64decode(entry)
-        if raw in seen:
-            raise InvalidEncryptionKeysError(f"{SETTING_NAME} 的第 {position} 個金鑰與前面的重複")
-        seen.add(raw)
-        keys.append(Fernet(entry))
-    return tuple(keys)
+        if raw in keys:
+            raise InvalidEncryptionKeysError(f"{setting_name} 的第 {position} 個金鑰與前面的重複")
+        keys.append(raw)
+    return keys
 
 
 def max_token_bytes(plaintext_bytes: int) -> int:

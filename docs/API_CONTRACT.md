@@ -83,7 +83,7 @@ T05 已實作上述驗證與權限：key 格式、有效期、驗證失敗的回
 | POST | /api/v1/scans/{scan_id}/reports | operator/admin | 202 排入佇列（重送已結束的報告回 200）；必帶 `Idempotency-Key`；scan 必須已終止（T21，§19.3） |
 | GET | /api/v1/scans/{scan_id}/reports | 同專案 | 200；這個 scan 的報告 metadata，新的在前（T21） |
 | GET | /api/v1/reports/{report_id} | 同專案 | 200；狀態、格式、大小、sha256、截斷、錯誤碼（T21） |
-| GET | /api/v1/reports/{report_id}/download | 同專案 | 200 附件下載平台產生的報告；未完成 409 `REPORT_NOT_READY`（T21，§19.3） |
+| GET | /api/v1/reports/{report_id}/download | 同專案 | 200 附件下載平台產生的報告；未完成 409 `REPORT_NOT_READY`（T21，§19.3）；內容已過保留期限並清除 410 `REPORT_EXPIRED`（T23a） |
 | GET | /api/v1/projects/{project_id}/audit-events | platform_admin | 200；遮罩且分頁，由新到舊（T05 已實作） |
 | GET | /api/v1/audit-events | platform_admin | 200；全域稽核（含 project 為 NULL 的事件），可依 project、action、object 與時間篩選（T21，§19.4） |
 | GET | /api/v1/scope-grants/pending | platform_admin | 200；跨 project、尚未過期的待核准申請，由舊到新（T21，§19.4） |
@@ -352,6 +352,7 @@ Compare request 只接受 `baseline_scan_id`、`current_scan_id`；不能由 cli
 | 405 | METHOD_NOT_ALLOWED |
 | 408 | REQUEST_TIMEOUT |
 | 409 | IDEMPOTENCY_CONFLICT、TARGET_BUSY、INVALID_STATE_TRANSITION、PROJECT_NAME_CONFLICT、TARGET_ORIGIN_CONFLICT、AUTH_ROLE_CONFLICT、TARGET_DISABLED、QUOTA_EXCEEDED、SCAN_NOT_TERMINAL、VERSION_CONFLICT、REPORT_NOT_READY、AUTH_PROFILE_DISABLED（T21） |
+| 410 | REPORT_EXPIRED（報告內容已過保留期限並清除；metadata 仍可查詢，T23a） |
 | 413 | SPEC_TOO_LARGE、REQUEST_TOO_LARGE、ARTIFACT_TOO_LARGE |
 | 415 | UNSUPPORTED_MEDIA_TYPE |
 | 422 | INVALID_REQUEST、INVALID_TARGET、SCOPE_OUTSIDE_LAB、INVALID_SPEC、UNSUPPORTED_SCHEMA、EXTERNAL_REF_FORBIDDEN、ENGINE_UNSUPPORTED、PROFILE_INCOMPATIBLE、TARGET_MISMATCH、QUOTA_EXCEEDED（比較輸入／證據超限）、RESOLUTION_EVIDENCE_INSUFFICIENT（T21） |
@@ -932,7 +933,7 @@ curl -s -H @admin.header -H 'Content-Type: application/yaml' \
 
 - secret 以 `SECRET_ENCRYPTION_KEYS` 的第一個金鑰加密（MultiFernet）；其他金鑰只用來解密。API 沒有金鑰或格式不合時不會啟動。
 - 加密的內容綁定認證設定與送出的方式（context 含 type 與 header 名稱）：密文被搬到其他認證設定，或同一個認證設定中另一種 type、另一個 header 名稱的版本，就解不開。
-- API 從不解密；M2 的 runner 是唯一會解密的程序。
+- API 從不解密目標的 secret；M2 的 runner 是唯一會解密它的程序。（T23a：API 另外以 `CONTENT_ENCRYPTION_KEYS` 解密報告與人工複測摘錄，只在報告下載與 triage 事件；見 §19.2、§19.3、`DECISIONS.md` §30.2。）
 - 換版：新金鑰放在第一個並重啟 API → `uv run secscan-admin rotate-secret-keys` → 移除舊金鑰並重啟 API → 再執行一次 `rotate-secret-keys` 確認全部解得開。
 - 第 4 步通過之前，另外保留舊金鑰的備份。
 - `rotate-secret-keys` 在一個 transaction 內重新加密所有還在的密文；有任何一份解不開就全部回滾、exit 1，只列出 profile id（最多 10 個）。執行期間的 PATCH 會等它 commit；PATCH 還沒 commit 時，換版也會等 PATCH。
@@ -991,8 +992,8 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
   "auth_role": "standard_user",
   "budget": {"requests_per_second": 2, "max_requests": 1000, "max_duration_seconds": 1500},
   "engines": [
-    {"engine": "preflight", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null, "budget": null, "usage": {"requests_allotted": null, "duration_allotted_seconds": null, "requests_sent": null, "requests_denied": null, "traffic_duration_seconds": null}},
-    {"engine": "fake", "sequence": 2, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null, "budget": null, "usage": {"requests_allotted": null, "duration_allotted_seconds": null, "requests_sent": null, "requests_denied": null, "traffic_duration_seconds": null}}
+    {"engine": "preflight", "sequence": 1, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null, "budget": null, "usage": {"requests_allotted": null, "duration_allotted_seconds": null, "requests_sent": null, "requests_denied": null, "traffic_duration_seconds": null}, "evidence": {"status": "pending", "sealed_at": null, "purged_at": null, "hold": null}},
+    {"engine": "fake", "sequence": 2, "status": "queued", "error_code": null, "started_at": null, "finished_at": null, "plan_hash": null, "profile_definition_sha256": null, "result": null, "budget": null, "usage": {"requests_allotted": null, "duration_allotted_seconds": null, "requests_sent": null, "requests_denied": null, "traffic_duration_seconds": null}, "evidence": {"status": "pending", "sealed_at": null, "purged_at": null, "hold": null}}
   ],
   "coverage": {
     "eligible_operations": 13,
@@ -1019,6 +1020,15 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
   - `budget_usage`：各容器 run 實際轉送與被 guard 拒絕的請求數、容器啟動到停止的秒數。開始過的 run 有任何一項不明（guard 重啟、telemetry 讀不出來、容器沒確認刪除）時，那一項是 null，不以 0 冒充。
   - `engines[].budget`（T31）：建立時凍結的這個引擎的上限 `{"max_requests", "max_duration_seconds"}`；沒有指定子預算是 null。
   - `engines[].usage`（T31，`DECISIONS.md` §29.2）：這個 run 開始時分到的請求數與秒數（`requests_allotted`、`duration_allotted_seconds`），以及 guard 記下的轉送、拒絕數與容器啟動到清理完成的秒數（`requests_sent`、`requests_denied`、`traffic_duration_seconds`）。沒有容器（in-process 的 fake、還沒開始、開始前就結束）或不明時是 null；T31 之前的 run 沒有記下分到的秒數。被 runner 停止、沒有收集的 run 也有這些數字（沒有 `result.guard_traffic`）。`traffic_duration_seconds` 可能略多於分到的秒數（被停止時的清理時間），會從之後的 run 扣除。
+  - `engines[].evidence`（T23a，`DECISIONS.md` §30.3）：這個 run 在 runs volume 的原始證據。`status` 是 `none`（從來沒有目錄，例如排隊中就取消）、`pending`（還沒加密：執行中、等待解析，或加密失敗之後等待重試）、`sealed`（只剩加密檔）、`purged`（保留期限到了已刪除）；`sealed_at`、`purged_at` 是對應的時間。加密在 run 結束（解析完成、失敗或逾期）、容器確認刪除之後才進行，**不是全程靜態加密**：`pending` 期間的檔案是明文。加密失敗時如實停在 `pending`，不會顯示成 `sealed`。
+  - `manual_intervention_required`（T23a 方案 B，`DECISIONS.md` §30.12）：目錄超過深度（32）、條目數（20,000）或路徑總長度（8M 字元）的上限、連續 3 次加密失敗，keeper 已隔離它：**明文保留原狀、不是加密成功**（artifact 的 `encrypted` 是 false），keeper 不再自動重試、清除或刪除，等待操作者以 `retry-evidence`（§20）處理；其他 run 照常認領。狀態依序判斷：有還沒解除的隔離是 `manual_intervention_required`（DB 不允許隔離中的 run 有加密或清除的紀錄；萬一出現也不顯示成已加密），否則有加密或清除的紀錄用它的狀態，都沒有是 `pending`。
+  - `hold`：隔離紀錄，從來沒有隔離是 null；否則是 `{"error_code", "attempts", "held_at", "resolved_at"}`（`error_code` 是 `EVIDENCE_TREE_TOO_DEEP`、`EVIDENCE_TREE_TOO_MANY_ENTRIES` 或 `EVIDENCE_TREE_PATHS_TOO_LONG`，`attempts` 是隔離之前連續失敗的次數）。人工重試加密成功之後 `status` 變成 `sealed`、`resolved_at` 有值，紀錄保留，看得出這個 run 曾經需要人工處理。例如：
+
+    ```json
+    "evidence": {"status": "manual_intervention_required", "sealed_at": null, "purged_at": null,
+                 "hold": {"error_code": "EVIDENCE_TREE_TOO_DEEP", "attempts": 3,
+                          "held_at": "2026-11-10T03:00:00Z", "resolved_at": null}}
+    ```
   - `auth.preflight`：`passed`、`failed`、`inconclusive`（匿名的請求也符合期望，或匿名的請求沒有有效的回應：證明不了端點有受保護）、`blocked`（guard 拒絕）、`not_executed`（沒有可用的回應；in-process 的 runner 一律如此）；還沒結束是 null。
   - `coverage_measured`：有規格、所有 run 都結束、至少一個容器 run，而且每個容器 run 的 telemetry 都已對應到 operation。`observed_operations` 是實際取得上游回應的請求對應到的 operation 數（preflight 的請求不算；不代表所有漏洞種類都測過了）；`authenticated_operations` 是其中以認證取得 401、403 以外回應的數量，而且要 preflight 是 `passed`（否則是 0），匿名的 scan 是 null。沒有量測依據時兩者都是 null。
   - `limitations`：`NO_API_SPEC`、`TRAFFIC_TELEMETRY_UNAVAILABLE`（沒有量測依據）、`AUTHENTICATION_NOT_VERIFIED`（綁定了 profile，但 preflight 不是 `passed`）、`AUTHENTICATION_LOST`（T16：綁定了 profile，解析時由 guard 的 telemetry 判定憑證在掃描中途失效，部分結果不是以這個身分取得的；這時 `authenticated_operations` 是 null。平台不重新登入，`DECISIONS.md` §20.4）、`AUTHENTICATION_HEALTH_UNKNOWN`（T16：綁定了 profile，但有解析過的 run 沒有認證的計數，看不出憑證是否整段有效）。沒有 `AUTHENTICATION_LOST` 不等於憑證整段有效：判斷依據是靶機回的 status，過期時回 302 或 200 登入頁的靶機看不出來。
@@ -1082,6 +1092,7 @@ scan 的狀態（`ARCHITECTURE.md` §8）：`queued`、`preparing`、`running`�
 | `GUARD_UNAVAILABLE` | egress guard 不可用（T11，`DECISIONS.md` §15.8）：建立容器之前（status 過期、不再檢查、寫不出 policy）→ `failed`；執行中 guard 中斷、重啟或續約失敗 → 封鎖、停止容器 → `interrupted` |
 | `BUDGET_EXHAUSTED` | scan 共用的預算用完（T12，`DECISIONS.md` §16.4）：開始之前剩下的請求數或時間是 0，或不夠 ZAP 執行（剩下的時間、請求數 ÷ 速率、grant 到期前的秒數三者取最小，減去 60 秒之後不到 60 秒，T14；grant 快到期時也是這個代碼，延長 grant 而不是增加預算）→ `failed`（不建立容器）；執行中 guard 回報已轉送到上限 → 封鎖、停止容器 → `timed_out`。有子預算時（T31）「剩下的」先和這個引擎的上限取較小值；份額已依最小時間窗檢查，所以通常是前面的引擎用掉了總額或清理的秒數 |
 | `PARSE_ATTEMPTS_EXHAUSTED` | 解析 3 次都沒有在 lease 內完成（worker 中斷或卡住）→ `failed`（T13，`DECISIONS.md` §17.6） |
+| `PARSE_DEADLINE_EXCEEDED` | 從第一次進入 `collected` 起超過 `EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60 分鐘）仍是 `collected`，或是 `normalizing` 而 lease 已過期：runner 結束這個 run（`failed`）並加密它的原始證據，讓明文不會因為 worker 停擺而無限期留著（T23a，`DECISIONS.md` §30.3）。已經存好的部分結果保留，所以這個代碼的意思是「解析沒有在期限內完成」，不是「沒有結果」 |
 | `OUTPUT_INVALID` | 工具的輸出不能用：報告或 log 缺少、不合法、版本不是鎖定的版本、超過上限，或 AF 的結尾摘要不存在、和退出碼矛盾 → `failed`（T15，`DECISIONS.md` §19.2）；原因在 `engines[].result.problem` |
 | `ENGINE_REPORTED_ERRORS` | 工具回報錯誤但報告有效 → `failed`，部分觀察仍入庫：ZAP 為 AF 退出碼 1（T15）；Nuclei 為模板事件帶 error，即使退出碼 0 也不算成功（T22，`nuclei-jsonl/3`）。只保存 `engine_errors` 計數、不回傳原始 error；Nuclei 的無流量或逾時判定優先。scan 不因保留觀察而成為完整結果 |
 | `NO_TARGET_TRAFFIC` | 未掃到端點 → `failed`：guard 沒有轉送任何請求，或沒有任何請求得到上游的回應（T15）；和零告警的 `succeeded` 不同 |
@@ -1277,14 +1288,14 @@ uv run secscan-admin fake-runner [--outcome succeed|fail] [--hold-seconds 0-300]
 {
   "link": {"sequence": 1, "normalized_severity": "high", "normalized_confidence": "medium", "needs_review": false, "taxonomy_sha256": "…", "linked_at": "…"},
   "observation": {"id": "…", "scan_id": "…", "scanner_run_id": "…", "engine": "zap", "…": "同 §17.8 的遮罩後欄位"},
-  "artifact": {"id": "…", "kind": "output", "path": "zap-report.json", "sha256": "…", "size_bytes": 46542, "redactions": 0, "classification": "masked", "encrypted": false},
+  "artifact": {"id": "…", "kind": "output", "path": "zap-report.json", "sha256": "…", "size_bytes": 46542, "redactions": 0, "classification": "masked", "encrypted": true, "purged_at": null},
   "run": {"id": "…", "engine": "zap", "sequence": 1, "status": "succeeded", "error_code": null, "image_ref": "zaproxy/zap-stable:…@sha256:…", "plan_hash": "…", "profile_definition_sha256": "…", "engine_version": "2.17.0", "parser_version": "zap-traditional-json/1", "started_at": "…", "finished_at": "…"}
 }
 ```
 
 - `link` 是連結當時寫入、之後不可修改的值（append-only）：不以目前的 taxonomy 重算，`taxonomy_sha256` 說明當時的規則與對應版本。
 - `observation` 和 `GET /scans/{id}/observations` 相同：遮罩、截斷之後的目標內容，仍是不可信的資料，顯示時要編碼。
-- `artifact` 是觀察引用的報告的 metadata（`sha256` 是遮罩後檔案的雜湊，不是原始報告或簽章）；**不輸出 storage_key 與檔案內容**。storage_key 不是秘密（由 run id、kind 與 path 組成），不能當成存取控制：T21 的下載必須以 artifact id 走 artifact → run → scan → target → project 的授權，不接受 client 給的 path 或 storage_key。T20 起新的觀察一定引用自己 run 的報告（寫入端拒絕沒有報告的觀察）；更早的資料可能是 null，如實回傳、不補造。
+- `artifact` 是觀察引用的報告的 metadata（`sha256` 是遮罩後檔案的雜湊，不是原始報告或簽章）；**不輸出 storage_key 與檔案內容**。T23a 起 `encrypted` 由這個 run 的原始證據狀態推導（`sealed`、`purged` 是 true，`none`、`pending` 是 false；DB 的 `artifacts.encrypted` 是從來沒有寫入過的舊欄位），`purged_at` 是檔案已依保留期限刪除的時間（之後只剩 metadata 與 sha256，`DECISIONS.md` §30.5）。storage_key 不是秘密（由 run id、kind 與 path 組成），不能當成存取控制：T21 的下載必須以 artifact id 走 artifact → run → scan → target → project 的授權，不接受 client 給的 path 或 storage_key。T20 起新的觀察一定引用自己 run 的報告（寫入端拒絕沒有報告的觀察）；更早的資料可能是 null，如實回傳、不補造。
 - `run`：`plan_hash` 是準備執行的 ExecutionPlan 的雜湊（含映像、參數與上限），不代表執行成功；沒有建立容器的 run 沒有 plan（null）。版本不明時是 null，不以目前的設定補上。
 
 ### 17.11 不可變複掃比較（T22）
@@ -1339,6 +1350,7 @@ uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-
 - lease 失效、或無法確認容器已停止：停止處理、刪除 secret，run 停在 `running`，由容器的對帳處理：lease 過期之後封鎖 guard、核對 label、強制刪除容器，確認之後才標成 `interrupted`（`LEASE_EXPIRED`）；Docker 不可用時保持 `running`，policy 保持 blocked（T13）。
 - 執行中的授權撤回（grant 撤銷或到期、target 停用、建立者的 key 撤銷）：封鎖 guard → 停止容器 → `failed`（該錯誤碼）；建立容器之前看到就不建立（T13）。建立容器之前會再心跳一次，lease 已失效就不建立。
 - `--once`：最多處理一個 run。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。fake 的腳本預設依 `RUNNER_FAKE_OUTCOME`、`RUNNER_FAKE_HOLD_SECONDS`。
+- **原始證據（T23a，`DECISIONS.md` §30.3）**：需要 `EVIDENCE_ENCRYPTION_KEYS`，缺少或格式不合就不啟動。程序內的背景執行緒 keeper 每 10 秒一輪：把等待解析太久的 run 轉成 failed（`PARSE_DEADLINE_EXCEEDED`）→ 加密已終止、容器確認刪除的 run 目錄（驗證之後才刪除明文）→ 刪除加密超過 `EVIDENCE_RETENTION_DAYS`（預設 7 天）的目錄 → 處理沒有 run 紀錄的孤兒目錄。任何一個 run 加密失敗、keeper 停止或停擺時，所有引擎變成不可用（`EVIDENCE_SEALING_FAILED`），不認領新的 run，一輪沒有任何失敗之後才恢復。`--once` 不啟動執行緒，改成在處理之前與結束之前各同步跑一輪，keeper 不健康時 exit 1。
 
 ### 18.2 worker
 
@@ -1347,6 +1359,7 @@ uv run secscan-admin worker [--once]
 ```
 
 - 先把 lease 過期的 `normalizing` 退回 `collected`（解析可以重試，最多 3 次；第 3 次過期是 `failed`，`PARSE_ATTEMPTS_EXHAUSTED`，T13），再把 fake 的 `collected` 標成 `succeeded`。單一 run 的非預期例外只記類別，繼續處理其他 run。T10 不讀任何輸出（parser 在 M3）。
+- T23a：需要 `CONTENT_ENCRYPTION_KEYS`，缺少或格式不合就不啟動。報告內容加密之後才寫入；開始時與之後每 10 分鐘清除到期的報告內容與人工複測摘錄（每批最多 50 份，`DECISIONS.md` §30.5）。
 
 ### 18.3 掃描容器
 
@@ -1376,7 +1389,7 @@ uv run secscan-admin worker [--once]
 ```
 
 - 引擎依執行順序列出（zap、nuclei、schemathesis、fake）。可用與否依「最近一個 30 秒內有心跳的 runner」回報的 capability probe。
-- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`RUN_VOLUME_NOT_WRITABLE`（runner 寫不進掛載的目錄）、`IMAGE_MISSING`（映像不在本機或架構不符）、`GUARD_UNAVAILABLE`（egress guard 的 status 過期、不再檢查，或 policy 目錄不可寫；T11）、`ENGINE_PROBE_PENDING`（執行容器驗證的 probe 還沒完成）、`ENGINE_PROBE_FAILED`（probe 的容器失敗、逾時或輸出讀不到）、`ENGINE_INCOMPATIBLE`（版本、add-on 或規則白名單和審查過的不同；T14，`DECISIONS.md` §18.8）。
+- `unavailable_reason`：`NOT_INTEGRATED`（Adapter 還沒整合）、`RUNNER_UNAVAILABLE`（沒有存活的 runner）、`DOCKER_UNAVAILABLE`、`DOCKER_API_UNSUPPORTED`（daemon 不支援 Engine API 1.45）、`SCAN_NETWORK_NOT_ISOLATED`、`RUN_VOLUME_MISSING`、`RUN_VOLUME_NOT_WRITABLE`（runner 寫不進掛載的目錄）、`IMAGE_MISSING`（映像不在本機或架構不符）、`GUARD_UNAVAILABLE`（egress guard 的 status 過期、不再檢查，或 policy 目錄不可寫；T11）、`ENGINE_PROBE_PENDING`（執行容器驗證的 probe 還沒完成）、`ENGINE_PROBE_FAILED`（probe 的容器失敗、逾時或輸出讀不到）、`ENGINE_INCOMPATIBLE`（版本、add-on 或規則白名單和審查過的不同；T14，`DECISIONS.md` §18.8）、`EVIDENCE_SEALING_FAILED`（runner 加密原始證據失敗、keeper 停止或停擺，或正在換版；修好之前不認領新的 run，T23a，`DECISIONS.md` §30.3）。
 - `version`：runner 的 probe 實際執行映像取得的版本（zap；其他引擎是 null）。
 
 ### 18.5 GET /api/v1/scan-profiles
@@ -1427,14 +1440,14 @@ uv run secscan-admin worker [--once]
 
 ### 19.2 GET /api/v1/findings/{finding_id}/triage-events
 
-不可修改的事件，依 sequence 由舊到新、分頁。每筆含 actor（key 或 system、key 的名稱與角色）、`request_id`、前後狀態、`reason_code`、`reason`、`comparison_id`、`basis`、`evidence_provenance`、系統重開的 `run_id`／`scan_id`、`evidence`（寫入當時的白名單鍵，不含摘錄內容）與 `created_at`。`excerpts`（遮罩後的請求與回應摘錄）只給 operator／admin；viewer 是 null（人工摘錄只有樣式遮罩：已知的秘密樣式、縮排的 header 行，以及這個 target 的認證設定用過的自訂 header 名稱）。回應帶 `Cache-Control: no-store`。`evidence.attestation.platform_checks` 只列實際執行過的檢查（finding 沒有參數時沒有 `parameter_present`），`checks_version` 目前是 2。每一項都是對操作者聲明的一致性檢查，**沒有一項代表平台獨立驗證了修補**：`request_line_matches_route`、`host_matches_target`、`parameter_present`、`response_status_line` 檢查摘錄的格式與對象；`role_matches`、`time_within_bounds` 檢查聲明的身分與時間；`declared_result_is_not_reproduced` 只表示宣稱的結果是平台唯一接受的 `not_reproduced`（v1 叫 `result_not_reproduced`，名稱容易誤解成平台確認無法重現，v2 改名）；`size_within_limits` 檢查摘錄的大小。
+不可修改的事件，依 sequence 由舊到新、分頁。每筆含 actor（key 或 system、key 的名稱與角色）、`request_id`、前後狀態、`reason_code`、`reason`、`comparison_id`、`basis`、`evidence_provenance`、系統重開的 `run_id`／`scan_id`、`evidence`（寫入當時的白名單鍵，不含摘錄內容）與 `created_at`。`excerpts`（遮罩後的請求與回應摘錄）只給 operator／admin；viewer 是 null（人工摘錄只有樣式遮罩：已知的秘密樣式、縮排的 header 行，以及這個 target 的認證設定用過的自訂 header 名稱）。回應帶 `Cache-Control: no-store`。T23a 起摘錄在 DB 中加密：每一段是 `{"kind", "content", "expires_at", "purged_at"}`，API 解密之後再核對事件中的 sha256 與長度，解不開或不符回 500、不送出內容；建立後 `EXCERPT_RETENTION_DAYS`（預設 30 天）清除，之後 `content` 是 null、`purged_at` 有值，事件與雜湊不變（`DECISIONS.md` §30.4）。`evidence.attestation.platform_checks` 只列實際執行過的檢查（finding 沒有參數時沒有 `parameter_present`），`checks_version` 目前是 2。每一項都是對操作者聲明的一致性檢查，**沒有一項代表平台獨立驗證了修補**：`request_line_matches_route`、`host_matches_target`、`parameter_present`、`response_status_line` 檢查摘錄的格式與對象；`role_matches`、`time_within_bounds` 檢查聲明的身分與時間；`declared_result_is_not_reproduced` 只表示宣稱的結果是平台唯一接受的 `not_reproduced`（v1 叫 `result_not_reproduced`，名稱容易誤解成平台確認無法重現，v2 改名）；`size_within_limits` 檢查摘錄的大小。
 
 ### 19.3 報告
 
-- `POST /api/v1/scans/{scan_id}/reports`：`{"format": "json" | "markdown"}`，必帶 `Idempotency-Key`（範圍是 project；同一個 key、同樣的內容回原本的報告，內容不同含 format 不同回 409 `IDEMPOTENCY_CONFLICT`）。scan 未終止 409 `SCAN_NOT_TERMINAL`。每個 project 同時最多 5 份 queued／generating、每個 scan 最多 20 份未失敗的報告（failed 不計入），超過 409 `QUOTA_EXCEEDED`。新的回 202，重送已結束的回 200。
+- `POST /api/v1/scans/{scan_id}/reports`：`{"format": "json" | "markdown"}`，必帶 `Idempotency-Key`（範圍是 project；同一個 key、同樣的內容回原本的報告，內容不同含 format 不同回 409 `IDEMPOTENCY_CONFLICT`）。scan 未終止 409 `SCAN_NOT_TERMINAL`。每個 project 同時最多 5 份 queued／generating、每個 scan 最多 20 份未失敗的報告（failed 與內容已清除的不計入，T23a），超過 409 `QUOTA_EXCEEDED`。新的回 202，重送已結束的回 200。
 - worker 在 REPEATABLE READ READ ONLY transaction 中讀快照，產生之後存 DB；最多嘗試 3 次，用盡時 `failed`：lease 一再過期是 `REPORT_ATTEMPTS_EXHAUSTED`，產生時一再出錯是 `REPORT_GENERATION_FAILED`。
-- `GET /api/v1/reports/{report_id}` 與 `GET /api/v1/scans/{scan_id}/reports`：`status`（queued／generating／succeeded／failed）、`format`、`schema_version`、`attempts`、`error_code`、`data_as_of`、`generated_at`、`size_bytes`、`sha256`、`truncated`、`omitted_findings`。
-- `GET /api/v1/reports/{report_id}/download`：只有 succeeded 能下載（否則 409 `REPORT_NOT_READY`）；送出前重新核對 sha256，不符回 500、不送出內容。
+- `GET /api/v1/reports/{report_id}` 與 `GET /api/v1/scans/{scan_id}/reports`：`status`（queued／generating／succeeded／failed）、`format`、`schema_version`、`attempts`、`error_code`、`data_as_of`、`generated_at`、`size_bytes`、`sha256`、`truncated`、`omitted_findings`、`expires_at`（succeeded 才有：完成時間加 `REPORT_RETENTION_DAYS`，預設 30 天）、`content_purged_at`（內容已清除的時間；T23a）。`size_bytes`、`sha256` 是明文的值，清除之後仍保留。
+- `GET /api/v1/reports/{report_id}/download`：只有 succeeded 能下載（否則 409 `REPORT_NOT_READY`）；內容已清除回 410 `REPORT_EXPIRED`（「是否已清除」與內容以同一個 statement 讀取，清除剛好在下載途中 commit 也是 410）；T23a 起內容在 DB 中以 context `report:<id>` 加密，API 解密之後重新核對 sha256，解不開、屬於別的報告或不符回 500、不送出內容。Idempotency-Key 重送在清除之後仍回原本的 metadata。
 - 內容：固定說明（未經 triage 的告警不是已驗證的漏洞、零告警不代表沒有弱點、not_observed 不等於已修補、平台不提供自動修補驗證、報告時間不是發現或修補時間、遮罩不保證辨識所有秘密）、掃描與引擎狀態、授權成立時間（grant 的 `approved_at`）、覆蓋與預算用量、摘要（以全部 finding 計算）、逐 finding 的標籤與 resolved 的依據（人工複測只有 metadata 與摘錄的 sha256）、比較快照摘要。不含 key id、storage_key、密文、idempotency key 與複測摘錄的原文。
 - 大小上限 8,388,608 bytes（UTF-8）：超過時依優先順序以整個 finding 為單位省略，`truncated=true`、記下省略數，開頭與結尾都有說明。
 - 比較快照最多列出最新的 10 份；較舊的份數記在內容的 `truncation.comparisons_omitted`，Markdown 另有說明。
@@ -1451,3 +1464,20 @@ uv run secscan-admin worker [--once]
 
 - 權限：operator／admin；body `{"reason": "..."}`（≤ 500；以 `redact_text` 遮罩之後寫進不可修改的 audit，遮罩後超過 500 回 422）。不要貼上外洩的憑證：遮罩只依名稱與樣式判斷。
 - 停用是終止狀態：清除目前版本的密文，之後 PATCH 回 409 `AUTH_PROFILE_DISABLED`，以它建立新的 scan 也回 409。排隊中的 scan，以及執行中 scan 之後才準備的 run（例如 ZAP 之後的 Nuclei），都在 runner 交出 secret 之前失敗（run 的錯誤碼 `AUTH_PROFILE_DISABLED`）；已經啟動的 run 已拿到 secret，不受影響，要立即停止請取消 scan：回 200 不代表已經沒有 run 持有 secret（runner 準備完 run、啟動容器之前的短暫時間內停用，該 run 仍會拿到 secret）。重複停用回 200，不重記 audit。
+
+## 20. 資料保護的管理指令（T23a）
+
+設計與理由見 `DECISIONS.md` §30。金鑰與明文一律不輸出到終端或 log；audit 只記數量與 id。主機上的 `.env` 三組金鑰都有：每個 `secscan-admin` 指令與 `make migrate` 都先確認三組之間沒有共用的金鑰，共用時停止、exit 1（§30.11）。
+
+| 指令 | 在哪裡執行 | 用途 |
+|---|---|---|
+| `uv run secscan-admin check-encryption-keys` | 主機 | 檢查三組平台金鑰（`SECRET_ENCRYPTION_KEYS`、`EVIDENCE_ENCRYPTION_KEYS`、`CONTENT_ENCRYPTION_KEYS`）都合法、互不共用；只顯示每組的數量，不連資料庫 |
+| `uv run secscan-admin rotate-content-keys` | 主機 | 以 `CONTENT_ENCRYPTION_KEYS` 的第一把重新加密所有報告內容與摘錄（報告一份一個 transaction、摘錄每批 100 段，已清除的略過）；解不開的保留原狀並列出 id、exit 1；audit `content_keys.rotate`（`reports`、`excerpts`、`failures`） |
+| `secscan-admin rotate-evidence-keys` | runner 容器內（`docker compose --profile app exec runner …`；compose 不能用時改用 `docker-compose`） | 以 `EVIDENCE_ENCRYPTION_KEYS` 的第一把重新加密 runs volume 的加密檔（暫存檔驗證之後才取代）；runs volume 的目錄數量超過上限或列不出來時不換版任何檔案、exit 1；和 keeper 以 advisory lock 互斥，等不到鎖時不改任何檔案、exit 1；解不開的目錄保留原狀並列出 run_id、exit 1；audit `evidence_keys.rotate`（`files`、`failures`） |
+| `secscan-admin export-evidence --run <id>` | runner 容器內 | 列出這個 run 的加密檔的原本路徑、大小與 sha256（每行一個 JSON，ASCII 跳脫；列表會解密驗證每個檔案，所以先寫 audit `evidence.list`：run_id 與檔案數）；還沒加密的 run 回錯誤、exit 1 |
+| `secscan-admin export-evidence --run <id> --path <原本的路徑>` | runner 容器內 | break-glass：先完整驗證，寫入 audit `evidence.export`（run_id、路徑的 sha256、大小；寫不進去就不匯出），才把明文寫到 stdout；不寫任何檔案。沒有這個 run 或這個檔案時 exit 1 |
+| `secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> [--max-depth 32 到 64] [--max-entries 20000 到 50000] [--max-path-chars 8388608 到 16777216]` | runner 容器內 | 人工處理一個隔離的目錄（`DECISIONS.md` §30.12）：理由必須是單行、最多 200 字、可以 UTF-8 表示；沒有還沒解除的隔離時 exit 1、不做任何改變；和 keeper 以 advisory lock 互斥；先寫 audit `evidence.retry`（錯誤代碼、上限、理由；寫不進去就不開始），再以指定的上限加密（先驗證才刪除明文）。成功時同一個 transaction 寫入 sealed 的 `run_evidence`（run 的目錄）、`resolved_at` 與 audit `evidence.resolve`（檔案數、bytes、上限），之後照常保留到期再清除；失敗時（仍然超過上限、其他錯誤、目錄不存在）寫 audit `evidence.retry_failed`、隔離不變、明文保留、exit 1。加密之後 DB 寫入失敗時另外寫 audit `evidence.retry_failed`（`EVIDENCE_SEALED_NOT_RECORDED`），再執行一次即可。上限都有絕對的上限（記憶體）。沒有不加密就解除或刪除目錄的指令 |
+| `uv run secscan-admin retention-status` | 主機 | 唯讀：原始證據（執行中、逾期、待加密、沒有目錄、已加密、待清除、已清除）、需要人工處理（run 與孤兒目錄的數量、各錯誤代碼的數量、已人工處理的數量，以及最多 10 個最早的隔離：目錄名稱、種類、錯誤代碼、次數、隔離時間）、報告內容與摘錄（保留中、待清除、已清除）的數量；不含路徑或內容。待加密不含隔離的 run |
+
+- 換版的步驟（比照 §16.6）：新金鑰放在最前面 → 重啟持有它的容器 → 換版 → 移除舊金鑰、重啟 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。`make env` 只新增缺少的金鑰，從不輪替。
+- 保留期限（1–365 天）：`EVIDENCE_RETENTION_DAYS`（runner，預設 7）、`REPORT_RETENTION_DAYS`（worker，預設 30）、`EXCERPT_RETENTION_DAYS`（api，預設 30）；`EVIDENCE_PLAINTEXT_MAX_MINUTES`（runner，預設 60，15–1440）。清除只刪除內容，metadata 與 sha256 保留；刪除是 unlink，不抹除磁碟的資料區塊。

@@ -23,9 +23,10 @@ from secscan.scanners.domain.instances import InstanceRole
 from secscan.scanners.service import Fleet
 from secscan.scans.queue import ScanQueue
 from secscan.worker.loop import WorkerLoop
-from secscan.worker.reports import ReportWorker
+from secscan.worker.retention import ContentRetention, PurgeReport
 from secscan.worker.service import Worker
 from tests.integration.api_support import LAB, Seeder, World
+from tests.integration.report_support import report_worker
 from tests.integration.triage_support import Scenario, scenario
 from tests.runner_fakes import FakeClock
 
@@ -98,7 +99,7 @@ def test_report_specific_db_errors_release_the_attempt(
     report = enqueue(sessions, world, item.baseline)
     monkeypatch.setattr(SnapshotReader, "read", _raise(error))
 
-    assert ReportWorker(sessions, owner="worker-r").drain(limit=1) == 0
+    assert report_worker(sessions, owner="worker-r").drain(limit=1) == 0
 
     assert status(queue_seed, report) == ("queued", 1)
 
@@ -116,7 +117,7 @@ def test_other_db_errors_stop_the_worker(
     )
 
     with pytest.raises(OperationalError):
-        ReportWorker(sessions, owner="worker-r").drain(limit=1)
+        report_worker(sessions, owner="worker-r").drain(limit=1)
 
     # 不釋放：lease 到期之後由對帳退回 queued 或標成 failed。
     assert status(queue_seed, report) == ("generating", 1)
@@ -132,7 +133,7 @@ def test_a_lost_lease_is_left_to_reconcile(
     report = enqueue(sessions, world, item.baseline)
     monkeypatch.setattr(ReportQueue, "complete", _raise(LeaseLostError("lost")))
 
-    assert ReportWorker(sessions, owner="worker-r").drain() == 0
+    assert report_worker(sessions, owner="worker-r").drain() == 0
 
     assert status(queue_seed, report) == ("generating", 1)
 
@@ -146,7 +147,7 @@ def _worker_loop(engine: Engine, sessions: sessionmaker[Session], clock: FakeClo
         stop_requested=lambda: clock.now >= 10,
         sleep=clock.sleep,
         poll_seconds=2,
-        reports=ReportWorker(sessions, owner="worker:loop"),
+        reports=report_worker(sessions, owner="worker:loop"),
     )
 
 
@@ -194,3 +195,75 @@ def test_failed_reports_do_not_count_toward_the_per_scan_quota(
     with pytest.raises(AppError) as caught:
         enqueue(sessions, world, item.baseline)
     assert caught.value.code == "QUOTA_EXCEEDED"
+
+
+class CountingRetention(ContentRetention):
+    """記下清除的次數（實際的清除照常執行）。"""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        super().__init__(sessions)
+        self.calls = 0
+
+    def purge(self) -> PurgeReport:
+        self.calls += 1
+        return super().purge()
+
+
+def test_the_worker_purges_expired_content_at_start_and_every_ten_minutes(
+    sessions: sessionmaker[Session],
+) -> None:
+    """docs/DECISIONS.md §30.5：開始時清除一次，之後每 10 分鐘一次（不是每一圈）。"""
+    clock = FakeClock()
+    queue = ScanQueue(sessions, lab=LAB, clock=lambda: datetime.now(UTC))
+    fleet = Fleet(sessions, owner="worker:loop", role=InstanceRole.WORKER, software_version="0.1.0")
+    retention = CountingRetention(sessions)
+    loop = WorkerLoop(
+        Worker(queue, owner="worker:loop", findings=None),
+        fleet,
+        stop_requested=lambda: clock.now >= 1_500,
+        sleep=clock.sleep,
+        poll_seconds=100,
+        retention=retention,
+        monotonic=clock.monotonic,
+    )
+
+    loop.run()
+
+    assert retention.calls == 3
+
+
+class FailingRetention(ContentRetention):
+    """清除時 DB 出錯（例如等換版的列鎖逾時）。"""
+
+    def __init__(self, sessions: sessionmaker[Session]) -> None:
+        super().__init__(sessions)
+        self.calls = 0
+
+    def purge(self) -> PurgeReport:
+        self.calls += 1
+        raise OperationalError("SELECT 1", {}, Exception("lock timeout"))
+
+
+def test_a_database_error_while_purging_does_not_stop_the_worker(
+    sessions: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """清除失敗只記類別、下一個間隔再試；解析與報告照常（資料庫審查 L8）。"""
+    clock = FakeClock()
+    queue = ScanQueue(sessions, lab=LAB, clock=lambda: datetime.now(UTC))
+    fleet = Fleet(sessions, owner="worker:loop", role=InstanceRole.WORKER, software_version="0.1.0")
+    retention = FailingRetention(sessions)
+    loop = WorkerLoop(
+        Worker(queue, owner="worker:loop", findings=None),
+        fleet,
+        stop_requested=lambda: clock.now >= 1_500,
+        sleep=clock.sleep,
+        poll_seconds=100,
+        retention=retention,
+        monotonic=clock.monotonic,
+    )
+
+    loop.run()
+
+    assert retention.calls == 3
+    assert "OperationalError" in caplog.text
+    assert "lock timeout" not in caplog.text

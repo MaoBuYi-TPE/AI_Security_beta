@@ -2,25 +2,28 @@
 
 每次：對帳 lease 過期的報告 → 認領最舊的 queued → 在 REPEATABLE READ READ ONLY transaction 中
 讀快照（每讀完一頁以另一個短 transaction 心跳）→ 以純函式渲染 → JSON 以 ReportDocumentV1 驗證 →
-fenced transaction 寫入內容。單一報告的例外（含這份報告專屬的 DB 錯誤：內容違反 CHECK、核對
-失敗、快照查詢逾時）只記類別與位置（內容可能含不可信的資料），立即釋放這一次嘗試（最多 3 次）；
+以 CONTENT_ENCRYPTION_KEYS 加密（context 綁定報告；docs/DECISIONS.md §30.4）→ fenced
+transaction 寫入密文與期限（完成時間加 REPORT_RETENTION_DAYS）。單一報告的例外（含這份報告專屬的
+DB 錯誤：內容違反 CHECK、核對失敗、快照查詢逾時）只記類別與位置（內容可能含不可信的資料），
+立即釋放這一次嘗試（最多 3 次）；
 連線中斷等其他 DB 錯誤讓程序結束（沿用 §17.6）。
 """
 
 import logging
 import traceback
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.reports.document_schema import ReportDocumentV1
-from secscan.reports.domain.model import ReportFormat
+from secscan.reports.domain.model import MAX_REPORT_BYTES, ReportFormat, report_context
 from secscan.reports.domain.render import render
 from secscan.reports.queue import LeaseLostError, ReportLease, ReportQueue
 from secscan.reports.snapshot import SnapshotReader
+from secscan.security.blob_cipher import BlobCipher
 
 logger = logging.getLogger(__name__)
 QUERY_CANCELED = "57014"
@@ -32,11 +35,15 @@ class ReportWorker:
         sessions: sessionmaker[Session],
         *,
         owner: str,
+        cipher: BlobCipher,
+        retention: timedelta,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessions = sessions
         self._queue = ReportQueue(sessions)
         self._owner = owner
+        self._cipher = cipher
+        self._retention = retention
         self._clock = clock
 
     def drain(self, *, limit: int | None = None) -> int:
@@ -93,9 +100,17 @@ class ReportWorker:
         rendered = render(snapshot, generated_at=generated_at)
         if lease.format is ReportFormat.JSON:
             ReportDocumentV1.model_validate_json(rendered.content)
+        sealed = self._cipher.seal(
+            rendered.content, context=report_context(lease.report_id), max_bytes=MAX_REPORT_BYTES
+        )
         self._queue.heartbeat(lease)
         self._queue.complete(
-            lease, rendered, data_as_of=snapshot.data_as_of, generated_at=generated_at
+            lease,
+            rendered,
+            sealed=sealed,
+            data_as_of=snapshot.data_as_of,
+            generated_at=generated_at,
+            expires_at=generated_at + self._retention,
         )
 
 

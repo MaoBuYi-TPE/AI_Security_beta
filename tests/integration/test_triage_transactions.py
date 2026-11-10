@@ -18,6 +18,7 @@ from tests.integration.api_support import Seeder, World
 from tests.integration.finding_support import ZAP_SQLI
 from tests.integration.test_triage_races import _attestation, resolve
 from tests.integration.triage_support import Scenario, eligible, queue, run_scan, scenario
+from tests.secret_support import shared_content_cipher
 
 pytestmark = pytest.mark.integration
 
@@ -58,7 +59,7 @@ def fail(*_: object, **__: object) -> None:
 
 def run_change(engine: Engine, world: World, item: Scenario, command: TriageCommand) -> None:
     with sessionmaker(engine).begin() as session:
-        TriageService(session).change(
+        TriageService(session, cipher=shared_content_cipher()).change(
             world.operator_a.principal, item.sqli, command, request_id=None
         )
 

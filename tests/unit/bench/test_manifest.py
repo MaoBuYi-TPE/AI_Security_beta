@@ -15,7 +15,7 @@ from benchmarks.manifest import (
     build_manifest,
     check_manifest,
 )
-from benchmarks.models import LabeledScan
+from benchmarks.models import FileDigests, LabeledScan
 from benchmarks.schedule import build_schedule
 from benchmarks.spec import ExperimentSpec, parse_spec
 from tests.unit.bench.samples import comparison_json, finding_json, scan_json
@@ -78,7 +78,7 @@ def _manifest(**overrides: Any) -> dict[str, Any]:
         "scans": scans,
         "comparisons": [("c1", normalize_comparison(snapshot, items))],
         "provenance": PROVENANCE,
-        "files": {"scan-01.json": "d" * 64},
+        "files": {"scan-01.json": FileDigests(sha256="d" * 64, sealed_sha256="e" * 64)},
         "complete": True,
         "stopped_reason": None,
     }
@@ -98,7 +98,11 @@ def test_a_complete_manifest_records_budgets_allotments_and_guard_counts() -> No
     assert manifest["scans"][0]["findings"] == 1
     assert manifest["comparisons"][0]["items"] == 1
     assert manifest["disclosures"] == list(DISCLOSURES)
-    assert "results_not_encrypted" in manifest["disclosures"]
+    # T23a：結果檔加密；manifest 記下每個檔案明文與密文的 sha256（版本 2）。
+    assert MANIFEST_VERSION == 2
+    assert "results_encrypted_with_local_bench_key" in manifest["disclosures"]
+    assert "results_not_encrypted" not in manifest["disclosures"]
+    assert manifest["files"] == {"scan-01.json": {"sha256": "d" * 64, "sealed_sha256": "e" * 64}}
     assert manifest["groups"][0]["engine_budgets"] is None
     json.dumps(manifest)
 
@@ -147,4 +151,21 @@ def test_another_version_is_rejected() -> None:
     manifest = {**_manifest(), "manifest_version": MANIFEST_VERSION + 1}
 
     with pytest.raises(ManifestError, match="版本"):
+        check_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"scan-01.json": "d" * 64},
+        {"scan-01.json": {"sha256": "d" * 64}},
+        {"scan-01.json": {"sha256": "d" * 64, "sealed_sha256": "not-hex"}},
+        [],
+    ],
+)
+def test_files_need_both_digests(files: Any) -> None:
+    """版本 1 的 files（只有明文的 sha256）或不完整的項目都不評估。"""
+    manifest = {**_manifest(), "files": files}
+
+    with pytest.raises(ManifestError, match="files"):
         check_manifest(manifest)

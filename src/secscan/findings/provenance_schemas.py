@@ -226,7 +226,10 @@ class ArtifactMetadataOut(_Frozen):
     size_bytes: int
     redactions: int
     classification: ArtifactClassification
+    # runs volume 中的原始檔案只剩加密檔（run 結束之後才加密，不是全程靜態加密）；
+    # 保留期限到了已刪除時有 purged_at（metadata 與 sha256 保留）。
     encrypted: bool
+    purged_at: datetime | None
 
     @classmethod
     def of(cls, artifact: ArtifactRecord) -> Self:
@@ -239,6 +242,7 @@ class ArtifactMetadataOut(_Frozen):
             redactions=artifact.redactions,
             classification=artifact.classification,
             encrypted=artifact.encrypted,
+            purged_at=artifact.purged_at,
         )
 
 

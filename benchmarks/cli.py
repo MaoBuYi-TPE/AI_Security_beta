@@ -1,9 +1,13 @@
 """benchmark 的離線指令（make bench-check、make bench-evaluate；docs/DECISIONS.md §29）。
 
-- check-spec：檢查實驗規格與結果目錄的名稱（不合或已存在就失敗）；make bench 在啟動 stack 之前
-  先跑，不連網、不碰 Docker。
-- evaluate：只讀結果目錄（先核對 SHA256SUMS 與 manifest，session 必須完整），評估結果以 canonical
-  JSON 寫到 stdout，不寫回結果目錄。
+- check-spec：檢查實驗規格、結果目錄的名稱（不合或已存在就失敗）與 bench 的金鑰檔；make bench 在
+  啟動 stack 之前先跑，不連網、不碰 Docker。
+- evaluate：只讀結果目錄（先核對 SHA256SUMS，再解密、核對明文的 sha256 與 manifest，session 必須
+  完整），評估結果以 canonical JSON 寫到 stdout，不寫回結果目錄。金鑰不對、遺失或檔案被改過時清楚
+  報錯，不輸出任何部分結果。
+- create-key（make bench-key）：以 O_EXCL 建立新的金鑰檔（0600），已經存在就失敗；不輸出金鑰。
+- seal-results（make bench-seal）：把 T23a 之前的明文結果目錄轉成新的加密結果目錄；原目錄不動。
+金鑰檔：BENCH_KEY_FILE，預設 ~/.config/secscan/bench-keys（benchmarks/sealing.py）。
 """
 
 import argparse
@@ -15,8 +19,10 @@ from typing import Any
 from benchmarks.batch import load_batch
 from benchmarks.evaluate import evaluate
 from benchmarks.ground_truth import load_adjudications, load_ground_truth, load_pair_labels
+from benchmarks.legacy import seal_legacy
 from benchmarks.results import canonical_json
 from benchmarks.schedule import build_schedule
+from benchmarks.sealing import REPO_ROOT, BenchKeys, create_key_file, key_file_path
 from benchmarks.spec import check_name, load_spec
 from benchmarks.stats import evaluation_json
 
@@ -29,6 +35,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if arguments.command == "check-spec":
             output = _check_spec(arguments.spec, arguments.name, arguments.results_root)
+        elif arguments.command == "create-key":
+            output = _create_key()
+        elif arguments.command == "seal-results":
+            output = _seal_results(arguments.source, arguments.name, arguments.results_root)
         else:
             output = _evaluate(arguments)
     except (OSError, ValueError) as error:
@@ -52,6 +62,11 @@ def _parser() -> argparse.ArgumentParser:
     scoring.add_argument("--adjudications", type=Path)
     scoring.add_argument("--pair-labels", type=Path)
     scoring.add_argument("--include-holdout", action="store_true")
+    commands.add_parser("create-key", help="建立 bench 的金鑰檔（已經存在就失敗）")
+    sealing = commands.add_parser("seal-results", help="把明文的結果目錄轉成加密的結果目錄")
+    sealing.add_argument("source", type=Path)
+    sealing.add_argument("name")
+    sealing.add_argument("--results-root", type=Path, default=DEFAULT_RESULTS)
     return parser
 
 
@@ -60,17 +75,31 @@ def _check_spec(path: Path, name: str, root: Path) -> str:
     check_name(name)
     if (root / name).exists():
         raise ValueError("結果目錄已經存在；請換一個新的 BENCH_NAME")
+    BenchKeys.load(key_file_path(), forbidden=(REPO_ROOT, root))
     schedule = build_schedule(spec)
     hours = spec.worst_case_seconds() / 3600
     return (
         f"{spec.name}（{spec.purpose.value}）：{len(schedule)} 個 scan，種子 {spec.seed}，"
-        f"最壞情況約 {hours:.1f} 小時，規格 sha256 {digest}\n"
+        f"最壞情況約 {hours:.1f} 小時，規格 sha256 {digest}；bench 的金鑰檔可用\n"
     )
+
+
+def _create_key() -> str:
+    path = key_file_path()
+    create_key_file(path)
+    return f"已建立 bench 的金鑰檔 {path}（0600）；請另外備份：遺失之後結果無法復原\n"
+
+
+def _seal_results(source: Path, name: str, root: Path) -> str:
+    keys = BenchKeys.load(key_file_path(), forbidden=(REPO_ROOT, root, source))
+    sealed = seal_legacy(source, root, name, keys)
+    return f"已加密成 {sealed}；原目錄 {source} 沒有改變，確認之後再自行處理\n"
 
 
 def _evaluate(arguments: argparse.Namespace) -> str:
     name = check_name(arguments.name)
-    batch = load_batch(arguments.results_root / name)
+    keys = BenchKeys.load(key_file_path(), forbidden=(REPO_ROOT, arguments.results_root))
+    batch = load_batch(arguments.results_root / name, keys)
     inputs: dict[str, Any] = {"ground_truth": {}, "adjudications": None, "pair_labels": None}
     truths = []
     for path in arguments.truth:

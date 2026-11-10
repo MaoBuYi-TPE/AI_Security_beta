@@ -86,3 +86,41 @@ def test_offline_mode_renders_sql_without_connection_or_password(
         "COMMIT;",
     ):
         assert expected in script
+
+
+def test_v0022_ciphertext_limits_match_the_domain() -> None:
+    """migration 寫死的密文上限必須等於 domain 由 max_sealed_blob_bytes 算出的值：否則 ORM 的
+    CHECK 會默默和 DB 不同，接近上限的報告或摘錄寫不進去（資料庫審查 M3）。"""
+    from secscan.findings.domain.triage import MAX_SEALED_EXCERPT_BYTES, ExcerptKind
+    from secscan.reports.domain.model import MAX_SEALED_REPORT_BYTES
+
+    migration = importlib.import_module("secscan.migrations.versions.v0022_sealed_content")
+
+    assert migration.MAX_SEALED_REPORT_BYTES == MAX_SEALED_REPORT_BYTES
+    assert MAX_SEALED_EXCERPT_BYTES[ExcerptKind.REQUEST] == migration.MAX_SEALED_REQUEST_BYTES
+    assert MAX_SEALED_EXCERPT_BYTES[ExcerptKind.RESPONSE] == migration.MAX_SEALED_RESPONSE_BYTES
+
+
+def test_migrations_refuse_shared_content_and_evidence_keys() -> None:
+    """make migrate 在主機上執行、三組金鑰都在：共用時停止（安全審查 L1）。"""
+    from cryptography.fernet import Fernet
+    from pydantic import SecretStr
+
+    from secscan.core.config import Settings
+    from secscan.migrations.keys import migration_content_keys
+
+    shared = Fernet.generate_key().decode()
+    settings = Settings(
+        app_env="test",
+        evidence_encryption_keys=SecretStr(shared),
+        content_encryption_keys=SecretStr(shared),
+    )
+
+    with pytest.raises(RuntimeError, match="有相同的金鑰"):
+        migration_content_keys(settings)
+    distinct = Settings(
+        app_env="test",
+        evidence_encryption_keys=SecretStr(Fernet.generate_key().decode()),
+        content_encryption_keys=SecretStr(shared),
+    )
+    assert migration_content_keys(distinct) == distinct.content_encryption_keys

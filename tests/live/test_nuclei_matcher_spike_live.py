@@ -9,7 +9,7 @@ import pytest
 from tests.live.lab_support import start_fixture, stop_target
 from tests.live.support import Api, admin_key
 from tests.live.test_fixture_nuclei_live import _finished, _scan, _web_lab
-from tests.live.zap_support import RUNS_VOLUME, volume_file, wait_for_zap
+from tests.live.zap_support import run_file, wait_for_zap
 
 pytestmark = [pytest.mark.live, pytest.mark.enable_socket]
 
@@ -26,7 +26,7 @@ def test_matcher_status_event_shapes_in_isolated_fixture() -> None:
         run_ids = {event["scanner_run_id"] for event in events if event["scanner_run_id"]}
         assert len(run_ids) == 1, (engine["status"], engine["error_code"])
         run_id = uuid.UUID(run_ids.pop())
-        report = volume_file(RUNS_VOLUME, f"{run_id}/out/results.jsonl")
+        report = run_file(str(run_id), "out/results.jsonl")
         assert report is not None, (engine["status"], engine["error_code"])
         events = [json.loads(line) for line in report.splitlines() if line.strip()]
         statuses = Counter(str(event.get("matcher-status", "missing")) for event in events)
