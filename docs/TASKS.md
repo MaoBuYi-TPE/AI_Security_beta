@@ -1563,8 +1563,15 @@
       - `benchmarks/results`：以本機的 bench 金鑰加密（manifest v2）；`make bench-key`、`make bench-seal`。
       - live 輔助程式改成等加密完成、以 `export-evidence` 讀原始輸出（`tests/live/evidence_assertions.py`），**未執行**。
       - 測試：S&T §4.3 的 KEY-01 至 05、SEAL-01 至 02、EVID-01 至 07、CONT-01 至 02、RET-01 至 02、ROT-01、BSEAL-01 至 03；六項空轉檢查都被抓到。使用者執行 `make env` 之前只在 db-test 上直接執行 pytest：審查修正之後 7269 passed、2 skipped、78 deselected（live），coverage 99.08%；branch：`blob_cipher` 72/72、`runner/evidence` 42/46、`keeper` 52/56、`worker/retention` 6/6、`benchmarks/sealing` 33/34。**這不是完整的 `make test`**。
-    - 審查（opus）：程式碼 2 HIGH＋1 MEDIUM＋4 LOW、安全 1 HIGH＋2 MEDIUM＋6 LOW、資料庫 3 MEDIUM＋10 LOW，沒有 CRITICAL；兩個 HIGH 兩份審查都有找到（runs volume 不存在時誤記成 none、孤兒目錄的加密檔解不開讓 keeper 的執行緒結束），都已修正。處理與不處理的理由見 `DECISIONS.md` §30.11。**待使用者決定**：單一 run 超過目錄樹的上限時，是否改成單一 run 的隔離狀態、不阻擋全域的認領（目前維持全域 fail closed）。
-    - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
+    - 審查（opus）：程式碼 2 HIGH＋1 MEDIUM＋4 LOW、安全 1 HIGH＋2 MEDIUM＋6 LOW、資料庫 3 MEDIUM＋10 LOW，沒有 CRITICAL；兩個 HIGH 兩份審查都有找到（runs volume 不存在時誤記成 none、孤兒目錄的加密檔解不開讓 keeper 的執行緒結束），都已修正。處理與不處理的理由見 `DECISIONS.md` §30.11。單一 run 超過目錄樹的上限時的處理，使用者決定改成方案 B（下一項）。
+    - 2026-11-09／10：使用者選擇方案 B 並給了五個條件（N = 3、fail-closed、故障隔離、可觀測性、人工復原），核准細部計畫（離線的程式、測試、文件、審查、PR 與合併；不包含 Live、修改 `.env`、`make bench-key`、修改或清除既有的金鑰）。實作（同一個分支，`DECISIONS.md` §30.12）：
+      - 同一個目錄連續 3 次因為深度或條目數超過上限而加密失敗，keeper 寫入 `evidence_holds`（migration v0023）與 audit `evidence.hold`，之後跳過這個目錄、恢復健康，其他 run 照常認領；明文保留原狀，不會被記成已加密。
+      - API：`engines[].evidence.status` 新增 `manual_intervention_required`，新欄位 `engines[].evidence.hold`；`retention-status` 新增需要人工處理的段落（數量、錯誤代碼、最早的 10 個目錄名稱）。
+      - 人工復原：`secscan-admin retry-evidence`（runner 容器內；先寫 audit、以較高的上限加密、驗證通過才在同一個 transaction 寫入 sealed 的 `run_evidence` 與解除）。沒有不加密就解除或刪除目錄的指令。
+      - 連帶修正：清除時先逐一刪除 `sealed/`，以較高上限加密的目錄也能清除；退避拆到 `runner/backoff.py`，次方加上上限。
+      - 測試：S&T §4.3 的 EVID-08、EVID-09；七項空轉檢查都被抓到。使用者執行 `make env` 之前只在 db-test 上直接執行 pytest：審查修正之後 7352 passed、2 skipped、78 deselected（live），coverage 99.04%；keeper 98%、backoff 100%、`scans/evidence_holds` 100%、`sealed_files` 94%、`fs` 95%、`cli/evidence_holds` 95%（statement＋branch）。**這不是完整的 `make test`**。
+      - 審查（opus）：程式碼 1 MEDIUM＋1 LOW、安全 2 MEDIUM＋5 LOW、資料庫 2 MEDIUM＋6 LOW，沒有 CRITICAL 或 HIGH。已修正：keeper 依 DB 清掉已隔離的退避項目、`run_evidence` 也由 DB 拒絕隔離中的 run（deferred constraint trigger 與交易鎖）、時間由 DB 決定、trigger 每個分支的測試、路徑總長度的上限、`resolve` 先鎖住隔離、加密後 DB 失敗的結果 audit、理由的 UTF-8 檢查、顯示以隔離優先；十項空轉檢查都被抓到。處理與不處理的理由見 `DECISIONS.md` §30.12。**待使用者決定**：隔離時的熔斷（和條件 3 衝突）、路徑總長度超過上限是否也隔離、隔離時是否收緊權限。
+    - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`（含方案 B）；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。

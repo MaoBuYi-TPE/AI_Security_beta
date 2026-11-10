@@ -428,6 +428,8 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 | EVID-05 | 加密之後整個目錄的位元組中沒有明文的 canary；孤兒目錄先加密才清除；probe 的目錄評估完就刪除 | unit：runner/test_evidence_vault；integration：evidence_keeper、runner_loop_probe |
 | EVID-06 | keeper：每輪的時間與數量上限、停止、例外（變成不健康）、停擺判斷、換版中拿不到 lock 也算不健康；不阻擋主迴圈的心跳；`--once` 結束時不健康就 exit 1 | unit：runner/test_keeper；integration：runner_loop、runner_cli |
 | EVID-07 | API 的 `engines[].evidence`、artifact 的 `encrypted`／`purged_at` 如實反映狀態；`export-evidence` 先驗證、寫 audit 才輸出，解密之後和 artifact 的 sha256 相符；解不開時不輸出任何內容 | integration：evidence_keeper、evidence_cli、finding_provenance_api |
+| EVID-08 | 隔離（`DECISIONS.md` §30.12）：同一個目錄連續 3 次因為深度或條目數超過上限而加密失敗才隔離，2 次不會；中間有其他種類的失敗就重新計數、成功就清除；其他種類的失敗、清除時的失敗、runs volume 的目錄數量超過上限都不會隔離；孤兒目錄也會隔離；寫入隔離紀錄失敗時維持不健康、之後重試；隔離後下一輪恢復健康、其他 run 照常加密，之後每一輪（含重啟的 keeper）都跳過這個目錄；明文保留原狀（canary 還在）；API 顯示 `manual_intervention_required`、`hold` 與 `encrypted: false`；audit `evidence.hold`；log 不含路徑；退避的次方有上限；隔離已 commit、回應卻遺失時，下一輪依 DB 清掉退避、恢復健康；路徑總長度超過上限是一般的失敗、不隔離 | unit：runner/test_backoff、test_keeper_holds、test_fs、test_evidence_vault、scans/test_evidence_hold；integration：evidence_holds |
+| EVID-09 | DB 與人工復原：trigger 只允許已終止、容器已刪除、沒有 `run_evidence` 的 run，或沒有 run 紀錄的孤兒目錄被隔離；新的隔離不能已解除；`resolved_at` 只能寫一次，run 必須已有 sealed（不是 none）的紀錄，同時改其他欄位被拒；`held_at`、`resolved_at` 由 DB 決定；隔離中的 run 新增 none 或 sealed 的 `run_evidence` 在 commit 時被拒，兩邊以交易鎖串行化（`lock_timeout` 確認會等）；外鍵的 scan 必須相符；其他修改、DELETE、TRUNCATE 被拒；5 個 CHECK，錯誤代碼的清單和 domain 一致；有紀錄時拒絕 downgrade。第二次解除得到 `HoldNotActiveError`。`retry-evidence`：沒有隔離時 exit 1、沒有任何改變；audit 寫不進去就不開始；等不到鎖時不動檔案；仍然超過上限時保留隔離與明文、寫 audit；指定較高的上限之後 `run_evidence` 是 sealed、隔離已解除、audit 完整，之後照常到期清除；孤兒目錄；目錄不存在時不記成 none；加密之後 DB 寫入失敗時寫入結果的 audit（`EVIDENCE_SEALED_NOT_RECORDED`），再執行一次就完成；參數的範圍與理由的檢查（含無法以 UTF-8 表示的字元）。API 的顯示以還沒解除的隔離優先。retention-status 的數量、錯誤代碼與目錄名稱（不含路徑）。`sealed/` 超過條目上限的目錄可以清除，其中有子目錄時 fail closed | integration：evidence_holds、evidence_retry、migrations、schema_constraints；unit：runner/test_evidence_vault |
 | CONT-01 | DB 中報告與摘錄的位元組沒有明文的 canary；下載與 triage-events 解密正確；把別的報告或摘錄的密文搬過來時回 500、不送出內容 | integration：sealed_content、reports_api |
 | CONT-02 | v0022：降到 0021 塞入舊格式的列再升級 → 舊明文被加密、期限是升級時間加 30 天；有舊資料而缺金鑰、舊內容和 sha256 不符時停止且資料不變；沒有舊資料時不需要金鑰；`--sql` 模式拒絕舊資料；有密文時拒絕 downgrade | integration：content_migration、migrations |
 | RET-01 | 只清除到期的：run 目錄（7 天）、報告內容（410、配額不計、重送照舊）、摘錄（tombstone、事件不變）；時間可注入 | integration：evidence_keeper、sealed_content |
@@ -730,7 +732,7 @@ T31 的 manifest（`DECISIONS.md` §29.3）記錄規格的 sha256、種子與實
 4. **掃描容器的 json-file log** 在容器刪除之前可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
 5. **保持現狀的明文**：`observations` 中遮罩過的證據（含 Nuclei 擷取的 email 與卡號）、guard telemetry 的路徑（tmpfs、6 小時）、摘錄沒有加 salt 的雜湊；報告與摘錄下載的回應是明文（TLS 由部署負責）。
 6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 交給 T34。
-7. **單一 run 可以讓整個平台停止認領**：掃描容器建立超過深度（32）或條目數（20,000）上限的目錄樹時，keeper 對這個 run 永遠失敗；退避讓其他 run 仍會加密，但 runner 不認領新的 run，直到操作者手動處理。改成單一 run 的隔離狀態需要使用者決定（`DECISIONS.md` §30.11）。
+7. **超過上限的單一目錄**（使用者決定方案 B，`DECISIONS.md` §30.12）：keeper 連續 3 次失敗之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄保留明文直到有人以 `retry-evidence` 處理（隔離幾乎代表掃描器異常或被攻陷，沒有熔斷；是否加上熔斷待使用者決定）；計數只在記憶體中（重啟會重新計數，`runner --once` 不會隔離）；超過深度 64、條目 50,000 或路徑總長度 8M 字元的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密；runs volume 的目錄數量超過上限、路徑總長度超過上限、清除失敗與其他種類的加密失敗仍然全域 fail closed。
 8. **runner 指到可寫、但不是 runs volume 的目錄**時，找不到目錄的 run 仍會被記成 none（DB 分不出「從來沒有目錄」與「目錄不見了」）。
 9. **金鑰在主機上**：`.env`（600）與家目錄中的 bench 金鑰檔；遺失之後尚未清除的資料都無法復原，備份由使用者負責。
 

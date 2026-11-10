@@ -362,6 +362,7 @@ ExecutionPlan 只能包含：
 | observations | id、scan_id、scanner_run_id、ordinal、source_event_id、source_index、source_rule、rule_variant、title、raw_severity、severity_label、raw_confidence、confidence_label、CWE、WASC、method、path、query、parameter 與位置、attack、evidence、other_info（遮罩並截斷）、auth_role、report_artifact_id、parser_version（T15 新增；T19 不加欄位，連結在 finding_observations，`DECISIONS.md` §25.2） |
 | artifacts | id、scanner_run_id、scan_id、kind（input/output）、path、sha256、size、redactions、classification、encrypted、storage_key（T15 新增；`encrypted` 是從來沒有寫入過的舊欄位，API 的 `encrypted` 改由 `run_evidence` 推導，T23a） |
 | run_evidence | scanner_run_id（主鍵）、scan_id、status（none／sealed／purged；沒有紀錄是 pending）、file_count、plaintext_bytes、sealed_at、purged_at、recorded_at；只有已終止、容器已確認刪除的 run 能新增；只允許 sealed → purged 一次（T23a，v0021） |
+| evidence_holds | directory（主鍵，runs volume 的目錄名稱）、scanner_run_id、scan_id（只有 run 的目錄有；孤兒目錄是 NULL）、error_code（`EVIDENCE_TREE_TOO_DEEP`／`EVIDENCE_TREE_TOO_MANY_ENTRIES`）、attempts、held_at、resolved_at；keeper 連續 3 次超過上限時新增（run 必須已終止、容器已刪除、還沒有 run_evidence）；`resolved_at` 只能寫一次，run 必須已有 sealed 的 run_evidence；不能刪除（T23a 方案 B，v0023，`DECISIONS.md` §30.12） |
 | reports | id、project／target／scan、format（json/markdown；P1 加 sarif）、status、queue_position、idempotency_key 與 request_sha256、attempts、lease 欄位、error_code、data_as_of、generated_at、size_bytes、sha256（明文的值）、truncated、omitted_findings、expires_at、content_purged_at；同時是 worker 的工作佇列（T21，v0018；到期與清除在 T23a，v0022） |
 | report_contents | report_id、content（T23a 起是 Fernet token、context `report:<id>`；只允許換版與報告清除之後刪除）（T21，v0018；T23a，v0022） |
 | finding_triage_events | (finding_id, sequence)、actor（key 或 system）、前後的 triage 與 lifecycle、reason_code、reason、comparison_id、resolution_basis、系統重開的 run 與 scan、evidence（白名單鍵）；append-only（T21，v0017） |
@@ -435,6 +436,7 @@ JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但�
 - **T21（migration `0017`–`0019`）**：triage 的版本與事件、人工複測摘錄（0017）；reports 與 report_contents（0018）；auth profile 的停用與全域稽核的索引（0019）。findings 的 `findings_guard` 改版為只允許版本恰好 +1 的 triage 變更（`DECISIONS.md` §28）。
 - **T23a（migration `0021`、`0022`，`DECISIONS.md` §30.3、§30.4）**：
   - 0021：`run_evidence` 與它的 trigger（新增只能是 none 或 sealed、run 必須已終止而且容器已確認刪除；只允許 sealed → purged 一次；不能刪除或 TRUNCATE）；既有資料不回填。有 sealed 的紀錄時拒絕 downgrade。
+  - 0023（方案 B，§30.12）：`evidence_holds` 與它的 trigger（新增、只能一次的解除、時間由 DB 決定、不能刪除或 TRUNCATE），5 個 CHECK、部分索引 `ix_evidence_holds_active`；`run_evidence` 加上 deferred constraint trigger `run_evidence_hold_check`（隔離中的 run 不能有紀錄，除非同一個 transaction 中解除），兩邊以 run 為鍵的交易鎖串行化；有任何紀錄時拒絕 downgrade。0021、0022 不變。
   - 0022：reports 加上 `expires_at` 與 `content_purged_at`；`report_contents` 與摘錄改用各自的 guard function（只允許換版與到期之後的清除）、內容的 CHECK 改成 Fernet token；摘錄以 `sealed_content` 取代 `content`。既有的明文在同一個 transaction 中加密、期限是升級時間加 30 天；只有存在舊資料時才需要內容金鑰，金鑰由 `migrations/env.py` 從設定放進 `config.attributes`；`--sql` 模式遇到舊資料就報錯；有密文時拒絕 downgrade。這個 migration import 加密元件，是「migration 不 import 應用程式的程式」的例外。
 
 ## 7. ScanPlan 與執行快照
@@ -697,6 +699,7 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 - 加密檔：每個原本的檔案一個，檔名是原本相對路徑的 sha256；分塊的 Fernet（每塊 1 MiB），標頭與每一塊綁定 `evidence:<run_id>`、原本的路徑、塊的序號與最後一塊旗標。先寫暫存檔、fsync、rename、串流解密核對 sha256，才刪除明文；任何一步失敗都保留明文、API 顯示 pending、runner 不認領新的 run。
 - 沒有 `scanner_runs` 紀錄的孤兒目錄超過 1 小時沒有變動才加密，絕不在未加密時刪除；probe 的目錄評估完就刪除。
 - 需要讀原始輸出時，只能在 runner 容器內以 `secscan-admin export-evidence` 解密到 stdout（先寫 audit），沒有 API。
+- 超過深度（32）或條目數（20,000）上限的單一目錄（§30.12）：keeper 在記憶體中計算連續的上限失敗（`runner/backoff.py`），第 3 次寫入 `evidence_holds` 與 audit，之後跳過這個目錄、不再算不健康，其他 run 照常認領；明文保留原狀，API 顯示 `manual_intervention_required`。操作者在 runner 容器內以 `secscan-admin retry-evidence` 用較高的上限（深度 64、條目 50,000 以內）重試，加密驗證通過才解除（同一個 transaction 寫入 sealed 的 `run_evidence`）。清除時先逐一刪除 `sealed/`，以較高上限加密的目錄也能清除。走訪另有路徑總長度的上限（8M 字元），整棵樹列在記憶體中時不會超過 runner 的記憶體上限。
 
 **報告內容**：
 

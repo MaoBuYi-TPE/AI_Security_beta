@@ -367,16 +367,17 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 T23a 的離線實作已完成，**Live 尚未執行，T23a 與 SEC-14 都不標完成**。設計見 `docs/DECISIONS.md` §30，測試見 `docs/SECURITY_AND_TESTING.md` §4.3 的 KEY／SEAL／EVID／CONT／RET／ROT／BSEAL 表，剩餘風險見同一份文件的 §8。
 
 - **原始證據（runs volume）是 run 結束之後才加密，不是全程靜態加密**：掃描、收集與等待解析期間是明文。run 結束（解析完成、失敗或逾期）、容器確認刪除之後，runner 的背景執行緒在約 10–20 秒內把目錄加密成 `sealed/`、驗證之後才刪除明文，7 天後刪除整個目錄。worker 停擺時，等待解析超過 60 分鐘的 run 以 `PARSE_DEADLINE_EXCEEDED` 結束並加密。加密失敗時明文保留、API 顯示 `pending`，runner 不認領新的 run（`GET /api/v1/scanners` 顯示 `EVIDENCE_SEALING_FAILED`）。
-- **API**：`GET /api/v1/scans/{id}` 的 `engines[].evidence`（none／pending／sealed／purged）；finding 來源追溯的 artifact 有 `encrypted`、`purged_at`。原始輸出沒有下載 API。
+- **API**：`GET /api/v1/scans/{id}` 的 `engines[].evidence`（none／pending／sealed／purged／manual_intervention_required，以及隔離紀錄 `hold`）；finding 來源追溯的 artifact 有 `encrypted`、`purged_at`。原始輸出沒有下載 API。
 - **報告與摘錄**：寫入 DB 之前加密，30 天後清除內容：報告下載回 410 `REPORT_EXPIRED`，摘錄的 `content` 變成 null；metadata 與 sha256 保留。
-- **升級**：`make migrate`（v0021、v0022）之前先 `make down` 停 api、worker 與 runner，再以 `make db-up` 只啟動資料庫（v0021 建立外鍵時會鎖住 `scanner_runs`，兩個 migration 在同一個 transaction 中執行）。既有的報告與摘錄在升級時加密，期限是升級時間加 30 天。
+- **升級**：`make migrate`（v0021、v0022、v0023）之前先 `make down` 停 api、worker 與 runner，再以 `make db-up` 只啟動資料庫（v0021 建立外鍵時會鎖住 `scanner_runs`，兩個 migration 在同一個 transaction 中執行）。既有的報告與摘錄在升級時加密，期限是升級時間加 30 天。
 - **保留期限**（1–365 天，`.env` 中可調整）：`EVIDENCE_RETENTION_DAYS`（預設 7）、`REPORT_RETENTION_DAYS`（30）、`EXCERPT_RETENTION_DAYS`（30）；`EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60）是等待解析的上限。既有的資料從升級之後才開始計時，升級不會立刻刪除任何東西。刪除只是 unlink，不抹除磁碟的資料區塊；DB 的 WAL 與備份會保留舊資料。
 - **管理指令**（`docs/API_CONTRACT.md` §20）：
   - `uv run secscan-admin check-encryption-keys`：檢查三組金鑰合法、互不共用，只顯示數量。
-  - `uv run secscan-admin retention-status`：各狀態的數量（唯讀）。
+  - `uv run secscan-admin retention-status`：各狀態的數量，以及需要人工處理的目錄（數量、錯誤代碼、最早的 10 個目錄名稱；唯讀）。
   - `uv run secscan-admin rotate-content-keys`：報告與摘錄的換版。
   - `docker compose --profile app exec runner secscan-admin rotate-evidence-keys`：原始證據的換版（只有 runner 容器有這組金鑰）。
   - `docker compose --profile app exec runner secscan-admin export-evidence --run <id> [--path <路徑>]`：break-glass，列出加密檔，或先寫 audit 再把一個檔案的明文寫到 stdout。
+  - `docker compose --profile app exec runner secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> [--max-depth N] [--max-entries N]`：人工處理 `retention-status` 列出的「需要人工處理」目錄（超過深度或條目數的上限、連續 3 次加密失敗而被隔離，明文保留）；先寫 audit，以指定的上限（最多深度 64、條目 50,000）加密，驗證通過才解除隔離。沒有不加密就解除或刪除目錄的指令（`docs/DECISIONS.md` §30.12）。
 - **換版**：新金鑰放在那一組的最前面（逗號分隔）→ 重啟持有它的容器 → 執行換版 → 移除舊金鑰、重啟 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。
 - **bench 結果**：`make bench-key` 建立本機的金鑰檔（預設 `~/.config/secscan/bench-keys`，可用 `BENCH_KEY_FILE` 指定；不可放在 repo 中；已經存在就失敗、不覆寫）。之後 `make bench` 寫出的每個檔案都是 `<名稱>.sealed`，`bench-evaluate` 先核對 `SHA256SUMS`、解密、再核對明文的 sha256 才評估。T23a 之前的明文結果目錄以 `make bench-seal BENCH_SOURCE=<原目錄> BENCH_NAME=<新名稱>` 轉成新的加密目錄，原目錄不修改也不刪除。**金鑰檔遺失之後結果無法復原，請另外備份。**
 

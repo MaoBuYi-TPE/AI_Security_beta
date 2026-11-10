@@ -2842,9 +2842,9 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 **fail-closed（使用者要求：加密失敗不能靜默略過，也不能誤報成已受保護）**：
 - **runs volume 必須存在而且可寫**（§30.11）：每個操作都先開啟 runs volume 的根目錄（開不了就是錯誤），run 的目錄以根目錄的 dir fd 開啟；keeper 每一輪加密與清除之前先確認可寫。主機上執行、volume 沒有掛上時，找不到 run 的目錄不會被記成 none、到期的也不會被記成 purged。
 - **先驗證才刪除**：寫進 `sealed/` 的暫存檔（`.sealing-<隨機>`，O_EXCL）→ fsync → rename → 串流解密，核對原本的路徑、大小與 sha256 → fsync `sealed/`（目錄項目落盤）→ 才刪除明文 → 全部完成之後 fsync run 的目錄。任何一步失敗都保留明文、不寫入 `run_evidence`，API 如實顯示 `pending`；加密之後 sealed/ 之外仍有條目也算失敗。以故障注入（rename、fsync、fchmod、驗證失敗或不符）與「刪除每個明文時它的加密檔已驗證過」的測試確認（EVID-02）。
-- **加密失敗或 keeper 停止**：任何一個 run 失敗都繼續處理其他 run，但這一輪就不健康；任何例外都不會讓執行緒結束（非預期的例外只記類別）；失敗的 run 與孤兒退避（20 秒起倍增，最多 10 分鐘），不會每一輪重試、佔滿批次而讓其他 run 等不到加密，還在退避的仍算不健康；正常停止時保留最後一輪的結果（§30.11）。不健康、執行緒停止、停擺（三輪的時間沒有完成一輪）或換版中（拿不到 advisory lock）時，runner 以新的 `CapabilityIssue.EVIDENCE_SEALING_FAILED` 把可用的引擎設成空的，不認領新的 run（比照 guard 停擺的 `require_guard`；執行中的 run 照常完成），`GET /scanners` 與 `/scan-profiles` 顯示原因。一輪沒有任何失敗之後才恢復。`--once` 結束時 keeper 不健康就 exit 1。log 只記 run_id 與錯誤的種類，不記路徑或內容；`retention-status` 列出積壓。
+- **加密失敗或 keeper 停止**：任何一個 run 失敗都繼續處理其他 run，但這一輪就不健康；任何例外都不會讓執行緒結束（非預期的例外只記類別）；失敗的 run 與孤兒退避（20 秒起倍增，最多 10 分鐘），不會每一輪重試、佔滿批次而讓其他 run 等不到加密，還在退避的仍算不健康；正常停止時保留最後一輪的結果（§30.11）。不健康、執行緒停止、停擺（三輪的時間沒有完成一輪）或換版中（拿不到 advisory lock）時，runner 以新的 `CapabilityIssue.EVIDENCE_SEALING_FAILED` 把可用的引擎設成空的，不認領新的 run（比照 guard 停擺的 `require_guard`；執行中的 run 照常完成），`GET /scanners` 與 `/scan-profiles` 顯示原因。一輪沒有任何失敗之後才恢復。`--once` 結束時 keeper 不健康就 exit 1。log 只記 run_id 與錯誤的種類，不記路徑或內容；`retention-status` 列出積壓。**例外（§30.12）**：同一個目錄連續 3 次因為深度或條目數超過上限而加密失敗，就隔離成「需要人工處理」，不再阻擋其他 run 的認領；隔離的目錄保留明文、不會被記成已加密，等待 `retry-evidence`。
 - **中斷恢復**：sealed/ 中殘留的 `.sealing-*`、`.rotating-*` 是不完整的密文，直接刪除；run 目錄的 `.masking-*` 是收集時只遮罩了一部分的明文暫存檔（不是證據），也直接刪除。加密到一半的目錄可以重複執行：加密檔的名稱由原本的路徑決定，rename 之後、刪除明文之前中斷時，下一輪重做同一個檔案並取代同一個加密檔，不會多一份。
-- **哪些東西會被加密**：一般檔案不論 link 數都加密（hardlink 只刪除 run 目錄中的這一個 link）；symlink 與特殊檔案不跟隨、直接刪除；完成之後刪掉空的子目錄。掃描容器和 runner 是同一個 uid，可以把 `out/` 或檔案改成 000：走訪時先補回擁有者的權限（容器已確認刪除、worker 只能唯讀，期間沒有其他程序改這棵樹；§30.11）。走訪有深度（32）與條目數（20,000）的上限，超過就 fail closed。
+- **哪些東西會被加密**：一般檔案不論 link 數都加密（hardlink 只刪除 run 目錄中的這一個 link）；symlink 與特殊檔案不跟隨、直接刪除；完成之後刪掉空的子目錄。掃描容器和 runner 是同一個 uid，可以把 `out/` 或檔案改成 000：走訪時先補回擁有者的權限（容器已確認刪除、worker 只能唯讀，期間沒有其他程序改這棵樹；§30.11）。走訪有深度（32）與條目數（20,000）的上限，超過就 fail closed；同一個目錄連續 3 次超過上限就隔離（§30.12）。
 
 **加密檔的格式**（`security/blob_cipher.py`）：
 - 一個 run 目錄加密之後只剩 `sealed/`：每個原本的檔案各一個加密檔，檔名是原本相對路徑的 sha256（計畫第一版寫「以序號命名」；改成路徑的 sha256：一樣避免 ENAMETOOLONG，而且讓重做可以取代同一個檔案）。原本的路徑寫在已驗證的標頭中；超過 4,096 bytes 時改記 `overlong-path/<sha256>`。
@@ -2853,7 +2853,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 
 **DB（migration v0021）**：`run_evidence`（主鍵 `scanner_run_id`，以 `(scanner_run_id, scan_id)` 引用 `scanner_runs`）：`status`（none／sealed／purged）、`file_count`、`plaintext_bytes`、`sealed_at`、`purged_at`、`recorded_at`；CHECK 狀態與時間、數量一致；部分索引 `ix_run_evidence_sealed`。trigger：新增只能是 none 或 sealed，而且 run 必須已終止、容器已確認刪除；修改只允許 sealed → purged 一次，其他欄位完全不變；刪除與 TRUNCATE 一律拒絕。既有的資料不回填（升級之後 keeper 分批加密既有的 run 目錄，第一次加密時才開始計算 7 天）。downgrade：已經有 sealed 的紀錄時拒絕。
 
-**API**：`engines[].evidence` 列出 `status`（none／pending／sealed／purged，沒有紀錄是 pending）、`sealed_at`、`purged_at`；finding 來源追溯的 artifact metadata 的 `encrypted` 改由 `run_evidence` 推導（sealed、purged 是 true），另加 `purged_at`。DB 的 `artifacts.encrypted` 不改，是從來沒有寫入過的舊欄位。
+**API**：`engines[].evidence` 列出 `status`（none／pending／sealed／purged，沒有紀錄是 pending；§30.12 加上 manual_intervention_required）、`sealed_at`、`purged_at`、`hold`（§30.12）；finding 來源追溯的 artifact metadata 的 `encrypted` 改由 `run_evidence` 推導（sealed、purged 是 true），另加 `purged_at`。DB 的 `artifacts.encrypted` 不改，是從來沒有寫入過的舊欄位。
 
 ### 30.4 報告內容與人工複測摘錄（DB，CONTENT 金鑰）
 
@@ -2926,7 +2926,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 4. **掃描容器的 json-file log**：在容器刪除之前，可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
 5. **其他保持現狀的明文**：`observations` 保留遮罩過的證據，包含 Nuclei 擷取的 email 與卡號；guard telemetry 的路徑以明文存在 tmpfs，保留 6 小時；摘錄的雜湊沒有加 salt，留在不可變的事件中（T21 的設計）；報告與摘錄在 API 的記憶體中解密，下載的回應是明文（TLS 由部署負責）。
 6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 中的明文交給 T34（使用者決定之前不修改或刪除）。
-7. **單一 run 可以讓整個平台停止認領**（安全審查 M1，§30.11）：掃描容器在 `out/` 建立超過深度（32）或條目數（20,000）上限的目錄樹時，keeper 對這個 run 永遠失敗；退避讓其他 run 仍會加密，但 keeper 一直不健康，runner 不認領新的 run，直到操作者手動處理那個目錄。這是 fail closed 的取捨；「把單一 run 改成需要人工處理的隔離狀態、不阻擋全域」改變了核准的語意，交給使用者決定（§30.11 的待決定事項）。
+7. **超過上限的單一目錄**（安全審查 M1，§30.11；使用者決定方案 B，§30.12）：掃描容器在 `out/` 建立超過深度（32）或條目數（20,000）上限的目錄樹時，keeper 連續 3 次失敗（約一分鐘）之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄**保留明文直到有人處理**（系統不會自動加密或刪除，`retention-status` 一直列出；隔離幾乎代表掃描器異常或被攻陷，沒有熔斷）；計數只在記憶體中（runner 重啟會重新計數，`runner --once` 永遠不會隔離）；超過 `retry-evidence` 上限（深度 64、條目 50,000、路徑總長度 8M 字元）的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密。runs volume 的目錄數量超過上限、路徑總長度超過上限、清除失敗與其他種類的加密失敗（例如磁碟滿）仍然全域 fail closed。完整清單與待決定事項見 §30.12。
 8. **runner 指到可寫、但不是 runs volume 的目錄**（例如主機上手動建立的空目錄）時，keeper 仍會把找不到目錄的 run 記成 none。DB 分不出「從來沒有目錄」與「目錄不見了」（容器名稱在建立工作目錄之前就寫入），所以沒有以 DB 判斷（§30.11）。
 9. **金鑰在主機上**：`.env` 是唯一的設定來源，三組金鑰都在裡面（600）；bench 的金鑰檔在使用者的家目錄。金鑰遺失之後，尚未清除的證據、報告、摘錄與 bench 結果都無法復原；備份金鑰由使用者負責。
 
@@ -2993,8 +2993,95 @@ HIGH 的剩餘部分：runner 指到一個可寫、但不是 runs volume 的目�
 | 逾期查詢用不到部分索引；到期清除沒有索引；沒有 collected 事件的 run 永遠不逾期（資料庫 L9） | 查詢加上 `lease_owner IS NOT NULL`；新增 `ix_reports_expiry`、`ix_finding_triage_excerpts_expiry`；沒有 collected 事件時以 run 建立的時間起算 |
 | `record()` 先查再新增（資料庫 L10） | 改成 `INSERT … ON CONFLICT DO NOTHING RETURNING` |
 
-**待使用者決定**：單一 run 可以讓整個平台停止認領（安全 M1 未處理的部分，§30.9 第 7 項）。可選的方向：
-- A（目前的做法）：維持全域 fail closed，由操作者手動處理那個目錄。
-- B：同一個 run 失敗 N 次之後，轉成明確的「需要人工處理」狀態，在 API 與 `retention-status` 顯示，不再阻擋其他 run 的認領；仍然不是靜默略過，但會讓「加密失敗時 runner 不認領」只限於還在重試的 run。需要新的 `run_evidence` 狀態（migration）與 API 欄位。
+**使用者的決定（2026-11-09）**：單一 run 可以讓整個平台停止認領（安全 M1 未處理的部分，§30.9 第 7 項）。可選的方向是 A（維持全域 fail closed，由操作者手動處理那個目錄）與 B（同一個 run 失敗 N 次之後轉成明確的「需要人工處理」狀態，不再阻擋其他 run 的認領）。使用者選擇 **B**，並給了五個實作條件；實作見 §30.12（狀態放在新的 `evidence_holds`，不是 `run_evidence`）。
 
-在使用者決定之前維持 A。
+### 30.12 超過上限的單一目錄改成「需要人工處理」（方案 B；使用者，2026-11-09）
+
+**使用者的條件**（原文）：
+1. N = 3 次：同一個 run 因目錄深度超過 32 或條目超過 20,000 而連續加密失敗 3 次，就進入 manual_intervention_required 狀態。
+2. Fail-closed：該 run 的未加密證據不得透過正常 API 提供，也不得被當成成功完成。
+3. 故障隔離：keeper 跳過被隔離的 run，其他正常 run 繼續認領。
+4. 可觀測性：新增 Migration 與 API 欄位，並在 retention-status 顯示待人工處理數量、錯誤代碼及狀態。
+5. 人工復原：必須有明確、可稽核的處置與重新嘗試機制，不可自動把異常 run 標成成功或直接刪除未封存證據。
+
+**觸發與計數**（條件 1）：
+- 只有兩種原因會隔離：`EVIDENCE_TREE_TOO_DEEP`（深度超過 32）與 `EVIDENCE_TREE_TOO_MANY_ENTRIES`（條目超過 20,000）。`runner/fs.py` 超過上限時拋出 `TreeLimitError`（記下是哪一個上限），`sealed_files.guarded()` 轉成帶錯誤代碼的 `EvidenceLimitError`。runs volume 的目錄數量超過上限是整個 volume 的問題，維持一般的 `EvidenceError`（全域 fail closed）。
+- 「連續」：keeper 在記憶體中記下每個目錄連續的上限失敗（`runner/backoff.py`）：上限失敗加一、其他種類的失敗歸零、成功就清除。退避的間隔不變（20 秒起倍增），三次失敗大約在 T、T+20 秒、T+60 秒。隔離之前照舊不健康、不認領。
+- 計數的步驟：run 的加密，以及孤兒目錄的檢查與加密（不納入的話，一個孤兒目錄仍會讓整個平台停止認領）。**清除不計數**：已加密的目錄在清除時超過上限，代表被改過或環境有問題，維持全域 fail closed。
+- 計數只在記憶體中，和退避相同：runner 重啟會重新計數（只會延後隔離，不會提早）；`runner --once` 每次都是新的程序、最多兩輪，所以永遠不會隔離，照舊以 exit 1 結束。
+- N = 3 是常數 `HOLD_AFTER_FAILURES`（`scans/domain/evidence.py`），不做成設定。
+
+**隔離之後**（條件 2、3）：
+- keeper 在同一個 transaction 中新增 `evidence_holds` 一列，並寫 audit `evidence.hold`（actor 是 null；錯誤代碼、次數、run 或孤兒；run 的 audit 帶 project）。寫入成功之後這個目錄不再算退避中：第 3 次失敗的那一輪仍算失敗，下一輪恢復健康，`EVIDENCE_SEALING_FAILED` 消失，runner 恢復認領。寫入失敗（DB 錯誤或 trigger 拒絕）時算失敗、保留計數，下一次失敗時再寫一次；寫入成功之前維持 fail closed。log 是 ERROR，只有目錄名稱與錯誤代碼。
+- keeper 跳過隔離的目錄：`sealable` 在 SQL 中排除隔離的 run（runner 重啟之後也不會再試）；孤兒目錄以分批查詢跳過。keeper 不會自動重試、加密、清除或刪除隔離的目錄；明文保留原狀。
+- 隔離的 run 不會有 `run_evidence`，所以不會被記成 none、sealed 或 purged；DB 雙向強制：新增隔離時還沒有 `run_evidence`；新增 `run_evidence` 時（commit 時檢查）沒有還沒解除的隔離；解除時已有 sealed 的 `run_evidence`。API 顯示 `manual_intervention_required`，artifact 的 `encrypted` 照舊由 `run_evidence` 推導（false）。一般 API 本來就不提供原始輸出（T21 已移除下載）；`export-evidence` 只輸出加密檔，隔離的目錄沒有加密檔。
+
+**DB（migration v0023）**：`evidence_holds`（主鍵 `directory`，就是目錄名稱）：`scanner_run_id`、`scan_id`（只有 run 的目錄有，以 `(scanner_run_id, scan_id)` 引用 `scanner_runs`）、`error_code`、`attempts`、`held_at`、`resolved_at`。5 個 CHECK（run 的兩個欄位同時有或同時沒有、`scanner_run_id = directory`、錯誤代碼的清單、次數至少 1、解除不早於隔離）；部分索引 `ix_evidence_holds_active`。trigger `evidence_holds_guard`：新增時還沒解除，run 必須已終止、容器已確認刪除、還沒有 `run_evidence`，孤兒目錄不能是已知的 run；修改只允許 `resolved_at` 寫入一次（其他欄位以 `to_jsonb` 比對不變），run 必須已有 sealed 的 `run_evidence`；`held_at` 與 `resolved_at` 一律由 trigger 以 `clock_timestamp()` 寫入，不採用用戶端的值；刪除與 TRUNCATE 一律拒絕。反方向：`run_evidence` 加上 deferred constraint trigger `run_evidence_hold_check`，commit 時這個 run 還有沒解除的隔離就拒絕（`retry-evidence` 在同一個 transaction 中先寫入 sealed 的紀錄、再解除，commit 時已解除）；新增隔離與新增 `run_evidence` 都先取得以 run 為鍵的交易層級 advisory lock（兩個 int4 的鍵，和 keeper 的 bigint 鍵不重疊），兩者不會同時 commit 而都看不到對方。downgrade 依讀取端的順序鎖住 `scanner_runs`、`run_evidence`、`evidence_holds`，有任何紀錄就拒絕。`run_evidence` 的欄位、CHECK 與 v0021 的 trigger 都不變；v0022 不變。升級時同樣先停 api、worker 與 runner（外鍵鎖住 `scanner_runs`）。
+
+**API 與 retention-status**（條件 4）：
+- `engines[].evidence.status` 依序判斷：有還沒解除的隔離是 `manual_intervention_required`（fail closed 的顯示：DB 不允許兩者並存，萬一出現也不顯示成已加密）；否則有 `run_evidence` 用它的狀態；都沒有是 `pending`。新欄位 `engines[].evidence.hold`：從來沒有隔離是 null，否則是 `{error_code, attempts, held_at, resolved_at}`，解除之後保留。
+- `retention-status` 新增一段：需要人工處理的 run 與孤兒目錄數量、各錯誤代碼的數量、已人工處理的數量，以及最多 10 筆最早的隔離（目錄名稱、run 或孤兒、錯誤代碼、次數、隔離時間；不含路徑或內容）。「已終止但未加密」不再包含隔離的 run。仍是唯讀、exit 0。
+- `GET /scanners` 不變：隔離之後引擎恢復可用。
+
+**人工復原：`secscan-admin retry-evidence`**（條件 5；在 runner 容器內執行）：
+- `--directory <目錄名稱> --reason <理由> [--max-depth 32 到 64] [--max-entries 20,000 到 50,000]`。目錄名稱必須是標準 UUID；理由必填（單行、最多 200 字），寫進 audit。
+- 和 keeper 以同一個 advisory lock 互斥（等鎖的迴圈和 `rotate-evidence-keys` 共用）。流程：沒有還沒解除的隔離就 exit 1、不做任何改變 → 先寫 audit `evidence.retry`（上限與理由），寫不進去就不開始 → 以指定的上限加密（同一條「先驗證才刪除」的路徑）→ 成功時在同一個 transaction 寫入 sealed 的 `run_evidence`（只有 run 的目錄）、`resolved_at` 與 audit `evidence.resolve`，之後照常保留 7 天再清除 → 失敗時（仍然超過上限、其他錯誤、目錄不存在）寫 audit `evidence.retry_failed`，隔離不變、明文保留原狀、exit 1；目錄不存在不會記成 none。加密完成、DB 寫入失敗時提示再執行一次（加密可以重複執行）。
+- **上限的上限**：整棵樹會列在記憶體中，而 `docker compose exec` 起的程序和 runner 共用容器的記憶體上限（256m）。只限條目數不夠：每個條目存完整的相對路徑，很長的路徑（例如 64 層、每層 255 字元）會讓 50,000 個條目需要數百 MB（安全審查 M1；計畫中「約多 20 MB」的估計只適用於短路徑）。所以 `TreeLimits` 另外限制所有相對路徑的總長度（8M 字元，ASCII 約 8 MB、最壞約 32 MB），keeper 與 `retry-evidence` 都適用；超過時是一般的失敗、不是可以隔離的上限（見下方待決定事項）。更大的樹不在系統內處理，由操作者另外決定，系統不會刪除它。
+- **刻意不提供**：不加密就解除隔離的指令、刪除目錄的指令，以及 API 的復原端點（復原需要 runs volume 與證據金鑰，只有 runner 有；§30.2 的權限邊界）。
+
+**連帶修正：大型加密目錄的清除**：以較高的上限加密的目錄，`sealed/` 可能超過 20,000 個檔案，`remove_tree` 會把它們算進條目上限、清除永遠失敗，又變成全域阻擋。`EvidenceVault.purge` 改成先逐一刪除 `sealed/` 中的條目，再以一般的上限刪除其餘部分。可以這樣做是因為 `sealed/` 只由 runner 寫入而且是平的（掃描容器只掛 `in/` 與 `out/`）；其中有子目錄代表被改過，刪除失敗、fail closed。
+
+**為什麼這樣設計**：
+- 另開 `evidence_holds`，不在 `run_evidence` 加狀態：v0021 的 trigger 與「沒有紀錄就是 pending」的語意不變，孤兒目錄（沒有 `scanner_runs`）也能隔離，而且「已加密」與「需要人工處理」不會出現在同一個欄位而被誤讀成成功。
+- 退避的計算拆到 `runner/backoff.py`（keeper 維持在 400 行以內）；退避的次方加上上限，長時間的故障不會讓浮點數溢位。
+- 分成三個 commit 的計畫改成兩個程式的 commit（功能、審查的修正）加一個文件：新的 CLI 模組依賴 `cli/evidence.py` 的修改，分開提交會讓 pre-commit 的 mypy 在中間的 commit 失敗。
+
+**測試**：EVID-08、EVID-09（SECURITY_AND_TESTING §4）：單元測試 `test_backoff`、`test_keeper_holds`、`test_fs`、`test_evidence_vault`、`test_evidence_hold`；整合測試 `test_evidence_holds`（真的 DB 與檔案，以較小的 `TreeLimits` 製造超過上限）、`test_evidence_retry`（指令、audit、retention-status）、`test_migrations`。`keeper`、`backoff`、`evidence_holds`、`sealed_files`、`fs`、`cli/evidence_holds` 的 branch coverage 都在 94% 以上。空轉檢查（故意改壞之後必須有測試失敗，確認之後改回、不提交）七項都被抓到：`sealable` 不排除隔離、第 2 次就隔離、其他種類的失敗也計入連續次數、隔離之後仍算退避中、trigger 不要求 sealed 的 `run_evidence` 就允許解除、`retry-evidence` 加密失敗也解除、清除不先刪除 `sealed/`。
+
+**審查與處理（2026-11-10）**：三份審查（子代理，opus），範圍是 `git diff 3f6a01d 3eb1e83`：
+
+| 審查 | CRITICAL | HIGH | MEDIUM | LOW |
+|---|---|---|---|---|
+| 程式碼 | 0 | 0 | 1 | 1 |
+| 安全 | 0 | 0 | 2 | 5 |
+| 資料庫（v0023） | 0 | 0 | 2 | 6 |
+
+| 問題 | 處理 |
+|---|---|
+| 隔離已 commit、keeper 卻收到錯誤（回應之前連線中斷）時，退避項目永遠不會清除：這個目錄之後被 SQL 或 `held()` 排除、不再處理，keeper 一直不健康到重啟（程式碼 M1、安全 L2） | 每一輪持有鎖時，先依 DB 清掉退避中、已經隔離的目錄。測試：替身先寫入再拋出錯誤，下一輪恢復健康 |
+| 「隔離的 run 不會有 `run_evidence`」只在新增隔離時強制，反方向靠 advisory lock 與 `sealable`；兩邊的 EXISTS 看不到對方還沒 commit 的列（資料庫 M1、安全 L3） | `run_evidence_hold_check`（deferred constraint trigger）與以 run 為鍵的交易鎖（見上方 DB 一段）；顯示改成還沒解除的隔離優先 |
+| trigger 的 `to_jsonb` 分支與其他幾個分支沒有測試（資料庫 M2） | 補上：解除時同時改其他欄位、只改 `held_at`、以 none 解除、容器還沒確認刪除、外鍵的 scan 不符、併發（`lock_timeout` 確認會等）、時間由 DB 決定 |
+| 記憶體只看條目數，很長的路徑讓 runner 或 `retry-evidence` 超過 256m（安全 M1） | 路徑總長度的上限（上方「上限的上限」）；超過是一般的失敗、不隔離。**不處理**：改用父節點索引的樹、逐一目錄串流加密、以獨立容器執行 `retry-evidence`（較大的重構，留待之後） |
+| 隔離幾乎代表掃描器被攻陷，但隔離之後自動恢復認領、沒有熔斷；超過 `retry-evidence` 上限的樹讓明文永久留下，worker 以唯讀掛載 runs volume 仍讀得到；每次掃描都可能多一個隔離目錄（安全 M2） | **不處理，交給使用者決定**（見下方）：熔斷與「停止認領」和條件 3 衝突。列入剩餘風險與操作指引：看到隔離時應當成疑似入侵調查 |
+| 隔離那一次的 log 先說「N 秒後重試」又說「不再自動重試」（程式碼 L1） | 到了門檻時只記隔離的結果；孤兒目錄的 log 改稱「目錄」 |
+| `resolve` 對 run 的 `HoldNotActiveError` 到不了，會撞上 `run_evidence` 的主鍵而誤報成 DB 錯誤（資料庫 L1） | 先以 `FOR UPDATE` 鎖住還沒解除的隔離；第二次解除得到 `HoldNotActiveError`，有測試 |
+| 加密之後 DB 寫入失敗時沒有結果的 audit（安全 L1） | 另外寫 `evidence.retry_failed`（`EVIDENCE_SEALED_NOT_RECORDED`、檔案數與 bytes）；寫不進去時在 stderr 說明。程序被 OOM kill 時仍可能只有 `evidence.retry` |
+| 時間由用戶端提供，稽核時間可以回溯（資料庫 L6） | `held_at`、`resolved_at` 由 trigger 以 `clock_timestamp()` 寫入 |
+| downgrade 刪除帶外鍵的資料表也要鎖 `scanner_runs`，和讀取端的順序相反（資料庫 L3） | 依讀取端的順序一次鎖住三張表；降級前同樣先停服務 |
+| 外鍵沒有索引（資料庫 L4） | **不加**：`scanner_runs` 的刪除與身分欄位的修改都被它自己的 trigger 拒絕，參照端的檢查不會執行；寫在 migration 的說明 |
+| CHECK 的錯誤代碼清單不在 autogenerate 的比對範圍（資料庫 L5） | 測試直接比對 `pg_get_constraintdef` 與 `EvidenceHoldCode` |
+| `--reason` 中孤立的 surrogate 會讓寫 audit 時拋出未處理的例外（安全 L4） | 開始之前就拒絕無法以 UTF-8 表示的理由 |
+| 主鍵是 directory：解除之後的孤兒目錄被人放回超過上限的明文時，第二次隔離會撞主鍵、keeper 一直不健康（資料庫 L2） | **不處理**：只有竄改才會發生，結果是 fail closed；列入剩餘風險 |
+| 解除之後的大型孤兒目錄，每一輪都重新驗證全部加密檔的標頭（安全 L5） | **不處理**：既有的行為，只是檔案變多；列入剩餘風險 |
+| retention-status 的兩段數量不是同一個快照（資料庫的附註） | 不處理（唯讀的報告，差一兩筆） |
+
+**審查之後的空轉檢查**（十項都被抓到）：`run_evidence` 不檢查隔離、檢查不取得交易鎖、採用用戶端的 `resolved_at`、採用用戶端的 `held_at`、不檢查其他欄位不變、`run_evidence` 優先於隔離、理由不檢查 UTF-8、加密後 DB 失敗不寫結果的 audit、`resolve` 不先鎖住隔離、路徑總長度不限制；另外 keeper 不依 DB 清掉已隔離的退避項目也被抓到。
+
+**待使用者決定**（安全審查 M1、M2 未處理的部分）：
+1. **熔斷**：隔離幾乎代表掃描器異常或被攻陷。是否在還沒解除的隔離達到門檻（例如同一個引擎 1 筆，或全域 3 筆）時停止認領該引擎或全部的 run、在 `GET /scanners` 或 health 揭露？這和條件 3（其他正常 run 繼續認領）衝突，所以沒有實作。
+2. **路徑總長度超過上限是否也隔離**：目前是一般的失敗、全域 fail closed（和方案 B 之前相同）；納入隔離會擴大條件 1 的觸發原因。
+3. **隔離時收緊目錄的權限或搬離 worker 看得到的位置**：worker 以唯讀掛載整個 runs volume；被攻陷的 worker 讀得到隔離中的明文（執行中與等待解析的明文也一樣）。
+
+**剩餘風險**（也寫在 §30.9 第 7 項）：
+- 隔離的目錄保留明文直到有人處理；看到隔離時應當成疑似入侵調查（安全 M2），沒有熔斷。
+- 計數只在記憶體中：重啟會重新計數，`runner --once` 永遠不會隔離。
+- 超過 `retry-evidence` 上限（深度 64、條目 50,000、路徑總長度 8M 字元）的樹不在系統內處理，明文一直留著。
+- 目錄在系統之外被刪除時，隔離紀錄一直留著（刻意不提供不加密就解除的方式）。
+- 孤兒目錄的解除 DB 無法確認已加密，由程式保證。
+- 一個目錄一生只能隔離一次：解除之後的孤兒目錄被竄改、再次超過上限時，keeper 一直不健康（fail closed）。
+- 解除之後的大型孤兒目錄在保留期限內，每一輪都要重新驗證全部加密檔的標頭。
+- `retry-evidence` 被 OOM kill 時只留下 `evidence.retry`。
+- 所有服務共用同一個 DB 角色，能停用 trigger（T23b）。
+- runs volume 的目錄數量超過上限、路徑總長度超過上限、清除失敗與其他種類的加密失敗仍然全域 fail closed。
+
+**不做**：自動重試、可調整的 N、API 的復原端點。
