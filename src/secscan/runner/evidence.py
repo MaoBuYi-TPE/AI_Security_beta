@@ -46,6 +46,7 @@ from secscan.runner.sealed_files import (
     SEALING_PREFIX,
     STAGING_MODE,
     EvidenceError,
+    EvidenceLimitError,
     SealedFiles,
     guarded,
     header_path,
@@ -56,7 +57,7 @@ from secscan.runner.sealed_files import (
 from secscan.scans.domain.evidence import SealedEvidence, evidence_context
 from secscan.security.blob_cipher import CHUNK_BYTES, Sink, StreamInfo
 
-__all__ = ["SEALED_DIR", "DirectoryState", "EvidenceError", "EvidenceVault"]
+__all__ = ["SEALED_DIR", "DirectoryState", "EvidenceError", "EvidenceLimitError", "EvidenceVault"]
 
 _CHECK_PREFIX = ".keeper-check-"
 
@@ -129,12 +130,22 @@ class EvidenceVault(SealedFiles):
             return self._seal(run_fd, name)
 
     def purge(self, name: str) -> None:
-        """刪除整個目錄。sealed/ 之外還有條目時先加密（絕不在未加密時刪除）。"""
+        """刪除整個目錄。sealed/ 之外還有條目時先加密（絕不在未加密時刪除）。
+
+        先逐一刪除 sealed/ 中的加密檔，再刪除其餘部分：retry-evidence 以較高的上限加密的目錄，
+        sealed/ 可能超過一般的條目上限（§30.12）。sealed/ 只由 runner 寫入、而且是平的（掃描容器
+        只掛 in/ 與 out/）；其中有子目錄代表被改過，刪除失敗、fail closed。
+        """
         state = self.inspect(name)
         if state is None:
             return
         if state.plaintext:
             self.seal(name)
+        run_fd = self._open_run(name)
+        if run_fd is None:
+            return
+        with opened(run_fd), guarded():
+            self._empty_sealed(run_fd)
         with opened(self._open_root()) as runs_fd, guarded():
             remove_tree(runs_fd, name, self._limits)
 
@@ -188,6 +199,16 @@ class EvidenceVault(SealedFiles):
         return tuple(sorted(infos, key=lambda info: info.path))
 
     # --- 內部 ------------------------------------------------------------------------------
+
+    def _empty_sealed(self, run_fd: int) -> None:
+        try:
+            sealed_fd = os.open(SEALED_DIR, DIRECTORY_FLAGS, dir_fd=run_fd)
+        except FileNotFoundError:
+            return
+        with opened(sealed_fd):
+            for entry in top_level(sealed_fd):
+                unlink_at(sealed_fd, entry)
+            fsync_directory(sealed_fd)
 
     def _seal(self, run_fd: int, name: str) -> SealedEvidence:
         for entry in top_level(run_fd):

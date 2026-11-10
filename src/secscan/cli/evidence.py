@@ -13,7 +13,9 @@
   以 advisory lock 互斥：換版期間 keeper 不加密、不清除，runner 不認領新的 run。audit 只記數量。
 - export-evidence（break-glass）：沒有 --path 時列出加密檔的原本路徑、大小與 sha256；有 --path 時
   先完整驗證，再寫入 audit（寫不進去就不匯出），最後才把明文寫到 stdout。不寫任何檔案。
-- retention-status：pending、逾期、已加密、待清除與已清除的數量；不含路徑或內容。
+- retention-status：pending、逾期、已加密、待清除與已清除的數量，以及需要人工處理（隔離）的數量、
+  錯誤代碼與最早的幾個目錄名稱（§30.12）；不含路徑或內容。
+人工重試加密（retry-evidence）在 evidence_holds.py；等鎖與建立 vault 的方式和這裡共用。
 說明都寫到 stderr。
 """
 
@@ -36,6 +38,8 @@ from secscan.core.config import Settings
 from secscan.core.json_types import JsonValue
 from secscan.runner.config import RunnerSettings
 from secscan.runner.evidence import EvidenceError, EvidenceVault
+from secscan.runner.fs import TreeLimits
+from secscan.scans.evidence_holds import ORPHAN_KIND, EvidenceHolds
 from secscan.scans.evidence_records import EvidenceStore
 from secscan.scans.models import ScanModel, ScannerRunModel
 from secscan.security.blob_cipher import StreamInfo
@@ -90,21 +94,42 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
         return _database(settings, report, lambda engine: _status(engine, settings, report))
     if args.command not in (ROTATE_COMMAND, EXPORT_COMMAND):
         return None
-    try:
-        runner_settings = RunnerSettings()
-        cipher = evidence_cipher(_setting(settings))
-    except ValidationError:
-        report("設定不正確（RUNNER_* 環境變數）。")
+    vault = runner_vault(settings, report)
+    if vault is None:
         return EXIT_FAILURE
-    except InvalidEncryptionKeysError as exc:
-        report(f"{exc}。")
-        return EXIT_FAILURE
-    vault = EvidenceVault(runner_settings.runs_dir, cipher)
     if args.command == ROTATE_COMMAND:
         return _database(settings, report, lambda engine: _rotate(engine, vault, report))
     return _database(
         settings, report, lambda engine: _export(engine, vault, args.run, args.path, report)
     )
+
+
+def runner_vault(
+    settings: Settings, report: Report, *, limits: TreeLimits | None = None
+) -> EvidenceVault | None:
+    """runner 容器內的 runs volume 與 EVIDENCE_ENCRYPTION_KEYS；設定不正確時說明並回 None。"""
+    try:
+        runner_settings = RunnerSettings()
+        cipher = evidence_cipher(_setting(settings))
+    except ValidationError:
+        report("設定不正確（RUNNER_* 環境變數）。")
+        return None
+    except InvalidEncryptionKeysError as exc:
+        report(f"{exc}。")
+        return None
+    return EvidenceVault(runner_settings.runs_dir, cipher, limits=limits)
+
+
+def with_evidence_lock[T](store: EvidenceStore, action: Callable[[], T]) -> T | None:
+    """持有 keeper 的 advisory lock 時執行 action；keeper 只在每一輪處理檔案時持有鎖，所以重試到
+    拿到為止（最多 LOCK_ATTEMPTS 次）。等不到時回 None、沒有執行。"""
+    for attempt in range(LOCK_ATTEMPTS):
+        if attempt:
+            time.sleep(LOCK_WAIT_SECONDS)
+        with store.exclusive() as acquired:
+            if acquired:
+                return action()
+    return None
 
 
 # --- rotate-evidence-keys ----------------------------------------------------------------------
@@ -113,7 +138,7 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
 def _rotate(engine: Engine, vault: EvidenceVault, report: Report) -> int:
     store = EvidenceStore(sessionmaker(engine, expire_on_commit=False), engine=engine)
     try:
-        outcome = _rotate_locked(store, vault)
+        outcome = with_evidence_lock(store, lambda: _rotate_all(vault))
     except EvidenceError as exc:
         # entries() 在換版任何檔案之前就失敗（列不出來、超過上限）：沒有改變任何檔案。
         report(f"{exc}：沒有換版任何檔案。")
@@ -140,17 +165,6 @@ def _rotate(engine: Engine, vault: EvidenceVault, report: Report) -> int:
         "現在可以移除舊金鑰；移除後重啟 runner，並再執行一次這個指令確認全部解得開。"
     )
     return EXIT_OK
-
-
-def _rotate_locked(store: EvidenceStore, vault: EvidenceVault) -> tuple[int, int, list[str]] | None:
-    """持有 advisory lock 時換版；keeper 只在每一輪處理檔案時持有鎖，所以重試到拿到為止。"""
-    for attempt in range(LOCK_ATTEMPTS):
-        if attempt:
-            time.sleep(LOCK_WAIT_SECONDS)
-        with store.exclusive() as acquired:
-            if acquired:
-                return _rotate_all(vault)
-    return None
 
 
 def _rotate_all(vault: EvidenceVault) -> tuple[int, int, list[str]]:
@@ -258,6 +272,7 @@ def _status(engine: Engine, settings: Settings, report: Report) -> int:
         f"保留 {settings.evidence_retention_days} 天、等待解析上限 "
         f"{settings.evidence_plaintext_max_minutes} 分鐘。"
     )
+    _holds_status(engine, report)
     content = ContentRetention(sessionmaker(engine)).summary()
     report(
         f"報告內容：保留中 {content.reports_kept}（其中已到期待清除 {content.reports_due}）、"
@@ -266,6 +281,26 @@ def _status(engine: Engine, settings: Settings, report: Report) -> int:
         "清除只刪除欄位與資料列，DB 的 WAL 與備份仍保留舊資料。"
     )
     return EXIT_OK
+
+
+def _holds_status(engine: Engine, report: Report) -> None:
+    holds = EvidenceHolds(sessionmaker(engine, expire_on_commit=False)).summary(listed=MAX_LISTED)
+    codes = "、".join(f"{code.value} {count}" for code, count in sorted(holds.by_code.items()))
+    report(
+        "需要人工處理（manual_intervention_required）："
+        f"run {holds.runs}、孤兒目錄 {holds.orphans}（錯誤代碼：{codes or '無'}）、"
+        f"已人工處理 {holds.resolved}。隔離的目錄保留明文、不會自動重試或刪除。"
+    )
+    for item in holds.oldest:
+        kind = "孤兒目錄" if item.kind == ORPHAN_KIND else "run"
+        held_at = item.hold.held_at.astimezone(UTC).isoformat(timespec="seconds")
+        hold = item.hold
+        report(
+            f"  {item.directory}（{kind}）：{hold.code.value}，連續失敗 {hold.attempts} 次，"
+            f"隔離於 {held_at}"
+        )
+    if holds.oldest:
+        report("以 secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> 處理。")
 
 
 # --- 共用 --------------------------------------------------------------------------------------

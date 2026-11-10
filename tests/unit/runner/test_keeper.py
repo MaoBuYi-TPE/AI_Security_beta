@@ -1,160 +1,30 @@
 """原始證據的 keeper（EVID-06；docs/DECISIONS.md §30.3）：每一輪的步驟、上限、失敗與健康狀態。
 
-store 與 vault 都是記憶體中的替身；實際的 DB 與檔案見 tests/integration/test_evidence_keeper.py。
+store 與 vault 都是記憶體中的替身（keeper_fakes.py）；隔離見 test_keeper_holds.py，
+實際的 DB 與檔案見 tests/integration/test_evidence_keeper.py。
 """
 
 import itertools
 import logging
 import threading
-from collections.abc import Collection, Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from datetime import timedelta
+from uuid import uuid4
 
 import pytest
-from sqlalchemy.exc import OperationalError
 
+from secscan.runner.backoff import MAX_BACKOFF_SECONDS
 from secscan.runner.evidence import DirectoryState, EvidenceError
-from secscan.runner.keeper import (
-    MAX_BACKOFF_SECONDS,
-    EvidenceKeeper,
-    KeeperSettings,
-    PassReport,
-)
+from secscan.runner.keeper import EvidenceKeeper, KeeperSettings, PassReport
 from secscan.scans.domain.evidence import SealedEvidence
-from secscan.scans.evidence_records import EvidenceRun
-
-NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
-SETTINGS = KeeperSettings(retention_days=7, plaintext_max_minutes=60, batch=5)
-
-
-def _run() -> EvidenceRun:
-    return EvidenceRun(uuid4(), uuid4())
-
-
-@dataclass
-class FakeStore:
-    overdue_runs: list[EvidenceRun] = field(default_factory=list)
-    sealable_runs: list[EvidenceRun] = field(default_factory=list)
-    purgeable_runs: list[EvidenceRun] = field(default_factory=list)
-    known_ids: set[UUID] = field(default_factory=set)
-    lock_free: bool = True
-    broken: str | None = None
-    expired: list[UUID] = field(default_factory=list)
-    recorded: dict[UUID, SealedEvidence | None] = field(default_factory=dict)
-    purged: list[UUID] = field(default_factory=list)
-    calls: list[str] = field(default_factory=list)
-
-    def _maybe_fail(self, name: str) -> None:
-        self.calls.append(name)
-        if self.broken == name:
-            raise OperationalError("SELECT 1", {}, Exception("db down"))
-
-    def overdue(self, *, now: datetime, max_minutes: int, limit: int) -> tuple[EvidenceRun, ...]:
-        self._maybe_fail("overdue")
-        assert (now, max_minutes) == (NOW, 60)
-        return tuple(self.overdue_runs[:limit])
-
-    def expire(self, run: EvidenceRun, *, now: datetime, max_minutes: int) -> bool:
-        self._maybe_fail("expire")
-        self.expired.append(run.run_id)
-        return True
-
-    def sealable(self, *, limit: int, exclude: Collection[UUID]) -> tuple[EvidenceRun, ...]:
-        self._maybe_fail("sealable")
-        return tuple(run for run in self.sealable_runs if run.run_id not in exclude)[:limit]
-
-    def record(self, run: EvidenceRun, sealed: SealedEvidence | None) -> bool:
-        self._maybe_fail("record")
-        self.recorded[run.run_id] = sealed
-        self.sealable_runs = [item for item in self.sealable_runs if item != run]
-        return True
-
-    def purgeable(
-        self, *, now: datetime, retention_days: int, limit: int, exclude: Collection[UUID]
-    ) -> tuple[EvidenceRun, ...]:
-        self._maybe_fail("purgeable")
-        assert retention_days == 7
-        return tuple(run for run in self.purgeable_runs if run.run_id not in exclude)[:limit]
-
-    def record_purged(self, run: EvidenceRun) -> bool:
-        self._maybe_fail("record_purged")
-        self.purged.append(run.run_id)
-        self.purgeable_runs = [item for item in self.purgeable_runs if item != run]
-        return True
-
-    def known(self, run_ids: Collection[UUID]) -> frozenset[UUID]:
-        self._maybe_fail("known")
-        return frozenset(set(run_ids) & self.known_ids)
-
-    @contextmanager
-    def exclusive(self) -> Iterator[bool]:
-        self.calls.append("lock")
-        yield self.lock_free
-
-
-@dataclass
-class FakeVault:
-    states: dict[str, DirectoryState | None] = field(default_factory=dict)
-    sealed_times: dict[str, int | None] = field(default_factory=dict)
-    failing: set[str] = field(default_factory=set)
-    missing: set[str] = field(default_factory=set)
-    sealed: list[str] = field(default_factory=list)
-    purged: list[str] = field(default_factory=list)
-    on_seal: list[object] = field(default_factory=list)
-    unexpected: BaseException | None = None
-    volume_error: EvidenceError | None = None
-
-    def check(self) -> None:
-        if self.volume_error is not None:
-            raise self.volume_error
-
-    def entries(self) -> tuple[str, ...]:
-        return tuple(sorted(self.states))
-
-    def inspect(self, name: str) -> DirectoryState | None:
-        return self.states.get(name)
-
-    def sealed_at(self, name: str) -> int | None:
-        return self.sealed_times.get(name)
-
-    def seal(self, name: str) -> SealedEvidence | None:
-        for hook in self.on_seal:
-            assert callable(hook)
-            hook()
-        if self.unexpected is not None:
-            raise self.unexpected
-        if name in self.failing:
-            raise EvidenceError("加密檔驗證不通過")
-        if name in self.missing:
-            return None
-        self.sealed.append(name)
-        return SealedEvidence(files=2, plaintext_bytes=10)
-
-    def purge(self, name: str) -> None:
-        if name in self.failing:
-            raise EvidenceError("無法刪除目錄")
-        self.purged.append(name)
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def monotonic(self) -> float:
-        return self.now
-
-
-def _keeper(
-    store: FakeStore,
-    vault: FakeVault,
-    *,
-    clock: Clock | None = None,
-    settings: KeeperSettings = SETTINGS,
-) -> EvidenceKeeper:
-    ticking = clock or Clock()
-    return EvidenceKeeper(store, vault, settings, clock=lambda: NOW, monotonic=ticking.monotonic)
+from tests.unit.runner.keeper_fakes import (
+    NOW,
+    SETTINGS,
+    Clock,
+    FakeStore,
+    FakeVault,
+)
+from tests.unit.runner.keeper_fakes import evidence_run as _run
+from tests.unit.runner.keeper_fakes import make_keeper as _keeper
 
 
 def test_a_clean_pass_expires_seals_purges_and_becomes_healthy() -> None:

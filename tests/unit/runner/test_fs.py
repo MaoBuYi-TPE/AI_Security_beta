@@ -9,6 +9,8 @@ import pytest
 from secscan.runner import fs
 from secscan.runner.fs import (
     TreeError,
+    TreeLimit,
+    TreeLimitError,
     TreeLimits,
     list_tree,
     open_directory,
@@ -48,12 +50,28 @@ def test_limits_fail_closed(tmp_path: Path, limits: TreeLimits) -> None:
         list_tree(root, limits)
 
 
+@pytest.mark.parametrize(
+    ("limits", "limit"),
+    [(TreeLimits(max_depth=1), TreeLimit.DEPTH), (TreeLimits(max_entries=2), TreeLimit.ENTRIES)],
+)
+def test_limit_errors_say_which_limit(tmp_path: Path, limits: TreeLimits, limit: TreeLimit) -> None:
+    """keeper 只對這兩種失敗計數、隔離（EVID-08；docs/DECISIONS.md §30.12）。"""
+    _tree(tmp_path)
+
+    with opened(open_directory(tmp_path)) as root, pytest.raises(TreeLimitError) as raised:
+        list_tree(root, limits)
+
+    assert raised.value.limit is limit
+    assert str(tmp_path) not in str(raised.value)
+
+
 def test_errors_carry_only_the_kind(tmp_path: Path) -> None:
     with pytest.raises(TreeError) as raised:
         open_directory(tmp_path / "missing")
 
     assert "ENOENT" in str(raised.value)
     assert str(tmp_path) not in str(raised.value)
+    assert not isinstance(raised.value, TreeLimitError)
 
 
 def test_a_symlinked_directory_is_not_opened(tmp_path: Path) -> None:

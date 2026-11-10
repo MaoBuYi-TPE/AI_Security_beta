@@ -564,6 +564,7 @@ def test_the_api_shows_pending_sealed_and_purged(
         "status": "pending",
         "sealed_at": None,
         "purged_at": None,
+        "hold": None,
     }
 
     keeper.run_pass()

@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -60,8 +61,32 @@ def _revision(engine: Engine) -> str:
         return str(connection.execute(text("SELECT version_num FROM alembic_version")).scalar())
 
 
+@contextmanager
+def _holds_table_for_the_orm(engine: Engine) -> Iterator[None]:
+    """建立 scan 的程式碼會讀 evidence_holds（0023 才建立，docs/DECISIONS.md §30.12），而這裡在
+    0021 的 schema 上寫入舊資料：期間暫時建立一張空的同名資料表，升級之前刪除。"""
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE evidence_holds (directory uuid PRIMARY KEY, scanner_run_id uuid, "
+                "scan_id uuid, error_code varchar(32), attempts integer, held_at timestamptz, "
+                "resolved_at timestamptz)"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE evidence_holds"))
+
+
 def _legacy(engine: Engine) -> tuple[World, Scenario, UUID]:
     """0021 的 schema 上：一份 succeeded 的明文報告與一個附兩段明文摘錄的人工複測事件。"""
+    with _holds_table_for_the_orm(engine):
+        return _legacy_rows(engine)
+
+
+def _legacy_rows(engine: Engine) -> tuple[World, Scenario, UUID]:
     seed = Seeder(engine)
     world = seed.world()
     item = scenario(engine, seed, world)

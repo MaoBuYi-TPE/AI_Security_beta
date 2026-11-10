@@ -35,7 +35,7 @@ from secscan.scans.domain.model import (
 )
 from secscan.scans.domain.observation import Observation, ParameterLocation, RunResult
 from secscan.scans.domain.preflight import PreflightResult
-from secscan.scans.evidence_models import RunEvidenceModel, evidence_state
+from secscan.scans.evidence_models import EvidenceHoldModel, RunEvidenceModel, evidence_state
 from secscan.scans.models import (
     ObservationModel,
     RunCoverageModel,
@@ -260,15 +260,16 @@ class ScanRepository:
 
     def _runs(self, scan_ids: Sequence[UUID]) -> dict[UUID, tuple[ScannerRun, ...]]:
         rows = self._session.execute(
-            select(ScannerRunModel, RunEvidenceModel)
+            select(ScannerRunModel, RunEvidenceModel, EvidenceHoldModel)
             .outerjoin(RunEvidenceModel, RunEvidenceModel.scanner_run_id == ScannerRunModel.id)
+            .outerjoin(EvidenceHoldModel, EvidenceHoldModel.directory == ScannerRunModel.id)
             .where(ScannerRunModel.scan_id.in_(scan_ids))
             .order_by(ScannerRunModel.scan_id, ScannerRunModel.sequence)
             .execution_options(populate_existing=True)
         )
         grouped: dict[UUID, list[ScannerRun]] = {}
-        for model, evidence in rows:
-            run = replace(_run(model), evidence=evidence_state(evidence))
+        for model, evidence, hold in rows:
+            run = replace(_run(model), evidence=evidence_state(evidence, hold))
             grouped.setdefault(model.scan_id, []).append(run)
         return {scan_id: tuple(runs) for scan_id, runs in grouped.items()}
 

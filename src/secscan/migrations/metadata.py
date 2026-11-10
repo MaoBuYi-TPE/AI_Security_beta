@@ -18,7 +18,7 @@ from secscan.grants.models import ScopeGrantModel
 from secscan.projects.models import ProjectModel
 from secscan.reports.models import ReportContentModel, ReportModel
 from secscan.scanners.models import RunnerInstanceModel
-from secscan.scans.evidence_models import RunEvidenceModel
+from secscan.scans.evidence_models import EvidenceHoldModel, RunEvidenceModel
 from secscan.scans.location_models import RunLocationModel, RunRuleLocationModel
 from secscan.scans.models import (
     ArtifactModel,
@@ -52,6 +52,7 @@ MODELS = (
     ArtifactModel,
     ObservationModel,
     RunEvidenceModel,
+    EvidenceHoldModel,
     RunnerInstanceModel,
     FindingModel,
     FindingObservationModel,

@@ -8,7 +8,8 @@ runner 的 keeper 與 admin 指令使用：
   同一個 transaction 重算 scan 的狀態。run 的鎖不等：worker 還在寫入時留到下一輪，不算失敗
   （資料庫審查 L6）。沒有 collected 事件的舊資料以 run 建立的時間起算。
   之後 worker 以舊 lease 寫入都會被 lease 的檢查擋下；已經存好的部分結果保留。
-- 待加密：已終止，而且沒有容器或容器已確認刪除（之後沒有任何程序會再寫這個目錄），還沒有紀錄。
+- 待加密：已終止，而且沒有容器或容器已確認刪除（之後沒有任何程序會再寫這個目錄），還沒有紀錄，
+  也沒有被隔離（evidence_holds；§30.12）。隔離的寫入與查詢在 evidence_holds.py，這裡轉交。
 - 待清除：sealed 而且加密時間早於保留期限。
 - keeper 處理檔案時與 rotate-evidence-keys 以 advisory lock 互斥（session 層級：transaction 結束之後
   仍持有，連線閒置時不會被 idle_in_transaction 的逾時中止；不支援 PgBouncer 的 transaction
@@ -28,10 +29,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute, Session, sessionmaker
 
-from secscan.scans.domain.evidence import EvidenceStatus, SealedEvidence
+from secscan.scans.domain.evidence import EvidenceHoldCode, EvidenceStatus, SealedEvidence
 from secscan.scans.domain.lifecycle import TERMINAL_RUN_STATUSES, RunErrorCode, RunStatus
 from secscan.scans.domain.model import EventType
-from secscan.scans.evidence_models import RunEvidenceModel
+from secscan.scans.evidence_holds import EvidenceHolds
+from secscan.scans.evidence_models import EvidenceHoldModel, RunEvidenceModel
 from secscan.scans.models import ScanEventModel, ScannerRunModel
 from secscan.scans.progress import ScanProgress, now
 
@@ -64,6 +66,7 @@ class EvidenceStore:
     def __init__(self, sessions: sessionmaker[Session], *, engine: Engine) -> None:
         self._sessions = sessions
         self._engine = engine
+        self._holds = EvidenceHolds(sessions)
 
     # --- 逾期 ------------------------------------------------------------------------------
 
@@ -98,11 +101,11 @@ class EvidenceStore:
     # --- 加密 ------------------------------------------------------------------------------
 
     def sealable(self, *, limit: int, exclude: Collection[UUID]) -> tuple[EvidenceRun, ...]:
-        """待加密的 run；exclude 是 keeper 還在退避的 run。"""
+        """待加密的 run（不含隔離的 run）；exclude 是 keeper 還在退避的 run。"""
         with self._sessions() as session:
             rows = session.execute(
                 select(ScannerRunModel.id, ScannerRunModel.scan_id)
-                .where(_settled(), ~_recorded(), *_excluding(ScannerRunModel.id, exclude))
+                .where(_settled(), ~_recorded(), ~_held(), *_excluding(ScannerRunModel.id, exclude))
                 .order_by(ScannerRunModel.finished_at, ScannerRunModel.id)
                 .limit(limit)
             )
@@ -158,6 +161,19 @@ class EvidenceStore:
             )
             return purged is not None
 
+    # --- 隔離（§30.12）----------------------------------------------------------------------
+
+    def hold(
+        self, directory: UUID, run: EvidenceRun | None, code: EvidenceHoldCode, attempts: int
+    ) -> None:
+        """run 是 None 代表孤兒目錄；否則 directory 必須是這個 run 的 run_id。"""
+        if run is not None and run.run_id != directory:
+            raise ValueError("run 的目錄名稱必須是 run_id")
+        self._holds.hold(directory, None if run is None else run.scan_id, code, attempts)
+
+    def held(self, directories: Collection[UUID]) -> frozenset[UUID]:
+        return self._holds.held(directories)
+
     # --- 其他 ------------------------------------------------------------------------------
 
     def known(self, run_ids: Collection[UUID]) -> frozenset[UUID]:
@@ -190,7 +206,7 @@ class EvidenceStore:
             return EvidenceSummary(
                 in_progress=count(~terminal),
                 overdue=count(_overdue(now, max_minutes)),
-                pending=count(terminal, ~_recorded()),
+                pending=count(terminal, ~_recorded(), ~_held()),
                 none=recorded(EvidenceStatus.NONE),
                 sealed=recorded(EvidenceStatus.SEALED),
                 due=int(
@@ -273,6 +289,11 @@ def _settled() -> ColumnElement[bool]:
 
 def _recorded() -> ColumnElement[bool]:
     return exists().where(RunEvidenceModel.scanner_run_id == ScannerRunModel.id)
+
+
+def _held() -> ColumnElement[bool]:
+    """有隔離紀錄（解除的也有 run_evidence，所以只差在還沒解除的）。"""
+    return exists().where(EvidenceHoldModel.directory == ScannerRunModel.id)
 
 
 def _due(now: datetime, retention_days: int) -> ColumnElement[bool]:

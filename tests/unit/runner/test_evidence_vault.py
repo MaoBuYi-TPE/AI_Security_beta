@@ -15,9 +15,10 @@ import pytest
 from cryptography.fernet import Fernet
 
 from secscan.runner import fs as fs_module
-from secscan.runner.evidence import SEALED_DIR, EvidenceError, EvidenceVault
+from secscan.runner.evidence import SEALED_DIR, EvidenceError, EvidenceLimitError, EvidenceVault
 from secscan.runner.fs import TreeLimits
 from secscan.runner.workspace import Workspace
+from secscan.scans.domain.evidence import EvidenceHoldCode
 from secscan.security.blob_cipher import SealedDataUnreadableError
 from secscan.security.key_rings import evidence_cipher
 
@@ -333,6 +334,66 @@ def test_too_many_entries_fail_closed(runs: Path, key: str) -> None:
         _vault(runs, key, limits=TreeLimits(max_entries=3)).seal(RUN)
 
     _plaintext_kept(root)
+
+
+@pytest.mark.parametrize(
+    ("limits", "code"),
+    [
+        (TreeLimits(max_depth=2), EvidenceHoldCode.TREE_TOO_DEEP),
+        (TreeLimits(max_entries=3), EvidenceHoldCode.TREE_TOO_MANY_ENTRIES),
+    ],
+)
+def test_limit_failures_carry_a_hold_code(
+    runs: Path, key: str, limits: TreeLimits, code: EvidenceHoldCode
+) -> None:
+    """keeper 以錯誤代碼分辨可以隔離的失敗（EVID-08；docs/DECISIONS.md §30.12）。"""
+    root = _run(runs)
+    vault = _vault(runs, key, limits=limits)
+
+    with pytest.raises(EvidenceLimitError) as sealing:
+        vault.seal(RUN)
+    with pytest.raises(EvidenceLimitError) as inspecting:
+        vault.inspect(RUN)
+
+    assert sealing.value.code is code
+    assert inspecting.value.code is code
+    assert str(runs) not in str(sealing.value)
+    _plaintext_kept(root)
+
+
+def test_a_volume_with_too_many_directories_is_not_a_limit_failure(runs: Path, key: str) -> None:
+    """整個 runs volume 的問題不能只隔離一個目錄：維持一般的失敗（全域 fail closed）。"""
+    _run(runs)
+    _run(runs, OTHER)
+
+    with pytest.raises(EvidenceError) as raised:
+        _vault(runs, key, limits=TreeLimits(max_entries=1)).entries()
+
+    assert not isinstance(raised.value, EvidenceLimitError)
+
+
+def test_a_sealed_directory_larger_than_the_limit_can_be_purged(runs: Path, key: str) -> None:
+    """retry-evidence 以較高的上限加密之後，sealed/ 可能超過一般的條目上限（§30.12）。"""
+    root = _run(runs, files={f"out/{index}.txt": b"x" for index in range(6)})
+    _vault(runs, key, limits=TreeLimits(max_entries=10)).seal(RUN)
+    assert len(list((root / SEALED_DIR).iterdir())) == 6
+
+    _vault(runs, key, limits=TreeLimits(max_entries=4)).purge(RUN)
+
+    assert not root.exists()
+
+
+def test_a_directory_inside_sealed_stops_the_purge(runs: Path, key: str) -> None:
+    """sealed/ 只由 runner 寫入、而且是平的；有子目錄代表被改過：不刪除、fail closed。"""
+    root = _run(runs)
+    vault = _vault(runs, key)
+    vault.seal(RUN)
+    (root / SEALED_DIR / ("0" * 64)).mkdir()
+
+    with pytest.raises(EvidenceError):
+        vault.purge(RUN)
+
+    assert (root / SEALED_DIR).is_dir()
 
 
 def test_unknown_files_in_the_sealed_directory_fail_closed(runs: Path, key: str) -> None:

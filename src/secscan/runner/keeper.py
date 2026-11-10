@@ -14,15 +14,20 @@ keeper 有自己的 DB session，和主迴圈只共用健康狀態：主迴圈�
 停止認領新的 run（CapabilityIssue.EVIDENCE_SEALING_FAILED），直到有一輪沒有任何失敗才恢復。
 執行緒意外結束、停擺（太久沒有完成一輪）或換版中也算不健康；正常停止時保留最後一輪的結果。
 任何例外都不會讓執行緒結束：非預期的例外只記類別，這一輪不健康（審查 HIGH-1）。
-失敗的 run 與孤兒目錄退避（20 秒起倍增，最多 10 分鐘）：不會每一輪都重試、佔滿批次而讓其他 run
-等不到加密；還在退避的仍算不健康（安全審查 M1）。log 只有 run_id 與錯誤的種類。
+失敗的 run 與孤兒目錄退避（20 秒起倍增，最多 10 分鐘；runner/backoff.py）：不會每一輪都重試、
+佔滿批次而讓其他 run 等不到加密；還在退避的仍算不健康（安全審查 M1）。log 只有 run_id 與錯誤的種類。
+
+隔離（§30.12）：同一個目錄（run 的加密、孤兒的檢查與加密）連續 HOLD_AFTER_FAILURES 次超過深度或
+條目數的上限，就寫入 evidence_holds 與 audit，之後不算退避中：這一輪仍算失敗，下一輪恢復健康。
+隔離的目錄不再自動加密、清除或刪除（明文保留原狀，等待 retry-evidence）；寫入失敗時維持不健康、
+下次再寫。清除時超過上限不計數（已加密的目錄被改過或環境有問題：維持全域 fail closed）。
 """
 
 import logging
 import threading
 import time
-from collections.abc import Callable, Collection
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Collection, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -30,16 +35,16 @@ from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from secscan.runner.evidence import DirectoryState, EvidenceError
+from secscan.runner.backoff import Backoff, BackoffKey
+from secscan.runner.evidence import DirectoryState, EvidenceError, EvidenceLimitError
 from secscan.runner.fs import TreeError
-from secscan.scans.domain.evidence import SealedEvidence
+from secscan.scans.domain.evidence import EvidenceHoldCode, SealedEvidence
 from secscan.scans.evidence_records import EvidenceRun
 
 logger = logging.getLogger(__name__)
 
 # 幾輪的時間沒有完成一輪就視為停擺。
 STALE_PASSES = 3
-MAX_BACKOFF_SECONDS = 600.0
 _KNOWN_BATCH = 500
 _FAILURES = (EvidenceError, TreeError, SQLAlchemyError, OSError)
 
@@ -64,6 +69,12 @@ class Store(Protocol):
     def record_purged(self, run: EvidenceRun) -> bool: ...
 
     def known(self, run_ids: Collection[UUID]) -> frozenset[UUID]: ...
+
+    def hold(
+        self, directory: UUID, run: EvidenceRun | None, code: EvidenceHoldCode, attempts: int
+    ) -> None: ...
+
+    def held(self, directories: Collection[UUID]) -> frozenset[UUID]: ...
 
     def exclusive(self) -> AbstractContextManager[bool]: ...
 
@@ -102,6 +113,7 @@ class PassReport:
     purged: int = 0
     orphans_sealed: int = 0
     orphans_purged: int = 0
+    held: int = 0
     failures: int = 0
     deferred: int = 0
     skipped: bool = False
@@ -131,8 +143,7 @@ class EvidenceKeeper:
         self._finished_at: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        # 失敗的次數與下一次重試的時間（monotonic）：run 以 run_id、孤兒以目錄名稱為鍵。
-        self._backoff: dict[UUID | str, tuple[int, float]] = {}
+        self._backoff = Backoff(settings.interval_seconds, monotonic)
 
     @property
     def healthy(self) -> bool:
@@ -211,7 +222,9 @@ class EvidenceKeeper:
                 logger.warning("run %s 等待解析逾期：已轉成 failed，接著加密", run.run_id)
 
     def _seal(self, report: PassReport, deadline: float) -> None:
-        candidates = self._store.sealable(limit=self._settings.batch, exclude=self._waiting_runs())
+        candidates = self._store.sealable(
+            limit=self._settings.batch, exclude=self._backoff.waiting_runs()
+        )
         for run in candidates:
             if self._monotonic() > deadline:
                 return
@@ -219,9 +232,9 @@ class EvidenceKeeper:
                 sealed = self._vault.seal(str(run.run_id))
                 self._store.record(run, sealed)
             except _FAILURES as exc:
-                self._failed(report, run.run_id, exc)
+                self._failed(report, run.run_id, exc, run=run)
                 continue
-            self._backoff.pop(run.run_id, None)
+            self._backoff.clear(run.run_id)
             if sealed is None:
                 report.none += 1
             else:
@@ -233,42 +246,47 @@ class EvidenceKeeper:
             now=self._clock(),
             retention_days=settings.retention_days,
             limit=settings.batch,
-            exclude=self._waiting_runs(),
+            exclude=self._backoff.waiting_runs(),
         )
         for run in candidates:
             if self._monotonic() > deadline:
                 return
             try:
-                self._vault.purge(str(run.run_id))
+                with _purging():
+                    self._vault.purge(str(run.run_id))
                 self._store.record_purged(run)
             except _FAILURES as exc:
                 self._failed(report, run.run_id, exc)
                 continue
-            self._backoff.pop(run.run_id, None)
+            self._backoff.clear(run.run_id)
             report.purged += 1
 
     def _orphans(self, report: PassReport, deadline: float) -> None:
         names = self._vault.entries()
-        known: set[UUID] = set()
-        for start in range(0, len(names), _KNOWN_BATCH):
-            known |= self._store.known([UUID(name) for name in names[start : start + _KNOWN_BATCH]])
-        # 操作者已經刪掉的孤兒目錄不再算失敗。
-        present = set(names)
-        for key in [key for key in self._backoff if isinstance(key, str) and key not in present]:
-            del self._backoff[key]
-        waiting = self._waiting()
+        skipped = self._runs_or_held(names)
+        self._backoff.forget_missing_orphans(set(names))
+        waiting = self._backoff.waiting()
         handled = 0
         for name in names:
-            if UUID(name) in known or name in waiting:
+            if UUID(name) in skipped or name in waiting:
                 continue
             if self._monotonic() > deadline or handled >= self._settings.batch:
                 return
             try:
                 handled += self._orphan(report, name)
             except _FAILURES as exc:
-                self._failed(report, UUID(name), exc, key=name)
+                self._failed(report, name, exc)
                 continue
-            self._backoff.pop(name, None)
+            self._backoff.clear(name)
+
+    def _runs_or_held(self, names: tuple[str, ...]) -> frozenset[UUID]:
+        """有 scanner_runs 紀錄的目錄（不是孤兒），以及隔離中的孤兒目錄（分批查詢）。"""
+        skipped: set[UUID] = set()
+        for start in range(0, len(names), _KNOWN_BATCH):
+            batch = [UUID(name) for name in names[start : start + _KNOWN_BATCH]]
+            known = self._store.known(batch)
+            skipped |= known | self._store.held([item for item in batch if item not in known])
+        return frozenset(skipped)
 
     def _orphan(self, report: PassReport, name: str) -> int:
         """處理了（加密或刪除）回 1，還沒到時間回 0。"""
@@ -290,7 +308,8 @@ class EvidenceKeeper:
                 return 0
         elif now - sealed_at < retention:
             return 0
-        self._vault.purge(name)
+        with _purging():
+            self._vault.purge(name)
         report.orphans_purged += 1
         logger.info("孤兒目錄 %s 已清除", name)
         return 1
@@ -298,51 +317,74 @@ class EvidenceKeeper:
     # --- 狀態 ------------------------------------------------------------------------------
 
     def _failed(
-        self, report: PassReport, run_id: UUID, exc: BaseException, *, key: UUID | str | None = None
+        self,
+        report: PassReport,
+        key: BackoffKey,
+        exc: BaseException,
+        *,
+        run: EvidenceRun | None = None,
     ) -> None:
+        """run 以 run_id、孤兒目錄以名稱為鍵；run 是這個目錄的 run（孤兒與逾期的步驟沒有）。
+        連續的上限失敗到了隔離的次數時寫入隔離紀錄；寫入成功才不再退避。"""
         report.failures += 1
-        failures = self._backoff.get(key or run_id, (0, 0.0))[0] + 1
-        delay = min(self._settings.interval_seconds * 2**failures, MAX_BACKOFF_SECONDS)
-        self._backoff[key or run_id] = (failures, self._monotonic() + delay)
+        attempt = self._backoff.failed(key, exc)
+        delay = attempt.retry_at - self._monotonic()
         logger.error(
-            "run %s 的原始證據無法處理（%s）：保留原狀，%.0f 秒後重試", run_id, _kind(exc), delay
+            "run %s 的原始證據無法處理（%s）：保留原狀，%.0f 秒後重試", key, _kind(exc), delay
         )
-
-    def _waiting(self) -> frozenset[UUID | str]:
-        """還在退避、這一輪不重試的 run 與孤兒（仍算不健康）。"""
-        now = self._monotonic()
-        return frozenset(key for key, (_, retry_at) in self._backoff.items() if retry_at > now)
-
-    def _waiting_runs(self) -> frozenset[UUID]:
-        return frozenset(key for key in self._waiting() if isinstance(key, UUID))
+        code = attempt.hold_code()
+        if code is None:
+            return
+        directory = key if isinstance(key, UUID) else UUID(key)
+        try:
+            self._store.hold(directory, run, code, attempt.streak)
+        except SQLAlchemyError as error:
+            logger.error(
+                "目錄 %s 無法記下需要人工處理（%s）：維持不健康，下一次失敗時再寫入",
+                directory,
+                type(error).__name__,
+            )
+            return
+        self._backoff.clear(key)
+        report.held += 1
+        logger.error(
+            "目錄 %s 連續 %s 次超過上限（%s）：已隔離、需要人工處理（retry-evidence），"
+            "明文保留原狀，不再自動重試",
+            directory,
+            attempt.streak,
+            code.value,
+        )
 
     def _finish(self, report: PassReport) -> None:
         with self._state:
             self._healthy = report.clean
             self._finished_at = self._monotonic()
-        changed = (
-            report.expired
-            + report.sealed
-            + report.none
-            + report.purged
-            + report.orphans_sealed
-            + report.orphans_purged
+        counts = (
+            report.expired,
+            report.sealed,
+            report.none,
+            report.purged,
+            report.orphans_sealed,
+            report.orphans_purged,
         )
-        if changed:
+        if any(counts):
             logger.info(
-                "keeper：逾期 %s、加密 %s、沒有目錄 %s、清除 %s、孤兒加密 %s、孤兒清除 %s",
-                report.expired,
-                report.sealed,
-                report.none,
-                report.purged,
-                report.orphans_sealed,
-                report.orphans_purged,
+                "keeper：逾期 %s、加密 %s、沒有目錄 %s、清除 %s、孤兒加密 %s、孤兒清除 %s", *counts
             )
 
     def _loop(self) -> None:
         while not self._stop.is_set():
             self.run_pass()
             self._stop.wait(self._settings.interval_seconds)
+
+
+@contextmanager
+def _purging() -> Iterator[None]:
+    """清除時超過上限不計入隔離：已加密的目錄被改過或環境有問題，維持全域 fail closed。"""
+    try:
+        yield
+    except EvidenceLimitError as exc:
+        raise EvidenceError(str(exc)) from None
 
 
 def _kind(exc: BaseException) -> str:

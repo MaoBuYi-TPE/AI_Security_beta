@@ -3,6 +3,7 @@
 - 一律以 dir fd 加 O_NOFOLLOW 開啟：工具建立的 symlink 不會讓 runner 讀到或刪到別的地方
   （和 workspace.py 收集輸出的做法相同）。
 - 走訪有深度與條目數的上限，先列出整棵樹再處理（走訪中改變目錄，os.scandir 可能重複或漏掉條目）。
+  超過上限是 TreeLimitError（記下是哪一個上限）：keeper 只對這種失敗計數、隔離（§30.12）。
 - 例外只帶錯誤的種類，不帶路徑（檔名由不可信的工具決定）。
 """
 
@@ -12,6 +13,7 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -23,6 +25,22 @@ READ_ONLY_FILE = 0o400
 
 class TreeError(Exception):
     """目錄樹無法處理（超過上限、沒有權限、被換掉…）。訊息只有原因，不含路徑。"""
+
+
+class TreeLimit(StrEnum):
+    DEPTH = "depth"
+    ENTRIES = "entries"
+
+
+_LIMIT_MESSAGES = {TreeLimit.DEPTH: "目錄的深度超過上限", TreeLimit.ENTRIES: "目錄的條目超過上限"}
+
+
+class TreeLimitError(TreeError):
+    """目錄樹超過深度或條目數的上限。"""
+
+    def __init__(self, limit: TreeLimit) -> None:
+        super().__init__(_LIMIT_MESSAGES[limit])
+        self.limit = limit
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +136,7 @@ def _list(walk: _Walk, dir_fd: int, prefix: str, depth: int, skip: frozenset[str
                 continue
             walk.tree.entries += 1
             if walk.tree.entries > walk.limits.max_entries:
-                raise TreeError("目錄的條目超過上限")
+                raise TreeLimitError(TreeLimit.ENTRIES)
             _visit(walk, dir_fd, entry.name, prefix, depth)
 
 
@@ -138,7 +156,7 @@ def _visit(walk: _Walk, dir_fd: int, name: str, prefix: str, depth: int) -> None
         tree.files.append(relative)
     elif stat.S_ISDIR(info.st_mode):
         if depth + 1 > walk.limits.max_depth:
-            raise TreeError("目錄的深度超過上限")
+            raise TreeLimitError(TreeLimit.DEPTH)
         if walk.restore_access:
             _grant(dir_fd, name, info.st_mode, PRIVATE_DIR)
         tree.directories.append(relative)
