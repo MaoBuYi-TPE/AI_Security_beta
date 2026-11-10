@@ -244,3 +244,21 @@ def test_a_hold_committed_without_a_reply_does_not_keep_the_keeper_unhealthy() -
 
     assert report.clean
     assert keeper.healthy is True
+
+
+def test_the_three_limits_count_toward_the_same_streak() -> None:
+    """深度、條目數與路徑總長度是三種可隔離的上限，共用連續的計數；記下的是最後一次的原因
+    （使用者，2026-11-10；§30.12）。"""
+    clock = Clock()
+    run = evidence_run()
+    name = str(run.run_id)
+    store = FakeStore(sealable_runs=[run])
+    vault = FakeVault()
+    keeper = make_keeper(store, vault, clock=clock)
+
+    for code in (DEEP, MANY, EvidenceHoldCode.TREE_PATHS_TOO_LONG):
+        vault.over_limit[name] = code
+        _again(keeper, clock)
+
+    assert store.holds[run.run_id].code is EvidenceHoldCode.TREE_PATHS_TOO_LONG
+    assert store.holds[run.run_id].attempts == HOLD_AFTER_FAILURES

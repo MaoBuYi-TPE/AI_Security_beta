@@ -6,8 +6,8 @@
 - 加密檔放在 run 目錄的 `sealed/`，檔名是原本相對路徑的 sha256；原本的路徑寫在已驗證的標頭中
   （security/blob_cipher.py）。
 - 例外一律轉成 EvidenceError（guarded），訊息只有原因，不含路徑或內容：任何一種失敗都不能讓
-  keeper 的執行緒結束（審查 HIGH-1）。目錄樹超過深度或條目數的上限是 EvidenceLimitError，帶有
-  隔離的錯誤代碼（§30.12）。
+  keeper 的執行緒結束（審查 HIGH-1）。目錄樹超過深度、條目數或路徑總長度的上限是
+  EvidenceLimitError，帶有隔離的錯誤代碼（§30.12）。
 """
 
 import hashlib
@@ -56,7 +56,7 @@ class EvidenceError(Exception):
 
 
 class EvidenceLimitError(EvidenceError):
-    """一個目錄超過深度或條目數的上限：keeper 連續 3 次就隔離這個目錄（§30.12）。"""
+    """一個目錄超過資源上限（深度、條目數或路徑總長度）：keeper 連續 3 次就隔離它（§30.12）。"""
 
     def __init__(self, code: EvidenceHoldCode, message: str) -> None:
         super().__init__(message)
@@ -66,6 +66,7 @@ class EvidenceLimitError(EvidenceError):
 _HOLD_CODES = {
     TreeLimit.DEPTH: EvidenceHoldCode.TREE_TOO_DEEP,
     TreeLimit.ENTRIES: EvidenceHoldCode.TREE_TOO_MANY_ENTRIES,
+    TreeLimit.PATHS: EvidenceHoldCode.TREE_PATHS_TOO_LONG,
 }
 
 

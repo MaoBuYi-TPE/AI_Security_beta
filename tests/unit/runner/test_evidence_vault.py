@@ -341,6 +341,7 @@ def test_too_many_entries_fail_closed(runs: Path, key: str) -> None:
     [
         (TreeLimits(max_depth=2), EvidenceHoldCode.TREE_TOO_DEEP),
         (TreeLimits(max_entries=3), EvidenceHoldCode.TREE_TOO_MANY_ENTRIES),
+        (TreeLimits(max_path_chars=20), EvidenceHoldCode.TREE_PATHS_TOO_LONG),
     ],
 )
 def test_limit_failures_carry_a_hold_code(
@@ -370,16 +371,6 @@ def test_a_volume_with_too_many_directories_is_not_a_limit_failure(runs: Path, k
         _vault(runs, key, limits=TreeLimits(max_entries=1)).entries()
 
     assert not isinstance(raised.value, EvidenceLimitError)
-
-
-def test_a_tree_with_too_long_paths_fails_closed_without_a_hold_code(runs: Path, key: str) -> None:
-    root = _run(runs)
-
-    with pytest.raises(EvidenceError) as raised:
-        _vault(runs, key, limits=TreeLimits(max_path_chars=20)).seal(RUN)
-
-    assert not isinstance(raised.value, EvidenceLimitError)
-    _plaintext_kept(root)
 
 
 def test_a_sealed_directory_larger_than_the_limit_can_be_purged(runs: Path, key: str) -> None:

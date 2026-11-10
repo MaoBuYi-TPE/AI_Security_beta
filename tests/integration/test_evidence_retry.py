@@ -22,7 +22,9 @@ from sqlalchemy.orm import sessionmaker
 
 from secscan.cli import EXIT_FAILURE, EXIT_OK, main
 from secscan.cli import evidence as evidence_cli
+from secscan.cli import evidence_holds as retry_cli
 from secscan.runner.evidence import SEALED_DIR, EvidenceVault
+from secscan.runner.fs import TreeLimits
 from secscan.runner.keeper import EvidenceKeeper, KeeperSettings
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.evidence import EvidenceHoldCode
@@ -166,6 +168,7 @@ def test_still_over_the_limit_keeps_the_hold_and_the_plaintext(
         "reason": REASON,
         "max_depth": 32,
         "max_entries": 20_000,
+        "max_path_chars": 8 * 1024 * 1024,
     }
     assert (retry.actor_key_id, retry.object_id) == (None, held_run.run_id)
     assert retry.project_id is not None
@@ -202,6 +205,7 @@ def test_a_higher_limit_seals_resolves_and_is_purged_later(
         "plaintext_bytes": len(CANARY) + 2,
         "max_depth": 40,
         "max_entries": 20_000,
+        "max_path_chars": 8 * 1024 * 1024,
     }
 
     later = datetime.now(UTC) + timedelta(days=8)
@@ -361,6 +365,8 @@ def test_a_reason_that_is_not_utf8_is_rejected_before_anything_changes(
         ["--max-depth", "65"],
         ["--max-entries", "19999"],
         ["--max-entries", "50001"],
+        ["--max-path-chars", str(8 * 1024 * 1024 - 1)],
+        ["--max-path-chars", str(16 * 1024 * 1024 + 1)],
         ["--max-depth", "deep"],
     ],
 )
@@ -387,3 +393,27 @@ def test_retention_status_lists_holds_without_paths(
     assert str(held_run.run_id) in err
     assert "retry-evidence" in err
     assert str(runs) not in err
+
+
+def test_paths_over_the_limit_need_a_higher_path_limit(
+    held_run: EvidenceRun,
+    queue_seed: Seeder,
+    runs: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsysbinary: pytest.CaptureFixture[bytes],
+) -> None:
+    """路徑總長度是第三種上限：預設的上限不夠時失敗、隔離不變；指定較高的上限（不超過絕對
+    上限）之後成功（使用者，2026-11-10；§30.12）。以較小的常數代替 8M／16M 字元。"""
+    monkeypatch.setattr(retry_cli, "DEFAULT_LIMITS", TreeLimits(max_path_chars=500))
+    monkeypatch.setattr(retry_cli, "MAX_PATH_CHARS", 5_000)
+
+    assert _retry(held_run.run_id, "--max-depth", "40") == EXIT_FAILURE
+    assert "--max-path-chars" in _err(capsysbinary)
+    [failed] = _audits(queue_seed, "evidence.retry_failed")
+    assert failed.redacted_changes["error_code"] == "EVIDENCE_TREE_PATHS_TOO_LONG"
+    assert _leaf(runs, held_run.run_id).read_bytes() == CANARY
+    with pytest.raises(SystemExit):
+        _retry(held_run.run_id, "--max-depth", "40", "--max-path-chars", "5001")
+
+    assert _retry(held_run.run_id, "--max-depth", "40", "--max-path-chars", "5000") == EXIT_OK
+    assert _hold(queue_seed, held_run.run_id).resolved_at is not None

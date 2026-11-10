@@ -7,8 +7,8 @@ runs volume 中每個 run 的目錄由 runner 的 keeper 在 run 結束（解析
 - pending：還沒加密（執行中、等待解析，或加密失敗後等待重試）。DB 沒有紀錄就是 pending。
 - sealed：只剩加密檔（已驗證解得開而且內容相符，才刪除明文）。
 - purged：保留期限到了，整個目錄已刪除（只是 unlink，不抹除磁碟上的資料區塊）。
-- manual_intervention_required：目錄超過深度或條目數的上限，連續 HOLD_AFTER_FAILURES 次加密失敗，
-  keeper 已隔離它（明文保留原狀、不再自動重試），等待 `secscan-admin retry-evidence`
+- manual_intervention_required：目錄超過深度、條目數或路徑總長度的上限，連續 HOLD_AFTER_FAILURES
+  次加密失敗，keeper 已隔離它（明文保留原狀、不再自動重試），等待 `secscan-admin retry-evidence`
   （docs/DECISIONS.md §30.12）。DB 中是 evidence_holds 的紀錄，不是 run_evidence。
 """
 
@@ -37,10 +37,12 @@ RECORDED_EVIDENCE_STATUSES = frozenset(
 
 
 class EvidenceHoldCode(StrEnum):
-    """keeper 隔離一個目錄的原因：只有這兩種上限（其他失敗照舊退避、全域 fail closed）。"""
+    """keeper 隔離一個目錄的原因：只有這三種資源上限（其他失敗照舊退避、全域 fail closed）。
+    路徑總長度是使用者 2026-11-10 加入的（§30.12）。"""
 
     TREE_TOO_DEEP = "EVIDENCE_TREE_TOO_DEEP"
     TREE_TOO_MANY_ENTRIES = "EVIDENCE_TREE_TOO_MANY_ENTRIES"
+    TREE_PATHS_TOO_LONG = "EVIDENCE_TREE_PATHS_TOO_LONG"
 
 
 @dataclass(frozen=True, slots=True)

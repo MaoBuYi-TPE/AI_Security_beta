@@ -6,10 +6,10 @@ Create Date: 2026-11-10 12:00:00+00:00
 
 升降級說明：
 - upgrade：
-  - 新增 evidence_holds：runs volume 中一個目錄連續超過深度或條目數的上限而加密失敗時，keeper 新增
-    一列（主鍵 directory，就是目錄名稱）。run 的目錄以 (scanner_run_id, scan_id) 引用 scanner_runs
-    （scanner_run_id 就是 directory）；孤兒目錄兩者都是 NULL。記下錯誤代碼、隔離之前連續失敗的次數、
-    隔離時間，以及人工重試加密成功的時間（resolved_at）。
+  - 新增 evidence_holds：runs volume 中一個目錄連續超過深度、條目數或路徑總長度的上限而加密失敗
+    時，keeper 新增一列（主鍵 directory，就是目錄名稱）。run 的目錄以 (scanner_run_id, scan_id)
+    引用 scanner_runs（scanner_run_id 就是 directory）；孤兒目錄兩者都是 NULL。記下錯誤代碼、
+    隔離之前連續失敗的次數、隔離時間，以及人工重試加密成功的時間（resolved_at）。
   - CHECK：run 的兩個欄位同時有或同時沒有；scanner_run_id 等於 directory；錯誤代碼的清單；次數至少
     1；解除不早於隔離。
   - 部分索引 ix_evidence_holds_active：retention-status 列出還沒解除的隔離。外鍵不另建索引：
@@ -52,7 +52,8 @@ _CHECKS = {
     "run_columns_paired": "(scanner_run_id IS NULL) = (scan_id IS NULL)",
     "directory_is_run": "scanner_run_id IS NULL OR scanner_run_id = directory",
     "error_code_valid": (
-        "error_code IN ('EVIDENCE_TREE_TOO_DEEP', 'EVIDENCE_TREE_TOO_MANY_ENTRIES')"
+        "error_code IN ('EVIDENCE_TREE_PATHS_TOO_LONG', 'EVIDENCE_TREE_TOO_DEEP', "
+        "'EVIDENCE_TREE_TOO_MANY_ENTRIES')"
     ),
     "attempts_positive": "attempts >= 1",
     "resolved_after_held": "resolved_at IS NULL OR resolved_at >= held_at",

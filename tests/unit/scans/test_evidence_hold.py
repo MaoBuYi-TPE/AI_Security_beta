@@ -37,6 +37,7 @@ def test_codes_fit_the_column() -> None:
     assert {code.value for code in EvidenceHoldCode} == {
         "EVIDENCE_TREE_TOO_DEEP",
         "EVIDENCE_TREE_TOO_MANY_ENTRIES",
+        "EVIDENCE_TREE_PATHS_TOO_LONG",
     }
     assert all(len(code.value) <= 32 for code in EvidenceHoldCode)
 

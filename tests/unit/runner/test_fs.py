@@ -65,16 +65,16 @@ def test_limit_errors_say_which_limit(tmp_path: Path, limits: TreeLimits, limit:
     assert str(tmp_path) not in str(raised.value)
 
 
-def test_the_total_path_length_is_limited_and_not_a_hold(tmp_path: Path) -> None:
-    """很長的路徑會讓整棵樹的記憶體超過 runner 的上限：另外限制總長度，超過時是一般的
-    TreeError（不隔離；安全審查 M1，§30.12）。"""
+def test_the_total_path_length_is_a_third_limit(tmp_path: Path) -> None:
+    """很長的路徑會讓整棵樹的記憶體超過 runner 的上限：另外限制總長度，第一次超過就停止走訪
+    （安全審查 M1）；和深度、條目數一樣可以隔離（使用者，2026-11-10；§30.12）。"""
     _tree(tmp_path)
 
-    with opened(open_directory(tmp_path)) as root, pytest.raises(TreeError) as raised:
+    with opened(open_directory(tmp_path)) as root, pytest.raises(TreeLimitError) as raised:
         list_tree(root, TreeLimits(max_path_chars=22))
 
+    assert raised.value.limit is TreeLimit.PATHS
     assert "路徑總長度" in str(raised.value)
-    assert not isinstance(raised.value, TreeLimitError)
     with opened(open_directory(tmp_path)) as root:
         assert list_tree(root, TreeLimits(max_path_chars=23)).path_chars == 23
 

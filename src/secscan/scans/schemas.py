@@ -233,7 +233,10 @@ class RunUsageOut(BaseModel):
 
 
 class RunEvidenceHoldOut(BaseModel):
-    """keeper 的隔離紀錄（docs/DECISIONS.md §30.12）：目錄連續超過深度或條目數的上限而加密失敗。
+    """keeper 的隔離紀錄（docs/DECISIONS.md §30.12）：目錄連續超過資源上限而加密失敗。
+
+    error_code：深度（EVIDENCE_TREE_TOO_DEEP）、條目數（EVIDENCE_TREE_TOO_MANY_ENTRIES）或路徑
+    總長度（EVIDENCE_TREE_PATHS_TOO_LONG）。
 
     resolved_at：人工以 `secscan-admin retry-evidence` 加密成功的時間；還沒解除是 null。
     """

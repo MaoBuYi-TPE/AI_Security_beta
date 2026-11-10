@@ -3,7 +3,8 @@
 在 runner 容器內執行（只有它掛載 runs volume、持有 EVIDENCE_ENCRYPTION_KEYS）：
 
     secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> \\
-        [--max-depth <32 到 64>] [--max-entries <20000 到 50000>]
+        [--max-depth <32 到 64>] [--max-entries <20000 到 50000>] \\
+        [--max-path-chars <8388608 到 16777216>]
 
 - 只處理還沒解除的隔離（retention-status 列出的目錄名稱）；沒有就 exit 1、不做任何改變。
 - 和 keeper 以 advisory lock 互斥（等鎖的方式同 rotate-evidence-keys）；執行期間 runner 不認領新的
@@ -15,8 +16,8 @@
 - 失敗時（仍然超過上限、其他錯誤、目錄不存在）寫 audit `evidence.retry_failed`，隔離不變、明文保留
   原狀，exit 1。目錄不存在不會記成「沒有目錄」。
 - 加密完成、DB 寫入失敗：提示再執行一次（加密可以重複執行）；記下之前維持隔離。
-- 上限：整棵樹列在記憶體中，而這個程序和 runner 共用容器的記憶體上限，所以最多深度 64、條目 50,000；
-  更大的樹不在系統內處理。
+- 上限：整棵樹列在記憶體中，而這個程序和 runner 共用容器的記憶體上限，所以有絕對的上限：深度 64、
+  條目 50,000、路徑總長度 16M 字元（最壞約 64 MB）。更大的樹不在系統內處理。
 - 刻意不提供：不加密就解除隔離，或刪除目錄的指令。
 說明都寫到 stderr，不含路徑或內容。
 """
@@ -48,6 +49,7 @@ APPLICATION_NAME = "secscan-evidence-cli"
 DEFAULT_LIMITS = TreeLimits()
 MAX_DEPTH = 64
 MAX_ENTRIES = 50_000
+MAX_PATH_CHARS = 16 * 1024 * 1024
 REASON_MAX_LENGTH = 200
 MISSING_DIRECTORY = "EVIDENCE_DIRECTORY_MISSING"
 SEALED_NOT_RECORDED = "EVIDENCE_SEALED_NOT_RECORDED"
@@ -95,6 +97,12 @@ def register(commands: Subparsers) -> None:
         default=DEFAULT_LIMITS.max_entries,
         help=f"條目數的上限（{DEFAULT_LIMITS.max_entries} 到 {MAX_ENTRIES}）",
     )
+    parser.add_argument(
+        "--max-path-chars",
+        type=_bounded(DEFAULT_LIMITS.max_path_chars, MAX_PATH_CHARS),
+        default=DEFAULT_LIMITS.max_path_chars,
+        help=f"路徑總字元數的上限（{DEFAULT_LIMITS.max_path_chars} 到 {MAX_PATH_CHARS}）",
+    )
 
 
 def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | None:
@@ -113,7 +121,11 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
     if not _utf8(args.reason):
         report("--reason 不可包含無法以 UTF-8 表示的位元組（例如終端的編碼不是 UTF-8）。")
         return EXIT_FAILURE
-    limits = TreeLimits(max_depth=args.max_depth, max_entries=args.max_entries)
+    limits = TreeLimits(
+        max_depth=args.max_depth,
+        max_entries=args.max_entries,
+        max_path_chars=args.max_path_chars,
+    )
     vault = runner_vault(settings, report, limits=limits)
     if vault is None:
         return EXIT_FAILURE
@@ -148,6 +160,7 @@ def _retry_locked(holds: EvidenceHolds, vault: EvidenceVault, request: _Request)
     limits: dict[str, JsonValue] = {
         "max_depth": request.limits.max_depth,
         "max_entries": request.limits.max_entries,
+        "max_path_chars": request.limits.max_path_chars,
     }
     try:
         holds.audit(
@@ -188,7 +201,11 @@ def _failed(holds: EvidenceHolds, held: HeldDirectory, code: str | None, error: 
         holds.audit(held, "evidence.retry_failed", {"error_code": code, "error": error})
     except SQLAlchemyError as exc:
         note = f"（audit 也無法寫入：{type(exc).__name__}）"
-    advice = "可以指定較高的 --max-depth、--max-entries 再試；" if code in _LIMIT_CODES else ""
+    advice = (
+        "可以指定較高的 --max-depth、--max-entries、--max-path-chars 再試；"
+        if code in _LIMIT_CODES
+        else ""
+    )
     return _Outcome(
         EXIT_FAILURE,
         f"仍無法加密（{error}）{note}：隔離不變，明文保留原狀。{advice}"

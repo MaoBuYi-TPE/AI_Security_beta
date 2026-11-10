@@ -95,10 +95,16 @@ def store(queue_engine: Engine) -> EvidenceStore:
     return EvidenceStore(sessionmaker(queue_engine, expire_on_commit=False), engine=queue_engine)
 
 
-def _keeper(store: EvidenceStore, runs: Path, moment: Moment, ticker: Ticker) -> EvidenceKeeper:
+def _keeper(
+    store: EvidenceStore,
+    runs: Path,
+    moment: Moment,
+    ticker: Ticker,
+    limits: TreeLimits = LIMITS,
+) -> EvidenceKeeper:
     return EvidenceKeeper(
         store,
-        EvidenceVault(runs, shared_evidence_cipher(), limits=LIMITS),
+        EvidenceVault(runs, shared_evidence_cipher(), limits=limits),
         SETTINGS,
         clock=lambda: moment.now,
         monotonic=lambda: ticker.now,
@@ -658,3 +664,32 @@ def test_a_second_resolve_finds_the_hold_already_resolved(
     with pytest.raises(HoldNotActiveError):
         holds.resolve(held, SealedEvidence(files=1, plaintext_bytes=1), {})
     assert len(_audits(queue_seed, "evidence.resolve")) == 1
+
+
+def test_a_run_with_too_long_paths_is_held_like_the_other_limits(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    runs: Path,
+    store: EvidenceStore,
+    moment: Moment,
+    ticker: Ticker,
+) -> None:
+    """路徑總長度超過上限也只隔離這個 run，不阻擋其他 run（使用者，2026-11-10；§30.12）。"""
+    keeper = _keeper(store, runs, moment, ticker, TreeLimits(max_path_chars=300))
+    stuck = _finished(queue, queue_seed, world, scannable)
+    leaf = runs / str(stuck.run_id) / "out" / ("n" * 200)
+    leaf.mkdir(parents=True)
+    (leaf / "messages.txt").write_bytes(CANARY)
+
+    reports = _until_held(keeper, ticker)
+
+    assert reports[-1].held == 1
+    assert _hold_row(queue_seed, stuck.run_id).error_code == "EVIDENCE_TREE_PATHS_TOO_LONG"
+    assert (leaf / "messages.txt").read_bytes() == CANARY
+    fine = _finished(queue, queue_seed, world, scannable)
+    (runs / str(fine.run_id) / "out").mkdir(parents=True)
+    (runs / str(fine.run_id) / "out" / "report.json").write_bytes(b"{}")
+    report = keeper.run_pass()
+    assert (report.clean, report.sealed) == (True, 1)

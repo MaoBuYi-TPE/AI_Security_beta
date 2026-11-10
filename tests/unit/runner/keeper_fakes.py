@@ -21,6 +21,7 @@ SETTINGS = KeeperSettings(retention_days=7, plaintext_max_minutes=60, batch=5)
 LIMIT_MESSAGES = {
     EvidenceHoldCode.TREE_TOO_DEEP: "目錄的深度超過上限",
     EvidenceHoldCode.TREE_TOO_MANY_ENTRIES: "目錄的條目超過上限",
+    EvidenceHoldCode.TREE_PATHS_TOO_LONG: "目錄的路徑總長度超過上限",
 }
 
 

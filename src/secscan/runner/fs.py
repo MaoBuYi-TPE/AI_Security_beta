@@ -2,8 +2,9 @@
 
 - 一律以 dir fd 加 O_NOFOLLOW 開啟：工具建立的 symlink 不會讓 runner 讀到或刪到別的地方
   （和 workspace.py 收集輸出的做法相同）。
-- 走訪有深度與條目數的上限，先列出整棵樹再處理（走訪中改變目錄，os.scandir 可能重複或漏掉條目）。
-  超過上限是 TreeLimitError（記下是哪一個上限）：keeper 只對這種失敗計數、隔離（§30.12）。
+- 走訪有深度、條目數與路徑總長度的上限，先列出整棵樹再處理（走訪中改變目錄，os.scandir 可能
+  重複或漏掉條目）。超過上限是 TreeLimitError（記下是哪一個上限）：keeper 只對這種失敗計數、
+  隔離（§30.12）。
 - 例外只帶錯誤的種類，不帶路徑（檔名由不可信的工具決定）。
 """
 
@@ -30,13 +31,20 @@ class TreeError(Exception):
 class TreeLimit(StrEnum):
     DEPTH = "depth"
     ENTRIES = "entries"
+    PATHS = "paths"
 
 
-_LIMIT_MESSAGES = {TreeLimit.DEPTH: "目錄的深度超過上限", TreeLimit.ENTRIES: "目錄的條目超過上限"}
+_LIMIT_MESSAGES = {
+    TreeLimit.DEPTH: "目錄的深度超過上限",
+    TreeLimit.ENTRIES: "目錄的條目超過上限",
+    TreeLimit.PATHS: "目錄的路徑總長度超過上限",
+}
+# 所有相對路徑的總字元數的預設上限（最壞每個字元 4 bytes，約 32 MB）。
+MAX_PATH_CHARS = 8 * 1024 * 1024
 
 
 class TreeLimitError(TreeError):
-    """目錄樹超過深度或條目數的上限。"""
+    """目錄樹超過深度、條目數或路徑總長度的上限（第一次超過就停止走訪）。"""
 
     def __init__(self, limit: TreeLimit) -> None:
         super().__init__(_LIMIT_MESSAGES[limit])
@@ -46,12 +54,11 @@ class TreeLimitError(TreeError):
 @dataclass(frozen=True, slots=True)
 class TreeLimits:
     """深度、條目數，以及所有相對路徑的總字元數（整棵樹列在記憶體中：只限條目數時，很長的路徑
-    仍會讓 runner 的 256m 記憶體不夠；安全審查 M1，§30.12）。路徑總長度超過上限是一般的
-    TreeError，不是可以隔離的 TreeLimitError。"""
+    仍會讓 runner 的 256m 記憶體不夠；安全審查 M1）。三者都是可以隔離的上限（§30.12）。"""
 
     max_depth: int = 32
     max_entries: int = 20_000
-    max_path_chars: int = 8 * 1024 * 1024
+    max_path_chars: int = MAX_PATH_CHARS
 
 
 @dataclass(slots=True)
@@ -157,7 +164,7 @@ def _visit(walk: _Walk, dir_fd: int, name: str, prefix: str, depth: int) -> None
     relative = f"{prefix}{name}"
     tree.path_chars += len(relative)
     if tree.path_chars > walk.limits.max_path_chars:
-        raise TreeError("目錄的路徑總長度超過上限")
+        raise TreeLimitError(TreeLimit.PATHS)
     tree.newest_mtime = max(tree.newest_mtime, info.st_mtime)
     if stat.S_ISREG(info.st_mode):
         if walk.restore_access:
