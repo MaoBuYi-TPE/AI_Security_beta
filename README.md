@@ -377,7 +377,7 @@ T23a 的離線實作已完成，**Live 尚未執行，T23a 與 SEC-14 都不標�
   - `uv run secscan-admin rotate-content-keys`：報告與摘錄的換版。
   - `docker compose --profile app exec runner secscan-admin rotate-evidence-keys`：原始證據的換版（只有 runner 容器有這組金鑰）。
   - `docker compose --profile app exec runner secscan-admin export-evidence --run <id> [--path <路徑>]`：break-glass，列出加密檔，或先寫 audit 再把一個檔案的明文寫到 stdout。
-  - `docker compose --profile app exec runner secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> [--max-depth N] [--max-entries N]`：人工處理 `retention-status` 列出的「需要人工處理」目錄（超過深度或條目數的上限、連續 3 次加密失敗而被隔離，明文保留）；先寫 audit，以指定的上限（最多深度 64、條目 50,000）加密，驗證通過才解除隔離。沒有不加密就解除或刪除目錄的指令（`docs/DECISIONS.md` §30.12）。
+  - `docker compose --profile app exec runner secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> [--max-depth N] [--max-entries N] [--max-path-chars N]`：人工處理 `retention-status` 列出的「需要人工處理」目錄（超過深度、條目數或路徑總長度的上限、連續 3 次加密失敗而被隔離，明文保留）；先寫 audit，以指定的上限（最多深度 64、條目 50,000、路徑總長度 16M 字元）加密，驗證通過才解除隔離。沒有不加密就解除或刪除目錄的指令（`docs/DECISIONS.md` §30.12）。
 - **換版**：新金鑰放在那一組的最前面（逗號分隔）→ 重啟持有它的容器 → 執行換版 → 移除舊金鑰、重啟 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。
 - **bench 結果**：`make bench-key` 建立本機的金鑰檔（預設 `~/.config/secscan/bench-keys`，可用 `BENCH_KEY_FILE` 指定；不可放在 repo 中；已經存在就失敗、不覆寫）。之後 `make bench` 寫出的每個檔案都是 `<名稱>.sealed`，`bench-evaluate` 先核對 `SHA256SUMS`、解密、再核對明文的 sha256 才評估。T23a 之前的明文結果目錄以 `make bench-seal BENCH_SOURCE=<原目錄> BENCH_NAME=<新名稱>` 轉成新的加密目錄，原目錄不修改也不刪除。**金鑰檔遺失之後結果無法復原，請另外備份。**
 

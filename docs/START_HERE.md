@@ -104,7 +104,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | uv run secscan-admin rotate-content-keys | M5（T23a 已建立） | 以 `CONTENT_ENCRYPTION_KEYS` 的第一個金鑰重新加密報告內容與人工複測摘錄；解不開的保留原狀、列出 id、exit 1 |
 | secscan-admin rotate-evidence-keys | M5（T23a 已建立） | 在 runner 容器內執行：以 `EVIDENCE_ENCRYPTION_KEYS` 的第一個金鑰重新加密 runs volume 的加密檔；和 keeper 互斥 |
 | secscan-admin export-evidence --run ID [--path P] | M5（T23a 已建立） | 在 runner 容器內執行：列出一個 run 的加密檔，或先驗證、寫 audit 再把一個檔案的明文寫到 stdout（break-glass） |
-| secscan-admin retry-evidence --directory D --reason R [--max-depth N] [--max-entries N] | M5（T23a 方案 B 已建立） | 在 runner 容器內執行：人工處理一個需要人工處理的目錄；先寫 audit，以較高的上限加密，驗證通過才解除隔離（`API_CONTRACT.md` §20） |
+| secscan-admin retry-evidence --directory D --reason R [--max-depth N] [--max-entries N] [--max-path-chars N] | M5（T23a 方案 B 已建立） | 在 runner 容器內執行：人工處理一個需要人工處理的目錄；先寫 audit，以較高的上限加密，驗證通過才解除隔離（`API_CONTRACT.md` §20） |
 | uv run secscan-admin retention-status | M5（T23a 已建立） | 唯讀：原始證據、需要人工處理的目錄、報告與摘錄各保留狀態的數量 |
 | uv run secscan-admin fake-runner [--outcome succeed\|fail] [--hold-seconds N] [--once] | M1（T09 已建立） | 對帳 lease 過期的 fake run，再處理排隊中的 fake run；不連任何位址，結果標為 fixture（`API_CONTRACT.md` §17.5） |
 | uv run secscan-admin runner [--once] [--outcome succeed\|fail] [--hold-seconds N] | M2（T10 已建立） | 容器版的 runner：經 socket-proxy 啟動強化的單次容器（T10 只有 fake），收集輸出；SIGTERM 時停止並刪除容器（`API_CONTRACT.md` §18.1） |
