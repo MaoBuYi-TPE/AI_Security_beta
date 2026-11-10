@@ -121,8 +121,11 @@ def evidence_hold(model: EvidenceHoldModel) -> EvidenceHold:
 def evidence_state(
     evidence: RunEvidenceModel | None, hold: EvidenceHoldModel | None
 ) -> EvidenceState:
-    """DB 的紀錄 → API 顯示的狀態：先看 run_evidence，再看還沒解除的隔離，都沒有是 pending。"""
+    """DB 的紀錄 → API 顯示的狀態：還沒解除的隔離優先（fail closed 的顯示：就算出現不一致的
+    run_evidence，也不顯示成已加密；安全審查 L3），再看 run_evidence，都沒有是 pending。"""
     held = None if hold is None else evidence_hold(hold)
+    if held is not None and held.active:
+        return EvidenceState(EvidenceStatus.MANUAL_INTERVENTION_REQUIRED, hold=held)
     if evidence is not None:
         return EvidenceState(
             EvidenceStatus(evidence.status),
@@ -130,6 +133,4 @@ def evidence_state(
             purged_at=evidence.purged_at,
             hold=held,
         )
-    if held is not None and held.active:
-        return EvidenceState(EvidenceStatus.MANUAL_INTERVENTION_REQUIRED, hold=held)
     return PENDING_EVIDENCE

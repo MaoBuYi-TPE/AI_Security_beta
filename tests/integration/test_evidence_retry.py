@@ -288,6 +288,9 @@ def test_a_database_failure_after_sealing_is_finished_by_running_again(
     assert {entry.name for entry in (runs / str(held_run.run_id)).iterdir()} == {SEALED_DIR}
     assert _hold(queue_seed, held_run.run_id).resolved_at is None
     assert _evidence(queue_seed, held_run.run_id) == []
+    [unrecorded] = _audits(queue_seed, "evidence.retry_failed")
+    assert unrecorded.redacted_changes["error_code"] == "EVIDENCE_SEALED_NOT_RECORDED"
+    assert unrecorded.redacted_changes["files"] == 2
 
     assert _retry(held_run.run_id) == EXIT_OK
 
@@ -332,6 +335,23 @@ def test_bad_arguments_change_nothing(
     assert main(["retry-evidence", *argv]) == EXIT_FAILURE
 
     assert _audits(queue_seed, "evidence.retry") == []
+
+
+def test_a_reason_that_is_not_utf8_is_rejected_before_anything_changes(
+    held_run: EvidenceRun,
+    queue_seed: Seeder,
+    runs: Path,
+    capsysbinary: pytest.CaptureFixture[bytes],
+) -> None:
+    """不合法的 UTF-8 經 surrogateescape 解碼成孤立的 surrogate，寫進 audit 時才會失敗
+    （安全審查 L4）：在開始之前就拒絕。"""
+    argv = ["--directory", str(held_run.run_id), "--reason", "理由\udcff", "--max-depth", "40"]
+
+    assert main(["retry-evidence", *argv]) == EXIT_FAILURE
+
+    assert "UTF-8" in _err(capsysbinary)
+    assert _audits(queue_seed, "evidence.retry") == []
+    assert _leaf(runs, held_run.run_id).read_bytes() == CANARY
 
 
 @pytest.mark.parametrize(

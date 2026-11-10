@@ -117,3 +117,12 @@ def test_a_recorded_status_wins_and_the_resolved_hold_stays_visible() -> None:
     assert state.status is EvidenceStatus.SEALED
     assert state.encrypted is True
     assert state.hold == _hold(resolved=True)
+
+
+def test_an_active_hold_wins_over_inconsistent_evidence() -> None:
+    """DB 不允許隔離中的 run 有 run_evidence；萬一出現（手動修改資料），也不顯示成已加密
+    （fail closed 的顯示；安全審查 L3，§30.12）。"""
+    state = evidence_state(_evidence_model(EvidenceStatus.SEALED), _hold_model(resolved=False))
+
+    assert state.status is EvidenceStatus.MANUAL_INTERVENTION_REQUIRED
+    assert state.encrypted is False

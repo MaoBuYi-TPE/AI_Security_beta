@@ -224,3 +224,23 @@ def test_a_failed_hold_write_stays_unhealthy_and_is_retried(
     assert report.held == 1
     assert store.holds[stuck.run_id].attempts == HOLD_AFTER_FAILURES + 1
     assert _again(keeper, clock).clean
+
+
+def test_a_hold_committed_without_a_reply_does_not_keep_the_keeper_unhealthy() -> None:
+    """寫入已 commit、回應卻遺失：DB 已隔離，這個目錄之後不會再被處理；下一輪依 DB 清掉退避，
+    不會一直不健康到 runner 重啟（程式碼審查 M1、安全審查 L2；§30.12）。"""
+    clock = Clock()
+    stuck = evidence_run()
+    store = FakeStore(sealable_runs=[stuck], hold_reply_lost=True)
+    vault = FakeVault(over_limit={str(stuck.run_id): DEEP})
+    keeper = make_keeper(store, vault, clock=clock)
+
+    for _ in range(HOLD_AFTER_FAILURES):
+        report = _again(keeper, clock)
+    assert (report.held, report.deferred) == (0, 1)
+    assert stuck.run_id in store.holds
+
+    report = _again(keeper, clock)
+
+    assert report.clean
+    assert keeper.healthy is True

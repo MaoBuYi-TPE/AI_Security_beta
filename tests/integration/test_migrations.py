@@ -87,6 +87,7 @@ TRIGGER_FUNCTIONS = (
     "finding_triage_excerpts_guard",
     "reports_purge_complete",
     "evidence_holds_guard",
+    "run_evidence_hold_check",
 )
 
 
@@ -309,6 +310,6 @@ def test_downgrade_without_holds_removes_the_table(fresh_database: ProvisionedDa
 
         assert _current_revisions(engine) == ["0022"]
         assert "evidence_holds" not in _tables(engine)
-        assert "evidence_holds_guard" not in _existing_functions(engine)
+        assert not {"evidence_holds_guard", "run_evidence_hold_check"} & _existing_functions(engine)
     finally:
         engine.dispose()

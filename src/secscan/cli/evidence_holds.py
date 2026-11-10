@@ -39,7 +39,7 @@ from secscan.core.json_types import JsonValue
 from secscan.core.text import require_text
 from secscan.runner.evidence import EvidenceError, EvidenceLimitError, EvidenceVault
 from secscan.runner.fs import TreeLimits
-from secscan.scans.domain.evidence import EvidenceHoldCode
+from secscan.scans.domain.evidence import EvidenceHoldCode, SealedEvidence
 from secscan.scans.evidence_holds import EvidenceHolds, HeldDirectory, HoldNotActiveError
 from secscan.scans.evidence_records import EvidenceStore
 
@@ -50,6 +50,7 @@ MAX_DEPTH = 64
 MAX_ENTRIES = 50_000
 REASON_MAX_LENGTH = 200
 MISSING_DIRECTORY = "EVIDENCE_DIRECTORY_MISSING"
+SEALED_NOT_RECORDED = "EVIDENCE_SEALED_NOT_RECORDED"
 
 type Subparsers = argparse._SubParsersAction[Any]
 
@@ -109,6 +110,9 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
     except ValueError as exc:
         report(f"{exc}。")
         return EXIT_FAILURE
+    if not _utf8(args.reason):
+        report("--reason 不可包含無法以 UTF-8 表示的位元組（例如終端的編碼不是 UTF-8）。")
+        return EXIT_FAILURE
     limits = TreeLimits(max_depth=args.max_depth, max_entries=args.max_entries)
     vault = runner_vault(settings, report, limits=limits)
     if vault is None:
@@ -162,12 +166,14 @@ def _retry_locked(holds: EvidenceHolds, vault: EvidenceVault, request: _Request)
     try:
         holds.resolve(held, sealed, limits)
     except HoldNotActiveError:
-        return _Outcome(EXIT_FAILURE, "已加密，但這個隔離已由另一次執行解除：沒有再寫入。")
+        note = _unrecorded(holds, held, sealed, "這個隔離已由另一次執行解除")
+        return _Outcome(EXIT_FAILURE, f"已加密，但這個隔離已由另一次執行解除：沒有再寫入。{note}")
     except SQLAlchemyError as exc:
+        note = _unrecorded(holds, held, sealed, f"DB 寫入失敗（{type(exc).__name__}）")
         return _Outcome(
             EXIT_FAILURE,
             f"已加密並驗證，但 DB 寫入失敗（{type(exc).__name__}）：隔離維持不變。"
-            "請再執行一次（加密可以重複執行）。",
+            f"請再執行一次（加密可以重複執行）。{note}",
         )
     return _Outcome(
         EXIT_OK,
@@ -188,6 +194,33 @@ def _failed(holds: EvidenceHolds, held: HeldDirectory, code: str | None, error: 
         f"仍無法加密（{error}）{note}：隔離不變，明文保留原狀。{advice}"
         "更大的樹不在系統內處理，系統不會刪除它。",
     )
+
+
+def _unrecorded(
+    holds: EvidenceHolds, held: HeldDirectory, sealed: SealedEvidence, error: str
+) -> str:
+    """明文已換成密文、DB 卻沒有記下：另外寫一筆結果的 audit，稽核看得出明文已被處理（安全審查
+    L1）。寫不進去時回傳說明。"""
+    changes: dict[str, JsonValue] = {
+        "error_code": SEALED_NOT_RECORDED,
+        "error": error,
+        "files": sealed.files,
+        "plaintext_bytes": sealed.plaintext_bytes,
+    }
+    try:
+        holds.audit(held, "evidence.retry_failed", changes)
+    except SQLAlchemyError as exc:
+        return f"（結果的 audit 也無法寫入：{type(exc).__name__}）"
+    return ""
+
+
+def _utf8(text: str) -> bool:
+    """argv 以 surrogateescape 解碼：不合法的 UTF-8 會變成孤立的 surrogate，寫進 audit 時才失敗。"""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 _LIMIT_CODES = frozenset(code.value for code in EvidenceHoldCode)

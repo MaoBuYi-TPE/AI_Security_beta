@@ -45,8 +45,13 @@ class TreeLimitError(TreeError):
 
 @dataclass(frozen=True, slots=True)
 class TreeLimits:
+    """深度、條目數，以及所有相對路徑的總字元數（整棵樹列在記憶體中：只限條目數時，很長的路徑
+    仍會讓 runner 的 256m 記憶體不夠；安全審查 M1，§30.12）。路徑總長度超過上限是一般的
+    TreeError，不是可以隔離的 TreeLimitError。"""
+
     max_depth: int = 32
     max_entries: int = 20_000
+    max_path_chars: int = 8 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -58,6 +63,7 @@ class Tree:
     directories: list[str] = field(default_factory=list)
     newest_mtime: float = 0.0
     entries: int = 0
+    path_chars: int = 0
 
 
 def reason(exc: OSError) -> str:
@@ -149,6 +155,9 @@ def _visit(walk: _Walk, dir_fd: int, name: str, prefix: str, depth: int) -> None
         raise TreeError(f"無法讀取條目（{reason(exc)}）") from None
     tree = walk.tree
     relative = f"{prefix}{name}"
+    tree.path_chars += len(relative)
+    if tree.path_chars > walk.limits.max_path_chars:
+        raise TreeError("目錄的路徑總長度超過上限")
     tree.newest_mtime = max(tree.newest_mtime, info.st_mtime)
     if stat.S_ISREG(info.st_mode):
         if walk.restore_access:

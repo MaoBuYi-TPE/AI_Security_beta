@@ -372,6 +372,16 @@ def test_a_volume_with_too_many_directories_is_not_a_limit_failure(runs: Path, k
     assert not isinstance(raised.value, EvidenceLimitError)
 
 
+def test_a_tree_with_too_long_paths_fails_closed_without_a_hold_code(runs: Path, key: str) -> None:
+    root = _run(runs)
+
+    with pytest.raises(EvidenceError) as raised:
+        _vault(runs, key, limits=TreeLimits(max_path_chars=20)).seal(RUN)
+
+    assert not isinstance(raised.value, EvidenceLimitError)
+    _plaintext_kept(root)
+
+
 def test_a_sealed_directory_larger_than_the_limit_can_be_purged(runs: Path, key: str) -> None:
     """retry-evidence 以較高的上限加密之後，sealed/ 可能超過一般的條目上限（§30.12）。"""
     root = _run(runs, files={f"out/{index}.txt": b"x" for index in range(6)})

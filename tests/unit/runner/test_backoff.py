@@ -114,4 +114,4 @@ def test_orphans_no_longer_present_are_forgotten(backoff: Backoff) -> None:
 
     backoff.forget_missing_orphans({kept})
 
-    assert backoff.keys() == {run, kept}
+    assert backoff.directories() == {run, kept}

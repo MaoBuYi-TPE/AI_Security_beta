@@ -7,6 +7,7 @@
 人工重試（retry-evidence）與 retention-status 見 test_evidence_retry.py。
 """
 
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,9 +26,11 @@ from secscan.runner.backoff import MAX_BACKOFF_SECONDS
 from secscan.runner.evidence import EvidenceVault
 from secscan.runner.fs import TreeLimits
 from secscan.runner.keeper import EvidenceKeeper, KeeperSettings, PassReport
+from secscan.runner.plans import ENGINE_IMAGES
 from secscan.scans.domain.catalog import Engine as ScanEngine
-from secscan.scans.domain.evidence import HOLD_AFTER_FAILURES
+from secscan.scans.domain.evidence import HOLD_AFTER_FAILURES, EvidenceHoldCode, SealedEvidence
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
+from secscan.scans.evidence_holds import EvidenceHolds, HoldNotActiveError
 from secscan.scans.evidence_records import EvidenceRun, EvidenceStore
 from secscan.scans.queue import ScanQueue
 from tests.integration.api_support import LAB, Scannable, Seeder, World
@@ -446,3 +449,212 @@ def test_a_run_hold_is_named_after_the_run(
             error_code="EVIDENCE_TREE_TOO_DEEP",
             attempts=3,
         )
+
+
+# --- 審查之後（資料庫審查 M1、M2、L1、L5、L6；安全審查 L3；§30.12）-------------------------------
+
+
+def _transaction(engine: Engine, *statements: tuple[str, dict[str, object]]) -> None:
+    """幾個敘述在同一個 transaction 中依序執行（deferred 的檢查在 commit 時進行）。"""
+    with Session(engine) as session, session.begin():
+        for statement, params in statements:
+            session.execute(text(statement), params)
+
+
+def _held_run(
+    queue: ScanQueue, seed: Seeder, engine: Engine, world: World, scannable: Scannable
+) -> EvidenceRun:
+    run = _finished(queue, seed, world, scannable)
+    _execute(engine, _INSERT_RUN, run=run.run_id, scan=run.scan_id)
+    return run
+
+
+@pytest.mark.parametrize("status", ["none", "sealed"])
+def test_run_evidence_for_a_held_run_is_refused_at_commit(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    world: World,
+    scannable: Scannable,
+    status: str,
+) -> None:
+    """隔離的 run 不能被記成 none 或 sealed：只有在同一個 transaction 中解除隔離才行。"""
+    run = _held_run(queue, queue_seed, queue_engine, world, scannable)
+
+    with pytest.raises(DBAPIError, match="held run"):
+        _execute(
+            queue_engine,
+            _INSERT_SEALED,
+            run=run.run_id,
+            scan=run.scan_id,
+            status=status,
+            sealed_at=datetime.now(UTC) if status == "sealed" else None,
+        )
+
+    assert (
+        queue_seed.query("SELECT 1 FROM run_evidence WHERE scanner_run_id = :id", id=run.run_id)
+        == []
+    )
+
+
+def test_a_hold_and_run_evidence_cannot_commit_concurrently(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    """兩邊都先取得以 run 為鍵的交易鎖：一邊還沒 commit 時，另一邊等它，之後看得到對方。"""
+    run = _finished(queue, queue_seed, world, scannable)
+    none = {"run": run.run_id, "scan": run.scan_id, "status": "none", "sealed_at": None}
+    with Session(queue_engine) as holding, holding.begin():
+        holding.execute(text(_INSERT_RUN), {"run": run.run_id, "scan": run.scan_id})
+        with pytest.raises(DBAPIError, match="lock timeout"):
+            _transaction(
+                queue_engine, ("SET LOCAL lock_timeout = '200ms'", {}), (_INSERT_SEALED, none)
+            )
+
+    with pytest.raises(DBAPIError, match="held run"):
+        _execute(
+            queue_engine,
+            _INSERT_SEALED,
+            run=run.run_id,
+            scan=run.scan_id,
+            status="none",
+            sealed_at=None,
+        )
+
+
+def test_resolving_cannot_change_other_columns(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    run = _held_run(queue, queue_seed, queue_engine, world, scannable)
+
+    sealed = {
+        "run": run.run_id,
+        "scan": run.scan_id,
+        "status": "sealed",
+        "sealed_at": datetime.now(UTC),
+    }
+    for resolve_and_change in (
+        "UPDATE evidence_holds SET resolved_at = clock_timestamp(), attempts = 9 "
+        "WHERE directory = :run",
+        "UPDATE evidence_holds SET resolved_at = clock_timestamp(), "
+        "error_code = 'EVIDENCE_TREE_TOO_MANY_ENTRIES' WHERE directory = :run",
+    ):
+        with pytest.raises(DBAPIError, match="resolved once"):
+            _transaction(
+                queue_engine, (_INSERT_SEALED, sealed), (resolve_and_change, {"run": run.run_id})
+            )
+    with pytest.raises(DBAPIError, match="resolved once"):
+        _execute(
+            queue_engine,
+            "UPDATE evidence_holds SET held_at = held_at - interval '1 day' WHERE directory = :run",
+            run=run.run_id,
+        )
+    assert _hold_row(queue_seed, run.run_id).attempts == 3
+
+
+def test_resolving_needs_sealed_not_none_evidence(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    run = _held_run(queue, queue_seed, queue_engine, world, scannable)
+
+    none = {"run": run.run_id, "scan": run.scan_id, "status": "none", "sealed_at": None}
+
+    with pytest.raises(DBAPIError, match="after its evidence is sealed"):
+        _transaction(queue_engine, (_INSERT_SEALED, none), (_RESOLVE, {"run": run.run_id}))
+
+
+def test_times_come_from_the_database(queue_engine: Engine, queue_seed: Seeder) -> None:
+    """用戶端給的 held_at、resolved_at 一律被 trigger 以 clock_timestamp() 取代。"""
+    directory = uuid4()
+    before = datetime.now(UTC) - timedelta(minutes=1)
+    _execute(
+        queue_engine,
+        "INSERT INTO evidence_holds (directory, error_code, attempts, held_at) "
+        "VALUES (:directory, 'EVIDENCE_TREE_TOO_DEEP', 3, '2000-01-01T00:00:00Z')",
+        directory=directory,
+    )
+    _execute(
+        queue_engine,
+        "UPDATE evidence_holds SET resolved_at = '2999-01-01T00:00:00Z' WHERE directory = :id",
+        id=directory,
+    )
+
+    row = _hold_row(queue_seed, directory)
+    after = datetime.now(UTC) + timedelta(minutes=1)
+    assert before < row.held_at <= row.resolved_at < after
+
+
+def test_a_run_whose_container_is_not_confirmed_removed_cannot_be_held(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    queue_seed.scan(world.operator_a, scannable)
+    lease = queue.claim(OWNER, FAKE)
+    assert lease is not None
+    queue.prepare_launch(lease, image_ref=str(ENGINE_IMAGES[ScanEngine.FAKE]))
+    queue.advance(lease, RunStatus.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
+
+    with pytest.raises(DBAPIError, match="container removed"):
+        _execute(queue_engine, _INSERT_RUN, run=lease.run_id, scan=lease.scan_id)
+
+
+def test_the_run_reference_must_match_its_scan(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    first = _finished(queue, queue_seed, world, scannable)
+    second = _finished(queue, queue_seed, world, scannable)
+
+    with pytest.raises(DBAPIError, match="fk_evidence_holds"):
+        _execute(queue_engine, _INSERT_RUN, run=first.run_id, scan=second.scan_id)
+
+
+def test_the_error_code_check_matches_the_domain(queue_engine: Engine) -> None:
+    """CHECK 的運算式不在 autogenerate 的比對範圍：直接核對 DB 中的清單（資料庫審查 L5）。"""
+    with queue_engine.connect() as connection:
+        definition = connection.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_evidence_holds_error_code_valid'"
+            )
+        ).scalar_one()
+
+    assert sorted(re.findall(r"'([A-Z_]+)'", definition)) == sorted(
+        code.value for code in EvidenceHoldCode
+    )
+
+
+def test_a_second_resolve_finds_the_hold_already_resolved(
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    world: World,
+    scannable: Scannable,
+) -> None:
+    run = _held_run(queue, queue_seed, queue_engine, world, scannable)
+    holds = EvidenceHolds(sessionmaker(queue_engine, expire_on_commit=False))
+    held = holds.active(run.run_id)
+    assert held is not None
+
+    holds.resolve(held, SealedEvidence(files=1, plaintext_bytes=1), {})
+
+    with pytest.raises(HoldNotActiveError):
+        holds.resolve(held, SealedEvidence(files=1, plaintext_bytes=1), {})
+    assert len(_audits(queue_seed, "evidence.resolve")) == 1

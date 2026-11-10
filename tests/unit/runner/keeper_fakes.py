@@ -47,6 +47,8 @@ class FakeStore:
     recorded: dict[UUID, SealedEvidence | None] = field(default_factory=dict)
     purged: list[UUID] = field(default_factory=list)
     holds: dict[UUID, Held] = field(default_factory=dict)
+    # 隔離紀錄寫入（commit）之後，回應在送回之前遺失：keeper 收到錯誤。
+    hold_reply_lost: bool = False
     calls: list[str] = field(default_factory=list)
 
     def _maybe_fail(self, name: str) -> None:
@@ -103,6 +105,8 @@ class FakeStore:
         assert run is None or run.run_id == directory
         assert directory not in self.holds
         self.holds[directory] = Held(run, code, attempts)
+        if self.hold_reply_lost:
+            raise OperationalError("COMMIT", {}, Exception("connection lost"))
 
     def held(self, directories: Collection[UUID]) -> frozenset[UUID]:
         self._maybe_fail("held")

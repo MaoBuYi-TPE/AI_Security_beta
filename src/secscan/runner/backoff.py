@@ -47,7 +47,8 @@ class Backoff:
     def __len__(self) -> int:
         return len(self._attempts)
 
-    def keys(self) -> frozenset[BackoffKey]:
+    def directories(self) -> frozenset[BackoffKey]:
+        """退避中的所有目錄（含已到重試時間的）。"""
         return frozenset(self._attempts)
 
     def failed(self, key: BackoffKey, exc: BaseException) -> Attempt:

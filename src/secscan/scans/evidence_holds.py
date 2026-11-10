@@ -120,8 +120,19 @@ class EvidenceHolds:
         self, held: HeldDirectory, sealed: SealedEvidence, changes: Mapping[str, JsonValue]
     ) -> None:
         """加密已驗證之後解除；隔離已經不在（另一次執行先解除了）時拋出 HoldNotActiveError、
-        整個 transaction 回滾。"""
+        整個 transaction 回滾。先鎖住還沒解除的隔離：另一次執行同時解除時，這裡等它 commit、重新
+        確認之後拿不到，不會撞上 run_evidence 的主鍵而誤報成 DB 錯誤（資料庫審查 L1）。"""
         with self._sessions.begin() as session:
+            locked = session.scalar(
+                select(EvidenceHoldModel.directory)
+                .where(
+                    EvidenceHoldModel.directory == held.directory,
+                    EvidenceHoldModel.resolved_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if locked is None:
+                raise HoldNotActiveError("這個目錄已經不在隔離中")
             if held.scanner_run_id is not None:
                 session.execute(
                     insert(RunEvidenceModel).values(
@@ -133,18 +144,13 @@ class EvidenceHolds:
                         sealed_at=now(),
                     )
                 )
-            resolved = session.scalar(
+            # resolved_at 的值由 trigger 以 clock_timestamp() 取代（不採用用戶端的時間）。
+            session.execute(
                 update(EvidenceHoldModel)
-                .where(
-                    EvidenceHoldModel.directory == held.directory,
-                    EvidenceHoldModel.resolved_at.is_(None),
-                )
+                .where(EvidenceHoldModel.directory == held.directory)
                 .values(resolved_at=now())
-                .returning(EvidenceHoldModel.directory)
                 .execution_options(synchronize_session=False)
             )
-            if resolved is None:
-                raise HoldNotActiveError("這個目錄已經不在隔離中")
             _audit(
                 session,
                 "evidence.resolve",

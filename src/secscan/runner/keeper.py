@@ -17,10 +17,9 @@ keeper 有自己的 DB session，和主迴圈只共用健康狀態：主迴圈�
 失敗的 run 與孤兒目錄退避（20 秒起倍增，最多 10 分鐘；runner/backoff.py）：不會每一輪都重試、
 佔滿批次而讓其他 run 等不到加密；還在退避的仍算不健康（安全審查 M1）。log 只有 run_id 與錯誤的種類。
 
-隔離（§30.12）：同一個目錄（run 的加密、孤兒的檢查與加密）連續 HOLD_AFTER_FAILURES 次超過深度或
-條目數的上限，就寫入 evidence_holds 與 audit，之後不算退避中：這一輪仍算失敗，下一輪恢復健康。
-隔離的目錄不再自動加密、清除或刪除（明文保留原狀，等待 retry-evidence）；寫入失敗時維持不健康、
-下次再寫。清除時超過上限不計數（已加密的目錄被改過或環境有問題：維持全域 fail closed）。
+隔離（§30.12）：同一個目錄（run 的加密、孤兒的檢查與加密）連續 3 次超過深度或條目數的上限，就寫入
+evidence_holds 與 audit，之後跳過它、不算退避中（明文保留，等待 retry-evidence）；寫入失敗時維持
+不健康、下次再寫。清除時超過上限不計數（已加密的目錄被改過或環境有問題：維持全域 fail closed）。
 """
 
 import logging
@@ -47,6 +46,10 @@ logger = logging.getLogger(__name__)
 STALE_PASSES = 3
 _KNOWN_BATCH = 500
 _FAILURES = (EvidenceError, TreeError, SQLAlchemyError, OSError)
+_HELD = "目錄 %s 連續 %s 次超過上限（%s）：已隔離、明文保留、不再自動重試（retry-evidence）"
+_HOLD_FAILED = (
+    "目錄 %s 連續 %s 次超過上限（%s），但無法記下隔離（%s）：維持不健康，下一次失敗時再寫入"
+)
 
 
 class Store(Protocol):
@@ -186,6 +189,7 @@ class EvidenceKeeper:
                     logger.warning("原始證據的金鑰換版中：這一輪不加密、不清除")
                 else:
                     self._vault.check()
+                    self._forget_held()
                     self._seal(report, deadline)
                     self._purge(report, deadline)
                     self._orphans(report, deadline)
@@ -324,36 +328,34 @@ class EvidenceKeeper:
         *,
         run: EvidenceRun | None = None,
     ) -> None:
-        """run 以 run_id、孤兒目錄以名稱為鍵；run 是這個目錄的 run（孤兒與逾期的步驟沒有）。
-        連續的上限失敗到了隔離的次數時寫入隔離紀錄；寫入成功才不再退避。"""
+        """run 以 run_id、孤兒以名稱為鍵；連續的上限失敗到了門檻就隔離，寫入成功才不再退避。"""
         report.failures += 1
         attempt = self._backoff.failed(key, exc)
-        delay = attempt.retry_at - self._monotonic()
-        logger.error(
-            "run %s 的原始證據無法處理（%s）：保留原狀，%.0f 秒後重試", key, _kind(exc), delay
-        )
         code = attempt.hold_code()
         if code is None:
+            delay = attempt.retry_at - self._monotonic()
+            logger.error(
+                "目錄 %s 的原始證據無法處理（%s）：保留原狀，%.0f 秒後重試", key, _kind(exc), delay
+            )
             return
         directory = key if isinstance(key, UUID) else UUID(key)
         try:
             self._store.hold(directory, run, code, attempt.streak)
         except SQLAlchemyError as error:
-            logger.error(
-                "目錄 %s 無法記下需要人工處理（%s）：維持不健康，下一次失敗時再寫入",
-                directory,
-                type(error).__name__,
-            )
+            logger.error(_HOLD_FAILED, directory, attempt.streak, code, type(error).__name__)
             return
         self._backoff.clear(key)
         report.held += 1
-        logger.error(
-            "目錄 %s 連續 %s 次超過上限（%s）：已隔離、需要人工處理（retry-evidence），"
-            "明文保留原狀，不再自動重試",
-            directory,
-            attempt.streak,
-            code.value,
-        )
+        logger.error(_HELD, directory, attempt.streak, code)
+
+    def _forget_held(self) -> None:
+        """隔離已 commit、keeper 卻收到錯誤時，退避項目永遠不會清除：每一輪依 DB 清掉（§30.12）。"""
+        keys = {
+            key if isinstance(key, UUID) else UUID(key): key for key in self._backoff.directories()
+        }
+        if keys:
+            for directory in self._store.held(list(keys)):
+                self._backoff.clear(keys[directory])
 
     def _finish(self, report: PassReport) -> None:
         with self._state:
