@@ -1574,7 +1574,10 @@
     - 2026-11-10：使用者判定方案 B「功能實作基本達標，但尚未通過最終驗收」，決定審查留下的三個問題（`DECISIONS.md` §30.12）：
       - 自動熔斷：T23a 不做全域熔斷（維持條件 3）；告警與有範圍的停用改成後續任務 T35。
       - 路徑總長度：改成第三種可隔離的上限（`EVIDENCE_TREE_PATHS_TOO_LONG`），`retry-evidence` 加上 `--max-path-chars`（8M 到 16M 字元的絕對上限）；開 PR 之前完成，三項空轉檢查都被抓到。
-      - [ ] **隔離目錄的機密性隔離（T23a 安全驗收的阻擋條件）**：worker 以唯讀掛載整個 runs volume，仍讀得到隔離中的明文；DB 的隔離只是工作流程的隔離。要以掛載範圍隔離（不能只依賴 chmod）：隔離時把目錄移到只有 keeper 與授權的復原程序能存取、不在 worker 掛載範圍內的位置，並驗證搬移與 DB 狀態的一致性、失敗復原與既有的檔案描述符；隔離無法撤銷 worker 之前已經讀到的內容。可以另開 PR；設計與實作先提出、由使用者核准。完成之前 T23a 不通過安全驗收，不宣稱風險已消失。
+      - [ ] **隔離目錄的機密性隔離（T23a 安全驗收的阻擋條件）**：worker 以唯讀掛載整個 runs volume，仍讀得到隔離中的明文；DB 的隔離只是工作流程的隔離。要以掛載範圍隔離（不能只依賴 chmod）：隔離時把目錄移到只有 keeper 與授權的復原程序能存取、不在 worker 掛載範圍內的位置，並驗證搬移與 DB 狀態的一致性、失敗復原與既有的檔案描述符；隔離無法撤銷 worker 之前已經讀到的內容。2026-11-10 使用者決定以另一個 PR 實作做法 A（`DECISIONS.md` §30.12）：
+        - runs volume 分成 `active/`／`held/`，worker 只掛載 `active/`；以隔離的中間狀態、原子 rename、重啟對帳與完整的 crash recovery 測試，保證 DB 與檔案系統一致；檢查 symlink、hard link、已開啟的檔案描述符與 runner／keeper 的權限邊界；搬移失敗不影響其他 run。
+        - 既有資料由使用者在服務停止、migration 完成之後手動執行管理員指令搬移（可重複執行、dry-run、audit、路徑驗證、中斷復原、只搬 UUID 目錄）；搬移沒有完成時，服務不得以新的目錄結構啟動；不允許 runner 自動搬移。
+        - 細部計畫先提出、由使用者核准。目前的 PR 合併不代表這一項完成：**新 PR 驗收之前，禁止把沒有這項防護的功能正式部署**；完成之前 T23a 不通過安全驗收、不宣稱風險已消失，T23a 與 SEC-14 都不標完成。
     - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`（含方案 B）；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
