@@ -1578,8 +1578,16 @@
         - runs volume 分成 `active/`／`held/`，worker 只掛載 `active/`；以隔離的中間狀態、原子 rename、重啟對帳與完整的 crash recovery 測試，保證 DB 與檔案系統一致；檢查 symlink、hard link、已開啟的檔案描述符與 runner／keeper 的權限邊界；搬移失敗不影響其他 run。
         - 既有資料由使用者在服務停止、migration 完成之後手動執行管理員指令搬移（可重複執行、dry-run、audit、路徑驗證、中斷復原、只搬 UUID 目錄）；搬移沒有完成時，服務不得以新的目錄結構啟動；不允許 runner 自動搬移。
         - 細部計畫先提出、由使用者核准。目前的 PR 合併不代表這一項完成：**新 PR 驗收之前，禁止把沒有這項防護的功能正式部署**；完成之前 T23a 不通過安全驗收、不宣稱風險已消失，T23a 與 SEC-14 都不標完成。
+        - 2026-11-11 使用者核准計畫（兩次審查的修正都已納入），**離線實作完成**（`DECISIONS.md` §30.13）：
+          - `runner/layout.py`（`.layout`、`active/`、`held/` 的檢查與初始化）、`runner/hold_moves.py`（dir fd 的搬移、inode 比對、fsync、身分驗證）、`runner/isolation.py`（keeper 每一輪的對帳、搬移失敗的紀錄、15 分鐘的緊急升級）、v0024（6 個欄位、9 個 CHECK、trigger 的五種轉換）、API 的 `hold.stage`。
+          - `retry-evidence` 的新流程（在 `held/` 加密並驗證 → 開始解除 → 搬回 → 再驗證 → 解除）、`init-runs-layout`（compose 的 `runs-init`：獨立、最小的服務）、`migrate-runs-layout` 與 `make runs-layout-migrate`（以和 `make up` 相同的設定解析實際的 volume、確認標籤與使用者）、retention-status 的「隔離未完成」段落、worker 只以 subpath 掛載 `active/`。
+          - 測試：EVID-10–12、審查的四個反例與第二次審查的反例、七個中斷點、18 項空轉檢查（全部被抓到）。
+          - [ ] **Docker 的實際驗證**（§30.13 的決策 3：worker 的掛載、hard link、open FD、`runs-init` 的實際容器與啟動指令、volume 的身分）：需要另外授權，是必要的安全驗收。
+          - [ ] 開發環境的升級（`make down` → `make db-up` → `make migrate` → `make runs-layout-migrate DRY_RUN=1` → `make runs-layout-migrate` → `make up`）：由使用者執行。
     - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`（含方案 B）；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
+    - [ ] uid 分離：runner、worker、api 與掃描容器不再共用 uid 10001（`DECISIONS.md` §30.13 的剩餘風險 2）。
+    - [ ] 完整的 FD 撤銷（和 uid 分離是兩件事）：rename、chmod 與 uid 分離都不會撤銷其他程序已開啟的 FD；候選做法是每次解析用短命的程序，以及隔離之後重啟 worker 的機制（§30.13 的剩餘風險 1）。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。
   - DoD：安全負向測試全通過；整體 coverage ≥ 80%、核心模組 branch coverage ≥ 90%；原始證據加密；文件與 API 一致；乾淨環境重建通過。
@@ -1588,6 +1596,7 @@
   - 盤點必須讀取可能含憑證的檔案，開始之前另外授權；未經使用者決定不修改或刪除任何檔案。
 - [ ] T35 隔離的告警與有範圍的停用（2026-11-10 由 T23a 方案 B 新增；`DECISIONS.md` §30.12）。
   - 第一次隔離就產生安全告警；例如 15 分鐘內 3 個不同目錄被隔離時，升級成高優先級告警，但不自動停機（門檻是初始建議，依實際執行量調整）。
+  - 告警的輸入也包含 §30.13 的緊急事件：隔離中（明文仍在 `active/`）超過 15 分鐘時，keeper 已寫 CRITICAL log 與 audit `evidence.isolation_overdue`、retention-status 已列為需要緊急處理；T35 負責把它變成主動的通知。
   - 「有範圍的熔斷」：針對異常的 scanner、worker 或來源停止認領，而不是停止整個 keeper；不做全域自動熔斷（少數異常目錄就讓整個系統停止，會形成新的 DoS 攻擊面）。
   - 細部計畫另外提出、由使用者核准。
 

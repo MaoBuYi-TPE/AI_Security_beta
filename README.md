@@ -370,14 +370,21 @@ T23a 的離線實作已完成，**Live 尚未執行，T23a 與 SEC-14 都不標�
 - **API**：`GET /api/v1/scans/{id}` 的 `engines[].evidence`（none／pending／sealed／purged／manual_intervention_required，以及隔離紀錄 `hold`）；finding 來源追溯的 artifact 有 `encrypted`、`purged_at`。原始輸出沒有下載 API。
 - **報告與摘錄**：寫入 DB 之前加密，30 天後清除內容：報告下載回 410 `REPORT_EXPIRED`，摘錄的 `content` 變成 null；metadata 與 sha256 保留。
 - **升級**：`make migrate`（v0021、v0022、v0023）之前先 `make down` 停 api、worker 與 runner，再以 `make db-up` 只啟動資料庫（v0021 建立外鍵時會鎖住 `scanner_runs`，兩個 migration 在同一個 transaction 中執行）。既有的報告與摘錄在升級時加密，期限是升級時間加 30 天。
+- **runs volume 的 layout**（`docs/DECISIONS.md` §30.13）：runs volume 分成 `active/`（一般的 run 目錄；worker 只以 subpath 唯讀掛載這裡）與 `held/`（隔離的目錄；worker 讀不到）。`make up` 先執行一次性的 `runs-init` 檢查 layout，舊的 layout 時 runner 與 worker 不啟動。既有的開發 volume 依序升級：`make down` → `make db-up` → `make migrate`（v0024）→ `make runs-layout-migrate DRY_RUN=1`（只列出計畫）→ `make runs-layout-migrate` → `make up`。搬移指令以和 `make up` 相同的設定解析實際的 volume、確認 compose 的標籤與沒有任何容器使用它，才在 runner 容器內搬移；可以重跑。如果 runner 曾經異常結束、留下容器還沒確認刪除的 run，搬移會拒絕，依下面的人工修復處理。降級之前要先把 `active/` 的目錄搬回根目錄、刪除 `.layout`。
+  **runner 異常結束之後的人工修復**（OOM、kill -9、Mac 睡眠讓 OrbStack 停止回應之後，`make runs-layout-migrate` 回報「容器還沒確認刪除」時）：搬移指令不刪紀錄、不略過檢查，必須先讓 runner 對帳（Docker 確認容器已刪除，或刪除這個 run 的容器，才結算）。新版的 runner 在舊的 layout 上不會啟動，而舊版的 runner 只接受 0023 的 schema，所以：
+  1. `make down`。
+  2. `uv run alembic downgrade 0023`：只有沒有 v0024 的隔離資料、也沒有執行過 layout 搬移時才會成功（搬移指令在寫入任何東西之前就拒絕，所以這時會成功）；被拒絕就停止，改為人工確認，不要強制降級。
+  3. 切回升級之前的版本（例如 `git switch --detach 61a5cd3`），先確認沒有排隊中的 scan（舊版的 runner 會認領它們），再 `make up`；runner 啟動時就對帳，log 出現「容器已確認不存在：已結算」。Docker 不可用時不會結算，先修復 Docker。
+  4. `make down`，切回新的版本，`make migrate`，再執行 `make runs-layout-migrate DRY_RUN=1`：它會再檢查一次；仍有未確認的容器就重複第 1 到 4 步。
+  5. `make runs-layout-migrate`，`make up`。**Docker 的實際驗證與 Live 需要另外授權，通過之前機密性隔離不算驗收完成。**
 - **保留期限**（1–365 天，`.env` 中可調整）：`EVIDENCE_RETENTION_DAYS`（預設 7）、`REPORT_RETENTION_DAYS`（30）、`EXCERPT_RETENTION_DAYS`（30）；`EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60）是等待解析的上限。既有的資料從升級之後才開始計時，升級不會立刻刪除任何東西。刪除只是 unlink，不抹除磁碟的資料區塊；DB 的 WAL 與備份會保留舊資料。
 - **管理指令**（`docs/API_CONTRACT.md` §20）：
   - `uv run secscan-admin check-encryption-keys`：檢查三組金鑰合法、互不共用，只顯示數量。
-  - `uv run secscan-admin retention-status`：各狀態的數量，以及需要人工處理的目錄（數量、錯誤代碼、最早的 10 個目錄名稱；唯讀）。
+  - `uv run secscan-admin retention-status`：各狀態的數量；隔離的各階段，隔離未完成（明文仍在 `active/`）超過 15 分鐘的列為需要緊急處理（主動告警是 T35）；以及需要人工處理的目錄（數量、錯誤代碼、最早的 10 個目錄名稱；唯讀）。
   - `uv run secscan-admin rotate-content-keys`：報告與摘錄的換版。
   - `docker compose --profile app exec runner secscan-admin rotate-evidence-keys`：原始證據的換版（只有 runner 容器有這組金鑰）。
   - `docker compose --profile app exec runner secscan-admin export-evidence --run <id> [--path <路徑>]`：break-glass，列出加密檔，或先寫 audit 再把一個檔案的明文寫到 stdout。
-  - `docker compose --profile app exec runner secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> [--max-depth N] [--max-entries N] [--max-path-chars N]`：人工處理 `retention-status` 列出的「需要人工處理」目錄（超過深度、條目數或路徑總長度的上限、連續 3 次加密失敗而被隔離，明文保留）；先寫 audit，以指定的上限（最多深度 64、條目 50,000、路徑總長度 16M 字元）加密，驗證通過才解除隔離。沒有不加密就解除或刪除目錄的指令（`docs/DECISIONS.md` §30.12）。
+  - `docker compose --profile app exec runner secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> [--max-depth N] [--max-entries N] [--max-path-chars N]`：人工處理 `retention-status` 列出的「需要人工處理」目錄（超過深度、條目數或路徑總長度的上限、連續 3 次加密失敗而被隔離，明文保留）；keeper 先把隔離的目錄搬到 `held/`；這個指令先寫 audit，在 `held/` 以指定的上限（最多深度 64、條目 50,000、路徑總長度 16M 字元）加密並逐一驗證，再搬回 `active/`、再驗證，才解除隔離。中斷之後再執行一次就從正確的步驟繼續。沒有不加密就解除或刪除目錄的指令（`docs/DECISIONS.md` §30.12、§30.13）。
 - **換版**：新金鑰放在那一組的最前面（逗號分隔）→ 重啟持有它的容器 → 執行換版 → 移除舊金鑰、重啟 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。
 - **bench 結果**：`make bench-key` 建立本機的金鑰檔（預設 `~/.config/secscan/bench-keys`，可用 `BENCH_KEY_FILE` 指定；不可放在 repo 中；已經存在就失敗、不覆寫）。之後 `make bench` 寫出的每個檔案都是 `<名稱>.sealed`，`bench-evaluate` 先核對 `SHA256SUMS`、解密、再核對明文的 sha256 才評估。T23a 之前的明文結果目錄以 `make bench-seal BENCH_SOURCE=<原目錄> BENCH_NAME=<新名稱>` 轉成新的加密目錄，原目錄不修改也不刪除。**金鑰檔遺失之後結果無法復原，請另外備份。**
 
