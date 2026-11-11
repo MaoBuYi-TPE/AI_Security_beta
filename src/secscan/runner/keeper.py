@@ -18,27 +18,28 @@ keeper 有自己的 DB session，和主迴圈只共用健康狀態：主迴圈�
 佔滿批次而讓其他 run 等不到加密；還在退避的仍算不健康（安全審查 M1）。log 只有 run_id 與錯誤的種類。
 
 隔離（§30.12）：同一個目錄（run 的加密、孤兒的檢查與加密）連續 3 次超過資源上限（深度、條目數或
-路徑總長度），就寫入 evidence_holds 與 audit，之後跳過它、不算退避中（明文保留，等待
-retry-evidence）；寫入失敗時維持不健康、下次再寫。清除時超過上限不計數（已加密的目錄被改過或
+路徑總長度），就寫入 evidence_holds（含目錄的 inode）與 audit，之後跳過它、不算退避中（明文保留，
+等待 retry-evidence）；寫入失敗時維持不健康、下次再寫。清除時超過上限不計數（已加密的目錄被改過或
 環境有問題：維持全域 fail closed）。
+機密性隔離（§30.13）：每一輪在加密之前（新增隔離之後再一次）由 runner/isolation.py 對帳、把隔離的
+目錄搬到 held/；搬移失敗只讓那個目錄退避，keeper 維持健康。
 """
 
 import logging
 import threading
 import time
-from collections.abc import Callable, Collection, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from secscan.runner.backoff import Backoff, BackoffKey
-from secscan.runner.evidence import DirectoryState, EvidenceError, EvidenceLimitError
+from secscan.runner.evidence import EvidenceError, EvidenceLimitError
 from secscan.runner.fs import TreeError
-from secscan.scans.domain.evidence import EvidenceHoldCode, SealedEvidence
+from secscan.runner.keeper_ports import Isolation, Store, Vault
 from secscan.scans.evidence_records import EvidenceRun
 
 logger = logging.getLogger(__name__)
@@ -51,52 +52,6 @@ _HELD = "目錄 %s 連續 %s 次超過上限（%s）：已隔離、明文保留�
 _HOLD_FAILED = (
     "目錄 %s 連續 %s 次超過上限（%s），但無法記下隔離（%s）：維持不健康，下一次失敗時再寫入"
 )
-
-
-class Store(Protocol):
-    """DB 的部分（scans.evidence_records.EvidenceStore）。"""
-
-    def overdue(
-        self, *, now: datetime, max_minutes: int, limit: int
-    ) -> tuple[EvidenceRun, ...]: ...
-
-    def expire(self, run: EvidenceRun, *, now: datetime, max_minutes: int) -> bool: ...
-
-    def sealable(self, *, limit: int, exclude: Collection[UUID]) -> tuple[EvidenceRun, ...]: ...
-
-    def record(self, run: EvidenceRun, sealed: SealedEvidence | None) -> bool: ...
-
-    def purgeable(
-        self, *, now: datetime, retention_days: int, limit: int, exclude: Collection[UUID]
-    ) -> tuple[EvidenceRun, ...]: ...
-
-    def record_purged(self, run: EvidenceRun) -> bool: ...
-
-    def known(self, run_ids: Collection[UUID]) -> frozenset[UUID]: ...
-
-    def hold(
-        self, directory: UUID, run: EvidenceRun | None, code: EvidenceHoldCode, attempts: int
-    ) -> None: ...
-
-    def held(self, directories: Collection[UUID]) -> frozenset[UUID]: ...
-
-    def exclusive(self) -> AbstractContextManager[bool]: ...
-
-
-class Vault(Protocol):
-    """檔案的部分（runner.evidence.EvidenceVault）。"""
-
-    def check(self) -> None: ...
-
-    def entries(self) -> tuple[str, ...]: ...
-
-    def inspect(self, name: str) -> DirectoryState | None: ...
-
-    def sealed_at(self, name: str) -> int | None: ...
-
-    def seal(self, name: str) -> SealedEvidence | None: ...
-
-    def purge(self, name: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,11 +89,13 @@ class EvidenceKeeper:
         vault: Vault,
         settings: KeeperSettings,
         *,
+        isolation: Isolation,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
         self._vault = vault
+        self._isolation = isolation
         self._settings = settings
         self._clock = clock
         self._monotonic = monotonic
@@ -191,9 +148,12 @@ class EvidenceKeeper:
                 else:
                     self._vault.check()
                     self._forget_held()
+                    self._isolation.reconcile(deadline)
                     self._seal(report, deadline)
                     self._purge(report, deadline)
                     self._orphans(report, deadline)
+                    if report.held:
+                        self._isolation.reconcile(deadline)
         except _FAILURES as exc:
             report.failures += 1
             logger.error("keeper 這一輪中止（%s）", _kind(exc))
@@ -341,8 +301,9 @@ class EvidenceKeeper:
             return
         directory = key if isinstance(key, UUID) else UUID(key)
         try:
-            self._store.hold(directory, run, code, attempt.streak)
-        except SQLAlchemyError as error:
+            source_ino = self._vault.inode(str(directory))
+            self._store.hold(directory, run, code, attempt.streak, source_ino)
+        except (SQLAlchemyError, EvidenceError) as error:
             logger.error(_HOLD_FAILED, directory, attempt.streak, code, type(error).__name__)
             return
         self._backoff.clear(key)

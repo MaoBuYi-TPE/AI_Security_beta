@@ -17,6 +17,7 @@ from uuid import UUID
 
 from secscan.core.identifiers import canonical_uuid
 from secscan.core.json_types import JsonObject, JsonValue
+from secscan.runner.domain.areas import ACTIVE_AREA
 from secscan.runner.domain.policy import ENGINE_POLICIES, ContainerPolicy, EnginePolicy
 from secscan.scanners.domain.plan import ExecutionPlan
 from secscan.scanners.domain.zap.script import CONFIG_FILE as ZAP_CONFIG_FILE
@@ -283,14 +284,15 @@ def _bounded(host: JsonObject) -> bool:
 
 
 def _mounts_safe(mounts: JsonValue, plan: ExecutionPlan, policy: ContainerPolicy) -> bool:
-    """只能是這個 run 的 volume subpath：in/ 與 secret 唯讀、out/ 可寫，順序固定。
+    """只能是這個 run 的 volume subpath（runs volume 的 active/ 之下；§30.13）：in/ 與 secret
+    唯讀、out/ 可寫，順序固定。
 
     不呼叫組 body 用的 _mounts：各自寫一次，任一邊寫錯都會被另一邊擋下。
     """
     run = str(plan.run_id)
     allowed = [
-        ("/scan/in", policy.runs_volume, f"{run}/in", True),
-        ("/scan/out", policy.runs_volume, f"{run}/out", False),
+        ("/scan/in", policy.runs_volume, f"{ACTIVE_AREA}/{run}/in", True),
+        ("/scan/out", policy.runs_volume, f"{ACTIVE_AREA}/{run}/out", False),
         ("/scan/secret", policy.secrets_volume, run, True),
     ]
     if not isinstance(mounts, list) or len(mounts) != len(allowed):
@@ -307,9 +309,10 @@ def _mounts_safe(mounts: JsonValue, plan: ExecutionPlan, policy: ContainerPolicy
 
 def _mounts(plan: ExecutionPlan, policy: ContainerPolicy) -> list[JsonValue]:
     run = str(plan.run_id)
+    runs = f"{ACTIVE_AREA}/{run}"
     return [
-        _volume(policy.runs_volume, f"{run}/in", IN_DIR, read_only=True),
-        _volume(policy.runs_volume, f"{run}/out", OUT_DIR, read_only=False),
+        _volume(policy.runs_volume, f"{runs}/in", IN_DIR, read_only=True),
+        _volume(policy.runs_volume, f"{runs}/out", OUT_DIR, read_only=False),
         _volume(policy.secrets_volume, run, SECRET_DIR, read_only=True),
     ]
 

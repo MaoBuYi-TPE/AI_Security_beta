@@ -51,7 +51,9 @@ def test_no_service_is_privileged(name: str) -> None:
     service = SERVICES[name]
 
     assert service.get("privileged", False) is False
-    for key in ("cap_add", "devices", "network_mode", "pid", "ipc", "userns_mode"):
+    # network_mode 只允許 none（runs-init 沒有任何網路；docs/DECISIONS.md §30.13）。
+    assert service.get("network_mode", "none") == "none"
+    for key in ("cap_add", "devices", "pid", "ipc", "userns_mode"):
         assert key not in service
 
 
@@ -421,10 +423,20 @@ def test_guard_logs_are_rotated() -> None:
 
 
 def test_the_worker_reads_collected_runs_read_only() -> None:
-    """preflight 的回應由 worker 判斷（DECISIONS §16.5）：runs 唯讀，不碰 secret 與 guard。"""
+    """preflight 的回應由 worker 判斷（DECISIONS §16.5）：runs 唯讀，不碰 secret 與 guard。
+    runs 只掛載 subpath active（§30.13；tests/unit/test_deployment_runs.py）。"""
     worker = SERVICES["worker"]
 
-    assert _volumes(worker) == ["runs:/runs:ro", "guard_telemetry:/guard/telemetry:ro"]
+    assert worker["volumes"] == [
+        {
+            "type": "volume",
+            "source": "runs",
+            "target": "/runs",
+            "read_only": True,
+            "volume": {"subpath": "active", "nocopy": True},
+        },
+        "guard_telemetry:/guard/telemetry:ro",
+    ]
     assert str(WorkerSettings().runs_dir) == "/runs"
     assert str(WorkerSettings().telemetry_dir) == "/guard/telemetry"
     assert worker["networks"] == ["control_net"]

@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from secscan.cli import EXIT_FAILURE, EXIT_OK, main
 from secscan.cli.services import stop_signals
 from secscan.runner.docker_runtime import DockerRuntime
+from secscan.runner.layout import init_layout
 from secscan.runner.loop import RunnerLoop
 from secscan.scanners.domain.zap.policy import ZAP_IMAGE
 from secscan.scans.domain.catalog import Engine as ScanEngine
@@ -62,9 +63,11 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> FakeContainerRuntime:
 def environment(
     queue_database: ProvisionedDatabase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> Path:
-    """以環境變數指向測試的資料庫與暫存目錄。"""
+    """以環境變數指向測試的資料庫與暫存目錄（runs volume 是新的 layout；worker 只看 active/）。"""
     for name in ("runs", "secrets"):
         (tmp_path / name).mkdir()
+    init_layout(tmp_path / "runs")
+    monkeypatch.setenv("WORKER_RUNS_DIR", str(tmp_path / "runs" / "active"))
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("DB_HOST", queue_database.host)
     monkeypatch.setenv("DB_PORT", str(queue_database.port))
@@ -128,7 +131,7 @@ def test_the_next_runner_pass_seals_the_finished_run(
     scan = queue_seed.scan(world.operator_a, scannable)
     assert main(["runner", "--once"]) == EXIT_OK
     [run] = queue_seed.query("SELECT id FROM scanner_runs WHERE scan_id = :id", id=scan.id)
-    root = environment / "runs" / str(run.id)
+    root = environment / "runs" / "active" / str(run.id)
     assert (root / "manifest.json").exists()
     assert main(["worker", "--once"]) == EXIT_OK
 
@@ -164,7 +167,7 @@ def test_the_runner_stops_claiming_when_evidence_cannot_be_sealed(
     queue_seed.scan(world.operator_a, scannable)
     lease = queue.claim("runner-elsewhere", frozenset({ScanEngine.FAKE}))
     assert lease is not None
-    out = environment / "runs" / str(lease.run_id) / "out"
+    out = environment / "runs" / "active" / str(lease.run_id) / "out"
     out.mkdir(parents=True)
     (out / "report.json").write_bytes(b"canary-unsealable")
     queue.prepare(lease)
@@ -428,3 +431,27 @@ def test_sigterm_requests_a_stop_and_the_handlers_are_restored() -> None:
         assert stop.wait(timeout=5)
 
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_the_runner_does_not_start_on_the_old_layout(
+    environment: Path, runtime: FakeContainerRuntime, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """根目錄還有沒搬移的 run 目錄（舊的 layout）：runner 不啟動，提示執行搬移（§30.13）。"""
+    (environment / "runs" / str(uuid4())).mkdir()
+
+    assert main(["runner", "--once"]) == EXIT_FAILURE
+
+    err = capsys.readouterr().err
+    assert "make runs-layout-migrate" in err
+    assert runtime.created == []
+
+
+def test_the_worker_refuses_the_volume_root(
+    environment: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """安全審查 LOW-1：worker 看得到 held/ 或 .layout（subpath 沒有生效、掛到根目錄）就不啟動。"""
+    monkeypatch.setenv("WORKER_RUNS_DIR", str(environment / "runs"))
+
+    assert main(["worker", "--once"]) == EXIT_FAILURE
+
+    assert "held/ 或 .layout" in capsys.readouterr().err

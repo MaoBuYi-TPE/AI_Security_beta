@@ -1,6 +1,7 @@
 """migration：全新 DB 可升到 head、可完整降回 base 再升上去，且 model 與 migration 沒有漂移。"""
 
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
@@ -10,6 +11,7 @@ from sqlalchemy import Engine, inspect, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from secscan.cli.services import audit_local
 from secscan.migrations import alembic_config, head_revision
 from secscan.migrations.metadata import target_metadata
 from secscan.scans.domain.allocation import EngineBudgetRequest
@@ -267,6 +269,8 @@ def test_downgrade_refuses_evidence_holds(
         with Session(engine) as session, session.begin():
             world, scan = web_scan(session, engines=(ScanEngine.ZAP,))
             ScanService(session, lab=LAB).cancel(world.operator, scan.id, request_id=None)
+        # v0024 之前留下的紀錄（沒有 inode）：在 0023 寫入，再升回 head。
+        _migrate(engine, "down", "0023")
         with Session(engine) as session, session.begin():
             run_id, scan_id = session.execute(
                 text("SELECT id, scan_id FROM scanner_runs WHERE scan_id = :scan"),
@@ -294,6 +298,7 @@ def test_downgrade_refuses_evidence_holds(
                     ),
                     {"run": run_id},
                 )
+        _migrate(engine, "up", "head")
 
         with pytest.raises(DBAPIError, match="holds exist"):
             _migrate(engine, "down", "0022")
@@ -311,5 +316,121 @@ def test_downgrade_without_holds_removes_the_table(fresh_database: ProvisionedDa
         assert _current_revisions(engine) == ["0022"]
         assert "evidence_holds" not in _tables(engine)
         assert not {"evidence_holds_guard", "run_evidence_hold_check"} & _existing_functions(engine)
+    finally:
+        engine.dispose()
+
+
+def _legacy_hold(engine: Engine) -> UUID:
+    """0023 的 schema 上：一個還沒解除、沒有 inode 的孤兒目錄的隔離紀錄。"""
+    directory = uuid4()
+    with Session(engine) as session, session.begin():
+        session.execute(
+            text(
+                "INSERT INTO evidence_holds (directory, error_code, attempts) "
+                "VALUES (:directory, 'EVIDENCE_TREE_TOO_DEEP', 3)"
+            ),
+            {"directory": directory},
+        )
+    return directory
+
+
+def test_v0024_keeps_legacy_holds_isolating(fresh_database: ProvisionedDatabase) -> None:
+    """既有的資料不回填（§30.13）：還沒解除的紀錄維持隔離中（沒有 inode），由搬移指令處理。"""
+    engine = app_engine(fresh_database)
+    try:
+        _migrate(engine, "up", "0023")
+        directory = _legacy_hold(engine)
+        _migrate(engine, "up", "head")
+
+        with Session(engine) as session:
+            row = session.execute(
+                text("SELECT * FROM evidence_holds WHERE directory = :id"), {"id": directory}
+            ).one()
+        assert (row.isolated_at, row.releasing_at, row.source_ino) == (None, None, None)
+        assert (row.move_failures, row.last_move_error, row.last_move_failed_at) == (0, None, None)
+    finally:
+        engine.dispose()
+
+
+def test_v0024_downgrade_refuses_isolation_records(fresh_database: ProvisionedDatabase) -> None:
+    """舊程式不認得 held/：有 inode、隔離或解除的時間、搬移失敗的紀錄就拒絕降級。"""
+    engine = app_engine(fresh_database)
+    try:
+        _migrate(engine, "up", "head")
+        with Session(engine) as session, session.begin():
+            session.execute(
+                text(
+                    "INSERT INTO evidence_holds (directory, error_code, attempts, source_ino) "
+                    "VALUES (:directory, 'EVIDENCE_TREE_TOO_DEEP', 3, 1)"
+                ),
+                {"directory": uuid4()},
+            )
+
+        with pytest.raises(DBAPIError, match="isolation records or a runs layout migration"):
+            _migrate(engine, "down", "0023")
+        assert _current_revisions(engine) == [head_revision()]
+    finally:
+        engine.dispose()
+
+
+def test_v0024_downgrade_restores_the_previous_guard(fresh_database: ProvisionedDatabase) -> None:
+    """沒有隔離的資料時可以降級：刪除欄位與 CHECK，還原 0023 的 trigger（不要求 inode）。"""
+    engine = app_engine(fresh_database)
+    try:
+        _migrate(engine, "up", "0023")
+        legacy = _legacy_hold(engine)
+        _migrate(engine, "up", "head")
+        _migrate(engine, "down", "0023")
+
+        assert _current_revisions(engine) == ["0023"]
+        columns = {column["name"] for column in inspect(engine).get_columns("evidence_holds")}
+        assert not {"isolated_at", "releasing_at", "move_failures", "source_ino"} & columns
+        _legacy_hold(engine)
+        with Session(engine) as session:
+            count = session.execute(text("SELECT count(*) FROM evidence_holds")).scalar()
+            kept = session.execute(
+                text("SELECT 1 FROM evidence_holds WHERE directory = :id"), {"id": legacy}
+            ).scalar()
+        assert (count, kept) == (2, 1)
+    finally:
+        engine.dispose()
+
+
+def test_v0024_downgrade_refuses_after_a_layout_migration(
+    fresh_database: ProvisionedDatabase,
+) -> None:
+    """資料庫審查 M1：已經搬到新的 layout（audit runs_layout.*）時，舊程式會把 active/ 的目錄記成
+    「沒有目錄」：拒絕降級。"""
+    engine = app_engine(fresh_database)
+    try:
+        _migrate(engine, "up", "head")
+        audit_local(engine, "runs_layout.migrated", {}, object_type="runs_volume")
+
+        with pytest.raises(DBAPIError, match="runs layout migration"):
+            _migrate(engine, "down", "0023")
+        assert _current_revisions(engine) == [head_revision()]
+    finally:
+        engine.dispose()
+
+
+def test_v0024_downgrade_restores_the_exact_previous_function(
+    fresh_database: ProvisionedDatabase,
+) -> None:
+    """資料庫審查 L2：降級之後的 trigger 函式和 0023 的完全相同（UPDATE 的規則也還原）。"""
+    engine = app_engine(fresh_database)
+    definition = "SELECT pg_get_functiondef('evidence_holds_guard()'::regprocedure)"
+    try:
+        _migrate(engine, "up", "0023")
+        with engine.connect() as connection:
+            before = connection.execute(text(definition)).scalar()
+        _migrate(engine, "up", "head")
+        with engine.connect() as connection:
+            upgraded = connection.execute(text(definition)).scalar()
+        _migrate(engine, "down", "0023")
+        with engine.connect() as connection:
+            after = connection.execute(text(definition)).scalar()
+
+        assert upgraded != before
+        assert after == before
     finally:
         engine.dispose()

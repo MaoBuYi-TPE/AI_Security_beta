@@ -14,7 +14,11 @@
 - export-evidence（break-glass）：沒有 --path 時列出加密檔的原本路徑、大小與 sha256；有 --path 時
   先完整驗證，再寫入 audit（寫不進去就不匯出），最後才把明文寫到 stdout。不寫任何檔案。
 - retention-status：pending、逾期、已加密、待清除與已清除的數量，以及需要人工處理（隔離）的數量、
-  錯誤代碼與最早的幾個目錄名稱（§30.12）；不含路徑或內容。
+  錯誤代碼與最早的幾個目錄名稱（§30.12）；不含路徑或內容。隔離的各階段數量；隔離未完成（明文
+  仍在 active/）的最早幾筆、經過時間與搬移失敗，超過門檻的列為需要緊急處理（§30.13）。仍是唯讀的
+  報告，exit 0。
+- rotate-evidence-keys 也處理 held/ 中的加密檔（解除中的目錄）；export-evidence 只處理 active/，
+  held/ 中的目錄一律拒絕。
 人工重試加密（retry-evidence）在 evidence_holds.py；等鎖與建立 vault 的方式和這裡共用。
 說明都寫到 stderr。
 """
@@ -39,7 +43,10 @@ from secscan.core.json_types import JsonValue
 from secscan.runner.config import RunnerSettings
 from secscan.runner.evidence import EvidenceError, EvidenceVault
 from secscan.runner.fs import TreeLimits
-from secscan.scans.evidence_holds import ORPHAN_KIND, EvidenceHolds
+from secscan.runner.layout import Area
+from secscan.scans.domain.evidence import ISOLATION_URGENT_AFTER
+from secscan.scans.evidence_hold_isolation import HoldIsolationStore
+from secscan.scans.evidence_holds import ORPHAN_KIND, EvidenceHolds, HeldDirectory
 from secscan.scans.evidence_records import EvidenceStore
 from secscan.scans.models import ScanModel, ScannerRunModel
 from secscan.security.blob_cipher import StreamInfo
@@ -168,16 +175,20 @@ def _rotate(engine: Engine, vault: EvidenceVault, report: Report) -> int:
 
 
 def _rotate_all(vault: EvidenceVault) -> tuple[int, int, list[str]]:
+    """active/ 與 held/（解除中的目錄已有加密檔；§30.13）中的每個加密檔。兩個區域都先列出：
+    任何一個列不出來時還沒換版任何檔案（程式碼審查 M2）。"""
     files = directories = 0
     failed: list[str] = []
-    for name in vault.entries():
-        try:
-            rotated = vault.rotate(name)
-        except EvidenceError:
-            failed.append(name)
-            continue
-        files += rotated
-        directories += 1 if rotated else 0
+    listings = [(scoped, scoped.entries()) for scoped in (vault.in_area(area) for area in Area)]
+    for scoped, names in listings:
+        for name in names:
+            try:
+                rotated = scoped.rotate(name)
+            except EvidenceError:
+                failed.append(name)
+                continue
+            files += rotated
+            directories += 1 if rotated else 0
     return files, directories, failed
 
 
@@ -284,7 +295,9 @@ def _status(engine: Engine, settings: Settings, report: Report) -> int:
 
 
 def _holds_status(engine: Engine, report: Report) -> None:
-    holds = EvidenceHolds(sessionmaker(engine, expire_on_commit=False)).summary(listed=MAX_LISTED)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    _isolation_status(sessions, report)
+    holds = EvidenceHolds(sessions).summary(listed=MAX_LISTED)
     codes = "、".join(f"{code.value} {count}" for code, count in sorted(holds.by_code.items()))
     report(
         "需要人工處理（manual_intervention_required）："
@@ -301,6 +314,42 @@ def _holds_status(engine: Engine, report: Report) -> None:
         )
     if holds.oldest:
         report("以 secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> 處理。")
+
+
+def _isolation_status(sessions: sessionmaker[Session], report: Report) -> None:
+    """隔離未完成（明文仍在 active/，worker 可能讀得到）的段落；超過門檻的需要緊急處理
+    （§30.13）。"""
+    now = datetime.now(UTC)
+    summary = HoldIsolationStore(sessions).summary(
+        now=now, urgent_after=ISOLATION_URGENT_AFTER, listed=MAX_LISTED
+    )
+    threshold = int(ISOLATION_URGENT_AFTER.total_seconds() // 60)
+    report(
+        f"隔離：已隔離（在 held/，worker 讀不到）{summary.isolated}、解除中 {summary.releasing}、"
+        f"隔離未完成 {summary.isolating}"
+        f"（其中超過 {threshold} 分鐘、需要緊急處理 {summary.urgent}）。"
+    )
+    if not summary.isolating:
+        return
+    oldest = summary.oldest[0].hold.held_at.astimezone(UTC).isoformat(timespec="seconds")
+    report(
+        f"警告：隔離未完成的目錄明文仍在 active/，worker 可能讀得到（最早的隔離於 {oldest}）。"
+        "主動告警尚未提供（T35）；請檢查 runner 的 log 與下列搬移失敗。"
+    )
+    for item in summary.oldest:
+        report(f"  {_isolating_line(item, now)}")
+
+
+def _isolating_line(item: HeldDirectory, now: datetime) -> str:
+    elapsed = int((now - item.hold.held_at).total_seconds() // 60)
+    urgent = "需要緊急處理，" if now - item.hold.held_at >= ISOLATION_URGENT_AFTER else ""
+    moves = item.moves
+    if moves.count and moves.last_code is not None and moves.last_at is not None:
+        failed_at = moves.last_at.astimezone(UTC).isoformat(timespec="seconds")
+        last = f"搬移失敗 {moves.count} 次，最近一次 {moves.last_code.value} 於 {failed_at}"
+    else:
+        last = "還沒有搬移失敗的紀錄"
+    return f"{item.directory}（{urgent}已 {elapsed} 分鐘）：{last}"
 
 
 # --- 共用 --------------------------------------------------------------------------------------

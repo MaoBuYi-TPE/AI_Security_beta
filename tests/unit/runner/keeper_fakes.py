@@ -34,6 +34,7 @@ class Held:
     run: EvidenceRun | None
     code: EvidenceHoldCode
     attempts: int
+    source_ino: int = 0
 
 
 @dataclass
@@ -100,12 +101,17 @@ class FakeStore:
         return frozenset(set(run_ids) & self.known_ids)
 
     def hold(
-        self, directory: UUID, run: EvidenceRun | None, code: EvidenceHoldCode, attempts: int
+        self,
+        directory: UUID,
+        run: EvidenceRun | None,
+        code: EvidenceHoldCode,
+        attempts: int,
+        source_ino: int,
     ) -> None:
         self._maybe_fail("hold")
         assert run is None or run.run_id == directory
         assert directory not in self.holds
-        self.holds[directory] = Held(run, code, attempts)
+        self.holds[directory] = Held(run, code, attempts, source_ino)
         if self.hold_reply_lost:
             raise OperationalError("COMMIT", {}, Exception("connection lost"))
 
@@ -132,6 +138,7 @@ class FakeVault:
     on_seal: list[object] = field(default_factory=list)
     unexpected: BaseException | None = None
     volume_error: EvidenceError | None = None
+    no_inode: set[str] = field(default_factory=set)
 
     def _maybe_over_limit(self, name: str) -> None:
         code = self.over_limit.get(name)
@@ -144,6 +151,12 @@ class FakeVault:
 
     def entries(self) -> tuple[str, ...]:
         return tuple(sorted(self.states))
+
+    def inode(self, name: str) -> int:
+        """目錄的 inode（以名稱推導的固定值）；no_inode 中的名稱不是目錄。"""
+        if name in self.no_inode:
+            raise EvidenceError("不是目錄")
+        return inode_of(name)
 
     def inspect(self, name: str) -> DirectoryState | None:
         self.inspected.append(name)
@@ -174,6 +187,23 @@ class FakeVault:
         self.purged.append(name)
 
 
+def inode_of(name: str) -> int:
+    return UUID(name).int % 1_000_003
+
+
+@dataclass
+class FakeIsolation:
+    """隔離的對帳（runner/isolation.py 另有自己的測試）：只記下呼叫；error 讓對帳失敗。"""
+
+    calls: list[float] = field(default_factory=list)
+    error: BaseException | None = None
+
+    def reconcile(self, deadline: float) -> None:
+        self.calls.append(deadline)
+        if self.error is not None:
+            raise self.error
+
+
 class Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -188,6 +218,14 @@ def make_keeper(
     *,
     clock: Clock | None = None,
     settings: KeeperSettings = SETTINGS,
+    isolation: FakeIsolation | None = None,
 ) -> EvidenceKeeper:
     ticking = clock or Clock()
-    return EvidenceKeeper(store, vault, settings, clock=lambda: NOW, monotonic=ticking.monotonic)
+    return EvidenceKeeper(
+        store,
+        vault,
+        settings,
+        isolation=isolation if isolation is not None else FakeIsolation(),
+        clock=lambda: NOW,
+        monotonic=ticking.monotonic,
+    )

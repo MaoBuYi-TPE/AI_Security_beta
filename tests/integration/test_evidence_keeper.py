@@ -35,6 +35,7 @@ from secscan.scans.queue import LeaseLostError, RunUsage, ScanQueue
 from secscan.scans.service import ScanService
 from tests.integration.api_support import LAB, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
+from tests.runs_volume_support import hold_isolation, runs_volume
 from tests.secret_support import shared_evidence_cipher
 
 pytestmark = pytest.mark.integration
@@ -77,9 +78,8 @@ def scannable(queue_seed: Seeder, world: World) -> Scannable:
 
 @pytest.fixture
 def runs(tmp_path: Path) -> Path:
-    directory = tmp_path / "runs"
-    directory.mkdir()
-    return directory
+    """runs volume 的 active/（§30.13）；vault 以 volume 的根目錄（.parent）建立。"""
+    return runs_volume(tmp_path)
 
 
 @pytest.fixture
@@ -101,11 +101,15 @@ SETTINGS = KeeperSettings(retention_days=7, plaintext_max_minutes=60)
 
 
 @pytest.fixture
-def keeper(store: EvidenceStore, runs: Path, moment: Moment, ticker: Ticker) -> EvidenceKeeper:
+def keeper(
+    store: EvidenceStore, queue_engine: Engine, runs: Path, moment: Moment, ticker: Ticker
+) -> EvidenceKeeper:
+    vault = EvidenceVault(runs.parent, shared_evidence_cipher())
     return EvidenceKeeper(
         store,
-        EvidenceVault(runs, shared_evidence_cipher()),
+        vault,
         SETTINGS,
+        isolation=hold_isolation(queue_engine, runs, vault, monotonic=lambda: ticker.now),
         clock=lambda: moment.now,
         monotonic=lambda: ticker.now,
     )
@@ -608,6 +612,7 @@ def test_a_failing_seal_stays_pending_in_the_api(
 def test_a_missing_runs_volume_records_nothing(
     queue: ScanQueue,
     queue_seed: Seeder,
+    queue_engine: Engine,
     world: World,
     scannable: Scannable,
     store: EvidenceStore,
@@ -617,10 +622,12 @@ def test_a_missing_runs_volume_records_nothing(
     """主機上執行或 volume 沒有掛上時，已終止的 run 不能被記成 none（審查 HIGH-2）。"""
     lease = _claim(queue, queue_seed, world, scannable)
     _finish_failed(queue, lease)
+    vault = EvidenceVault(tmp_path / "not-mounted", shared_evidence_cipher())
     keeper = EvidenceKeeper(
         store,
-        EvidenceVault(tmp_path / "not-mounted", shared_evidence_cipher()),
+        vault,
         SETTINGS,
+        isolation=hold_isolation(queue_engine, tmp_path / "not-mounted" / "active", vault),
         clock=lambda: moment.now,
     )
 

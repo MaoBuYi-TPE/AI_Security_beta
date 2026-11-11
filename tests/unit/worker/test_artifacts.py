@@ -179,3 +179,25 @@ def test_a_huge_integer_in_the_manifest_does_not_stop_a_read(tmp_path: Path) -> 
     run_id = _write_manifest(tmp_path, document)
 
     assert ArtifactReader(tmp_path).read(run_id, "a", max_bytes=10) is None
+
+
+def _open_descriptors() -> set[str]:
+    return set(os.listdir("/dev/fd"))
+
+
+def test_no_descriptor_stays_open_after_a_read(tmp_path: Path) -> None:
+    """worker 只在解析時開檔，成功與錯誤路徑都關閉（§30.13：隔離之前沒有殘留的 FD）。"""
+    run_dir = _collect(tmp_path, {"report.json": b"{}"}).parent
+    reader = ArtifactReader(tmp_path)
+    run_id = RUN
+    before = _open_descriptors()
+
+    assert reader.read(run_id, "report.json", max_bytes=1024) == b"{}"
+    assert reader.read(run_id, "report.json", max_bytes=1) is None
+    assert reader.read(run_id, "missing.json", max_bytes=1024) is None
+    assert reader.read(uuid4(), "report.json", max_bytes=1024) is None
+    reader.manifest(run_id)
+    (run_dir / "manifest.json").write_bytes(b"not json")
+    assert reader.manifest(run_id) is None
+
+    assert _open_descriptors() == before

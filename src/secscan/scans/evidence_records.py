@@ -68,6 +68,10 @@ class EvidenceStore:
         self._engine = engine
         self._holds = EvidenceHolds(sessions)
 
+    @property
+    def engine(self) -> Engine:
+        return self._engine
+
     # --- 逾期 ------------------------------------------------------------------------------
 
     def overdue(self, *, now: datetime, max_minutes: int, limit: int) -> tuple[EvidenceRun, ...]:
@@ -105,7 +109,9 @@ class EvidenceStore:
         with self._sessions() as session:
             rows = session.execute(
                 select(ScannerRunModel.id, ScannerRunModel.scan_id)
-                .where(_settled(), ~_recorded(), ~_held(), *_excluding(ScannerRunModel.id, exclude))
+                .where(
+                    run_settled(), ~_recorded(), ~_held(), *_excluding(ScannerRunModel.id, exclude)
+                )
                 .order_by(ScannerRunModel.finished_at, ScannerRunModel.id)
                 .limit(limit)
             )
@@ -164,12 +170,19 @@ class EvidenceStore:
     # --- 隔離（§30.12）----------------------------------------------------------------------
 
     def hold(
-        self, directory: UUID, run: EvidenceRun | None, code: EvidenceHoldCode, attempts: int
+        self,
+        directory: UUID,
+        run: EvidenceRun | None,
+        code: EvidenceHoldCode,
+        attempts: int,
+        source_ino: int,
     ) -> None:
         """run 是 None 代表孤兒目錄；否則 directory 必須是這個 run 的 run_id。"""
         if run is not None and run.run_id != directory:
             raise ValueError("run 的目錄名稱必須是 run_id")
-        self._holds.hold(directory, None if run is None else run.scan_id, code, attempts)
+        self._holds.hold(
+            directory, None if run is None else run.scan_id, code, attempts, source_ino
+        )
 
     def held(self, directories: Collection[UUID]) -> frozenset[UUID]:
         return self._holds.held(directories)
@@ -276,8 +289,8 @@ def _overdue(now: datetime, max_minutes: int) -> ColumnElement[bool]:
     return and_(waiting, started <= now - timedelta(minutes=max_minutes))
 
 
-def _settled() -> ColumnElement[bool]:
-    """已終止，而且沒有容器或容器已確認刪除。"""
+def run_settled() -> ColumnElement[bool]:
+    """已終止，而且沒有容器或容器已確認刪除（之後沒有任何程序會再寫或解析這個目錄）。"""
     return and_(
         ScannerRunModel.status.in_(sorted(status.value for status in TERMINAL_RUN_STATUSES)),
         or_(

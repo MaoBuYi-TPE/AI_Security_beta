@@ -22,6 +22,7 @@ from secscan.scans.domain.evidence import (
     EvidenceHoldCode,
     EvidenceState,
     EvidenceStatus,
+    HoldStage,
 )
 from secscan.scans.domain.lifecycle import RunStatus, ScanStatus
 from secscan.scans.domain.model import Scan, ScanEvent, ScannerRun
@@ -238,14 +239,22 @@ class RunEvidenceHoldOut(BaseModel):
     error_code：深度（EVIDENCE_TREE_TOO_DEEP）、條目數（EVIDENCE_TREE_TOO_MANY_ENTRIES）或路徑
     總長度（EVIDENCE_TREE_PATHS_TOO_LONG）。
 
-    resolved_at：人工以 `secscan-admin retry-evidence` 加密成功的時間；還沒解除是 null。
+    stage（§30.13）：isolating（隔離未完成：目錄還在 active/，worker 可能讀得到）、isolated（已搬到
+    held/，worker 讀不到）、releasing（已在 held/ 加密並驗證，正在搬回）、resolved（已解除）。
+
+    isolated_at：搬到 held/ 的時間；releasing_at：開始解除的時間。這個版本之前就解除的紀錄兩者都是
+    null。resolved_at：人工以 `secscan-admin retry-evidence` 加密成功的時間；還沒解除是 null。
+    搬移失敗的細節只在 retention-status。
     """
 
     model_config = ConfigDict(frozen=True)
 
     error_code: EvidenceHoldCode
     attempts: int
+    stage: HoldStage
     held_at: datetime
+    isolated_at: datetime | None
+    releasing_at: datetime | None
     resolved_at: datetime | None
 
     @classmethod
@@ -253,7 +262,10 @@ class RunEvidenceHoldOut(BaseModel):
         return cls(
             error_code=hold.code,
             attempts=hold.attempts,
+            stage=hold.stage,
             held_at=hold.held_at,
+            isolated_at=hold.isolated_at,
+            releasing_at=hold.releasing_at,
             resolved_at=hold.resolved_at,
         )
 

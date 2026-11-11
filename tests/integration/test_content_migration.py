@@ -63,14 +63,17 @@ def _revision(engine: Engine) -> str:
 
 @contextmanager
 def _holds_table_for_the_orm(engine: Engine) -> Iterator[None]:
-    """建立 scan 的程式碼會讀 evidence_holds（0023 才建立，docs/DECISIONS.md §30.12），而這裡在
-    0021 的 schema 上寫入舊資料：期間暫時建立一張空的同名資料表，升級之前刪除。"""
+    """建立 scan 的程式碼會讀 evidence_holds（0023 才建立、0024 加上隔離的欄位，docs/DECISIONS.md
+    §30.12、§30.13），而這裡在 0021 的 schema 上寫入舊資料：期間暫時建立一張空的同名資料表
+    （目前 model 的欄位），升級之前刪除。"""
     with engine.begin() as connection:
         connection.execute(
             text(
                 "CREATE TABLE evidence_holds (directory uuid PRIMARY KEY, scanner_run_id uuid, "
                 "scan_id uuid, error_code varchar(32), attempts integer, held_at timestamptz, "
-                "resolved_at timestamptz)"
+                "resolved_at timestamptz, isolated_at timestamptz, releasing_at timestamptz, "
+                "move_failures integer, last_move_error varchar(32), "
+                "last_move_failed_at timestamptz, source_ino bigint)"
             )
         )
     try:

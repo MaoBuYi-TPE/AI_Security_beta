@@ -17,10 +17,12 @@ from cryptography.fernet import Fernet
 from secscan.runner import fs as fs_module
 from secscan.runner.evidence import SEALED_DIR, EvidenceError, EvidenceLimitError, EvidenceVault
 from secscan.runner.fs import TreeLimits
+from secscan.runner.layout import Area
 from secscan.runner.workspace import Workspace
 from secscan.scans.domain.evidence import EvidenceHoldCode
 from secscan.security.blob_cipher import SealedDataUnreadableError
 from secscan.security.key_rings import evidence_cipher
+from tests.runs_volume_support import runs_volume
 
 RUN = "6f1c2d3e-4b5a-4c6d-8e7f-001122334455"
 OTHER = "00000000-0000-4000-8000-000000000001"
@@ -45,13 +47,12 @@ def key() -> str:
 
 @pytest.fixture
 def runs(tmp_path: Path) -> Path:
-    directory = tmp_path / "runs"
-    directory.mkdir()
-    return directory
+    """runs volume 的 active/（§30.13）；vault 以 volume 的根目錄建立。"""
+    return runs_volume(tmp_path)
 
 
 def _vault(runs: Path, *keys: str, limits: TreeLimits | None = None) -> EvidenceVault:
-    return EvidenceVault(runs, evidence_cipher(",".join(keys)), limits=limits)
+    return EvidenceVault(runs.parent, evidence_cipher(",".join(keys)), limits=limits)
 
 
 def _run(runs: Path, name: str = RUN, files: dict[str, bytes] = FILES) -> Path:
@@ -622,23 +623,104 @@ def test_a_missing_runs_volume_is_an_error_not_a_missing_directory(
 ) -> None:
     """runs 的根目錄不存在（主機上執行、volume 沒有掛上）時不能回報成「沒有這個目錄」：否則
     keeper 會把待加密的 run 永久記成 none（審查 HIGH-2）。"""
-    vault = _vault(tmp_path / "missing", key)
+    vault = EvidenceVault(tmp_path / "missing", evidence_cipher(key))
 
     with pytest.raises(EvidenceError, match="runs volume"):
+        getattr(vault, operation)(RUN)
+
+
+@pytest.mark.parametrize("operation", ["inspect", "seal", "purge"])
+def test_a_volume_without_the_area_is_an_error(tmp_path: Path, key: str, operation: str) -> None:
+    """舊的 layout（沒有 active/）：同樣是錯誤，不是「沒有這個目錄」（§30.13）。"""
+    (tmp_path / "old").mkdir()
+    vault = EvidenceVault(tmp_path / "old", evidence_cipher(key))
+
+    with pytest.raises(EvidenceError, match="active/"):
         getattr(vault, operation)(RUN)
 
 
 def test_check_needs_a_writable_runs_volume(runs: Path, tmp_path: Path, key: str) -> None:
     _vault(runs, key).check()
     with pytest.raises(EvidenceError, match="runs volume"):
-        _vault(tmp_path / "missing", key).check()
-    runs.chmod(0o500)
-    try:
-        with pytest.raises(EvidenceError, match="runs volume"):
-            _vault(runs, key).check()
-    finally:
-        runs.chmod(0o700)
+        EvidenceVault(tmp_path / "missing", evidence_cipher(key)).check()
+    for area in (runs, runs.parent / "held"):
+        area.chmod(0o500)
+        try:
+            with pytest.raises(EvidenceError, match="無法寫入"):
+                _vault(runs, key).check()
+        finally:
+            area.chmod(0o700)
     assert list(runs.iterdir()) == []
+    assert list((runs.parent / "held").iterdir()) == []
+
+
+def test_check_needs_the_new_layout(runs: Path, key: str) -> None:
+    """check 也重新檢查 layout（runner/layout.py）：根目錄還有沒搬移的 run 目錄就不通過。"""
+    (runs.parent / RUN).mkdir()
+
+    with pytest.raises(EvidenceError, match="make runs-layout-migrate"):
+        _vault(runs, key).check()
+
+
+def test_a_symlinked_area_is_not_followed(runs: Path, tmp_path: Path, key: str) -> None:
+    """active 被換成 symlink 時，所有操作都失敗（O_NOFOLLOW），不會處理別的目錄。"""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / RUN).mkdir()
+    runs.rmdir()
+    runs.symlink_to(elsewhere)
+
+    with pytest.raises(EvidenceError, match="active/"):
+        _vault(runs, key).seal(RUN)
+    with pytest.raises(EvidenceError):
+        _vault(runs, key).check()
+
+
+@pytest.mark.parametrize("operation", ["seal", "purge", "listing", "export"])
+def test_a_held_directory_is_refused_in_active(runs: Path, key: str, operation: str) -> None:
+    """active/ 中沒有、卻在 held/ 中的目錄：DB 不認為它是隔離的目錄，一律失敗（§30.13）。"""
+    held = runs.parent / "held" / RUN
+    held.mkdir()
+    (held / "secret.txt").write_text("明文")
+    vault = _vault(runs, key)
+    act = (lambda: _export(vault, "secret.txt")) if operation == "export" else None
+    act = act or (lambda: getattr(vault, operation)(RUN))
+
+    with pytest.raises(EvidenceError, match="held/"):
+        act()
+    assert (held / "secret.txt").read_text() == "明文"
+
+
+def test_the_held_area_is_sealed_in_place(runs: Path, key: str) -> None:
+    """retry-evidence 在 held/ 中加密（in_area），不碰 active/。"""
+    held = runs.parent / "held" / RUN
+    (held / "out").mkdir(parents=True)
+    (held / "out" / "zap-report.json").write_text("{}")
+    vault = _vault(runs, key).in_area(Area.HELD)
+
+    sealed = vault.seal(RUN)
+
+    assert sealed is not None
+    assert sealed.files == 1
+    assert [info.path for info in vault.listing(RUN)] == ["out/zap-report.json"]
+    assert list(runs.iterdir()) == []
+    assert vault.volume == runs.parent
+
+
+def test_inode_is_the_directory_in_the_area(runs: Path, key: str) -> None:
+    _run(runs)
+    vault = _vault(runs, key)
+
+    assert vault.inode(RUN) == (runs / RUN).stat().st_ino
+    with pytest.raises(ValueError, match="run_id"):
+        vault.inode("not-a-uuid")
+    (runs / RUN).rename(runs / "moved")
+    (runs / RUN).symlink_to(runs / "moved")
+    with pytest.raises(EvidenceError, match="不是目錄"):
+        vault.inode(RUN)
+    (runs / RUN).unlink()
+    with pytest.raises(EvidenceError, match="無法檢查"):
+        vault.inode(RUN)
 
 
 def test_export_and_listing_of_an_unsealed_directory_are_evidence_errors(
@@ -716,3 +798,28 @@ def test_the_sealed_directory_is_synced_before_plaintext_is_deleted(
     for index, event in enumerate(events):
         if event == "unlink":
             assert events[index - 1] == "fsync", events
+
+
+@pytest.mark.parametrize(
+    "extra",
+    ["sealed/.hidden", "sealed/notes.txt", "sealed/sub/", "leftover.txt", "sealed/" + "A" * 64],
+)
+def test_only_ciphertext_passes_the_strict_check(runs: Path, key: str, extra: str) -> None:
+    """安全審查 LOW-2：retry-evidence 搬回 active/ 前後的檢查，sealed/ 中只能有加密檔。"""
+    _run(runs)
+    vault = _vault(runs, key)
+    vault.seal(RUN)
+    vault.require_sealed_only(RUN)
+    target = runs / RUN / extra.rstrip("/")
+    if extra.endswith("/"):
+        target.mkdir()
+    else:
+        target.write_bytes(b"x")
+
+    with pytest.raises(EvidenceError):
+        vault.require_sealed_only(RUN)
+
+
+def test_the_strict_check_needs_the_directory(runs: Path, key: str) -> None:
+    with pytest.raises(EvidenceError, match="找不到"):
+        _vault(runs, key).require_sealed_only(RUN)
