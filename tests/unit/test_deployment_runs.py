@@ -5,7 +5,8 @@
 - runs-init 是獨立、最小的服務：不使用 x-app，沒有環境變數、金鑰、網路與多餘的掛載。
 - make runs-layout-migrate 和 make up 使用同一組 compose 設定（APP_COMPOSE），解析出來的 volume 和
   RUNNER_RUNS_VOLUME 使用同一個運算式。
-實際的行為（掛載、volume 的標籤、up --wait 對一次性服務的處理）由另外授權的 Docker 驗證確認。
+實際的行為（掛載、volume 的標籤、up --wait 對一次性服務的處理）已由 Docker 驗證確認（2026-11-11，
+docs/DECISIONS.md §30.13）；compose 設定中的秘密由 test_compose_secrets 檢查。
 """
 
 import re

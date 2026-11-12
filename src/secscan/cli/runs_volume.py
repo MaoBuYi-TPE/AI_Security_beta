@@ -8,6 +8,8 @@ make runs-layout-migrate 在主機上執行：
 - 和 make up 使用同一組 compose 設定（APP_COMPOSE），所以取出的就是正式部署實際使用的 volume；
   不退回任何預設名稱。
 - 純函式：只讀 stdin，不 import Docker、不連網、不讀環境變數。輸出一行「<project> <volume>」。
+- config 的輸出不含秘密：compose 的密碼與金鑰只寫在各服務自己的 environment，不放在頂層的 x-*
+  （config 即使只查詢 runs-init，也會輸出全部頂層的 x-*；tests/unit/test_compose_secrets.py）。
 - JSON 無法解析、缺少欄位或名稱不合法時 exit 1（說明寫到 stderr），呼叫端拒絕搬移。
 """
 

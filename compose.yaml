@@ -35,13 +35,15 @@ x-app: &app
   pids_limit: 128
   restart: unless-stopped
 
+# 只放不含秘密的共用設定。密碼與金鑰一律寫在各服務自己的 environment，不放在任何頂層的 x-*：
+# docker compose config 即使只查詢一個服務（例如 make runs-layout-migrate 的 config runs-init），
+# 也會輸出全部頂層的 x-*，而且是替換變數之後的值（docs/DECISIONS.md §30.13 的 Docker 驗證 F1）。
 x-app-env: &app-env
   APP_ENV: ${APP_ENV:-prod}
   DB_HOST: db
   DB_PORT: "5432"
   DB_NAME: ${DB_NAME:-secscan}
   DB_USER: ${DB_USER:-secscan_app}
-  DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
   LAB_CIDR: ${LAB_CIDR:-10.89.7.0/24}
 
 x-postgres: &postgres
@@ -127,6 +129,7 @@ services:
     # 報告／人工複測摘錄的內容金鑰，沒有原始證據的金鑰。
     environment:
       <<: *app-env
+      DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
       SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
       CONTENT_ENCRYPTION_KEYS: ${CONTENT_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
       EXCERPT_RETENTION_DAYS: ${EXCERPT_RETENTION_DAYS:-30}
@@ -175,6 +178,7 @@ services:
     # 沒有報告內容的金鑰（docs/DECISIONS.md §30.2）。
     environment:
       <<: *app-env
+      DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
       SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
       EVIDENCE_ENCRYPTION_KEYS: ${EVIDENCE_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
       EVIDENCE_RETENTION_DAYS: ${EVIDENCE_RETENTION_DAYS:-7}
@@ -211,11 +215,13 @@ services:
     # 原始證據的金鑰（docs/DECISIONS.md §30.2）。
     environment:
       <<: *app-env
+      DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
       CONTENT_ENCRYPTION_KEYS: ${CONTENT_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
       REPORT_RETENTION_DAYS: ${REPORT_RETENTION_DAYS:-30}
     # runner 收集好的輸出（preflight 的回應；docs/DECISIONS.md §16.5）與 guard 的 telemetry
     # （coverage；§16.6）：都唯讀。runs volume 只掛載 subpath active（§30.13）：held/ 中隔離的目錄
-    # 不在 worker 的檔案系統裡；active 不存在時容器無法建立。
+    # 不在 worker 的檔案系統裡。active 不存在時，容器可能成功建立，但無法啟動（Docker 驗證：exit
+    # 128；平常由 runs-init 先擋下）。
     volumes:
       - type: volume
         source: runs
