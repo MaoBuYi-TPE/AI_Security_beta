@@ -2915,7 +2915,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 
 ### 30.9 SEC-14 的剩餘風險與改善方向（使用者要求寫進 DECISIONS 與 SECURITY_AND_TESTING）
 
-**T23a 完成也不代表 SEC-14 完成**：
+**T23a 完成也不代表 SEC-14 完成**（SEC-14 的 P0 完成條件見 §30.14）：
 
 1. **加密時間點的限制**：run 執行、收集、等待解析期間是明文。
    - 平常是 run 的時間加上數十秒；worker 異常時最多再加 60 分鐘（`EVIDENCE_PLAINTEXT_MAX_MINUTES`）；runner 停機或 Docker 無法確認容器已刪除時，持續到恢復為止。
@@ -2926,14 +2926,14 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 4. **掃描容器的 json-file log**：在容器刪除之前，可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
 5. **其他保持現狀的明文**：`observations` 保留遮罩過的證據，包含 Nuclei 擷取的 email 與卡號；guard telemetry 的路徑以明文存在 tmpfs，保留 6 小時；摘錄的雜湊沒有加 salt，留在不可變的事件中（T21 的設計）；報告與摘錄在 API 的記憶體中解密，下載的回應是明文（TLS 由部署負責）。
 6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 中的明文交給 T34（使用者決定之前不修改或刪除）。
-7. **超過上限的單一目錄**（安全審查 M1，§30.11；使用者決定方案 B，§30.12）：掃描容器在 `out/` 建立超過深度（32）、條目數（20,000）或路徑總長度（8M 字元）上限的目錄樹時，keeper 連續 3 次失敗（約一分鐘）之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄**保留明文直到有人處理**；機密性隔離（§30.13：隔離的目錄搬到 `held/`，worker 只掛載 `active/`）的離線實作已完成，Docker 的實際驗證也已通過（2026-11-11），**Live 通過之前仍是安全驗收的阻擋條件**，而且搬到 `held/` 之前（隔離中）worker 仍讀得到；不做全域熔斷（告警在 T35）；計數只在記憶體中（runner 重啟會重新計數，`runner --once` 永遠不會隔離）；超過 `retry-evidence` 絕對上限（深度 64、條目 50,000、路徑總長度 16M 字元）的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密。runs volume 的目錄數量超過上限、清除失敗與其他種類的加密失敗（例如磁碟滿）仍然全域 fail closed。完整清單見 §30.12。
+7. **超過上限的單一目錄**（安全審查 M1，§30.11；使用者決定方案 B，§30.12）：掃描容器在 `out/` 建立超過深度（32）、條目數（20,000）或路徑總長度（8M 字元）上限的目錄樹時，keeper 連續 3 次失敗（約一分鐘）之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄**保留明文直到有人處理**；機密性隔離（§30.13：隔離的目錄搬到 `held/`，worker 只掛載 `active/`）的 Docker 實際驗證（2026-11-11）與 Live 驗收（2026-11-12）都已通過，但搬到 `held/` 之前（隔離中）worker 仍讀得到；不做全域熔斷（告警在 T35）；計數只在記憶體中（runner 重啟會重新計數，`runner --once` 永遠不會隔離）；超過 `retry-evidence` 絕對上限（深度 64、條目 50,000、路徑總長度 16M 字元）的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密。runs volume 的目錄數量超過上限、清除失敗與其他種類的加密失敗（例如磁碟滿）仍然全域 fail closed。完整清單見 §30.12。
 8. **runner 指到可寫、但不是 runs volume 的目錄**（例如主機上手動建立的空目錄）時，keeper 仍會把找不到目錄的 run 記成 none。DB 分不出「從來沒有目錄」與「目錄不見了」（容器名稱在建立工作目錄之前就寫入），所以沒有以 DB 判斷（§30.11）。
 9. **金鑰在主機上**：`.env` 是唯一的設定來源，三組金鑰都在裡面（600）；bench 的金鑰檔在使用者的家目錄。金鑰遺失之後，尚未清除的證據、報告、摘錄與 bench 結果都無法復原；備份金鑰由使用者負責。
 
 ### 30.10 交接
 
 - **T34（新增，獨立於 T23 的 DoD）**：本機研究資料的安全盤點（`recordings/`、`runs/spike-t03/work/`）：逐項列出路徑、大小、類型、是否可能含憑證或敏感資料、被哪些文件引用為證據，提出處理建議（保留、加密或刪除）由使用者決定。盤點必須讀取可能含憑證的檔案，開始之前另外授權；未經決定不修改或刪除。
-- **T23b**：主機全碟加密的部署要求、compose secrets、DDL／DML 分權、掃描容器的 log driver、uid 分離、以每個 key 計的速率限制。
+- **T23b**：主機全碟加密的部署要求、compose secrets、DDL／DML 分權、掃描容器的 log driver、uid 分離、以每個 key 計的速率限制。2026-11-12 拆成 b1–b4，b1 的範圍由使用者決定（§30.14）。
 - **T23c**：在最終版本重跑所有 live 套件，包含這次改成等加密完成、以 `export-evidence` 讀取原始輸出的那些。
 - **T23d**：乾淨環境的重建，包含 `make env` 產生三組金鑰。
 - **T27／T28**：原始證據 7 天後清除；需要人工複核原始輸出時，要在期限內進行（或事先調整 `EVIDENCE_RETENTION_DAYS`）。實驗結果以加密的 `benchmarks/results` 保存，金鑰檔要備份；T31 的 Live smoke 需要使用者先執行 `make bench-key`。
@@ -3113,7 +3113,7 @@ HIGH 的剩餘部分：runner 指到一個可寫、但不是 runs volume 的目�
 
 ### 30.13 隔離目錄的機密性隔離（做法 A；使用者，2026-11-10 決定、2026-11-11 核准計畫）
 
-**範圍**：§30.12 的阻擋條件。隔離的目錄搬到 runs volume 的 `held/`，worker 只以 subpath 唯讀掛載 `active/`；DB 與檔案系統一致、能從當機復原；既有資料由管理員指令搬移。計畫經過兩次審查（第一次六處、第二次四處），使用者核准之後實作。離線實作之後，Docker 的實際驗證在 2026-11-11 以獨立、可拋棄的測試環境完成（見下方「Docker 實際驗證」），發現的 F1–F3 在 2026-11-12 修正；Live 需要另外授權，通過之前 T23a 與 SEC-14 都不標完成。
+**範圍**：§30.12 的阻擋條件。隔離的目錄搬到 runs volume 的 `held/`，worker 只以 subpath 唯讀掛載 `active/`；DB 與檔案系統一致、能從當機復原；既有資料由管理員指令搬移。計畫經過兩次審查（第一次六處、第二次四處），使用者核准之後實作。離線實作之後，Docker 的實際驗證在 2026-11-11 以獨立、可拋棄的測試環境完成（見下方「Docker 實際驗證」），發現的 F1–F3 在 2026-11-12 修正。Live 驗收在 2026-11-12 通過（見下方「Live 驗收」）；T23a 依 §30.14 標示完成，SEC-14 仍不標完成。
 
 **layout 與掛載**：
 
@@ -3195,7 +3195,7 @@ runs volume 的根目錄
 
 | # | 項目 | 離線（這個 PR） | 之後（另外授權） |
 |---|---|---|---|
-| 1 | worker 只掛載 `active/` | 部署測試 | Docker 驗證：通過（2026-11-11） |
+| 1 | worker 只掛載 `active/` | 部署測試 | Docker 驗證：通過（2026-11-11，`held/` 非空）；Live：通過（2026-11-12，`held/` 為空） |
 | 2 | DB 狀態與檔案位置相符 | 對帳表的每一列、I1–I3 | — |
 | 3 | 人工復原之前完成加密與完整性驗證 | `retry-evidence` 的每一步與中斷表 | — |
 | 4 | crash recovery 涵蓋 DB、rename 與 fsync 的中斷點 | 七個中斷點、對帳的身分驗證 | — |
@@ -3204,7 +3204,7 @@ runs volume 的根目錄
 | 7 | 搬移失敗保留明文並揭露，其他 run 不受影響 | 單元與整合測試 | — |
 | 8 | 超過 15 分鐘升級為緊急事件 | 只到升級（主動告警是 T35） | T35 |
 | 9 | Docker 實際驗證掛載、hard link 與 FD | — | Docker 驗證：通過（2026-11-11；FD 的結果見剩餘風險 1） |
-| 10 | Live 通過之前不把 T23a、SEC-14 標成完成 | 文件與 TASKS 維持未完成 | Live（T23c） |
+| 10 | Live 通過之前不把 T23a、SEC-14 標成完成 | 文件與 TASKS 維持未完成 | Live：通過（2026-11-12）；T23a 依 §30.14 標示完成，SEC-14 仍未完成 |
 
 **Docker 實際驗證**（2026-11-11；使用者授權，限定在獨立、可拋棄的測試環境）：
 - **隔離的做法**：
@@ -3237,6 +3237,66 @@ runs volume 的根目錄
   - 超過上限的目錄在隔離之前，keeper 不健康，runner 約 1 分鐘不認領新的 run（PR #35 的設計）。
   - 驗證期間 Mac 用電池進入睡眠，Docker 停止回應約 20 分鐘；接上電源之後恢復。沒有重啟 OrbStack，不影響結果。
 
+**Live 驗收**（2026-11-12；使用者授權，只限 T23a 驗收所需的操作）：
+- **前提**：
+  - **版本**：main `c5988fe`（PR #36 的 merge commit）。
+  - **環境**：Makefile 的 Live 專案 `secscan-live`，有自己的 volume、網路與 DB。migration 只在 Live 自己全新的 DB 上執行，沒有碰開發環境。
+  - **電源**：開始時是電池，接上 AC 之後才啟動 Live。
+  - **證據**：放在 gitignore 的 `recordings/t23a-live/`，摘要與每個檔案的 sha256 在 `SUMMARY.md`。
+
+| 項目 | 結果 |
+|---|---|
+| `make test`（使用者，同一個 commit） | 7,586 passed、2 skipped、78 deselected，coverage 98.74% |
+| `make lint`、`make typecheck` | 都 exit 0 |
+| `make test-live-fixture-findings` | 3 passed（23 分 19 秒） |
+| `make test-live-fixture-rescan` | 1 passed（31 分 45 秒）。unchanged 與 patched 的 new、not_observed 都是 0；小預算的比較是 different，需要人工檢視 |
+| 測試內建的證據斷言 | <ul><li>每個 scan：worker 的 `/runs` 沒有 `held`、`.layout`、`active`；API 只有 `sealed` 或 `none`；run 目錄只剩密文，沒有 target 的明文。</li><li>只有 findings：以 runner 容器內的 `export-evidence` 解密，sha256 與大小等於 API 的 artifact。</li></ul> |
+| worker 的獨立檢查（每項 Live 3 次） | <ul><li>掛載是 subpath `active`、唯讀：`HostConfig.Mounts` 與 mountinfo 都確認。</li><li>`/runs/held`、`/held`、`/runs/../held`、`/runs/.layout` 都是 ENOENT；在整個檔案系統都找不到 `held` 與 `.layout`。</li><li>worker 的 `/runs` 和 runner 的 `/runs/active` 相同。</li><li>對照組：runner 看得到 `.layout`、`active`、`held`。</li></ul> |
+| 清除 | <ul><li>沒有 Live 的殘留；`.env` 是 600、401 bytes，沒有改變。</li><li>映像 ID 改變，只是因為 containerd 映像存放區每次 build 都產生新的 attestation manifest；config digest 不變。</li></ul> |
+
+**11/12 Live 的限制**：
+- 這兩項 Live 不會產生隔離，`held/` 都是空的。**11/12 的 Live 沒有驗證非空 `held/` 的存取隔離。**
+- 也不能在驗收的 Live 中放入資料：runner 會把沒有 DB 紀錄的目錄記成 ERROR `EVIDENCE_HELD_UNKNOWN`，干擾驗收結果。
+
+**互補的證據**（使用者 2026-11-12 同意以兩次驗證互補，條件見 §30.14）：
+
+| | 2026-11-11 Docker 驗證 | 2026-11-12 Live |
+|---|---|---|
+| 版本 | `c974cce`：build 前後的 `git status` 都沒有追蹤中的修改；`.dockerignore` 只放入 `pyproject.toml`、`uv.lock`、`src/`、`deploy/guard/` | `c5988fe` |
+| 環境 | 獨立的 project `secscan-t23av`；測試的 volume、網路、映像 tag 與秘密；以 repo 的 `compose.yaml` 加上測試 env 檔執行 | project `secscan-live`（Makefile 的 Live 隔離） |
+| `held/` | 非空：keeper 以真實流程隔離的目錄 | 空 |
+| 範圍 | 掛載、隔離之後 worker 讀不到、hard link、open FD、`runs-init`、`up --wait`、搬移指令 | 真實掃描（ZAP、Nuclei）的端到端、加密與證據斷言、worker 的掛載與負向存取 |
+| 限制 | <ul><li>隔離的是 runner 在 `active/` 建立的孤兒目錄（深度 35，內容是 canary），不是真實掃描的證據。</li><li>隔離之前開啟的 FD 仍讀得到（剩餘風險 1）。</li></ul> | `held/` 中沒有隔離的資料 |
+
+**11/11 非空 `held/` 的紀錄**：原始的指令與輸出保存在 `recordings/t23a-live/20261111-held-negative-access.txt`，從當天工作階段的紀錄擷取，沒有修改；runner 的 log 在 `20261111-t23av/`。
+1. runner 在 `active/` 建立深度 35 的孤兒目錄，內容是 canary。
+2. keeper 連續 3 次 `EVIDENCE_TREE_TOO_DEEP`。
+3. 14:11:55Z，`evidence_holds` 寫入 `held_at`、`isolated_at` 與 `source_ino` 850708；audit 是 `evidence.hold`、`evidence.isolated`。
+4. runner 看到 `/runs/held/<目錄>`：inode 是 850708，讀得到 canary。
+5. worker：
+   - `ls /runs` 只剩另外兩個目錄；
+   - `ls /runs/<目錄>` 是 ENOENT；
+   - `find / -xdev -name <目錄>` 沒有結果。
+6. retention-status 顯示「已隔離 1」。
+
+**版本等價**（`git diff c974cce c5988fe`）：
+- 有修改的部分：
+  - `compose.yaml`：`DB_PASSWORD` 從 `x-app-env` 移到 api、runner、worker 各自的 `environment`（F1），加上註解（F2）。掛載、uid、唯讀、capability 與網路都不變。
+  - `src/`：只有 `cli/runs_volume.py` 的 docstring。
+  - 測試與文件。
+- 沒有修改：Dockerfile、`deploy/`、Makefile、`pyproject.toml`、`uv.lock`、migrations。
+- 11/11 解析之後的 worker 設定，和 11/12 Live 實際的 worker 相同：
+  - subpath `active` 唯讀、`guard_telemetry` 唯讀；
+  - uid 10001、唯讀 rootfs、`cap_drop ALL`；
+  - 只接 `control_net`。
+
+**開發環境**（2026-11-12 唯讀檢查）：
+- **做法**：把 volume 唯讀掛進一次性容器（沒有網路、`cap_drop ALL`），在 tmpfs 的複本上以 single-user 模式查詢。原本的 volume 沒有寫入，也沒有建立新的 volume。
+- **結果**：
+  - DB 的 `alembic_version` 是 `0024`（head）；
+  - runs volume 的 `.layout` 是 layout 2，`active/` 與 `held/` 都是空的。
+- **沒有可靠的 migration 執行紀錄**，所以不記載執行過 `make migrate`。
+
 **剩餘風險**：
 1. open FD（LOW，增量；細節見上方「open FD 與 hard link」）：
    - 被攻陷的 worker 在隔離之前保留的檔案 FD 或目錄 FD 無法自動撤銷；rename 之後仍讀得到明文。
@@ -3255,6 +3315,7 @@ runs volume 的根目錄
 10. Docker 驗證的範圍有兩項沒有涵蓋：
     - **`make up` 本身沒有直接執行**：它會先執行改寫 `.env` 的 `make env`，而且指向開發 project。改在測試 project 上執行相同的 compose 指令，確認 `runs-init` 在實際啟動指令下的行為。
     - **runner 實際產生的掃描容器設定沒有在 Docker 上執行**：這次沒有執行掃描（Live 另外授權）。hard link 改用相同掛載形狀的容器驗證。
+    - 2026-11-12 的 Live 以 runner 實際產生的掃描容器跑完真實的掃描，加密與證據的斷言都通過；但 hard link 的 EXDEV 只在 11/11 以相同掛載形狀的容器驗證過。`make up` 本身仍然沒有由開發代理執行。
 
 11. 降級：v0024 的 downgrade 在有隔離紀錄或 layout 搬移的 audit 時拒絕；但 `runs-init` 建立的新 volume 不寫 DB、偵測不到。降級之前要先把 `active/` 的目錄搬回根目錄、刪除 `.layout`，否則舊程式會把找不到的目錄記成「沒有目錄」（資料庫審查 M1）。
 12. **搬移的前提會和啟動的阻擋互相卡住**（資料庫審查 M2）：runner 異常結束（OOM、Mac 睡眠讓 OrbStack 停止回應、kill -9）時，可能留下容器還沒確認刪除的 run；搬移指令依核准的前提拒絕，而新版的 runner 在舊的 layout 上不會啟動、無法對帳。使用者 2026-11-11 決定**維持原本的前提**，不放寬；無法安全對帳時不刪除紀錄、不略過檢查，明確報錯並提供人工修復的程序（README 與下方）。驗證（`tests/integration/test_runs_layout_recovery.py`）：
@@ -3293,3 +3354,52 @@ runs volume 的根目錄
 3. 切回升級之前的版本（例如 `git switch --detach 61a5cd3`），先確認沒有排隊中的 scan（舊版的 runner 會認領它們），再 `make up`；runner 啟動時就對帳，log 出現「容器已確認不存在：已結算」。Docker 不可用時不會結算，先修復 Docker。
 4. `make down`，切回新的版本，`make migrate`，再執行 `make runs-layout-migrate DRY_RUN=1`：它會再檢查一次；仍有未確認的容器就重複第 1 到 4 步。
 5. `make runs-layout-migrate`，`make up`。
+
+### 30.14 T23a 的驗收結論與之後的決定（使用者，2026-11-12）
+
+**T23a 標示完成的依據**（由文件 PR 提議，使用者審查合併之後生效）：
+
+使用者要求正式結案之前要符合三點：
+1. 兩項既定的 Live 完整通過。
+2. worker 的 `active/` 掛載要實際驗證。
+3. 對 `held/` 中實際存在的隔離資料，另外要有負向存取的證據。
+
+1、2 由 2026-11-12 的 Live 驗收滿足（§30.13 的「Live 驗收」）。
+
+3 的處理：使用者同意以 2026-11-11 的 Docker 驗證與 2026-11-12 的 Live 互補，條件有四項：
+- 兩次的版本、掛載與權限設定可證明等價；
+- 11/11 的 `held/` 確實有 keeper 以真實流程隔離的資料，而且 worker 的負向存取有明確的結果紀錄；
+- 文件區分兩次驗證的日期、版本、環境、範圍與限制；
+- 不宣稱 11/12 的 Live 驗證了非空 `held/` 的存取隔離。
+
+四項都已在 §30.13 確認並記錄：版本等價、11/11 的紀錄、兩次驗證的對照表、11/12 Live 的限制。
+
+離線的部分：使用者在同一個 commit 執行的完整 `make test`，以及 2026-11-12 的 `make lint`、`make typecheck`。
+
+**T23a 完成不代表**：
+- SEC-14 完成；
+- 不是全程靜態加密（§30.9）；
+- §30.13 的剩餘風險都還在：open FD、共用 uid、隔離之前的空檔等。
+
+**SEC-14 的 P0 完成條件**（使用者，2026-11-12）：
+- **前提**：T23a、T23b 的 b1–b3、T23c 都完成。
+- **洩漏路徑**：除了程式的修改與 Live canary 通過，還要驗證機密不會經由下列路徑洩漏：
+  - 一般 API；
+  - 日誌；
+  - 報告；
+  - 未授權的證據存取路徑。
+- **剩餘風險**：所有剩餘風險都要明確記錄、界定適用範圍，並經使用者確認接受。
+- **範圍**：Schemathesis 的安全驗收延到 M6。SEC-14 的 P0 通過，不代表全部範圍都已完成。
+
+**T23b-b1 的範圍**（使用者，2026-11-12）：只做 DDL／DML 分權。服務級的 DB 角色是 b3 之後的另一個子項目。要求如下：
+
+1. **驗證權限確實被撤銷**：
+   - `secscan_app` 不能執行 `ALTER TABLE`、`DROP TABLE`、`ALTER TRIGGER` 或其他未授權的結構操作。
+   - 也要檢查能不能經由物件擁有權、繼承的角色或特殊函式繞過。
+2. **migration 使用獨立的憑證**：`secscan_owner` 不長期提供給 api、worker、runner。
+3. **分權之後重新測試 T23a 的安全不變條件**：`active/`／`held/` 隔離所依賴的 trigger 與 DB 約束仍然正常運作。
+4. **記錄剩餘風險**：三個服務仍共用 `secscan_app`。一個服務被入侵時，仍可能存取其他服務能存取的資料；DDL／DML 分權不是完整的服務級隔離。
+
+PostgreSQL 的物件擁有者有特殊權限，不能只靠 `REVOKE` 就認定隔離完成。目前 `secscan_app` 擁有資料庫與所有物件（所以能停用 trigger），細部計畫要處理擁有權的移轉。
+
+**順序**：T23a 的文件 PR 合併之後，才撰寫 T23b-b1 的細部計畫；核准之前不實作。

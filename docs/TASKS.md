@@ -1554,7 +1554,9 @@
     - **未完成**：BENCH-13（Live smoke：fixture app、web profile、匿名，A、B、C 各一次加一個 C 的比較區塊，約 35 分鐘）需要使用者另外授權；smoke 通過、符合 DoD 之前 T31 不標完成。正式的總預算、份額與 ground truth 比對檔是 T27。
 - [ ] T23 完成所有 P0 的安全、故障、整合測試，並在乾淨環境重建。
   - 因資料保護、部署與最終驗收涉及不同界線，拆成以下四項，各自細化後實作：
-  - [ ] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）；含 T21 的人工複測摘錄與報告內容。
+  - [x] T23a：原始證據加密、明文清理、保留期限與換版（SEC-14）；含 T21 的人工複測摘錄與報告內容。
+    - 2026-11-12 驗收通過，依據見 `DECISIONS.md` §30.13 的「Live 驗收」與 §30.14。
+    - 不代表 SEC-14 完成，也不是全程靜態加密。
     - 2026-11-09：使用者決定保留期限 7／30／30 天、兩組平台金鑰分開（最小權限）、`benchmarks/results` 也加密、`make env` 由使用者自己執行；核准細部計畫第一版的離線範圍（程式、測試、文件、分支、PR 與合併）。**不包含**：任何 Live、由開發代理修改 `.env`（包括經 `make test` 間接觸發 `make env`）、執行 `make bench-key`、修改或清除既有的金鑰、修改或刪除 `recordings/`、`runs/spike-t03/work/` 與既有的研究、開發資料。決策見 `DECISIONS.md` §30。
     - 2026-11-09：離線實作（分支 `feat/t23a-evidence-encryption`）：
       - 金鑰：`EVIDENCE_ENCRYPTION_KEYS`（只給 runner）、`CONTENT_ENCRYPTION_KEYS`（api、worker），`make env` 冪等地補上；各程序的啟動檢查、`check-encryption-keys`。
@@ -1574,7 +1576,7 @@
     - 2026-11-10：使用者判定方案 B「功能實作基本達標，但尚未通過最終驗收」，決定審查留下的三個問題（`DECISIONS.md` §30.12）：
       - 自動熔斷：T23a 不做全域熔斷（維持條件 3）；告警與有範圍的停用改成後續任務 T35。
       - 路徑總長度：改成第三種可隔離的上限（`EVIDENCE_TREE_PATHS_TOO_LONG`），`retry-evidence` 加上 `--max-path-chars`（8M 到 16M 字元的絕對上限）；開 PR 之前完成，三項空轉檢查都被抓到。
-      - [ ] **隔離目錄的機密性隔離（T23a 安全驗收的阻擋條件）**：worker 以唯讀掛載整個 runs volume，仍讀得到隔離中的明文；DB 的隔離只是工作流程的隔離。要以掛載範圍隔離（不能只依賴 chmod）：隔離時把目錄移到只有 keeper 與授權的復原程序能存取、不在 worker 掛載範圍內的位置，並驗證搬移與 DB 狀態的一致性、失敗復原與既有的檔案描述符；隔離無法撤銷 worker 之前已經讀到的內容。2026-11-10 使用者決定以另一個 PR 實作做法 A（`DECISIONS.md` §30.12）：
+      - [x] **隔離目錄的機密性隔離（T23a 安全驗收的阻擋條件；2026-11-12 驗收通過）**：worker 以唯讀掛載整個 runs volume，仍讀得到隔離中的明文；DB 的隔離只是工作流程的隔離。要以掛載範圍隔離（不能只依賴 chmod）：隔離時把目錄移到只有 keeper 與授權的復原程序能存取、不在 worker 掛載範圍內的位置，並驗證搬移與 DB 狀態的一致性、失敗復原與既有的檔案描述符；隔離無法撤銷 worker 之前已經讀到的內容。2026-11-10 使用者決定以另一個 PR 實作做法 A（`DECISIONS.md` §30.12）：
         - runs volume 分成 `active/`／`held/`，worker 只掛載 `active/`；以隔離的中間狀態、原子 rename、重啟對帳與完整的 crash recovery 測試，保證 DB 與檔案系統一致；檢查 symlink、hard link、已開啟的檔案描述符與 runner／keeper 的權限邊界；搬移失敗不影響其他 run。
         - 既有資料由使用者在服務停止、migration 完成之後手動執行管理員指令搬移（可重複執行、dry-run、audit、路徑驗證、中斷復原、只搬 UUID 目錄）；搬移沒有完成時，服務不得以新的目錄結構啟動；不允許 runner 自動搬移。
         - 細部計畫先提出、由使用者核准。目前的 PR 合併不代表這一項完成：**新 PR 驗收之前，禁止把沒有這項防護的功能正式部署**；完成之前 T23a 不通過安全驗收、不宣稱風險已消失，T23a 與 SEC-14 都不標完成。
@@ -1587,9 +1589,40 @@
             - F2：文件措辭。
             - F3：open FD 的剩餘風險補充，分級 LOW（增量）。
             - 這一項完成不代表 T23a 或 SEC-14 完成。
-          - [ ] 開發環境的升級（`make down` → `make db-up` → `make migrate` → `make runs-layout-migrate DRY_RUN=1` → `make runs-layout-migrate` → `make up`）：由使用者執行。
-    - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`（含方案 B）；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
+          - [x] **Live 驗收**（2026-11-12；使用者授權，只限 T23a 驗收所需的操作；`DECISIONS.md` §30.13 的「Live 驗收」）：
+            - **結果**（`c5988fe`）：
+              - `make test-live-fixture-findings` 3 passed；
+              - `make test-live-fixture-rescan` 1 passed；
+              - 測試內建的證據斷言都通過。
+            - **worker 的獨立檢查**（每項 Live 3 次）：
+              - 掛載是 subpath `active`、唯讀；
+              - 存取 `held/` 都是 ENOENT。
+            - **限制**：這兩項 Live 的 `held/` 都是空的。非空 `held/` 的負向存取，以 2026-11-11 Docker 驗證的紀錄為證據：keeper 的真實流程，版本等價已確認。使用者同意兩者互補（§30.14）。
+          - [x] 開發環境的狀態（2026-11-12 唯讀檢查）：
+            - DB 是 `0024`（head）；
+            - runs volume 是 layout 2，`active/` 與 `held/` 都是空的；
+            - 不需要 `runs-layout-migrate`。
+            - 沒有可靠的 migration 執行紀錄，所以不記載執行過 `make migrate`。
+            - 有既有資料的環境，升級順序仍然是 `make down` → `make db-up` → `make migrate` → `make runs-layout-migrate DRY_RUN=1` → `make runs-layout-migrate` → `make up`（由使用者執行）。
+    - **驗收**（2026-11-12）：
+      - 使用者在 `c5988fe` 執行完整的 `make test`：7,586 passed、2 skipped、78 deselected，coverage 98.74%。
+      - `make lint`、`make typecheck` 都 exit 0。
+      - 兩項 Live 與 worker 的檢查（上方）。
+      - T23a 完成不代表 SEC-14 完成：P0 的完成條件見 `DECISIONS.md` §30.14，剩餘風險見 §30.9。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
+    - 2026-11-12 拆成 b1–b4。b1 的範圍由使用者決定；其他各項在細部計畫時確認。SEC-14 的 P0 需要 b1–b3（`DECISIONS.md` §30.14）。
+    - [ ] **b1：DDL／DML 分權**（只做這一項；細部計畫在 T23a 的文件 PR 合併之後撰寫，核准之前不實作）：
+      1. 驗證權限確實被撤銷：
+         - `secscan_app` 不能執行 `ALTER TABLE`、`DROP TABLE`、`ALTER TRIGGER` 或其他未授權的結構操作；
+         - 也要檢查經由物件擁有權、繼承的角色或特殊函式的繞過。
+      2. migration 使用獨立的憑證：`secscan_owner` 不長期提供給 api、worker、runner。
+      3. 分權之後重新測試 T23a 的安全不變條件：`active/`／`held/` 隔離所依賴的 trigger 與 DB 約束。
+      4. 記錄剩餘風險：三個服務仍共用 `secscan_app`，DDL／DML 分權不是服務級的隔離。
+      - PostgreSQL 的物件擁有者有特殊權限，不能只靠 `REVOKE`：目前 `secscan_app` 擁有資料庫與所有物件。
+    - [ ] b2（提議）：compose secrets、掃描容器的 log driver、主機全碟加密的部署要求。
+    - [ ] b3（提議）：uid 分離與完整的 FD 撤銷（下方兩項）。
+    - [ ] b4（提議）：API 的安全 header、以每個 key 計的速率限制與並行上限。
+    - [ ] 服務級的 DB 角色（b3 之後的另一個子項目）：api、worker、runner 各自的角色。
     - [ ] uid 分離：runner、worker、api 與掃描容器不再共用 uid 10001（`DECISIONS.md` §30.13 的剩餘風險 2）。
     - [ ] 完整的 FD 撤銷（和 uid 分離是兩件事；§30.13 的剩餘風險 1，LOW、增量）：
       - **問題**：rename、chmod 與 uid 分離都不會撤銷其他程序已開啟的 FD。Docker 驗證確認：
