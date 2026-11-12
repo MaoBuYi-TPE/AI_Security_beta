@@ -15,12 +15,17 @@
 run 目錄的 .masking-* 是收集時只遮罩了一部分的明文暫存檔（不是證據），也直接刪除。symlink 與
 特殊檔案不跟隨、直接刪除；一般檔案不論 link 數都加密；缺少擁有者權限的目錄與檔案先補上權限。
 例外與 log 只帶錯誤的種類，不帶路徑或內容。
+
+vault 處理 runs volume 的一個區域（§30.13）：keeper 與一般的指令是 active/，retry-evidence 與換版
+另外處理 held/。active/ 中找不到、卻在 held/ 中的目錄，加密、清除與匯出一律失敗（fail closed）。
 """
 
 import contextlib
 import os
 import stat
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Self
 from uuid import uuid4
 
 from secscan.core.identifiers import canonical_uuid
@@ -39,6 +44,7 @@ from secscan.runner.fs import (
     remove_tree,
     unlink_at,
 )
+from secscan.runner.layout import Area, LayoutError, check_layout
 from secscan.runner.sealed_files import (
     MASKING_PREFIX,
     ROTATING_PREFIX,
@@ -60,6 +66,8 @@ from secscan.security.blob_cipher import CHUNK_BYTES, Sink, StreamInfo
 __all__ = ["SEALED_DIR", "DirectoryState", "EvidenceError", "EvidenceLimitError", "EvidenceVault"]
 
 _CHECK_PREFIX = ".keeper-check-"
+_SEALED_NAME_LENGTH = 64
+_HEX = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,23 +80,50 @@ class DirectoryState:
 
 
 class EvidenceVault(SealedFiles):
+    @property
+    def volume(self) -> Path:
+        """runs volume 的根目錄。"""
+        return self._runs
+
+    def in_area(self, area: Area) -> Self:
+        """同一個 volume、金鑰與上限，處理另一個區域（retry-evidence、換版處理 held/）。"""
+        return type(self)(self._runs, self._cipher, limits=self._limits, area=area)
+
     # --- 列出與檢查 ------------------------------------------------------------------------
 
     def check(self) -> None:
-        """runs volume 存在而且可以寫入（keeper 每一輪加密與清除之前）：沒有掛上 volume 時，
-        找不到 run 的目錄不能當成「從來沒有目錄」。"""
-        probe = f"{_CHECK_PREFIX}{uuid4().hex}"
-        with opened(self._open_root()) as runs_fd:
+        """runs volume 是預期的 layout（runner/layout.py），active/ 與 held/ 都可以寫入（keeper
+        每一輪加密與清除之前）：沒有掛上 volume 時，找不到 run 的目錄不能當成「從來沒有目錄」。"""
+        try:
+            check_layout(self._runs)
+        except LayoutError as exc:
+            raise EvidenceError(str(exc)) from None
+        for area in Area:
+            probe = f"{_CHECK_PREFIX}{uuid4().hex}"
+            with opened(self._open_area(area)) as area_fd:
+                try:
+                    os.close(os.open(probe, NEW_FILE_FLAGS, STAGING_MODE, dir_fd=area_fd))
+                    os.unlink(probe, dir_fd=area_fd)
+                except OSError as exc:
+                    raise EvidenceError(f"{area.value}/ 無法寫入（{reason(exc)}）") from None
+
+    def inode(self, name: str) -> int:
+        """區域中這個目錄的 inode（隔離紀錄的 source_ino）；不是真的目錄（含 symlink）就失敗。"""
+        if canonical_uuid(name) is None:
+            raise ValueError("目錄名稱必須是標準格式的 run_id")
+        with opened(self._open_area()) as area_fd:
             try:
-                os.close(os.open(probe, NEW_FILE_FLAGS, STAGING_MODE, dir_fd=runs_fd))
-                os.unlink(probe, dir_fd=runs_fd)
+                info = os.stat(name, dir_fd=area_fd, follow_symlinks=False)
             except OSError as exc:
-                raise EvidenceError(f"runs volume 無法寫入（{reason(exc)}）") from None
+                raise EvidenceError(f"無法檢查目錄（{reason(exc)}）") from None
+        if not stat.S_ISDIR(info.st_mode):
+            raise EvidenceError("不是目錄")
+        return info.st_ino
 
     def entries(self) -> tuple[str, ...]:
-        """runs volume 中名稱是標準 UUID 的目錄（不跟隨 symlink）；超過上限就失敗、不截斷。"""
+        """區域中名稱是標準 UUID 的目錄（不跟隨 symlink）；超過上限就失敗、不截斷。"""
         names: list[str] = []
-        with opened(self._open_root()) as runs_fd, guarded(), os.scandir(runs_fd) as listing:
+        with opened(self._open_area()) as runs_fd, guarded(), os.scandir(runs_fd) as listing:
             for entry in listing:
                 if _is_run(entry):
                     names.append(entry.name)
@@ -106,6 +141,21 @@ class EvidenceVault(SealedFiles):
             own = os.fstat(run_fd).st_mtime
             sealed = self._sealed_names(run_fd)
         return DirectoryState(tree.entries > 0, max(tree.newest_mtime, own), len(sealed))
+
+    def require_sealed_only(self, name: str) -> None:
+        """目錄中只有 sealed/，sealed/ 中只有加密檔（64 個十六進位字元的一般檔案；沒有暫存檔、
+        點開頭的條目或子目錄）。retry-evidence 搬回 active/ 之前與之後都檢查（安全審查 LOW-2）。"""
+        run_fd = self._open_run(name)
+        if run_fd is None:
+            raise EvidenceError("找不到這個目錄")
+        with opened(run_fd), guarded():
+            if top_level(run_fd) != [SEALED_DIR]:
+                raise EvidenceError("sealed/ 之外仍有條目")
+            with opened(open_child(SEALED_DIR, run_fd)) as sealed_fd:
+                for entry in top_level(sealed_fd):
+                    info = os.stat(entry, dir_fd=sealed_fd, follow_symlinks=False)
+                    if not (_is_sealed_name(entry) and stat.S_ISREG(info.st_mode)):
+                        raise EvidenceError("sealed/ 中有加密檔以外的條目")
 
     def sealed_at(self, name: str) -> int | None:
         """所有加密檔的標頭中最晚的加密時間（已驗證）；沒有加密檔時回 None。"""
@@ -125,6 +175,7 @@ class EvidenceVault(SealedFiles):
         """加密目錄中 sealed/ 之外的每個檔案；沒有這個目錄時回 None。可以重複執行。"""
         run_fd = self._open_run(name)
         if run_fd is None:
+            self._refuse_held(name)
             return None
         with opened(run_fd), guarded("加密檔驗證不通過"):
             return self._seal(run_fd, name)
@@ -138,6 +189,7 @@ class EvidenceVault(SealedFiles):
         """
         state = self.inspect(name)
         if state is None:
+            self._refuse_held(name)
             return
         if state.plaintext:
             self.seal(name)
@@ -146,7 +198,7 @@ class EvidenceVault(SealedFiles):
             return
         with opened(run_fd), guarded():
             self._empty_sealed(run_fd)
-        with opened(self._open_root()) as runs_fd, guarded():
+        with opened(self._open_area()) as runs_fd, guarded():
             remove_tree(runs_fd, name, self._limits)
 
     # --- 換版與匯出（admin 指令） ---------------------------------------------------------
@@ -171,6 +223,7 @@ class EvidenceVault(SealedFiles):
         """解密一個原本的檔案寫進 sink（驗證路徑；例外時 sink 已寫了一部分，呼叫端必須丟棄）。"""
         run_fd = self._open_run(name)
         if run_fd is None:
+            self._refuse_held(name)
             raise EvidenceError("沒有這個 run 的原始證據（不存在或已清除）")
         with opened(run_fd), guarded():
             return self._read(
@@ -185,6 +238,7 @@ class EvidenceVault(SealedFiles):
         """目錄中每個加密檔的原本路徑、大小與 sha256（逐一完整驗證）。"""
         run_fd = self._open_run(name)
         if run_fd is None:
+            self._refuse_held(name)
             raise EvidenceError("沒有這個 run 的原始證據（不存在或已清除）")
         with opened(run_fd), guarded():
             try:
@@ -298,6 +352,10 @@ class EvidenceVault(SealedFiles):
         except BaseException:
             unlink_quietly(temporary, sealed_fd)
             raise
+
+
+def _is_sealed_name(name: str) -> bool:
+    return len(name) == _SEALED_NAME_LENGTH and all(char in _HEX for char in name)
 
 
 def _is_run(entry: os.DirEntry[str]) -> bool:

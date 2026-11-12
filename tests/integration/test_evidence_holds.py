@@ -35,6 +35,7 @@ from secscan.scans.evidence_records import EvidenceRun, EvidenceStore
 from secscan.scans.queue import ScanQueue
 from tests.integration.api_support import LAB, Scannable, Seeder, World
 from tests.integration.database import ProvisionedDatabase
+from tests.runs_volume_support import hold_isolation, runs_volume
 from tests.secret_support import shared_evidence_cipher
 
 pytestmark = pytest.mark.integration
@@ -75,9 +76,8 @@ def scannable(queue_seed: Seeder, world: World) -> Scannable:
 
 @pytest.fixture
 def runs(tmp_path: Path) -> Path:
-    directory = tmp_path / "runs"
-    directory.mkdir()
-    return directory
+    """runs volume 的 active/（§30.13）；vault 以 volume 的根目錄（.parent）建立。"""
+    return runs_volume(tmp_path)
 
 
 @pytest.fixture
@@ -102,10 +102,14 @@ def _keeper(
     ticker: Ticker,
     limits: TreeLimits = LIMITS,
 ) -> EvidenceKeeper:
+    vault = EvidenceVault(runs.parent, shared_evidence_cipher(), limits=limits)
     return EvidenceKeeper(
         store,
-        EvidenceVault(runs, shared_evidence_cipher(), limits=limits),
+        vault,
         SETTINGS,
+        isolation=hold_isolation(
+            store.engine, runs, vault, clock=lambda: moment.now, monotonic=lambda: ticker.now
+        ),
         clock=lambda: moment.now,
         monotonic=lambda: ticker.now,
     )
@@ -137,6 +141,11 @@ def _deep(runs: Path, name: UUID | str, levels: int) -> Path:
     leaf.mkdir(parents=True)
     (leaf / "messages.txt").write_bytes(CANARY)
     return leaf / "messages.txt"
+
+
+def _in_held(runs: Path, path: Path) -> Path:
+    """active/ 中的路徑搬到 held/ 之後的位置（§30.13）。"""
+    return runs.parent / "held" / path.relative_to(runs)
 
 
 def _until_held(keeper: EvidenceKeeper, ticker: Ticker) -> list[PassReport]:
@@ -216,15 +225,25 @@ def test_a_run_over_the_limit_is_held_and_the_keeper_recovers(
         queue_seed.query("SELECT 1 FROM run_evidence WHERE scanner_run_id = :id", id=stuck.run_id)
         == []
     )
-    assert leaf.read_bytes() == CANARY
+    # 同一輪就搬到 held/（worker 讀不到）、記下隔離完成與來源 inode（§30.13）。
+    assert not leaf.exists()
+    assert not (runs / str(stuck.run_id)).exists()
+    assert _in_held(runs, leaf).read_bytes() == CANARY
+    assert row.source_ino == (runs.parent / "held" / str(stuck.run_id)).stat().st_ino
+    isolated = _hold_row(queue_seed, stuck.run_id)
+    assert isolated.isolated_at is not None
+    [moved] = _audits(queue_seed, "evidence.isolated")
+    assert moved.redacted_changes == {"kind": "run", "move_failures": 0}
 
     shown = _shown(client, world, stuck.scan_id)
     assert shown["status"] == "manual_intervention_required"
     assert (shown["sealed_at"], shown["purged_at"]) == (None, None)
     assert shown["hold"]["error_code"] == "EVIDENCE_TREE_TOO_DEEP"
     assert shown["hold"]["attempts"] == HOLD_AFTER_FAILURES
+    assert shown["hold"]["stage"] == "isolated"
     assert shown["hold"]["held_at"].endswith("Z")
-    assert shown["hold"]["resolved_at"] is None
+    assert shown["hold"]["isolated_at"].endswith("Z")
+    assert (shown["hold"]["releasing_at"], shown["hold"]["resolved_at"]) == (None, None)
     summary = store.summary(now=moment.now, retention_days=7, max_minutes=60)
     assert summary.pending == 0
 
@@ -238,7 +257,7 @@ def test_a_run_over_the_limit_is_held_and_the_keeper_recovers(
 
     restarted = _keeper(store, runs, moment, Ticker())
     assert restarted.run_pass().clean
-    assert leaf.read_bytes() == CANARY
+    assert _in_held(runs, leaf).read_bytes() == CANARY
     assert _hold_row(queue_seed, stuck.run_id).resolved_at is None
 
 
@@ -282,7 +301,9 @@ def test_an_orphan_over_the_limit_is_held_and_skipped(
     assert audit.project_id is None
     assert audit.redacted_changes["kind"] == "orphan"
     assert keeper.run_pass().clean
-    assert leaf.read_bytes() == CANARY
+    assert not leaf.exists()
+    assert _in_held(runs, leaf).read_bytes() == CANARY
+    assert _hold_row(queue_seed, name).isolated_at is not None
 
 
 # --- trigger 與 CHECK（EVID-09）------------------------------------------------------------------
@@ -294,14 +315,22 @@ def _execute(engine: Engine, statement: str, **params: object) -> None:
 
 
 _INSERT_RUN = (
-    "INSERT INTO evidence_holds (directory, scanner_run_id, scan_id, error_code, attempts) "
-    "VALUES (:run, :run, :scan, 'EVIDENCE_TREE_TOO_DEEP', 3)"
+    "INSERT INTO evidence_holds (directory, scanner_run_id, scan_id, error_code, attempts, "
+    "source_ino) VALUES (:run, :run, :scan, 'EVIDENCE_TREE_TOO_DEEP', 3, 1)"
 )
 _INSERT_SEALED = (
     "INSERT INTO run_evidence (scanner_run_id, scan_id, status, file_count, plaintext_bytes, "
     "sealed_at) VALUES (:run, :scan, :status, 0, 0, :sealed_at)"
 )
 _RESOLVE = "UPDATE evidence_holds SET resolved_at = clock_timestamp() WHERE directory = :run"
+# v0024（§30.13）：解除之前必須已隔離完成（搬到 held/）並開始解除。
+_ISOLATED = "UPDATE evidence_holds SET isolated_at = clock_timestamp() WHERE directory = :run"
+_RELEASING = "UPDATE evidence_holds SET releasing_at = clock_timestamp() WHERE directory = :run"
+
+
+def _release(engine: Engine, directory: UUID) -> None:
+    _execute(engine, _ISOLATED, run=directory)
+    _execute(engine, _RELEASING, run=directory)
 
 
 def test_a_hold_needs_a_finished_run_without_recorded_evidence(
@@ -340,8 +369,8 @@ def test_an_orphan_hold_cannot_name_a_known_run_and_starts_unresolved(
 ) -> None:
     run = _finished(queue, queue_seed, world, scannable)
     orphan = (
-        "INSERT INTO evidence_holds (directory, error_code, attempts, resolved_at) "
-        "VALUES (:directory, 'EVIDENCE_TREE_TOO_DEEP', 3, :resolved_at)"
+        "INSERT INTO evidence_holds (directory, error_code, attempts, resolved_at, source_ino) "
+        "VALUES (:directory, 'EVIDENCE_TREE_TOO_DEEP', 3, :resolved_at, 1)"
     )
 
     with pytest.raises(DBAPIError, match="known run"):
@@ -360,6 +389,7 @@ def test_a_run_is_resolved_only_with_sealed_evidence_and_only_once(
 ) -> None:
     run = _finished(queue, queue_seed, world, scannable)
     _execute(queue_engine, _INSERT_RUN, run=run.run_id, scan=run.scan_id)
+    _release(queue_engine, run.run_id)
 
     with pytest.raises(DBAPIError, match="after its evidence is sealed"):
         _execute(queue_engine, _RESOLVE, run=run.run_id)
@@ -376,9 +406,9 @@ def test_a_run_is_resolved_only_with_sealed_evidence_and_only_once(
         session.execute(text(_RESOLVE), {"run": run.run_id})
 
     assert _hold_row(queue_seed, run.run_id).resolved_at is not None
-    with pytest.raises(DBAPIError, match="resolved once"):
+    with pytest.raises(DBAPIError, match="isolation steps"):
         _execute(queue_engine, _RESOLVE, run=run.run_id)
-    with pytest.raises(DBAPIError, match="resolved once"):
+    with pytest.raises(DBAPIError, match="isolation steps"):
         _execute(
             queue_engine,
             "UPDATE evidence_holds SET attempts = 9 WHERE directory = :run",
@@ -394,8 +424,8 @@ def test_holds_cannot_be_deleted(queue_engine: Engine, queue_seed: Seeder, state
     directory = uuid4()
     _execute(
         queue_engine,
-        "INSERT INTO evidence_holds (directory, error_code, attempts) "
-        "VALUES (:directory, 'EVIDENCE_TREE_TOO_MANY_ENTRIES', 3)",
+        "INSERT INTO evidence_holds (directory, error_code, attempts, source_ino) "
+        "VALUES (:directory, 'EVIDENCE_TREE_TOO_MANY_ENTRIES', 3, 1)",
         directory=directory,
     )
 
@@ -430,8 +460,8 @@ def test_checks_reject_inconsistent_rows(
 
 
 _INSERT_ANY = (
-    "INSERT INTO evidence_holds (directory, scanner_run_id, scan_id, error_code, attempts) "
-    "VALUES (:directory, :scanner_run_id, :scan_id, :error_code, :attempts)"
+    "INSERT INTO evidence_holds (directory, scanner_run_id, scan_id, error_code, attempts, "
+    "source_ino) VALUES (:directory, :scanner_run_id, :scan_id, :error_code, :attempts, 1)"
 )
 
 
@@ -472,6 +502,14 @@ def _held_run(
 ) -> EvidenceRun:
     run = _finished(queue, seed, world, scannable)
     _execute(engine, _INSERT_RUN, run=run.run_id, scan=run.scan_id)
+    return run
+
+
+def _releasing_run(
+    queue: ScanQueue, seed: Seeder, engine: Engine, world: World, scannable: Scannable
+) -> EvidenceRun:
+    run = _held_run(queue, seed, engine, world, scannable)
+    _release(engine, run.run_id)
     return run
 
 
@@ -538,7 +576,7 @@ def test_resolving_cannot_change_other_columns(
     world: World,
     scannable: Scannable,
 ) -> None:
-    run = _held_run(queue, queue_seed, queue_engine, world, scannable)
+    run = _releasing_run(queue, queue_seed, queue_engine, world, scannable)
 
     sealed = {
         "run": run.run_id,
@@ -552,11 +590,11 @@ def test_resolving_cannot_change_other_columns(
         "UPDATE evidence_holds SET resolved_at = clock_timestamp(), "
         "error_code = 'EVIDENCE_TREE_TOO_MANY_ENTRIES' WHERE directory = :run",
     ):
-        with pytest.raises(DBAPIError, match="resolved once"):
+        with pytest.raises(DBAPIError, match="isolation steps"):
             _transaction(
                 queue_engine, (_INSERT_SEALED, sealed), (resolve_and_change, {"run": run.run_id})
             )
-    with pytest.raises(DBAPIError, match="resolved once"):
+    with pytest.raises(DBAPIError, match="isolation steps"):
         _execute(
             queue_engine,
             "UPDATE evidence_holds SET held_at = held_at - interval '1 day' WHERE directory = :run",
@@ -572,7 +610,7 @@ def test_resolving_needs_sealed_not_none_evidence(
     world: World,
     scannable: Scannable,
 ) -> None:
-    run = _held_run(queue, queue_seed, queue_engine, world, scannable)
+    run = _releasing_run(queue, queue_seed, queue_engine, world, scannable)
 
     none = {"run": run.run_id, "scan": run.scan_id, "status": "none", "sealed_at": None}
 
@@ -581,24 +619,26 @@ def test_resolving_needs_sealed_not_none_evidence(
 
 
 def test_times_come_from_the_database(queue_engine: Engine, queue_seed: Seeder) -> None:
-    """用戶端給的 held_at、resolved_at 一律被 trigger 以 clock_timestamp() 取代。"""
+    """用戶端給的時間（held_at、isolated_at、releasing_at、resolved_at）一律被 trigger 以
+    clock_timestamp() 取代（§30.12、§30.13）。"""
     directory = uuid4()
     before = datetime.now(UTC) - timedelta(minutes=1)
     _execute(
         queue_engine,
-        "INSERT INTO evidence_holds (directory, error_code, attempts, held_at) "
-        "VALUES (:directory, 'EVIDENCE_TREE_TOO_DEEP', 3, '2000-01-01T00:00:00Z')",
+        "INSERT INTO evidence_holds (directory, error_code, attempts, held_at, source_ino) "
+        "VALUES (:directory, 'EVIDENCE_TREE_TOO_DEEP', 3, '2000-01-01T00:00:00Z', 1)",
         directory=directory,
     )
-    _execute(
-        queue_engine,
+    for statement in (
+        "UPDATE evidence_holds SET isolated_at = '2999-01-01T00:00:00Z' WHERE directory = :id",
+        "UPDATE evidence_holds SET releasing_at = '2999-01-01T00:00:00Z' WHERE directory = :id",
         "UPDATE evidence_holds SET resolved_at = '2999-01-01T00:00:00Z' WHERE directory = :id",
-        id=directory,
-    )
+    ):
+        _execute(queue_engine, statement, id=directory)
 
     row = _hold_row(queue_seed, directory)
     after = datetime.now(UTC) + timedelta(minutes=1)
-    assert before < row.held_at <= row.resolved_at < after
+    assert before < row.held_at <= row.isolated_at <= row.releasing_at <= row.resolved_at < after
 
 
 def test_a_run_whose_container_is_not_confirmed_removed_cannot_be_held(
@@ -654,7 +694,7 @@ def test_a_second_resolve_finds_the_hold_already_resolved(
     world: World,
     scannable: Scannable,
 ) -> None:
-    run = _held_run(queue, queue_seed, queue_engine, world, scannable)
+    run = _releasing_run(queue, queue_seed, queue_engine, world, scannable)
     holds = EvidenceHolds(sessionmaker(queue_engine, expire_on_commit=False))
     held = holds.active(run.run_id)
     assert held is not None
@@ -687,7 +727,7 @@ def test_a_run_with_too_long_paths_is_held_like_the_other_limits(
 
     assert reports[-1].held == 1
     assert _hold_row(queue_seed, stuck.run_id).error_code == "EVIDENCE_TREE_PATHS_TOO_LONG"
-    assert (leaf / "messages.txt").read_bytes() == CANARY
+    assert (_in_held(runs, leaf) / "messages.txt").read_bytes() == CANARY
     fine = _finished(queue, queue_seed, world, scannable)
     (runs / str(fine.run_id) / "out").mkdir(parents=True)
     (runs / str(fine.run_id) / "out" / "report.json").write_bytes(b"{}")

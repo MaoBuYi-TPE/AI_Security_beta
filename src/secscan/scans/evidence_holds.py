@@ -8,10 +8,12 @@
   在同一個 transaction 中寫入 sealed 的 run_evidence（run 的目錄）、resolved_at 與 audit
   `evidence.resolve`。trigger 要求 run 已有 sealed 的紀錄，所以不可能沒有加密就解除。
 - summary：retention-status 的數量與最早的幾筆（目錄名稱、種類、代碼、次數與時間，不含路徑）。
+隔離的搬移（held/）、對帳與解除的轉換在 evidence_hold_isolation.py（§30.13）。
 """
 
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, insert, select, update
@@ -23,6 +25,7 @@ from secscan.scans.domain.evidence import (
     EvidenceHold,
     EvidenceHoldCode,
     EvidenceStatus,
+    HoldMoveCode,
     SealedEvidence,
 )
 from secscan.scans.evidence_models import EvidenceHoldModel, RunEvidenceModel, evidence_hold
@@ -39,17 +42,34 @@ class HoldNotActiveError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class MoveFailures:
+    """搬不到 held/ 的次數、最近一次的代碼與時間（§30.13）。"""
+
+    count: int = 0
+    last_code: HoldMoveCode | None = None
+    last_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class HeldDirectory:
-    """一個隔離中的目錄：run 的目錄有 scanner_run_id 與 scan_id（就是目錄名稱），孤兒目錄沒有。"""
+    """一個隔離中的目錄：run 的目錄有 scanner_run_id 與 scan_id（就是目錄名稱），孤兒目錄沒有。
+    source_ino 是隔離之前記下的來源目錄 inode（v0024 之前留下的紀錄沒有）。"""
 
     directory: UUID
     scanner_run_id: UUID | None
     scan_id: UUID | None
     hold: EvidenceHold
+    source_ino: int | None = None
+    moves: MoveFailures = MoveFailures()
 
     @property
     def kind(self) -> str:
         return ORPHAN_KIND if self.scanner_run_id is None else RUN_KIND
+
+    @property
+    def name(self) -> str:
+        """runs volume 中的目錄名稱。"""
+        return str(self.directory)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,9 +88,15 @@ class EvidenceHolds:
         self._sessions = sessions
 
     def hold(
-        self, directory: UUID, scan_id: UUID | None, code: EvidenceHoldCode, attempts: int
+        self,
+        directory: UUID,
+        scan_id: UUID | None,
+        code: EvidenceHoldCode,
+        attempts: int,
+        source_ino: int,
     ) -> None:
-        """scan_id 是 None 代表孤兒目錄；否則 directory 就是 run_id。"""
+        """scan_id 是 None 代表孤兒目錄；否則 directory 就是 run_id。source_ino 是 active/ 中這個
+        目錄的 inode（隔離的搬移與對帳以它確認身分；§30.13）。"""
         run_id = None if scan_id is None else directory
         with self._sessions.begin() as session:
             session.execute(
@@ -80,9 +106,10 @@ class EvidenceHolds:
                     scan_id=scan_id,
                     error_code=code.value,
                     attempts=attempts,
+                    source_ino=source_ino,
                 )
             )
-            _audit(
+            hold_audit(
                 session,
                 "evidence.hold",
                 directory,
@@ -151,7 +178,7 @@ class EvidenceHolds:
                 .values(resolved_at=now())
                 .execution_options(synchronize_session=False)
             )
-            _audit(
+            hold_audit(
                 session,
                 "evidence.resolve",
                 held.directory,
@@ -167,7 +194,7 @@ class EvidenceHolds:
     def audit(self, held: HeldDirectory, action: str, changes: Mapping[str, JsonValue]) -> None:
         """retry-evidence 的 audit（evidence.retry、evidence.retry_failed）；run 帶 project。"""
         with self._sessions.begin() as session:
-            _audit(
+            hold_audit(
                 session, action, held.directory, held.scanner_run_id, {"kind": held.kind, **changes}
             )
 
@@ -203,10 +230,26 @@ class EvidenceHolds:
 
 
 def _held(model: EvidenceHoldModel) -> HeldDirectory:
-    return HeldDirectory(model.directory, model.scanner_run_id, model.scan_id, evidence_hold(model))
+    return held_directory(model)
 
 
-def _audit(
+def held_directory(model: EvidenceHoldModel) -> HeldDirectory:
+    error = model.last_move_error
+    return HeldDirectory(
+        model.directory,
+        model.scanner_run_id,
+        model.scan_id,
+        evidence_hold(model),
+        source_ino=model.source_ino,
+        moves=MoveFailures(
+            count=model.move_failures,
+            last_code=None if error is None else HoldMoveCode(error),
+            last_at=model.last_move_failed_at,
+        ),
+    )
+
+
+def hold_audit(
     session: Session,
     action: str,
     directory: UUID,

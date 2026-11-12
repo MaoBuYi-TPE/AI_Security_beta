@@ -7,6 +7,8 @@ run 的原始證據狀態，以及需要人工處理的目錄。
 - evidence_holds：一個目錄連續超過上限而加密失敗時，keeper 新增一列（run 的目錄帶 run 的欄位，
   孤兒目錄沒有）；`secscan-admin retry-evidence` 加密成功之後才寫入 resolved_at（只能一次，run 必須
   已有 sealed 的 run_evidence）。不能刪除（migration 0023 的 trigger）。
+  v0024（§30.13）：來源目錄的 inode（source_ino）、隔離完成（isolated_at，目錄已搬到 held/）、開始
+  解除（releasing_at）與搬移失敗的紀錄；trigger 只允許固定的幾種轉換。
 - 只保存狀態、時間、數量與錯誤代碼，不保存路徑或內容。
 """
 
@@ -24,11 +26,13 @@ from secscan.scans.domain.evidence import (
     EvidenceHoldCode,
     EvidenceState,
     EvidenceStatus,
+    HoldMoveCode,
 )
 
 EVIDENCE_STATUS_MAX_LENGTH = 16
 EVIDENCE_HOLD_CODE_MAX_LENGTH = 32
 _HOLD_CODES = ", ".join(f"'{code.value}'" for code in sorted(EvidenceHoldCode))
+_MOVE_CODES = ", ".join(f"'{code.value}'" for code in sorted(HoldMoveCode))
 _STATUSES = ", ".join(f"'{status.value}'" for status in sorted(RECORDED_EVIDENCE_STATUSES))
 _NONE = EvidenceStatus.NONE.value
 _SEALED = EvidenceStatus.SEALED.value
@@ -97,6 +101,36 @@ class EvidenceHoldModel(Base):
         CheckConstraint(
             "resolved_at IS NULL OR resolved_at >= held_at", name="resolved_after_held"
         ),
+        # v0024（§30.13）：有值時才比較（v0024 之前的紀錄不回填）。
+        CheckConstraint(
+            "isolated_at IS NULL OR isolated_at >= held_at", name="isolated_after_held"
+        ),
+        CheckConstraint(
+            "releasing_at IS NULL OR (isolated_at IS NOT NULL AND releasing_at >= isolated_at)",
+            name="releasing_after_isolated",
+        ),
+        CheckConstraint(
+            "resolved_at IS NULL OR releasing_at IS NULL OR resolved_at >= releasing_at",
+            name="resolved_after_releasing",
+        ),
+        CheckConstraint("move_failures >= 0", name="move_failures_valid"),
+        CheckConstraint(
+            f"last_move_error IS NULL OR last_move_error IN ({_MOVE_CODES})",
+            name="move_error_valid",
+        ),
+        CheckConstraint(
+            "(move_failures = 0) = (last_move_error IS NULL) "
+            "AND (move_failures = 0) = (last_move_failed_at IS NULL)",
+            name="move_failure_fields",
+        ),
+        CheckConstraint(
+            "last_move_failed_at IS NULL OR last_move_failed_at >= held_at",
+            name="move_failed_after_held",
+        ),
+        CheckConstraint("source_ino IS NULL OR source_ino >= 0", name="source_ino_valid"),
+        CheckConstraint(
+            "isolated_at IS NULL OR source_ino IS NOT NULL", name="isolated_has_source"
+        ),
     )
 
     # runs volume 中的目錄名稱（run 的目錄就是 run_id）。
@@ -107,6 +141,13 @@ class EvidenceHoldModel(Base):
     attempts: Mapped[int]
     held_at: Mapped[datetime] = mapped_column(server_default=func.clock_timestamp())
     resolved_at: Mapped[datetime | None]
+    isolated_at: Mapped[datetime | None]
+    releasing_at: Mapped[datetime | None]
+    move_failures: Mapped[int] = mapped_column(server_default=text("0"))
+    last_move_error: Mapped[str | None] = mapped_column(String(EVIDENCE_HOLD_CODE_MAX_LENGTH))
+    last_move_failed_at: Mapped[datetime | None]
+    # 隔離之前在 active/ 記下的來源目錄 inode（不存 st_dev：重開機之後可能改變）。
+    source_ino: Mapped[int | None] = mapped_column(BigInteger)
 
 
 def evidence_hold(model: EvidenceHoldModel) -> EvidenceHold:
@@ -115,6 +156,8 @@ def evidence_hold(model: EvidenceHoldModel) -> EvidenceHold:
         attempts=model.attempts,
         held_at=model.held_at,
         resolved_at=model.resolved_at,
+        isolated_at=model.isolated_at,
+        releasing_at=model.releasing_at,
     )
 
 

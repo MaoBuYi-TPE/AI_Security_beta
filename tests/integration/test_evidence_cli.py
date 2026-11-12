@@ -20,6 +20,7 @@ from sqlalchemy.orm import sessionmaker
 from secscan.cli import EXIT_FAILURE, EXIT_OK, main
 from secscan.cli import evidence as evidence_cli
 from secscan.runner.evidence import SEALED_DIR, EvidenceError, EvidenceVault
+from secscan.runner.layout import Area
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.domain.lifecycle import RunErrorCode, RunStatus
 from secscan.scans.evidence_records import EvidenceRun, EvidenceStore
@@ -27,6 +28,7 @@ from secscan.scans.queue import ScanQueue
 from secscan.security.key_rings import evidence_cipher
 from tests.integration.api_support import LAB, Seeder
 from tests.integration.database import ProvisionedDatabase
+from tests.runs_volume_support import runs_volume
 
 pytestmark = pytest.mark.integration
 
@@ -37,9 +39,8 @@ REPORT = b'{"alerts": "' + CANARY + b'"}'
 
 @pytest.fixture
 def runs(tmp_path: Path) -> Path:
-    directory = tmp_path / "runs"
-    directory.mkdir()
-    return directory
+    """runs volume 的 active/（§30.13）；vault 以 volume 的根目錄（.parent）建立。"""
+    return runs_volume(tmp_path)
 
 
 @pytest.fixture
@@ -61,7 +62,7 @@ def environment(
     monkeypatch.setenv("DB_USER", queue_database.user)
     monkeypatch.setenv("DB_PASSWORD", queue_database.password)
     monkeypatch.setenv("EVIDENCE_ENCRYPTION_KEYS", old_key)
-    monkeypatch.setenv("RUNNER_RUNS_DIR", str(runs))
+    monkeypatch.setenv("RUNNER_RUNS_DIR", str(runs.parent))
 
 
 @pytest.fixture
@@ -83,7 +84,7 @@ def sealed_run(
     queue.prepare(lease)
     queue.advance(lease, RunStatus.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
     run = EvidenceRun(lease.run_id, lease.scan_id)
-    sealed = EvidenceVault(runs, evidence_cipher(old_key)).seal(str(run.run_id))
+    sealed = EvidenceVault(runs.parent, evidence_cipher(old_key)).seal(str(run.run_id))
     store = EvidenceStore(sessionmaker(queue_engine), engine=queue_engine)
     assert store.record(run, sealed)
     return run
@@ -178,7 +179,7 @@ def test_rotation_moves_everything_to_the_new_key(
     assert main(["rotate-evidence-keys"]) == EXIT_OK
 
     assert "2 個檔案" in capsysbinary.readouterr().err.decode()
-    only_new = EvidenceVault(runs, evidence_cipher(new_key))
+    only_new = EvidenceVault(runs.parent, evidence_cipher(new_key))
     assert {info.path for info in only_new.listing(str(sealed_run.run_id))} == {
         "out/report.json",
         "manifest.json",
@@ -274,7 +275,7 @@ def test_listing_is_audited_and_escapes_tool_controlled_names(
     root = runs / str(lease.run_id)
     (root / "out").mkdir(parents=True)
     (root / tricky).write_bytes(REPORT)
-    EvidenceVault(runs, evidence_cipher(old_key)).seal(str(lease.run_id))
+    EvidenceVault(runs.parent, evidence_cipher(old_key)).seal(str(lease.run_id))
 
     assert main(["export-evidence", "--run", str(lease.run_id)]) == EXIT_OK
 
@@ -316,3 +317,37 @@ def test_rotation_fails_without_changes_when_the_volume_cannot_be_listed(
 class _OverflowingVault(EvidenceVault):
     def entries(self) -> tuple[str, ...]:
         raise EvidenceError("runs volume 中的目錄數量超過上限")
+
+
+class _HeldOverflowingVault(EvidenceVault):
+    """held/ 列不出來（active/ 正常）。"""
+
+    def entries(self) -> tuple[str, ...]:
+        if self._area is Area.HELD:
+            raise EvidenceError("held/ 的條目數量超過上限")
+        return super().entries()
+
+
+def test_rotation_lists_both_areas_before_changing_anything(
+    sealed_run: EvidenceRun,
+    runs: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """程式碼審查 M2：held/ 列不出來時 active/ 也還沒換版，回報「沒有換版任何檔案」才是真的。"""
+    before = {
+        path: path.read_bytes()
+        for path in (runs / str(sealed_run.run_id)).rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(evidence_cli, "EvidenceVault", _HeldOverflowingVault)
+
+    assert main(["rotate-evidence-keys"]) == EXIT_FAILURE
+
+    assert "沒有換版任何檔案" in capsys.readouterr().err
+    after = {
+        path: path.read_bytes()
+        for path in (runs / str(sealed_run.run_id)).rglob("*")
+        if path.is_file()
+    }
+    assert after == before

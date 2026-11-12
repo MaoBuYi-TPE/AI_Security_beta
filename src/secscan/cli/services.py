@@ -13,6 +13,8 @@
 - --once：最多處理一個 run 就結束。沒有可用的引擎、lease 失效或 Docker 中途不可用時 exit 1。
 - 原始證據的 keeper（docs/DECISIONS.md §30.3）：常駐時是背景執行緒；--once 不啟動執行緒，改在處理
   之前與結束之前各同步跑一輪。keeper 有任何失敗時不認領新的 run，--once 以 exit 1 結束。
+- runs volume 的 layout（§30.13）：runner 啟動時先檢查（不通過就不啟動）；run 的目錄在 active/，
+  隔離的目錄由 keeper 搬到 held/。
 """
 
 import os
@@ -22,6 +24,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
+from pathlib import Path
 from types import FrameType
 from uuid import UUID, uuid4
 
@@ -39,7 +42,10 @@ from secscan.migrations import head_revision
 from secscan.runner.config import RunnerSettings
 from secscan.runner.docker_runtime import DockerRuntime
 from secscan.runner.evidence import EvidenceVault
+from secscan.runner.hold_moves import HoldMoves
+from secscan.runner.isolation import HoldIsolation
 from secscan.runner.keeper import EvidenceKeeper, KeeperSettings
+from secscan.runner.layout import LAYOUT_FILE, Area, LayoutError, active_dir, check_layout
 from secscan.runner.loop import RunnerLoop
 from secscan.runner.reconciler import ContainerReconciler
 from secscan.runner.service import ContainerRunner
@@ -47,6 +53,7 @@ from secscan.runner.workspace import Workspace
 from secscan.scanners.domain.fake import FakeScript
 from secscan.scanners.domain.instances import InstanceRole
 from secscan.scanners.service import Fleet
+from secscan.scans.evidence_hold_isolation import HoldIsolationStore
 from secscan.scans.evidence_records import EvidenceStore
 from secscan.scans.queue import RunReport, ScanQueue
 from secscan.security.blob_cipher import BlobCipher
@@ -115,6 +122,11 @@ def run_runner(
     if evidence is None:
         return EXIT_FAILURE
     try:
+        check_layout(runner_settings.runs_dir)
+    except LayoutError as exc:
+        report(f"{exc}。runner 不啟動。")
+        return EXIT_FAILURE
+    try:
         runtime = DockerRuntime.connect(runner_settings.docker_url)
     except ValueError as exc:
         report(f"RUNNER_DOCKER_URL 不正確：{exc}。")
@@ -152,12 +164,16 @@ def _keeper(
     runner_settings: RunnerSettings,
     cipher: BlobCipher,
 ) -> EvidenceKeeper:
+    vault = EvidenceVault(runner_settings.runs_dir, cipher)
     return EvidenceKeeper(
         EvidenceStore(sessions, engine=engine),
-        EvidenceVault(runner_settings.runs_dir, cipher),
+        vault,
         KeeperSettings(
             retention_days=settings.evidence_retention_days,
             plaintext_max_minutes=settings.evidence_plaintext_max_minutes,
+        ),
+        isolation=HoldIsolation(
+            HoldIsolationStore(sessions), HoldMoves(runner_settings.runs_dir), vault
         ),
     )
 
@@ -194,7 +210,7 @@ def _runner_loop(
     evidence_ready: Callable[[], bool],
 ) -> RunnerLoop:
     owner = _owner(InstanceRole.RUNNER)
-    workspace = Workspace(runner_settings.runs_dir, runner_settings.secrets_dir)
+    workspace = Workspace(active_dir(runner_settings.runs_dir), runner_settings.secrets_dir)
     policy = runner_settings.container_policy()
     guard = runner_settings.guard_channel()
     queue = _queue(sessions, settings)
@@ -229,7 +245,7 @@ def _runner_loop(
 
 def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
     content = _content_cipher(settings, report)
-    if content is None:
+    if content is None or not _only_active(WorkerSettings().runs_dir, report):
         return EXIT_FAILURE
     engine = create_db_engine(settings, application_name=WORKER_APPLICATION_NAME, pooled=False)
     try:
@@ -259,6 +275,21 @@ def run_worker(settings: Settings, *, once: bool, report: Report) -> int:
     if once and not reports:
         report("沒有等待解析的 run。")
     return EXIT_OK
+
+
+def _only_active(runs_dir: Path, report: Report) -> bool:
+    """worker 的 runs 目錄必須是 active/ 本身（subpath 掛載）：看得到 held/ 或 .layout 代表掛到了
+    volume 的根目錄（例如 subpath 沒有生效），拒絕啟動（安全審查 LOW-1；§30.13）。"""
+    for name in (Area.HELD.value, LAYOUT_FILE):
+        try:
+            os.lstat(runs_dir / name)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            pass  # 無法確認（例如沒有權限）：視為看得到，fail closed。
+        report("worker 的 runs 目錄看得到 held/ 或 .layout（掛到 volume 的根目錄）：不啟動。")
+        return False
+    return True
 
 
 def _worker(sessions: sessionmaker[Session], queue: ScanQueue, owner: str) -> Worker:

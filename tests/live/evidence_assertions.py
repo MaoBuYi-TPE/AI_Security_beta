@@ -6,7 +6,8 @@ export-evidence 讀取。
 - export-evidence 在 runner 容器內執行（只有它持有原始證據的金鑰）：先完整驗證、寫入 audit，才把
   明文寫到 stdout；不寫任何檔案。
 - 直接讀 volume（唯讀掛載的輔助容器）只用來確認密文：只剩 `sealed/`，位元組中沒有明文的 canary
-  與已知的值。
+  與已知的值。run 的目錄在 volume 的 active/（§30.13）。
+- worker 只以 subpath 掛載 active/：它的 /runs 看不到 held/ 與 .layout（§30.13）。
 """
 
 import hashlib
@@ -16,11 +17,13 @@ import uuid
 from collections.abc import Iterable
 from typing import Any
 
-from tests.live.support import BUSYBOX, Api, container, wait_for
+from tests.live.support import BUSYBOX, Api, container, docker, wait_for
 
 RUNS_VOLUME = "secscan_live_runs"
 SEAL_TIMEOUT = 180.0
 SEALED_DIR = "sealed"
+# runs volume 中 run 目錄所在的區域（runner/domain/areas.py 的 ACTIVE_AREA）。
+ACTIVE = "/runs/active"
 
 
 def _busybox(script: str) -> subprocess.CompletedProcess[bytes]:
@@ -54,7 +57,7 @@ def _busybox(script: str) -> subprocess.CompletedProcess[bytes]:
 def entries(run_id: str) -> list[str] | None:
     """run 目錄最上層的條目；目錄不存在時是 None。"""
     run = uuid.UUID(run_id)
-    result = _busybox(f'[ -d "/runs/{run}" ] && ls -A "/runs/{run}"')
+    result = _busybox(f'[ -d "{ACTIVE}/{run}" ] && ls -A "{ACTIVE}/{run}"')
     if result.returncode != 0:
         return None
     return sorted(result.stdout.decode().split())
@@ -127,7 +130,7 @@ def run_file(run_id: str, path: str) -> bytes | None:
 def sealed_bytes(run_id: str) -> bytes:
     """run 目錄中所有檔案的位元組與名稱（直接讀 volume：只應該看到密文）。"""
     run = uuid.UUID(run_id)
-    script = f'cd "/runs/{run}" && find . -print && find . -type f -exec cat {{}} +'
+    script = f'cd "{ACTIVE}/{run}" && find . -print && find . -type f -exec cat {{}} +'
     result = _busybox(script)
     assert result.returncode == 0, "讀不到 run 目錄"
     return result.stdout
@@ -167,8 +170,23 @@ def run_ids(api: Api, scan_id: str) -> set[str]:
     return {str(event["scanner_run_id"]) for event in events if event["scanner_run_id"]}
 
 
+def worker_runs() -> list[str]:
+    """worker 容器中 /runs 最上層的條目（subpath active 的內容）。"""
+    return sorted(docker("exec", container("worker"), "ls", "-A", "/runs").split())
+
+
+def assert_worker_sees_only_active() -> None:
+    """worker 的 /runs 就是 active/：看不到 held/ 與 .layout（§30.13）。"""
+    names = worker_runs()
+    assert "held" not in names
+    assert ".layout" not in names
+    assert "active" not in names
+
+
 def assert_scan_sealed(api: Api, scan_id: str, forbidden: Iterable[bytes]) -> None:
-    """API 顯示 sealed（或 none），每個有目錄的 run 只剩密文、沒有 forbidden 的值。"""
+    """API 顯示 sealed（或 none），每個有目錄的 run 只剩密文、沒有 forbidden 的值；worker 只看得到
+    active/。"""
+    assert_worker_sees_only_active()
     assert_api_sealed(api, scan_id)
     values = list(forbidden)
     for run_id in run_ids(api, scan_id):

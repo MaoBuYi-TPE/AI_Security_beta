@@ -6,6 +6,9 @@ UV_RUN := uv run --locked
 # 用遞延指派（=）：只有 lab 目標才會求值，避免每次 make test/lint 都 fork docker。
 COMPOSE = $(shell if docker compose version >/dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi)
 DB_FILE := compose.yaml
+# app stack 的 compose 設定：make up、make down 與 make runs-layout-migrate 共用（docs/DECISIONS.md
+# §30.13：搬移時解析出來的 runs volume 必須和 make up 實際使用的相同，所以不覆寫環境變數、不加 -p）。
+APP_COMPOSE = $(COMPOSE) -f $(DB_FILE) --profile app
 LAB_FILE := compose.lab.yaml
 LAB_PROJECT := secscan-lab
 # lab_net 與 scan_net 由這裡建立（docs/DECISIONS.md §15.6）：internal＋gateway isolated＋固定網段，
@@ -54,7 +57,7 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
 	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check \
 	owasp-top10 owasp-top10-check test-live-fixture-findings test-live-fixture-rescan \
-	bench-check bench-live-check bench bench-evaluate bench-key bench-seal
+	bench-check bench-live-check bench bench-evaluate bench-key bench-seal runs-layout-migrate
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -213,14 +216,53 @@ scan-net:
 lab-net:
 	@$(MAKE) --no-print-directory ensure-net NET=$(LAB_NET) SUBNET=$(LAB_SUBNET) IP_RANGE=$(LAB_IP_RANGE)
 
-# 啟動 app stack（db、api、runner、worker、socket-proxy、guard）。API 只綁 127.0.0.1:$${API_PORT:-8000}。
-# 第一次使用先執行 make migrate（db 的 schema）與 create-admin-key。
+# 啟動 app stack（db、api、runner、worker、socket-proxy、guard，以及一次性的 runs-init）。API 只綁
+# 127.0.0.1:$${API_PORT:-8000}。第一次使用先執行 make migrate（db 的 schema）與 create-admin-key。
+# runs volume 是舊的 layout 時 runs-init 失敗，runner 與 worker 不啟動：先執行 make runs-layout-migrate。
 up: env docker-check scan-net lab-net images build
-	$(COMPOSE) -f $(DB_FILE) --profile app up -d --wait
+	$(APP_COMPOSE) up -d --wait
 
 # 停止 app stack 與 db（資料保留在 volume）。
 down:
-	$(COMPOSE) -f $(DB_FILE) --profile app down
+	$(APP_COMPOSE) down
+
+# 既有的 runs volume 搬到新的 layout（docs/DECISIONS.md §30.13）。升級順序：make down → make db-up →
+# make migrate → make runs-layout-migrate DRY_RUN=1 → make runs-layout-migrate → make up。
+# 1. 以和 make up 相同的設定（APP_COMPOSE）解析實際的 runs volume（cli/runs_volume.py）；解析失敗就
+#    拒絕，不退回預設名稱。
+# 2. volume 不存在就不需要搬移。存在時：compose 的標籤必須是這個 project 的 runs；api、worker、
+#    runner 都沒有在執行；沒有任何容器（含已停止的）使用它。docker 指令失敗視為無法確認，拒絕。
+# 3. 在 runner 容器內執行（--no-deps：不啟動 runs-init），容器內再比對一次 volume 的名稱與掛載。
+runs-layout-migrate: env docker-check
+	@config=$$($(APP_COMPOSE) config runs-init --format json) \
+		|| { echo "無法解析 compose 的設定：拒絕搬移"; exit 1; }; \
+	parsed=$$(printf '%s' "$$config" | $(UV_RUN) python -m secscan.cli.runs_volume) \
+		|| { echo "無法取得 runs volume 的名稱：拒絕搬移"; exit 1; }; \
+	project=$${parsed% *}; volume=$${parsed#* }; \
+	names=$$(docker volume ls --format '{{.Name}}') \
+		|| { echo "無法列出 Docker volume：拒絕搬移"; exit 1; }; \
+	if ! printf '%s\n' "$$names" | grep -Fxq "$$volume"; then \
+		echo "runs volume $${volume} 不存在：沒有需要搬移的資料，make up 會建立新的 layout"; exit 0; \
+	fi; \
+	labels=$$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}} {{index .Labels "com.docker.compose.volume"}}' "$$volume") \
+		|| { echo "無法檢查 runs volume：拒絕搬移"; exit 1; }; \
+	[ "$$labels" = "$$project runs" ] \
+		|| { echo "runs volume $${volume} 不是 compose 專案 $${project} 的 runs（標籤：$${labels}）：拒絕搬移，請人工確認"; exit 1; }; \
+	running=$$($(APP_COMPOSE) ps --status running --services) \
+		|| { echo "無法列出執行中的服務：拒絕搬移"; exit 1; }; \
+	for service in api worker runner; do \
+		if printf '%s\n' "$$running" | grep -Fxq "$$service"; then \
+			echo "$${service} 還在執行：請先 make down"; exit 1; \
+		fi; \
+	done; \
+	users=$$(docker ps -a --filter "volume=$$volume" --format '{{.Names}} {{.Status}}') \
+		|| { echo "無法列出使用 runs volume 的容器：拒絕搬移"; exit 1; }; \
+	if [ -n "$$users" ]; then \
+		echo "還有容器（含已停止的）使用 runs volume，確認之後刪除再執行："; \
+		printf '%s\n' "$$users"; exit 1; \
+	fi; \
+	$(APP_COMPOSE) run --rm --no-deps runner secscan-admin migrate-runs-layout \
+		--expect-volume "$$volume" $(if $(DRY_RUN),--dry-run,)
 
 # live 測試：真的 Docker、socket-proxy、egress guard 與 fake 容器；guard 的測試在 live 自己的 lab 網路
 # 上啟動接收端（不啟動 Juice Shop、VAmPI）。需要自己設定 ENABLE_LIVE_LAB_TESTS=1；在獨立的 compose

@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立；`test-live-fixture` 已在 T30 建立；`nuclei-templates`、`nuclei-templates-check` 已在 T17 建立；`test-live-fixture-nuclei` 已在 T18 建立；`owasp-top10`、`owasp-top10-check`、`test-live-fixture-findings` 已在 T19 建立；`bench-key`、`bench-seal` 與 `secscan-admin` 的 `check-encryption-keys`、`rotate-content-keys`、`rotate-evidence-keys`、`export-evidence`、`retention-status` 已在 T23a 建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立；`test-live-fixture` 已在 T30 建立；`nuclei-templates`、`nuclei-templates-check` 已在 T17 建立；`test-live-fixture-nuclei` 已在 T18 建立；`owasp-top10`、`owasp-top10-check`、`test-live-fixture-findings` 已在 T19 建立；`bench-key`、`bench-seal` 與 `secscan-admin` 的 `check-encryption-keys`、`rotate-content-keys`、`rotate-evidence-keys`、`export-evidence`、`retention-status` 已在 T23a 建立；`runs-layout-migrate` 與 `secscan-admin` 的 `init-runs-layout`、`migrate-runs-layout` 已在 T23a 的機密性隔離建立。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -104,7 +104,9 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | uv run secscan-admin rotate-content-keys | M5（T23a 已建立） | 以 `CONTENT_ENCRYPTION_KEYS` 的第一個金鑰重新加密報告內容與人工複測摘錄；解不開的保留原狀、列出 id、exit 1 |
 | secscan-admin rotate-evidence-keys | M5（T23a 已建立） | 在 runner 容器內執行：以 `EVIDENCE_ENCRYPTION_KEYS` 的第一個金鑰重新加密 runs volume 的加密檔；和 keeper 互斥 |
 | secscan-admin export-evidence --run ID [--path P] | M5（T23a 已建立） | 在 runner 容器內執行：列出一個 run 的加密檔，或先驗證、寫 audit 再把一個檔案的明文寫到 stdout（break-glass） |
-| secscan-admin retry-evidence --directory D --reason R [--max-depth N] [--max-entries N] [--max-path-chars N] | M5（T23a 方案 B 已建立） | 在 runner 容器內執行：人工處理一個需要人工處理的目錄；先寫 audit，以較高的上限加密，驗證通過才解除隔離（`API_CONTRACT.md` §20） |
+| secscan-admin retry-evidence --directory D --reason R [--max-depth N] [--max-entries N] [--max-path-chars N] | M5（T23a 方案 B 已建立） | 在 runner 容器內執行：人工處理一個已搬到 `held/` 的隔離目錄；先寫 audit，在 `held/` 以較高的上限加密並驗證，搬回 `active/` 再驗證，才解除隔離（`API_CONTRACT.md` §20） |
+| make runs-layout-migrate [DRY_RUN=1] | M5（T23a 機密性隔離已建立） | 既有的 runs volume 搬到 `active/`／`held/` 的 layout：以和 `make up` 相同的設定解析實際的 volume、確認標籤與沒有任何容器使用它，再在 runner 容器內搬移（`DECISIONS.md` §30.13）；由使用者執行 |
+| secscan-admin init-runs-layout | M5（T23a 機密性隔離已建立） | compose 的一次性服務 `runs-init` 執行：建立或檢查 layout，不通過時 runner 與 worker 不啟動；不需要 DB 與金鑰 |
 | uv run secscan-admin retention-status | M5（T23a 已建立） | 唯讀：原始證據、需要人工處理的目錄、報告與摘錄各保留狀態的數量 |
 | uv run secscan-admin fake-runner [--outcome succeed\|fail] [--hold-seconds N] [--once] | M1（T09 已建立） | 對帳 lease 過期的 fake run，再處理排隊中的 fake run；不連任何位址，結果標為 fixture（`API_CONTRACT.md` §17.5） |
 | uv run secscan-admin runner [--once] [--outcome succeed\|fail] [--hold-seconds N] | M2（T10 已建立） | 容器版的 runner：經 socket-proxy 啟動強化的單次容器（T10 只有 fake），收集輸出；SIGTERM 時停止並刪除容器（`API_CONTRACT.md` §18.1） |

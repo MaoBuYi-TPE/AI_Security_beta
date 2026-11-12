@@ -13,17 +13,19 @@ from uuid import UUID, uuid4
 import pytest
 
 from secscan.runner.backoff import MAX_BACKOFF_SECONDS
-from secscan.runner.evidence import DirectoryState
+from secscan.runner.evidence import DirectoryState, EvidenceError
 from secscan.runner.keeper import EvidenceKeeper, PassReport
 from secscan.scans.domain.evidence import HOLD_AFTER_FAILURES, EvidenceHoldCode
 from tests.unit.runner.keeper_fakes import (
     NOW,
     SETTINGS,
     Clock,
+    FakeIsolation,
     FakeStore,
     FakeVault,
     Held,
     evidence_run,
+    inode_of,
     make_keeper,
 )
 
@@ -57,7 +59,8 @@ def test_three_consecutive_limit_failures_hold_the_run(caplog: pytest.LogCapture
 
     assert [report.failures for report in (first, second, third)] == [1, 1, 1]
     assert (third.held, third.deferred) == (1, 0)
-    assert store.holds == {stuck.run_id: Held(stuck, DEEP, HOLD_AFTER_FAILURES)}
+    source_ino = inode_of(str(stuck.run_id))
+    assert store.holds == {stuck.run_id: Held(stuck, DEEP, HOLD_AFTER_FAILURES, source_ino)}
     assert keeper.healthy is False
     assert "EVIDENCE_TREE_TOO_DEEP" in caplog.text
     assert str(stuck.run_id) in caplog.text
@@ -171,7 +174,7 @@ def test_an_orphan_over_the_limit_is_held_and_skipped_afterwards() -> None:
 
     for _ in range(HOLD_AFTER_FAILURES):
         _again(keeper, clock)
-    assert store.holds == {UUID(name): Held(None, DEEP, HOLD_AFTER_FAILURES)}
+    assert store.holds == {UUID(name): Held(None, DEEP, HOLD_AFTER_FAILURES, inode_of(name))}
     vault.inspected.clear()
     report = _again(keeper, clock)
 
@@ -262,3 +265,75 @@ def test_the_three_limits_count_toward_the_same_streak() -> None:
 
     assert store.holds[run.run_id].code is EvidenceHoldCode.TREE_PATHS_TOO_LONG
     assert store.holds[run.run_id].attempts == HOLD_AFTER_FAILURES
+
+
+# --- 機密性隔離（§30.13）-----------------------------------------------------------------------
+
+
+def test_each_pass_reconciles_isolation_before_sealing() -> None:
+    """隔離的對帳在加密之前：已隔離的目錄先搬走、對帳表的每一列先處理。"""
+    run = evidence_run()
+    store = FakeStore(sealable_runs=[run])
+    isolation = FakeIsolation()
+    vault = FakeVault()
+    vault.on_seal.append(lambda: isolation.calls.append(-1.0))
+    keeper = make_keeper(store, vault, isolation=isolation)
+
+    report = keeper.run_pass()
+
+    assert report.clean
+    assert len(isolation.calls) == 2
+    assert isolation.calls[0] >= 0
+    assert isolation.calls[1] == -1.0
+
+
+def test_a_new_hold_is_reconciled_again_in_the_same_pass() -> None:
+    clock = Clock()
+    stuck = evidence_run()
+    isolation = FakeIsolation()
+    store = FakeStore(sealable_runs=[stuck])
+    keeper = make_keeper(
+        store, FakeVault(over_limit={str(stuck.run_id): DEEP}), clock=clock, isolation=isolation
+    )
+
+    for _ in range(HOLD_AFTER_FAILURES):
+        before = len(isolation.calls)
+        report = _again(keeper, clock)
+
+    assert report.held == 1
+    assert len(isolation.calls) - before == 2
+
+
+def test_a_directory_without_an_inode_is_not_held(caplog: pytest.LogCaptureFixture) -> None:
+    """取不到 inode（不是目錄、已消失）時不寫隔離紀錄：維持不健康，下一次失敗時再寫。"""
+    clock = Clock()
+    stuck = evidence_run()
+    name = str(stuck.run_id)
+    store = FakeStore(sealable_runs=[stuck])
+    vault = FakeVault(over_limit={name: DEEP}, no_inode={name})
+    keeper = make_keeper(store, vault, clock=clock)
+    caplog.set_level(logging.ERROR)
+
+    for _ in range(HOLD_AFTER_FAILURES):
+        report = _again(keeper, clock)
+
+    assert store.holds == {}
+    assert (report.held, report.failures) == (0, 1)
+    assert keeper.healthy is False
+    assert "無法記下隔離（EvidenceError）" in caplog.text
+
+
+def test_a_failed_reconciliation_aborts_the_pass() -> None:
+    """held/ 無法開啟、條目超過上限這類全域的失敗：這一輪不加密、不清除，keeper 不健康。"""
+    run = evidence_run()
+    store = FakeStore(sealable_runs=[run])
+    vault = FakeVault()
+    keeper = make_keeper(
+        store, vault, isolation=FakeIsolation(error=EvidenceError("held/ 的條目數量超過上限"))
+    )
+
+    report = keeper.run_pass()
+
+    assert report.failures == 1
+    assert vault.sealed == []
+    assert keeper.healthy is False

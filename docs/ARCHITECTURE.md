@@ -17,7 +17,7 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
    runner 認領 queued run       worker 認領 collected run / pending report
   （SKIP LOCKED + lease）       （解析、正規化、去重、報告）
           |                          ^
-   docker-socket-proxy               | 唯讀讀取 runs volume
+   docker-socket-proxy               | 唯讀讀取 runs volume 的 active/
           |                          |
    單次掃描容器：ZAP -> Nuclei -> [Schemathesis]
           |
@@ -77,7 +77,7 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 - 只接 scan_net；沒有 Docker socket、沒有 host network、不掛載任何 host 路徑。
 - 映像固定 digest，以非 root 執行，設定 `cap_drop: ALL` 與 `no-new-privileges`。
 - 唯讀 rootfs（必要的 tmpfs 例外），並限制記憶體、CPU、pids 與執行時間。
-- 只掛載該 run 的工作目錄：runs volume 的 subpath，`in/` 唯讀、`out/` 可寫。[S29]
+- 只掛載該 run 的工作目錄：runs volume 的 subpath（`active/<run>/in` 唯讀、`active/<run>/out` 可寫）。[S29]
 
 ### runner
 
@@ -88,7 +88,7 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 
 ### worker
 
-- 負責解析不可信的工具輸出，但沒有 Docker 權限，對 runs volume 只有唯讀權限。
+- 負責解析不可信的工具輸出，但沒有 Docker 權限，對 runs volume 只有唯讀權限，而且只以 subpath 掛載 `active/`（`DECISIONS.md` §30.13）：隔離的目錄在 `held/`，不在 worker 的檔案系統裡。
 - **T12 已實作**（`DECISIONS.md` §16.5、§16.6）：worker 唯讀掛載 runs 與 guard 的 telemetry volume。preflight 的回應依 manifest 讀取（大小與 sha256 相符、不跟隨 symlink），以 §12.5 的純函式判斷；每個 run 的轉送請求對應到凍結的 operation，寫入 `run_coverage`。不掛 secrets、policy 與 status。
 - **T23a**：worker 只在 run 加密之前讀明文；`collected` 超過 `EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60）或 lease 過期的 `normalizing` 由 runner 的 keeper 轉成 failed 並加密，worker 之後以舊 lease 的寫入一律被拒。worker 沒有原始證據的金鑰，讀不了加密檔；它持有內容金鑰，加密報告並每 10 分鐘清除到期的報告與摘錄。
 
@@ -362,7 +362,7 @@ ExecutionPlan 只能包含：
 | observations | id、scan_id、scanner_run_id、ordinal、source_event_id、source_index、source_rule、rule_variant、title、raw_severity、severity_label、raw_confidence、confidence_label、CWE、WASC、method、path、query、parameter 與位置、attack、evidence、other_info（遮罩並截斷）、auth_role、report_artifact_id、parser_version（T15 新增；T19 不加欄位，連結在 finding_observations，`DECISIONS.md` §25.2） |
 | artifacts | id、scanner_run_id、scan_id、kind（input/output）、path、sha256、size、redactions、classification、encrypted、storage_key（T15 新增；`encrypted` 是從來沒有寫入過的舊欄位，API 的 `encrypted` 改由 `run_evidence` 推導，T23a） |
 | run_evidence | scanner_run_id（主鍵）、scan_id、status（none／sealed／purged；沒有紀錄是 pending）、file_count、plaintext_bytes、sealed_at、purged_at、recorded_at；只有已終止、容器已確認刪除的 run 能新增；只允許 sealed → purged 一次（T23a，v0021） |
-| evidence_holds | directory（主鍵，runs volume 的目錄名稱）、scanner_run_id、scan_id（只有 run 的目錄有；孤兒目錄是 NULL）、error_code（`EVIDENCE_TREE_TOO_DEEP`／`EVIDENCE_TREE_TOO_MANY_ENTRIES`／`EVIDENCE_TREE_PATHS_TOO_LONG`）、attempts、held_at、resolved_at；keeper 連續 3 次超過上限時新增（run 必須已終止、容器已刪除、還沒有 run_evidence）；`resolved_at` 只能寫一次，run 必須已有 sealed 的 run_evidence；不能刪除（T23a 方案 B，v0023，`DECISIONS.md` §30.12） |
+| evidence_holds | directory（主鍵，runs volume 的目錄名稱）、scanner_run_id、scan_id（只有 run 的目錄有；孤兒目錄是 NULL）、error_code（`EVIDENCE_TREE_TOO_DEEP`／`EVIDENCE_TREE_TOO_MANY_ENTRIES`／`EVIDENCE_TREE_PATHS_TOO_LONG`）、attempts、held_at、resolved_at、isolated_at、releasing_at、move_failures、last_move_error、last_move_failed_at、source_ino（v0024，§30.13）；keeper 連續 3 次超過上限時新增（run 必須已終止、容器已刪除、還沒有 run_evidence）；trigger 只允許五種轉換（記錄來源 inode、記錄搬移失敗、隔離完成、開始解除、解除），解除之前必須已開始解除、run 必須已有 sealed 的 run_evidence；不能刪除（T23a 方案 B，v0023，`DECISIONS.md` §30.12） |
 | reports | id、project／target／scan、format（json/markdown；P1 加 sarif）、status、queue_position、idempotency_key 與 request_sha256、attempts、lease 欄位、error_code、data_as_of、generated_at、size_bytes、sha256（明文的值）、truncated、omitted_findings、expires_at、content_purged_at；同時是 worker 的工作佇列（T21，v0018；到期與清除在 T23a，v0022） |
 | report_contents | report_id、content（T23a 起是 Fernet token、context `report:<id>`；只允許換版與報告清除之後刪除）（T21，v0018；T23a，v0022） |
 | finding_triage_events | (finding_id, sequence)、actor（key 或 system）、前後的 triage 與 lifecycle、reason_code、reason、comparison_id、resolution_basis、系統重開的 run 與 scan、evidence（白名單鍵）；append-only（T21，v0017） |
@@ -699,7 +699,8 @@ Compare 的結果分成 `new / persistent / not_observed / inconclusive / not_co
 - 加密檔：每個原本的檔案一個，檔名是原本相對路徑的 sha256；分塊的 Fernet（每塊 1 MiB），標頭與每一塊綁定 `evidence:<run_id>`、原本的路徑、塊的序號與最後一塊旗標。先寫暫存檔、fsync、rename、串流解密核對 sha256，才刪除明文；任何一步失敗都保留明文、API 顯示 pending、runner 不認領新的 run。
 - 沒有 `scanner_runs` 紀錄的孤兒目錄超過 1 小時沒有變動才加密，絕不在未加密時刪除；probe 的目錄評估完就刪除。
 - 需要讀原始輸出時，只能在 runner 容器內以 `secscan-admin export-evidence` 解密到 stdout（先寫 audit），沒有 API。
-- 超過深度（32）、條目數（20,000）或路徑總長度（8M 字元）上限的單一目錄（§30.12）：keeper 在記憶體中計算連續的上限失敗（`runner/backoff.py`），第 3 次寫入 `evidence_holds` 與 audit，之後跳過這個目錄、不再算不健康，其他 run 照常認領；明文保留原狀，API 顯示 `manual_intervention_required`。操作者在 runner 容器內以 `secscan-admin retry-evidence` 用較高的上限（深度 64、條目 50,000 以內）重試，加密驗證通過才解除（同一個 transaction 寫入 sealed 的 `run_evidence`）。清除時先逐一刪除 `sealed/`，以較高上限加密的目錄也能清除。路徑總長度的上限讓整棵樹列在記憶體中時不會超過 runner 的記憶體上限。**隔離是工作流程的隔離，不是檔案的機密性隔離**：worker 以唯讀掛載整個 runs volume，仍讀得到隔離中的明文；改成掛載範圍的隔離是 T23a 安全驗收的阻擋條件（§30.12）。
+- 超過深度（32）、條目數（20,000）或路徑總長度（8M 字元）上限的單一目錄（§30.12）：keeper 在記憶體中計算連續的上限失敗（`runner/backoff.py`），第 3 次寫入 `evidence_holds` 與 audit，之後跳過這個目錄、不再算不健康，其他 run 照常認領；明文保留原狀，API 顯示 `manual_intervention_required`。操作者在 runner 容器內以 `secscan-admin retry-evidence` 用較高的上限（深度 64、條目 50,000 以內）重試，加密驗證通過才解除（同一個 transaction 寫入 sealed 的 `run_evidence`）。清除時先逐一刪除 `sealed/`，以較高上限加密的目錄也能清除。路徑總長度的上限讓整棵樹列在記憶體中時不會超過 runner 的記憶體上限。隔離的目錄搬到 `held/`（下一項），worker 讀不到；Docker 的實際驗證與 Live 通過之前，這仍是 T23a 安全驗收的阻擋條件（§30.12、§30.13）。
+- **機密性隔離（§30.13）**：runs volume 的根目錄是 `.layout`（`{"layout": 2}`）、`active/`（一般的 run 目錄）與 `held/`（隔離的目錄）。只有 runner 與一次性的 `runs-init` 掛載根目錄；worker 只以 subpath 唯讀掛載 `active/`；掃描容器只掛載 `active/<run>/in`、`out`。隔離的流程：新增隔離紀錄（含來源目錄的 inode）→ 確認沒有有效的解析 lease → 以 dir fd 的 rename 搬到 `held/`（inode 比對、目的地必須不存在、fsync 兩個區域、事後驗證）→ 寫入 `isolated_at`。keeper 每一輪在加密之前對帳（DB 的階段 × 目錄的位置），補寫 `isolated_at` 之前先確認身分並 fsync；搬移失敗寫進 DB、只讓這個目錄退避，隔離中超過 15 分鐘升級為緊急狀態（CRITICAL、audit、retention-status；主動告警是 T35）。`retry-evidence` 在 `held/` 加密並驗證之後才寫 `releasing_at`、搬回 `active/`、再驗證、解除。`runs-init` 在 runner 與 worker 之前檢查 layout；既有的 volume 以 `make runs-layout-migrate` 搬移（不由 runner 自動搬移）。
 
 **報告內容**：
 

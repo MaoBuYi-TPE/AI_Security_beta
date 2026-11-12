@@ -28,7 +28,7 @@ fake 引擎的 runner（docs/DECISIONS.md §13.7）：
 
     uv run secscan-admin runner [--once] [--outcome succeed|fail] [--hold-seconds 0-300]
     uv run secscan-admin worker [--once]
-金鑰換版、原始證據與保留期限的指令在 secscan.cli.modules（§12.3、§30）。
+金鑰換版、原始證據、保留期限與 runs volume 的 layout 的指令在 secscan.cli.modules（§12.3、§30）。
 """
 
 import argparse
@@ -123,6 +123,10 @@ class KeyOutput:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    # runs-init：沒有任何環境變數與金鑰（docs/DECISIONS.md §30.13），不載入 Settings。
+    initialized = modules.init_layout(args, _report)
+    if initialized is not None:
+        return initialized
     try:
         settings = Settings()
     except ValidationError as exc:

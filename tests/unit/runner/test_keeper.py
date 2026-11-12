@@ -20,6 +20,7 @@ from tests.unit.runner.keeper_fakes import (
     NOW,
     SETTINGS,
     Clock,
+    FakeIsolation,
     FakeStore,
     FakeVault,
 )
@@ -216,7 +217,7 @@ def test_the_thread_runs_passes_until_stopped() -> None:
     passes = threading.Event()
     vault = FakeVault()
     settings = KeeperSettings(retention_days=7, plaintext_max_minutes=60, interval_seconds=0.01)
-    keeper = EvidenceKeeper(store, vault, settings, clock=lambda: NOW)
+    keeper = EvidenceKeeper(store, vault, settings, isolation=FakeIsolation(), clock=lambda: NOW)
     original = keeper.run_pass
 
     def counted() -> PassReport:
@@ -291,6 +292,7 @@ def test_a_failed_last_pass_stays_unhealthy_after_stopping() -> None:
         FakeStore(sealable_runs=[broken]),
         FakeVault(failing={str(broken.run_id)}),
         settings,
+        isolation=FakeIsolation(),
         clock=lambda: NOW,
     )
     keeper.start()

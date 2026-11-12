@@ -46,8 +46,9 @@ pytestmark = pytest.mark.integration
 # auth_profiles 的停用 1（v0019，test_auth_profile_disable.py）；T31 的引擎子預算 3（v0020，
 # test_engine_budget_schema.py）；T23a 的 run_evidence 5（v0021，test_evidence_schema.py），以及
 # reports 的期限 2、report_contents 的密文 1、摘錄的密文與清除 3，取代原本兩個明文的大小（v0022，
-# test_sealed_content_schema.py）。
-EXPECTED_CHECK_COUNT = 206
+# test_sealed_content_schema.py）。evidence_holds 的隔離 9（v0024：時間的先後、搬移失敗的欄位與
+# inode；test_evidence_hold_isolation.py）。
+EXPECTED_CHECK_COUNT = 215
 
 INSERT_AUDIT = (
     "INSERT INTO audit_events (actor_key_id, project_id, action, object_type, redacted_changes) "

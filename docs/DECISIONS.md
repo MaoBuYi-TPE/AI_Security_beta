@@ -2926,7 +2926,7 @@ S2 可透過既有隔離入口重現：`ENABLE_LIVE_LAB_TESTS=1 make test-live-r
 4. **掃描容器的 json-file log**：在容器刪除之前，可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
 5. **其他保持現狀的明文**：`observations` 保留遮罩過的證據，包含 Nuclei 擷取的 email 與卡號；guard telemetry 的路徑以明文存在 tmpfs，保留 6 小時；摘錄的雜湊沒有加 salt，留在不可變的事件中（T21 的設計）；報告與摘錄在 API 的記憶體中解密，下載的回應是明文（TLS 由部署負責）。
 6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 中的明文交給 T34（使用者決定之前不修改或刪除）。
-7. **超過上限的單一目錄**（安全審查 M1，§30.11；使用者決定方案 B，§30.12）：掃描容器在 `out/` 建立超過深度（32）、條目數（20,000）或路徑總長度（8M 字元）上限的目錄樹時，keeper 連續 3 次失敗（約一分鐘）之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄**保留明文直到有人處理**，而且**在完成掛載範圍的隔離之前 worker 仍讀得到**（安全驗收的阻擋條件）；不做全域熔斷（告警在 T35）；計數只在記憶體中（runner 重啟會重新計數，`runner --once` 永遠不會隔離）；超過 `retry-evidence` 絕對上限（深度 64、條目 50,000、路徑總長度 16M 字元）的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密。runs volume 的目錄數量超過上限、清除失敗與其他種類的加密失敗（例如磁碟滿）仍然全域 fail closed。完整清單見 §30.12。
+7. **超過上限的單一目錄**（安全審查 M1，§30.11；使用者決定方案 B，§30.12）：掃描容器在 `out/` 建立超過深度（32）、條目數（20,000）或路徑總長度（8M 字元）上限的目錄樹時，keeper 連續 3 次失敗（約一分鐘）之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄**保留明文直到有人處理**；機密性隔離（§30.13：隔離的目錄搬到 `held/`，worker 只掛載 `active/`）的離線實作已完成，Docker 的實際驗證也已通過（2026-11-11），**Live 通過之前仍是安全驗收的阻擋條件**，而且搬到 `held/` 之前（隔離中）worker 仍讀得到；不做全域熔斷（告警在 T35）；計數只在記憶體中（runner 重啟會重新計數，`runner --once` 永遠不會隔離）；超過 `retry-evidence` 絕對上限（深度 64、條目 50,000、路徑總長度 16M 字元）的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密。runs volume 的目錄數量超過上限、清除失敗與其他種類的加密失敗（例如磁碟滿）仍然全域 fail closed。完整清單見 §30.12。
 8. **runner 指到可寫、但不是 runs volume 的目錄**（例如主機上手動建立的空目錄）時，keeper 仍會把找不到目錄的 run 記成 none。DB 分不出「從來沒有目錄」與「目錄不見了」（容器名稱在建立工作目錄之前就寫入），所以沒有以 DB 判斷（§30.11）。
 9. **金鑰在主機上**：`.env` 是唯一的設定來源，三組金鑰都在裡面（600）；bench 的金鑰檔在使用者的家目錄。金鑰遺失之後，尚未清除的證據、報告、摘錄與 bench 結果都無法復原；備份金鑰由使用者負責。
 
@@ -3097,7 +3097,7 @@ HIGH 的剩餘部分：runner 指到一個可寫、但不是 runs volume 的目�
   - 不得為了加快合併而降低 fail closed、安全審查或測試的標準。
 
 **剩餘風險**（也寫在 §30.9 第 7 項）：
-- **隔離的目錄在完成掛載範圍的隔離之前，worker 仍讀得到**（使用者決定的安全驗收阻擋條件）。
+- **隔離的目錄在完成掛載範圍的隔離之前，worker 仍讀得到**（使用者決定的安全驗收阻擋條件）。§30.13 完成了離線實作，Docker 的實際驗證也已通過（2026-11-11，獨立的測試環境）；Live 通過之前，這一項仍是阻擋條件。
 - 隔離的目錄保留明文直到有人處理；看到隔離時應當成疑似入侵調查（安全 M2）。T23a 不做全域熔斷，告警在 T35。
 - 計數只在記憶體中：重啟會重新計數，`runner --once` 永遠不會隔離。
 - 超過 `retry-evidence` 的絕對上限（深度 64、條目 50,000、路徑總長度 16M 字元）的樹不在系統內處理，明文一直留著。
@@ -3110,3 +3110,186 @@ HIGH 的剩餘部分：runner 指到一個可寫、但不是 runs volume 的目�
 - runs volume 的目錄數量超過上限、清除失敗與其他種類的加密失敗（例如磁碟滿）仍然全域 fail closed。
 
 **不做**：自動重試、可調整的 N、API 的復原端點。
+
+### 30.13 隔離目錄的機密性隔離（做法 A；使用者，2026-11-10 決定、2026-11-11 核准計畫）
+
+**範圍**：§30.12 的阻擋條件。隔離的目錄搬到 runs volume 的 `held/`，worker 只以 subpath 唯讀掛載 `active/`；DB 與檔案系統一致、能從當機復原；既有資料由管理員指令搬移。計畫經過兩次審查（第一次六處、第二次四處），使用者核准之後實作。離線實作之後，Docker 的實際驗證在 2026-11-11 以獨立、可拋棄的測試環境完成（見下方「Docker 實際驗證」），發現的 F1–F3 在 2026-11-12 修正；Live 需要另外授權，通過之前 T23a 與 SEC-14 都不標完成。
+
+**layout 與掛載**：
+
+```
+runs volume 的根目錄
+├── .layout            一般檔案，內容剛好是 {"layout": 2}
+├── active/<run_id>/   一般的 run 目錄（原本在根目錄）
+└── held/<目錄名稱>/    隔離的目錄（明文，或解除中的加密檔）
+```
+
+| 程序 | 掛載 | 權限 |
+|---|---|---|
+| runner（keeper 與 runner 容器內的管理指令） | 根目錄 | 讀寫 |
+| `runs-init`（一次性服務） | 根目錄 | 讀寫 |
+| worker | subpath `active` | 唯讀 |
+| 掃描容器 | `active/<run>/in`（唯讀）、`active/<run>/out` | 不變 |
+| api、guard、socket-proxy | 不掛載 | — |
+
+`active/` 與 `held/` 的權限是 0700（多一層防護：所有服務目前共用 uid 10001）。`vault.check()` 每一輪重新檢查 layout 與兩個區域可以寫入；runner 啟動時也檢查，不通過就不啟動。
+
+**狀態與不變條件**（v0024：`isolated_at`、`releasing_at`、`move_failures`、`last_move_error`、`last_move_failed_at`、`source_ino`）：
+
+| 階段 | 欄位 | 目錄的位置 |
+|---|---|---|
+| 隔離中（isolating） | `isolated_at` 是 NULL | 搬移完成之前在 `active/`（worker 可能讀得到） |
+| 已隔離（isolated） | `isolated_at` 有值 | 只在 `held/` |
+| 解除中（releasing） | `releasing_at` 有值 | `held/` 或 `active/`，只有已驗證的加密檔 |
+| 已解除（resolved） | `resolved_at` 有值 | `active/`，照常 7 天後清除 |
+
+- I1：已隔離 ⇒ 不在 `active/`。I2：解除中 ⇒ 在 `active/` 時只有已驗證的加密檔。I3：隔離中是唯一允許明文留在 `active/` 的未解除狀態，一律看得見並計時。
+- trigger 只允許五種轉換：0 記錄來源 inode（v0024 之前的紀錄）、1 記錄搬移失敗、2 隔離完成（必須有 inode）、3 開始解除、4 解除（必須已開始解除，run 必須有 sealed 的 `run_evidence`）。時間一律由 DB 寫入；9 個 CHECK 是第二道防線（`EXPECTED_CHECK_COUNT` 206 → 215）。既有的資料不回填。
+
+**keeper 的隔離與對帳**（`runner/isolation.py`、`runner/hold_moves.py`）：
+- 第 3 次上限失敗：lstat 取得 inode → 新增隔離紀錄（含 `source_ino`）→ 確認沒有有效的解析 lease → 以 dir fd rename 到 `held/`（lstat、inode 比對、目的地必須不存在）→ fsync 兩個區域 → 確認 inode 與裝置 → 寫入 `isolated_at` 與 audit `evidence.isolated`。新增之後同一輪再對帳一次。
+- 每一輪在加密之前對帳所有還沒解除的紀錄（表見計畫與 `runner/isolation.py` 的說明）：隔離中的紀錄先處理、分頁到全部完成，已隔離與解除中的紀錄不會擋住它們（審查 M1）。補寫 `isolated_at` 之前一定先確認身分（真的目錄、和 `held/` 在同一個裝置、inode 等於 `source_ino`）並 fsync（第二次審查第 3 點）。違反 I1、I2 就搬回 `held/`、寫 ERROR 與 audit `evidence.reisolated`。對帳絕不自動解除、不記成 none、sealed 或 purged，也不刪除目錄。
+- 搬移失敗只讓這個目錄退避（獨立的退避，keeper 維持健康），失敗寫進 DB（四個代碼：`EVIDENCE_HOLD_MOVE_FAILED`、`EVIDENCE_HOLD_CONFLICT`、`EVIDENCE_HOLD_NOT_DIRECTORY`、`EVIDENCE_HOLD_DIRECTORY_MISSING`），retention-status 看得見。
+- **緊急門檻**（第二次審查第 4 點）：隔離中超過 `ISOLATION_URGENT_AFTER`（15 分鐘，常數）就升級為緊急狀態：每一輪直接查 DB 找出逾時的隔離中紀錄（不依賴對帳的批次與時間），CRITICAL log、audit `evidence.isolation_overdue`（每個程序對每個目錄一次），retention-status 列為「需要緊急處理」。**這個版本只記錄與升級；主動告警留待 T35 完成**，不宣稱已經具備隔離異常的告警能力。
+- `seal`、`purge`、`export-evidence` 在 `active/` 找不到、卻在 `held/` 中的目錄：一律失敗（fail closed）。held/ 的條目超過 20,000 個也全域 fail closed。
+
+**人工復原**（`retry-evidence`）：隔離中 exit 1（`EVIDENCE_HOLD_NOT_ISOLATED`），位置和紀錄不符 exit 1（交給對帳），都不做任何改變。之後：寫 audit → 在 `held/` 加密 → 確認只有加密檔並逐一解密驗證 → 寫 `releasing_at` 與 audit `evidence.release` → 搬回 `active/` → 在 `active/` 再驗證（不通過就搬回 `held/`）→ 寫入 sealed 的 `run_evidence` 與 `resolved_at`。每個中斷點再執行一次就從正確的步驟繼續；明文只會在 `held/`。`rotate-evidence-keys` 也處理 `held/` 中的加密檔。
+
+**既有資料**（`make runs-layout-migrate [DRY_RUN=1]`，由使用者執行）：
+- 主機端：以和 `make up` 相同的設定（`APP_COMPOSE`，不覆寫環境變數、不加 `-p`）執行 `config runs-init --format json`，由 `cli/runs_volume.py` 取出 project name 與 `volumes.runs.name`；解析失敗就拒絕，不退回預設名稱（第二次審查第 1 點）。volume 的 compose 標籤必須是這個 project 的 `runs`；api、worker、runner 沒有在執行；沒有任何容器（含已停止的）使用它；任何 docker 指令失敗都視為無法確認。
+- 容器內（`compose run --rm --no-deps runner`）：`RUNNER_RUNS_VOLUME` 等於 `--expect-volume`、runs 目錄是掛載點、DB 在 head、拿得到 advisory lock、沒有 lease 有效的 run、沒有容器還沒確認刪除的 run。其中名稱的比對只擋得住「沒有經過 make target 而直接執行、傳入不同名稱」的情況：compose 的 `RUNNER_RUNS_VOLUME` 與 `volumes.runs.name` 是同一個運算式，經 make target 執行時必然相等；掛載點的檢查也不能證明掛上的是哪個 volume。**真正確認 volume 身分的是主機端的 compose 標籤**（安全審查 LOW-4）。
+- 搬移：只處理根目錄下標準 UUID 名稱的真實目錄；有還沒解除的隔離紀錄就搬到 `held/`（先記下 inode），其他的經暫存目錄 `.active-migrating` 搬到 `active/`；其他條目不動。有衝突就不完成 layout。可以重跑；dry-run 不寫任何東西。audit：`runs_layout.migrate`、`runs_layout.migrated`（失敗時 `runs_layout.migrate_failed`）。
+- **啟動的阻擋**：`runs-init` 是獨立、最小的服務（不使用 `x-app`；沒有環境變數、金鑰與網路，只掛載 runs volume；`restart: "no"`），根目錄是空的就建立結構，否則有 `.layout` 也重新檢查全部條件（第一次審查第 6 點、第二次審查第 2 點）；runner 與 worker 依賴它成功結束。只有搬移指令以 `--no-deps` 略過它。
+
+**open FD 與 hard link**（第一次審查第 2 點；Docker 驗證的 F3 補充）：
+- `rename`、`chmod` 與 uid 分離都不會撤銷其他程序已開啟的 FD；只有持有 FD 的程序關閉它或結束才會。Docker 驗證在 worker 內刻意於隔離之前開啟並保留 FD，確認：
+  - **檔案 FD**：rename 之後仍讀得到明文；以路徑重新開啟是 ENOENT。
+  - **目錄 FD**：可以走訪並讀取整個搬走的目錄，**包含隔離之後才新增的檔案**。目前的設計中，隔離之後只有 `retry-evidence` 寫入這個目錄，寫入的是加密檔；明文仍是隔離之前就在的那些，直到 `retry-evidence` 驗證之後刪除。
+  - **`..` 的逃逸被擋下**：經由目錄 FD 走 `..`（例如 `../../.layout`）是 ENOENT。目錄已經搬出 worker 的 subpath 掛載，核心不允許經由它往上走，所以碰不到 `held/` 中的其他目錄與 `.layout`。
+  - **經由 `/proc/<pid>/fd` 借用**：同一個容器內、同一個 uid 的其他程序，可以經由 `/proc/<持有者的 pid>/fd/<n>` 開啟同一個目錄並讀取，包含隔離之後新增的檔案。下列條件同時成立才做得到：
+    1. 和持有者在同一個 PID namespace，也就是同一個 worker 容器。api、runner 與掃描容器雖然也是 uid 10001，但 PID namespace 不同，看不到 worker 的程序。
+    2. 同一個 uid，或有 `CAP_SYS_PTRACE`（所有服務都已 `cap_drop: ALL`）。
+    3. 持有者是 dumpable（Python 程序預設是）。
+    4. 持有者還沒關閉 FD，也還沒結束。
+
+    uid 分離（T23b）擋不住同一個容器內的這種借用。
+  - 重啟 worker 之後，持有者結束，FD 與 `/proc` 的借用都消失；`held/` 仍然看不到。
+- **這次的做法**：隔離之前確認沒有有效的解析 lease；worker 只在解析期間開檔，成功與錯誤路徑都關閉（有測試）；runbook：出現新的隔離紀錄或懷疑 worker 異常時，重啟 worker。被攻陷的 worker 在隔離之前開檔並保留 FD，系統無法自動偵測或撤銷。
+- **風險分級：LOW（增量）**（2026-11-12 依 Docker 驗證重新確認）：
+  - 利用的前提是 worker 在隔離之前就已被攻陷，例如經由解析不可信的工具輸出。
+  - 這時 worker 本來就讀得到同一份明文，可以直接複製；FD 只是延長存取的時間。之後新增的內容只有加密檔，也碰不到其他隔離的目錄。
+  - 隔離之後才被攻陷的 worker 拿不到 FD。
+  - 絕對的影響是一個 run 目錄的原始證據對被攻陷的 worker 外洩，和隔離之前相同。
+  - 下列情況要重新評估分級：日後有任何流程在隔離之後把明文寫進 `held/<目錄>`；或解析改成長時間持有 FD。
+- **完整的 FD 撤銷**列為 T23b 的獨立項目（和 uid 分離分開），驗收標準寫在 `TASKS.md` 的 T23b。
+- **hard link**：跨掛載點的 `link(2)` 會得到 EXDEV；Docker 驗證確認，同一個檔案系統、不同掛載點也是 EXDEV。程式不使用 `os.link`（AST 測試）。
+
+**`held/` 不被覆寫**（第一次審查第 4 點）：目的地的事前檢查是緩解措施，不是原子保證（Linux 的 rename 會取代空目錄；非空的目的地讓 rename 失敗，既有的證據不會被覆寫）。真正的保證是只有持有 advisory lock 的 runner 寫 `held/`（AST 測試確認只有 runner 的模組與 runner 容器內的指令提到 `held`；部署測試確認其他服務都無法掛載根目錄）。`renameat2(RENAME_NOREPLACE)` 列為日後的選項。
+
+**三個決策**：
+1. 計畫：有條件核准，兩次審查的修正都已納入。
+2. `docker compose config`：只執行受限的語法檢查 `COMPOSE_DISABLE_ENV_FILE=1 docker compose -f compose.yaml --profile app config --no-interpolate --no-env-resolution --quiet`（不讀 `.env`、不替換變數、不輸出內容）；不能證明掛載隔離有效。
+3. Docker 的實際驗證：另外授權，是必要的安全驗收（2026-11-11 完成，結果見下方「Docker 實際驗證」）。項目：worker 的 `/runs` 看不到 `held/` 與 `.layout`；隔離之後 worker 讀不到；`/scan/in` 到 `/scan/out` 的 hard link 是 EXDEV；open FD 的三種情境（正常、刻意保留、重啟之後）；`make up` 與 Live 的啟動指令會執行 `runs-init`、舊 layout 時 runner 與 worker 不啟動、`up -d --wait` 能處理成功結束的一次性服務；`runs-init` 的實際容器設定（`docker inspect`）；以非預設的名稱與 project 實際執行搬移指令的檢查（`config --format json` 的格式、compose 的標籤）。
+
+**驗收標準**（第二次審查；全部通過才算機密性隔離驗收完成）：
+
+| # | 項目 | 離線（這個 PR） | 之後（另外授權） |
+|---|---|---|---|
+| 1 | worker 只掛載 `active/` | 部署測試 | Docker 驗證：通過（2026-11-11） |
+| 2 | DB 狀態與檔案位置相符 | 對帳表的每一列、I1–I3 | — |
+| 3 | 人工復原之前完成加密與完整性驗證 | `retry-evidence` 的每一步與中斷表 | — |
+| 4 | crash recovery 涵蓋 DB、rename 與 fsync 的中斷點 | 七個中斷點、對帳的身分驗證 | — |
+| 5 | 搬移工具確認實際 runs volume 的身分 | 假的 `docker` 執行 make target | Docker 驗證：通過（2026-11-11） |
+| 6 | `runs-init` 沒有繼承金鑰、環境設定與掛載 | 合併之後的設定逐項測試；以真的 compose 解析（F1 之後） | Docker 驗證：通過（2026-11-11） |
+| 7 | 搬移失敗保留明文並揭露，其他 run 不受影響 | 單元與整合測試 | — |
+| 8 | 超過 15 分鐘升級為緊急事件 | 只到升級（主動告警是 T35） | T35 |
+| 9 | Docker 實際驗證掛載、hard link 與 FD | — | Docker 驗證：通過（2026-11-11；FD 的結果見剩餘風險 1） |
+| 10 | Live 通過之前不把 T23a、SEC-14 標成完成 | 文件與 TASKS 維持未完成 | Live（T23c） |
+
+**Docker 實際驗證**（2026-11-11；使用者授權，限定在獨立、可拋棄的測試環境）：
+- **隔離的做法**：
+  - 獨立的 compose project `secscan-t23av`。`compose.yaml` 固定了 volume 與外部網路的名稱，只加 `-p` 會接到開發用的資源，所以測試 env 把 5 個具名 volume、2 個外部網路、映像 tag 與 port 都改成測試名稱；秘密都是新產生的測試值。
+  - compose 以清空的環境、指定的 env 檔執行。建立或刪除任何資源之前，先以 `config --format json` 確認每個名稱都是測試資源，也確認秘密都來自測試的 env 檔。
+  - migration 在測試容器內執行，只連測試 DB；`make runs-layout-migrate` 以 `-o env` 執行，不改 `.env`。
+  - 結束時 `down -v`，並刪除測試網路與映像。前後的 Docker 快照逐行相同，`.env` 沒有改變。
+
+| # | 項目 | 結果 | 證據 |
+|---|---|---|---|
+| 1 | worker 只掛載 `active/` | PASS | <ul><li>掛載是 `subpath=active`、唯讀；`/runs/..` 是容器自己的 `/`，看不到 `held/` 與 `.layout`。</li><li>以 keeper 的真實流程隔離深度 35 的目錄：第 3 次失敗之後搬到 `held/`，`isolated_at` 有值，inode 前後相同；之後 worker 在整個檔案系統都找不到它。</li><li>把根目錄掛給 worker 時，worker 以 exit 1 拒絕啟動。</li></ul> |
+| 2 | hard link 跨掛載點 | PASS | 掃描容器形狀的 `in/` 連到 `out/` 是 EXDEV（兩邊都可寫也是）；同一個掛載點的對照組成功；worker 從 `/runs` 連到 `/tmp` 是 EXDEV |
+| 3 | 搬移前後的 open FD | PASS（和剩餘風險 1 相符） | 見上方「open FD 與 hard link」 |
+| 4 | `runs-init` 的實際容器 | PASS | 環境變數只有映像預設的 7 個；`NetworkMode` 是 none；只掛載 runs volume；唯讀 rootfs、`CapDrop` 是 ALL、重啟政策是 no、uid 10001。有 `.layout` 但根目錄仍有 UUID 目錄時 exit 1 |
+| 5 | `config --format json`、volume 的標籤與名稱解析 | PASS；發現 F1 | 自訂名稱的 volume 也有兩個 compose 標籤。搬移指令以真的 Docker 執行：api 還在執行、已停止的容器仍使用 volume、project 改名，三種情況都拒絕；`DRY_RUN=1` 不改變任何東西；實際搬移完成並寫 audit；重跑不做任何事 |
+| 6 | `up -d --wait` 與啟動順序 | PASS；措辭 F2 | 舊 layout：回傳 1，runs-init exit 1，runner 與 worker 從未啟動。新 layout：回傳 0，順序是 runs-init 結束 → worker → runner |
+| 加測 | `retry-evidence`、retention-status | PASS | 在 `held/` 加密、搬回 `active/`，DB 依序寫入解除中與已解除；之後 worker 只看得到加密檔 |
+
+- **發現與處理**（2026-11-12，使用者核准方案 (a)）：
+  - **F1（LOW）**：`config runs-init --format json` 的輸出含有 `DB_PASSWORD`。compose 即使只查詢一個服務，也會輸出全部頂層的 `x-*`，而且是替換變數之後的值；`DB_PASSWORD` 原本在 `x-app-env`。make target 只把輸出放在 shell 變數、以 pipe 交給本機的解析程式，不會印出或寫進 log，實際的暴露很小，但「輸出不含金鑰」的說法不正確。
+    - 處理：`DB_PASSWORD` 移到 api、runner、worker 各自的 `environment`，`x-app-env` 只留不含秘密的連線設定；三個服務的 DB 連線設定不變。
+    - 回歸測試 `tests/unit/test_compose_secrets.py`：
+      - 靜態檢查：頂層的區段都不引用秘密，每個服務只在 `environment` 中引用自己需要的秘密。
+      - 以真的 `docker compose`、暫存的 project directory 與虛構的秘密解析：`config runs-init` 的輸出不含任何秘密，每個服務只拿到自己的秘密。這個測試不讀 `.env`，也不連 daemon。
+      - 在修正之前的 compose 上，這個測試有 3 項失敗。
+  - **F2（措辭）**：subpath `active` 不存在時，worker 容器可能成功建立，但無法啟動（直接 `docker start` 是 exit 128），不是「無法建立」。保護的效果相同，平常由 `runs-init` 先擋下；已修正 compose.yaml 的註解。
+  - **F3（剩餘風險 1 的補充）**：目錄 FD 看得到之後新增的檔案；同 uid 的程序可以經由 `/proc/<pid>/fd` 借用。已寫進上方「open FD 與 hard link」與剩餘風險 1，T23b 加上 FD 撤銷的驗收標準。
+- **觀察**（既有的設計，不是這次的修改）：
+  - 舊 layout 時 `up -d --wait` 回傳 1，但 db、api、guard、socket-proxy 已經啟動並留著；搬移指令會要求先 `make down`，和 README 的升級順序一致。
+  - 超過上限的目錄在隔離之前，keeper 不健康，runner 約 1 分鐘不認領新的 run（PR #35 的設計）。
+  - 驗證期間 Mac 用電池進入睡眠，Docker 停止回應約 20 分鐘；接上電源之後恢復。沒有重啟 OrbStack，不影響結果。
+
+**剩餘風險**：
+1. open FD（LOW，增量；細節見上方「open FD 與 hard link」）：
+   - 被攻陷的 worker 在隔離之前保留的檔案 FD 或目錄 FD 無法自動撤銷；rename 之後仍讀得到明文。
+   - 目錄 FD 也看得到隔離之後新增的檔案（目前只有加密檔）。
+   - 同一個 worker 容器內、同 uid 的程序可以經由 `/proc/<pid>/fd` 借用這些 FD。
+   - `..` 的逃逸被核心擋下。
+   - 目前只能重啟 worker（T23b：完整的 FD 撤銷）。
+2. 所有服務共用 uid 10001（T23b：uid 分離）。
+3. 主機與 Docker 的管理者讀得到 volume。
+4. `held/` 中的目錄保留明文，直到有人執行 `retry-evidence`（worker 讀不到）。
+5. 隔離之前的空檔：連續 3 次失敗約 1 分鐘，這段時間目錄在 `active/`；隔離中正常在同一輪（新增之後再對帳一次）或下一輪（約 10 秒）完成，這一輪的時間預算用完時留到下一輪。
+6. 搬移持續失敗時明文一直留在 `active/`、worker 讀得到；看得見（API、retention-status、audit），15 分鐘後升級為緊急狀態，但主動告警留待 T35，在那之前要有人執行 retention-status 或查看 log 才會發現，也不會自動阻擋其他 run。
+7. hard link 的檢查依賴掛載的邊界。
+8. `held/` 不被覆寫的保證依賴「只有一個可信的寫入者」：事前檢查與 rename 之間不是原子的，空的目的地會被 rename 取代（裡面沒有資料）。
+9. 主機的容器檢查與搬移之間不是原子的；volume 的身分只依賴主機端的 compose 標籤（容器內的名稱比對在 make target 下必然成立），有 Docker 權限的人可以改寫標籤。日後可以在容器內比對 `/proc/self/mountinfo`（需要 Docker 驗證確認格式）。
+10. Docker 驗證的範圍有兩項沒有涵蓋：
+    - **`make up` 本身沒有直接執行**：它會先執行改寫 `.env` 的 `make env`，而且指向開發 project。改在測試 project 上執行相同的 compose 指令，確認 `runs-init` 在實際啟動指令下的行為。
+    - **runner 實際產生的掃描容器設定沒有在 Docker 上執行**：這次沒有執行掃描（Live 另外授權）。hard link 改用相同掛載形狀的容器驗證。
+
+11. 降級：v0024 的 downgrade 在有隔離紀錄或 layout 搬移的 audit 時拒絕；但 `runs-init` 建立的新 volume 不寫 DB、偵測不到。降級之前要先把 `active/` 的目錄搬回根目錄、刪除 `.layout`，否則舊程式會把找不到的目錄記成「沒有目錄」（資料庫審查 M1）。
+12. **搬移的前提會和啟動的阻擋互相卡住**（資料庫審查 M2）：runner 異常結束（OOM、Mac 睡眠讓 OrbStack 停止回應、kill -9）時，可能留下容器還沒確認刪除的 run；搬移指令依核准的前提拒絕，而新版的 runner 在舊的 layout 上不會啟動、無法對帳。使用者 2026-11-11 決定**維持原本的前提**，不放寬；無法安全對帳時不刪除紀錄、不略過檢查，明確報錯並提供人工修復的程序（README 與下方）。驗證（`tests/integration/test_runs_layout_recovery.py`）：
+   - 對帳的程式（`ContainerReconciler`）新版與舊版相同，只依 DB 的容器名稱與 Docker 的 label 判斷，和 runs volume 的 layout 無關：label 相符才刪除、刪除之後才結算；404 才算不存在；同名但 label 不符的容器不動；Docker 不可用時不結算。所以新版的 runner 在 layout 搬移之後能安全對帳舊版留下的 run，但搬移之前不會啟動。
+   - OOM／kill -9（lease 還有效）、lease 過期、容器還在、容器已刪除、Docker 不可用：搬移都正確地拒絕或在對帳之後完成。
+   - 原本寫的脫困方式（切回舊版執行 `make up`）在 `make migrate` 之後**不可行**：舊版的 runner 只接受 0023 的 schema。修正後的程序要先降回 0023（這時一定沒有 v0024 的資料，降級會成功；被拒絕就停止）。
+   - `make up`／`make down` 的實際執行需要 Docker，屬於另外授權的驗證（決策 3）；離線只以假的 `docker` 驗證 make target 的檢查。
+   - 日後的選項（需要使用者決定）：新版提供只做容器對帳的指令（以 socket-proxy 存取 Docker、不碰 runs volume、不認領 run），就不必切回舊版與降級。
+
+
+
+**審查與處理**（2026-11-11，opus，審查未 commit 的 diff；三份都沒有 CRITICAL 或 HIGH）：
+
+| 意見 | 處理 |
+|---|---|
+| 程式碼 M1、安全 MEDIUM-1：對帳只取最舊的 500 筆，已隔離的紀錄累積之後，新的隔離中紀錄排不到、也不會升級（共用 DB 角色時，被攻陷的 worker 可以插入假紀錄放大這個問題） | 隔離中的紀錄先處理、分頁到全部完成；緊急升級改成每一輪直接查 DB。加上「超過一頁的已隔離紀錄不會擋住隔離中的紀錄」的測試 |
+| 程式碼 M2：換版先處理完 `active/` 才列出 `held/`，`held/` 列不出來時回報「沒有換版任何檔案」卻已換了一部分 | 兩個區域都先列出，才開始換版；加測試 |
+| 資料庫 M1：已經搬到新的 layout、沒有隔離紀錄時，降級擋不住 | 降級也檢查 `runs_layout.*` 的 audit；`runs-init` 建立的 volume 偵測不到，寫進剩餘風險 11 |
+| 資料庫 M2：搬移的前提和啟動的阻擋互相卡住 | 使用者決定維持前提；lease 與未確認刪除的容器分開回報，訊息指向 README 的人工修復程序（先降回 0023、以舊版對帳）；OOM、kill -9、lease 過期、容器已刪除與 Docker 不可用的測試；寫進剩餘風險 12 |
+| 安全 LOW-1：worker 沒有在執行時確認自己只看得到 `active/` | worker 啟動時以 lstat 確認看不到 `held/` 與 `.layout`，否則不啟動；加測試 |
+| 安全 LOW-2：「只有加密檔」不檢查 `sealed/` 中點開頭的條目 | `require_sealed_only`：`sealed/` 只能有 64 個十六進位字元名稱的一般檔案；`retry-evidence` 搬回前後都用它 |
+| 程式碼 L3、安全 LOW-3：`HoldMoves.move` 沒有用到目的地參數 | 來源與目的地相同時拒絕，方向由兩個參數決定；加測試 |
+| 安全 LOW-4：容器內的 volume 比對是同義反覆 | 修正文件的說法（真正的身分檢查是主機端的標籤）；mountinfo 的比對列為日後的選項 |
+| 程式碼 L1：搬移收尾時一筆身分不符就整個中止；UUID 名稱、但不是目錄的條目會造成無法完成的迴圈 | 身分不符的紀錄不寫入、繼續其他的（交給 keeper 的對帳）；這類條目在計畫階段就列為阻擋、不做任何改變；加測試 |
+| 程式碼 L2：重新隔離的 audit 寫入失敗之後不會補寫 | 留到下一輪再寫；加測試 |
+| 程式碼 L4：held/ 寫入者的靜態檢查沒涵蓋 `for … in Area` | 檢查加上區域的走訪，白名單加上 vault、換版與 worker 的自我檢查（只讀） |
+| 資料庫 L1：統計查詢用不到部分索引 | 還沒解除的條件移到 WHERE |
+| 資料庫 L2：測試缺口 | 補上：搬移失敗的時間由 DB 決定、no-op 更新被拒絕、降級之後的函式和 0023 完全相同 |
+| 資料庫 L3：共用的 DB 角色可以停用 trigger | 既有的限制，已列在 T23b |
+
+**修正之後的空轉檢查**：18 項重新執行，全部被抓到。
+
+**runner 異常結束之後的人工修復**（OOM、kill -9、Mac 睡眠讓 OrbStack 停止回應之後，`make runs-layout-migrate` 回報「容器還沒確認刪除」時）：搬移指令不刪紀錄、不略過檢查，必須先讓 runner 對帳（Docker 確認容器已刪除，或刪除這個 run 的容器，才結算）。新版的 runner 在舊的 layout 上不會啟動，而舊版的 runner 只接受 0023 的 schema，所以：
+1. `make down`。
+2. `uv run alembic downgrade 0023`：只有沒有 v0024 的隔離資料、也沒有執行過 layout 搬移時才會成功（搬移指令在寫入任何東西之前就拒絕，所以這時會成功）；被拒絕就停止，改為人工確認，不要強制降級。
+3. 切回升級之前的版本（例如 `git switch --detach 61a5cd3`），先確認沒有排隊中的 scan（舊版的 runner 會認領它們），再 `make up`；runner 啟動時就對帳，log 出現「容器已確認不存在：已結算」。Docker 不可用時不會結算，先修復 Docker。
+4. `make down`，切回新的版本，`make migrate`，再執行 `make runs-layout-migrate DRY_RUN=1`：它會再檢查一次；仍有未確認的容器就重複第 1 到 4 步。
+5. `make runs-layout-migrate`，`make up`。
