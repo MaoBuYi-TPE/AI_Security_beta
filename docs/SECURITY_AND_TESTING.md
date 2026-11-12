@@ -256,7 +256,7 @@ T06 已涵蓋 target 與 scope grant：
 - **SEC-02、SEC-05**：T06 只完成應用層（origin 的嚴格解析，以及 grant 綁定 origin 與 IP）；T07 把規格的 `servers` 改綁到 target 的 origin，並拒絕其他會讓工具連到別處的欄位。guard 的檢查與實際收包證據要到 M2，工具實際讀到的規格在 M3 驗證。
 - **SEC-11**：T07 完成規格解析的部分（拒絕外部參照、大小與深度的上限，平台不讀檔也不連網）。工具（ZAP、Schemathesis）對規格的實際行為，包含參照炸彈，在 M3、M6 以容器的資源上限與 guard 的收包紀錄驗證。
 - **SEC-17**：T07 只涵蓋上傳的規格（JSON、YAML）；T15 涵蓋 ZAP 的 JSON 報告與 log（§4.1、§4.2）；**T18 涵蓋 Nuclei 的 JSONL（逐行嚴格解析、壞行整份 OUTPUT_INVALID、大小上限）**；**T21 涵蓋平台報告的安全呈現**（§4.3 的 REPORT 表：JSON 跳脫、Markdown 以 CommonMark 實際解析的 token 不變式、Hypothesis 與惡意輸入集合、8 MiB 上限）；Schemathesis 的輸出在 M6 之後。
-- **SEC-14**：T21 補上平台報告這一側（canary 不出現在 JSON 與 Markdown，§4.3 的 REPORT-01）；**T23a 的離線部分已實作（`DECISIONS.md` §30）：原始證據在 run 結束（解析完成、失敗或逾期）之後以只給 runner 的金鑰加密、7 天後清除；報告內容與人工複測摘錄以只給 api 與 worker 的金鑰加密、30 天後清除；三組平台金鑰分開、可換版；`benchmarks/results` 以本機的 bench 金鑰加密（§4.3 的 KEY、SEAL、EVID、CONT、RET、ROT、BSEAL 表）。這不是全程靜態加密：執行、收集與等待解析期間是明文（§8 的剩餘風險）。T23a 的 Live 尚未執行，**SEC-14 不標完成**。**T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；**T18 完成 Nuclei 的 JSONL 輸出與觀察（runner 以 `SecretMasker` 做位元組級遮罩、parser 以 `redact_text`／`redact_url` 做文字層遮罩，涵蓋 extracted-results／request／response／curl-command，`DECISIONS.md` §24.3）**；Schemathesis 的 token 在 M6 之後，不標成完成。
+- **SEC-14**：T21 補上平台報告這一側（canary 不出現在 JSON 與 Markdown，§4.3 的 REPORT-01）；**T23a 的離線部分已實作（`DECISIONS.md` §30）：原始證據在 run 結束（解析完成、失敗或逾期）之後以只給 runner 的金鑰加密、7 天後清除；報告內容與人工複測摘錄以只給 api 與 worker 的金鑰加密、30 天後清除；三組平台金鑰分開、可換版；`benchmarks/results` 以本機的 bench 金鑰加密（§4.3 的 KEY、SEAL、EVID、CONT、RET、ROT、BSEAL 表）。這不是全程靜態加密：執行、收集與等待解析期間是明文（§8 的剩餘風險）。T23a 的 Live 在 2026-11-12 通過，T23a 完成；**SEC-14 仍不標完成**，P0 的完成條件見 `DECISIONS.md` §30.14。**T08 只完成平台自己的 API、日誌、audit 與 DB（以 canary 測試）；T15 完成 ZAP 的輸出與觀察（以已知的 secret 值精確遮罩，`DECISIONS.md` §19.5）；**T18 完成 Nuclei 的 JSONL 輸出與觀察（runner 以 `SecretMasker` 做位元組級遮罩、parser 以 `redact_text`／`redact_url` 做文字層遮罩，涵蓋 extracted-results／request／response／curl-command，`DECISIONS.md` §24.3）**；Schemathesis 的 token 在 M6 之後，不標成完成。
 - **SEC-15**：T08 只把認證設定綁定 target，並拒絕會影響連線、代理、路由或 method 的 header；secret 只送往核准的 origin、跨 origin 的 redirect 不轉送，要到 M2 的 guard 以接收端證明。
 - **SEC-12**：T10 完成映像、指令、環境變數、輸入檔與掛載的驗證（unit），以及真的 Docker 上「被拒的設定沒有產生容器」（live）。Nuclei 模板的 allowlist 已在 **T17** 凍結（清單＋每檔 sha256＋`-ni -duc -pt http` 等執行設定，`DECISIONS.md` §23；清單外的模板一律不執行）；**T18 把凍結的 42 個模板以 InputFile 掛進 `/scan/in`、admission 以每檔 `ContentDigest` 核准（清單外的模板無法掛載，不用 `-id`），並加 `-dut` 只跑簽章模板（§24.2）**。
 - **SEC-18**：T10 涵蓋 runner 的收集（symlink、hardlink、特殊檔、大小）；T15 涵蓋遮罩的兩階段與 worker 只讀 manifest 列出的檔案；**T21 不提供 artifact 下載**（只能以 report id 下載平台產生的報告，`?path=`、`?storage_key=` 不影響結果，`/artifacts/{id}/download` 回 404，§4.3 的 REPORT-05）。
@@ -452,7 +452,7 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 - KEY-01：EVIDENCE 與 CONTENT 共用金鑰時，每個 admin 指令與 `make migrate` 都停止（格式錯誤留給各指令說明）。
 - BSEAL-01：bench 金鑰檔以 O_NOFOLLOW 開檔、對 fd 檢查（檢查之後換成 symlink 也讀不到別的檔案）；上層目錄別人可以寫入、是 symlink 或不存在時拒絕；放在結果目錄中時拒絕。
 
-空轉檢查（故意改壞之後必須有測試失敗，確認之後改回、不提交）：拿掉「先驗證才刪除」、容器確認刪除之前就加密、到期之前就清除、拿掉最後一塊的檢查、逾期改從最後一次 `collected` 起算、加密失敗時引擎仍然可用——六項都被抓到。Live 的證據斷言（`tests/live/evidence_assertions.py`：run 目錄只剩密文、沒有 canary、export 的 sha256 等於 artifact）已更新，**尚未執行**，需要使用者另外授權（§4.4）。
+空轉檢查（故意改壞之後必須有測試失敗，確認之後改回、不提交）：拿掉「先驗證才刪除」、容器確認刪除之前就加密、到期之前就清除、拿掉最後一塊的檢查、逾期改從最後一次 `collected` 起算、加密失敗時引擎仍然可用——六項都被抓到。Live 的證據斷言（`tests/live/evidence_assertions.py`：run 目錄只剩密文、沒有 canary、export 的 sha256 等於 artifact）已更新，2026-11-12 在 `make test-live-fixture-findings` 與 `make test-live-fixture-rescan` 中執行通過。export 的 sha256 比對只在 findings 中執行（`DECISIONS.md` §30.13 的「Live 驗收」）。
 
 ### 4.4 Live E2E
 
@@ -728,11 +728,16 @@ T31 的 manifest（`DECISIONS.md` §29.3）記錄規格的 sha256、種子與實
 
 清除只刪除內容：metadata、sha256、遮罩過的觀察、finding 與比較快照都保留。`secscan-admin retention-status` 列出各狀態的數量。
 
-**隔離目錄的機密性隔離（`DECISIONS.md` §30.13）**：離線實作完成（EVID-10–12；審查的四個反例：搬回 `active/` 之後當機、搬移之前還有一次性掃描容器、搬移時目的地突然出現同名的非空目錄、`runs-init` 看到 `.layout` 但根目錄仍有 UUID 目錄，都有測試）。Docker 的實際驗證已在獨立的測試環境通過（2026-11-11），發現的 F1–F3 已修正（2026-11-12）：F1 是 `config runs-init` 的輸出含有 `DB_PASSWORD`，回歸測試 `test_compose_secrets`。**Live 需要另外授權，通過之前 T23a 與 SEC-14 不標完成。**
+**隔離目錄的機密性隔離（`DECISIONS.md` §30.13）**：離線實作完成（EVID-10–12；審查的四個反例：搬回 `active/` 之後當機、搬移之前還有一次性掃描容器、搬移時目的地突然出現同名的非空目錄、`runs-init` 看到 `.layout` 但根目錄仍有 UUID 目錄，都有測試）。Docker 的實際驗證已在獨立的測試環境通過（2026-11-11），發現的 F1–F3 已修正（2026-11-12）：F1 是 `config runs-init` 的輸出含有 `DB_PASSWORD`，回歸測試 `test_compose_secrets`。**Live 在 2026-11-12 通過**：
+- **證據**：
+  - 兩項 Live 的證據斷言；
+  - Live 期間 worker 的獨立檢查：subpath `active` 唯讀，`held/` 的四種路徑都是 ENOENT。
+- **限制**：兩項 Live 的 `held/` 都是空的。非空 `held/` 的負向存取，以 2026-11-11 Docker 驗證的紀錄為證據，兩者互補（`DECISIONS.md` §30.13、§30.14）。
+- **狀態**：T23a 完成，SEC-14 仍不標完成。
 
 剩餘風險：
-- **open FD（LOW，增量）**：被攻陷的 worker 在隔離之前開啟並保留的檔案 FD 或目錄 FD 無法自動撤銷，rename 之後仍讀得到明文。目錄 FD 也看得到隔離之後新增的檔案（目前只有加密檔）。同一個 worker 容器內同 uid 的程序，可以經由 `/proc/<pid>/fd` 借用。`..` 的逃逸被核心擋下。目前只能重啟 worker；完整的 FD 撤銷與驗收標準見 T23b。
-- 其他：所有服務共用 uid 10001；隔離之前約 1 分鐘、以及搬移持續失敗時，明文在 `active/`、worker 讀得到（看得見，15 分鐘後升級為緊急狀態，主動告警留待 T35）；`held/` 不被覆寫依賴只有 runner 寫入；主機的容器檢查與搬移之間不是原子的，volume 的身分依賴 compose 的標籤。
+- **open FD（LOW，增量）**：被攻陷的 worker 在隔離之前開啟並保留的檔案 FD 或目錄 FD 無法自動撤銷，rename 之後仍讀得到明文。目錄 FD 也看得到隔離之後新增的檔案（目前只有加密檔）。同一個 worker 容器內同 uid 的程序，可以經由 `/proc/<pid>/fd` 借用。`..` 的逃逸被核心擋下。目前只能重啟 worker；完整的 FD 撤銷與驗收標準見 T23b-b3（不可省略，`DECISIONS.md` §30.14）。
+- 其他：所有服務共用 uid 10001（uid 分離也在 T23b-b3，不可省略）；隔離之前約 1 分鐘、以及搬移持續失敗時，明文在 `active/`、worker 讀得到（看得見，15 分鐘後升級為緊急狀態，主動告警留待 T35；搬移持續失敗的處置程序與接受標準是提議，在 T23c 驗證，見 §30.14）；`held/` 不被覆寫依賴只有 runner 寫入；主機的容器檢查與搬移之間不是原子的，volume 的身分依賴 compose 的標籤。
 
 **SEC-14 的剩餘風險（T23a 之後；`DECISIONS.md` §30.9）**：
 1. **不是全程靜態加密**：run 執行、收集、等待解析期間是明文；runner 停機或 Docker 無法確認容器已刪除時持續到恢復為止。原因是 ZAP 與 Nuclei 只能寫一般檔案，runner 要在容器結束之後讀取並遮罩、worker 再讀取解析。改善方向：主機全碟加密（FileVault／LUKS，T23b 的部署要求）；未來以每個 run 的 tmpfs `out/` 加輔助容器加密、加密的 sidecar，或讓 worker 讀加密檔（和目前的最小權限分配衝突）。
@@ -741,7 +746,7 @@ T31 的 manifest（`DECISIONS.md` §29.3）記錄規格的 sha256、種子與實
 4. **掃描容器的 json-file log** 在容器刪除之前可能保留 Nuclei 沒有遮罩的 stdout（T23b）。
 5. **保持現狀的明文**：`observations` 中遮罩過的證據（含 Nuclei 擷取的 email 與卡號）、guard telemetry 的路徑（tmpfs、6 小時）、摘錄沒有加 salt 的雜湊；報告與摘錄下載的回應是明文（TLS 由部署負責）。
 6. **本機研究資料**：`recordings/` 與 `runs/spike-t03/work/` 交給 T34。
-7. **超過上限的單一目錄**（使用者決定方案 B，`DECISIONS.md` §30.12）：深度、條目數或路徑總長度超過上限時，keeper 連續 3 次失敗之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄保留明文直到有人以 `retry-evidence` 處理，而且**在完成掛載範圍的隔離之前 worker 仍讀得到**（使用者決定的安全驗收阻擋條件；DB 的隔離只是工作流程的隔離）；不做全域熔斷，告警在 T35；計數只在記憶體中（重啟會重新計數，`runner --once` 不會隔離）；超過深度 64、條目 50,000 或路徑總長度 16M 字元的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密；runs volume 的目錄數量超過上限、清除失敗與其他種類的加密失敗仍然全域 fail closed。
+7. **超過上限的單一目錄**（使用者決定方案 B，`DECISIONS.md` §30.12）：深度、條目數或路徑總長度超過上限時，keeper 連續 3 次失敗之後隔離這個目錄、改成需要人工處理，其他 run 恢復認領。剩下的風險：隔離的目錄保留明文直到有人以 `retry-evidence` 處理，掛載範圍的隔離已驗收（`DECISIONS.md` §30.13），但搬到 `held/` 之前（隔離中約 1 分鐘，或搬移持續失敗時）worker 仍讀得到；不做全域熔斷，告警在 T35；計數只在記憶體中（重啟會重新計數，`runner --once` 不會隔離）；超過深度 64、條目 50,000 或路徑總長度 16M 字元的樹不在系統內處理；孤兒目錄的解除 DB 無法確認已加密；runs volume 的目錄數量超過上限、清除失敗與其他種類的加密失敗仍然全域 fail closed。
 8. **runner 指到可寫、但不是 runs volume 的目錄**時，找不到目錄的 run 仍會被記成 none（DB 分不出「從來沒有目錄」與「目錄不見了」）。
 9. **金鑰在主機上**：`.env`（600）與家目錄中的 bench 金鑰檔；遺失之後尚未清除的資料都無法復原，備份由使用者負責。
 
@@ -753,7 +758,7 @@ Gate B：SEC-01 至 SEC-20 適用測試有結果；未支援能力明確關閉�
 
 Gate C：取消/故障/重送/partial 狀態測試通過。
 
-Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者審閱樣本報告的結論是核心安全語意通過、有條件通過，兩個措辭已修正（§28.17）。**通過（2026-11-08，接受有文件記錄的替代證據，`DECISIONS.md` §28.17）**：partially_completed 與 timed_out 由兩次 Live rescan 驗證；fixture 的 Live 不會產生 completed 的 scan，completed 改以 DB 整合測試驗證，走真實的 API、worker、渲染與下載流程，並直接套用 Live 的報告核對（§4.3 的 REPORT-03）。這個替代方案只適用於 Gate D 的報告正確性與措辭驗收，不宣稱已完成 completed 的 Live 端到端驗證。Gate D 通過不代表 M5 完成：SEC-14（T23a 的離線部分已實作、Live 尚未執行，SEC-14 仍不標完成）、權限與速率限制（T23b）、Gate E（T23d）與 T23 的 DoD 仍未完成，Gate A–C 尚未正式判定。）
+Gate D：去重與複掃的反例測試通過，報告無未驗證誇大敘述。（T20：去重反例已通過，§4.3 的 DEDUP 表；T22：RESCAN 離線反例與三次 live 校準＋最終執行已通過，§4.4；T21：報告的離線與 DB 測試已實作（§4.3 的 TRIAGE／REPORT 表），兩次 `make test-live-fixture-rescan` 的報告核對已通過（`DECISIONS.md` §28.15）；使用者審閱樣本報告的結論是核心安全語意通過、有條件通過，兩個措辭已修正（§28.17）。**通過（2026-11-08，接受有文件記錄的替代證據，`DECISIONS.md` §28.17）**：partially_completed 與 timed_out 由兩次 Live rescan 驗證；fixture 的 Live 不會產生 completed 的 scan，completed 改以 DB 整合測試驗證，走真實的 API、worker、渲染與下載流程，並直接套用 Live 的報告核對（§4.3 的 REPORT-03）。這個替代方案只適用於 Gate D 的報告正確性與措辭驗收，不宣稱已完成 completed 的 Live 端到端驗證。Gate D 通過不代表 M5 完成：SEC-14（T23a 已在 2026-11-12 完成，SEC-14 仍不標完成）、權限與速率限制（T23b）、Gate E（T23d）與 T23 的 DoD 仍未完成，Gate A–C 尚未正式判定。）
 
 Gate E：以乾淨環境（新 clone、新 volume）重建 smoke test，版本/輸出可追溯；可能的話，請同學依文件獨立重建一次。
 

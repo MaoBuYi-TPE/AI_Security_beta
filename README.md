@@ -362,9 +362,9 @@ observation 是不可變的單次觀察；finding 是 target 層級、跨掃描�
 - `make bench-evaluate BENCH_NAME=… BENCH_TRUTH=<ground truth>`：離線、只讀結果目錄，評估以 JSON 寫到 stdout（另有選填的 `BENCH_ADJUDICATIONS`、`BENCH_PAIR_LABELS`、`BENCH_INCLUDE_HOLDOUT`）。正式的 ground truth 比對檔與預算由 T27 凍結；smoke 的數字不是實驗結果。
 - 決策見 `docs/DECISIONS.md` §29，契約見 `docs/API_CONTRACT.md` §17.1，測試見 `docs/SECURITY_AND_TESTING.md` §4.3 的 BUDGET／BENCH 表。
 
-#### 資料保護（T23a，進行中）
+#### 資料保護（T23a）
 
-T23a 的離線實作已完成，**Live 尚未執行，T23a 與 SEC-14 都不標完成**。設計見 `docs/DECISIONS.md` §30，測試見 `docs/SECURITY_AND_TESTING.md` §4.3 的 KEY／SEAL／EVID／CONT／RET／ROT／BSEAL 表，剩餘風險見同一份文件的 §8。
+T23a 已完成（2026-11-12）：兩項 Live 與 worker 的掛載檢查都通過，見 `docs/DECISIONS.md` §30.13 的「Live 驗收」與 §30.14。**SEC-14 仍未完成**，P0 的完成條件見 §30.14。設計見 `docs/DECISIONS.md` §30，測試見 `docs/SECURITY_AND_TESTING.md` §4.3 的 KEY／SEAL／EVID／CONT／RET／ROT／BSEAL 表，剩餘風險見同一份文件的 §8。
 
 - **原始證據（runs volume）是 run 結束之後才加密，不是全程靜態加密**：掃描、收集與等待解析期間是明文。run 結束（解析完成、失敗或逾期）、容器確認刪除之後，runner 的背景執行緒在約 10–20 秒內把目錄加密成 `sealed/`、驗證之後才刪除明文，7 天後刪除整個目錄。worker 停擺時，等待解析超過 60 分鐘的 run 以 `PARSE_DEADLINE_EXCEEDED` 結束並加密。加密失敗時明文保留、API 顯示 `pending`，runner 不認領新的 run（`GET /api/v1/scanners` 顯示 `EVIDENCE_SEALING_FAILED`）。
 - **API**：`GET /api/v1/scans/{id}` 的 `engines[].evidence`（none／pending／sealed／purged／manual_intervention_required，以及隔離紀錄 `hold`）；finding 來源追溯的 artifact 有 `encrypted`、`purged_at`。原始輸出沒有下載 API。
@@ -376,7 +376,7 @@ T23a 的離線實作已完成，**Live 尚未執行，T23a 與 SEC-14 都不標�
   2. `uv run alembic downgrade 0023`：只有沒有 v0024 的隔離資料、也沒有執行過 layout 搬移時才會成功（搬移指令在寫入任何東西之前就拒絕，所以這時會成功）；被拒絕就停止，改為人工確認，不要強制降級。
   3. 切回升級之前的版本（例如 `git switch --detach 61a5cd3`），先確認沒有排隊中的 scan（舊版的 runner 會認領它們），再 `make up`；runner 啟動時就對帳，log 出現「容器已確認不存在：已結算」。Docker 不可用時不會結算，先修復 Docker。
   4. `make down`，切回新的版本，`make migrate`，再執行 `make runs-layout-migrate DRY_RUN=1`：它會再檢查一次；仍有未確認的容器就重複第 1 到 4 步。
-  5. `make runs-layout-migrate`，`make up`。**Docker 的實際驗證已在獨立的測試環境通過（2026-11-11）；Live 需要另外授權，通過之前機密性隔離不算驗收完成。**
+  5. `make runs-layout-migrate`，`make up`。**機密性隔離的 Docker 實際驗證（2026-11-11，獨立的測試環境，`held/` 中有隔離的資料）與 Live 驗收（2026-11-12）都已通過。**全新、空的 runs volume 不需要搬移，`runs-init` 會直接建立新的 layout。
 - **保留期限**（1–365 天，`.env` 中可調整）：`EVIDENCE_RETENTION_DAYS`（預設 7）、`REPORT_RETENTION_DAYS`（30）、`EXCERPT_RETENTION_DAYS`（30）；`EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60）是等待解析的上限。既有的資料從升級之後才開始計時，升級不會立刻刪除任何東西。刪除只是 unlink，不抹除磁碟的資料區塊；DB 的 WAL 與備份會保留舊資料。
 - **管理指令**（`docs/API_CONTRACT.md` §20）：
   - `uv run secscan-admin check-encryption-keys`：檢查三組金鑰合法、互不共用，只顯示數量。
