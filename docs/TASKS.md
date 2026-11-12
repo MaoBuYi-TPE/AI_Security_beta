@@ -1580,6 +1580,9 @@
         - runs volume 分成 `active/`／`held/`，worker 只掛載 `active/`；以隔離的中間狀態、原子 rename、重啟對帳與完整的 crash recovery 測試，保證 DB 與檔案系統一致；檢查 symlink、hard link、已開啟的檔案描述符與 runner／keeper 的權限邊界；搬移失敗不影響其他 run。
         - 既有資料由使用者在服務停止、migration 完成之後手動執行管理員指令搬移（可重複執行、dry-run、audit、路徑驗證、中斷復原、只搬 UUID 目錄）；搬移沒有完成時，服務不得以新的目錄結構啟動；不允許 runner 自動搬移。
         - 細部計畫先提出、由使用者核准。目前的 PR 合併不代表這一項完成：**新 PR 驗收之前，禁止把沒有這項防護的功能正式部署**；完成之前 T23a 不通過安全驗收、不宣稱風險已消失，T23a 與 SEC-14 都不標完成。
+          - **註（2026-11-12）**：上一行是 2026-11-10 當時的狀態，保留作為決策紀錄。
+            - T23a 的阻擋已經由 2026-11-12 的驗收結果取代（下方的「驗收」、`DECISIONS.md` §30.14）。
+            - 仍然有效：不宣稱風險已消失（剩餘風險見 §30.13）、SEC-14 不標完成。
         - 2026-11-11 使用者核准計畫（兩次審查的修正都已納入），**離線實作完成**（`DECISIONS.md` §30.13）：
           - `runner/layout.py`（`.layout`、`active/`、`held/` 的檢查與初始化）、`runner/hold_moves.py`（dir fd 的搬移、inode 比對、fsync、身分驗證）、`runner/isolation.py`（keeper 每一輪的對帳、搬移失敗的紀錄、15 分鐘的緊急升級）、v0024（6 個欄位、9 個 CHECK、trigger 的五種轉換）、API 的 `hold.stage`。
           - `retry-evidence` 的新流程（在 `held/` 加密並驗證 → 開始解除 → 搬回 → 再驗證 → 解除）、`init-runs-layout`（compose 的 `runs-init`：獨立、最小的服務）、`migrate-runs-layout` 與 `make runs-layout-migrate`（以和 `make up` 相同的設定解析實際的 volume、確認標籤與使用者）、retention-status 的「隔離未完成」段落、worker 只以 subpath 掛載 `active/`。
@@ -1608,6 +1611,11 @@
       - 使用者在 `c5988fe` 執行完整的 `make test`：7,586 passed、2 skipped、78 deselected，coverage 98.74%。
       - `make lint`、`make typecheck` 都 exit 0。
       - 兩項 Live 與 worker 的檢查（上方）。
+      - 本機證據的核對（合併之前，2026-11-12；`DECISIONS.md` §30.14 的「PR #37 審查意見的處理」）：
+        - 原始紀錄在 gitignore 的 `recordings/`，不提交；
+        - SUMMARY.md 列出的 12 個檔案，sha256 都相符；
+        - 完整的清單是 `recordings/t23a-live/MANIFEST.sha256`（36 個檔案）；
+        - 11/11 的摘錄從 transcript 重新擷取，內容相同。
       - T23a 完成不代表 SEC-14 完成：P0 的完成條件見 `DECISIONS.md` §30.14，剩餘風險見 §30.9。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
     - 2026-11-12 拆成 b1–b4。b1 的範圍由使用者決定；其他各項在細部計畫時確認。SEC-14 的 P0 需要 b1–b3（`DECISIONS.md` §30.14）。
@@ -1620,7 +1628,9 @@
       4. 記錄剩餘風險：三個服務仍共用 `secscan_app`，DDL／DML 分權不是服務級的隔離。
       - PostgreSQL 的物件擁有者有特殊權限，不能只靠 `REVOKE`：目前 `secscan_app` 擁有資料庫與所有物件。
     - [ ] b2（提議）：compose secrets、掃描容器的 log driver、主機全碟加密的部署要求。
-    - [ ] b3（提議）：uid 分離與完整的 FD 撤銷（下方兩項）。
+    - [ ] b3（分組是提議）：uid 分離與完整的 FD 撤銷（下方兩項）。
+      - 這兩項**不可省略**：它們是 SEC-14 P0 的必要條件，不能以接受剩餘風險取代。
+      - 依據：使用者 2026-11-12 審查 PR #37 的意見，`DECISIONS.md` §30.14。
     - [ ] b4（提議）：API 的安全 header、以每個 key 計的速率限制與並行上限。
     - [ ] 服務級的 DB 角色（b3 之後的另一個子項目）：api、worker、runner 各自的角色。
     - [ ] uid 分離：runner、worker、api 與掃描容器不再共用 uid 10001（`DECISIONS.md` §30.13 的剩餘風險 2）。
@@ -1643,6 +1653,11 @@
            - 解析進行中開始隔離；
            - 正常的解析流程不受影響。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
+    - [ ] 搬移持續失敗的處置程序與接受標準（§30.13 的剩餘風險 6；使用者 2026-11-12 審查 PR #37 的意見）：
+      - **風險**：明文一直留在 `active/`，worker 讀得到。
+      - **處置與接受標準**：是提議，見 `DECISIONS.md` §30.14。
+        - 處置程序要寫進 README，並在 Docker 上以故障注入驗證；
+        - 接受與否在 SEC-14 的 P0 驗收時由使用者確認。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。
   - DoD：安全負向測試全通過；整體 coverage ≥ 80%、核心模組 branch coverage ≥ 90%；原始證據加密；文件與 API 一致；乾淨環境重建通過。
 - [ ] T34 本機研究資料的安全盤點（2026-11-09 由 T23a 新增，獨立於 T23 的 DoD；`DECISIONS.md` §30.10）。
@@ -1651,6 +1666,7 @@
 - [ ] T35 隔離的告警與有範圍的停用（2026-11-10 由 T23a 方案 B 新增；`DECISIONS.md` §30.12）。
   - 第一次隔離就產生安全告警；例如 15 分鐘內 3 個不同目錄被隔離時，升級成高優先級告警，但不自動停機（門檻是初始建議，依實際執行量調整）。
   - 告警的輸入也包含 §30.13 的緊急事件：隔離中（明文仍在 `active/`）超過 15 分鐘時，keeper 已寫 CRITICAL log 與 audit `evidence.isolation_overdue`、retention-status 已列為需要緊急處理；T35 負責把它變成主動的通知。
+    - SEC-14 的 P0 之前是否必須完成這一項：由使用者在 SEC-14 驗收時決定，見 `DECISIONS.md` §30.14 的接受標準 3。
   - 「有範圍的熔斷」：針對異常的 scanner、worker 或來源停止認領，而不是停止整個 keeper；不做全域自動熔斷（少數異常目錄就讓整個系統停止，會形成新的 DoS 攻擊面）。
   - 細部計畫另外提出、由使用者核准。
 
