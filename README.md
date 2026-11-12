@@ -376,7 +376,7 @@ T23a 的離線實作已完成，**Live 尚未執行，T23a 與 SEC-14 都不標�
   2. `uv run alembic downgrade 0023`：只有沒有 v0024 的隔離資料、也沒有執行過 layout 搬移時才會成功（搬移指令在寫入任何東西之前就拒絕，所以這時會成功）；被拒絕就停止，改為人工確認，不要強制降級。
   3. 切回升級之前的版本（例如 `git switch --detach 61a5cd3`），先確認沒有排隊中的 scan（舊版的 runner 會認領它們），再 `make up`；runner 啟動時就對帳，log 出現「容器已確認不存在：已結算」。Docker 不可用時不會結算，先修復 Docker。
   4. `make down`，切回新的版本，`make migrate`，再執行 `make runs-layout-migrate DRY_RUN=1`：它會再檢查一次；仍有未確認的容器就重複第 1 到 4 步。
-  5. `make runs-layout-migrate`，`make up`。**Docker 的實際驗證與 Live 需要另外授權，通過之前機密性隔離不算驗收完成。**
+  5. `make runs-layout-migrate`，`make up`。**Docker 的實際驗證已在獨立的測試環境通過（2026-11-11）；Live 需要另外授權，通過之前機密性隔離不算驗收完成。**
 - **保留期限**（1–365 天，`.env` 中可調整）：`EVIDENCE_RETENTION_DAYS`（預設 7）、`REPORT_RETENTION_DAYS`（30）、`EXCERPT_RETENTION_DAYS`（30）；`EVIDENCE_PLAINTEXT_MAX_MINUTES`（預設 60）是等待解析的上限。既有的資料從升級之後才開始計時，升級不會立刻刪除任何東西。刪除只是 unlink，不抹除磁碟的資料區塊；DB 的 WAL 與備份會保留舊資料。
 - **管理指令**（`docs/API_CONTRACT.md` §20）：
   - `uv run secscan-admin check-encryption-keys`：檢查三組金鑰合法、互不共用，只顯示數量。

@@ -1582,12 +1582,33 @@
           - `runner/layout.py`（`.layout`、`active/`、`held/` 的檢查與初始化）、`runner/hold_moves.py`（dir fd 的搬移、inode 比對、fsync、身分驗證）、`runner/isolation.py`（keeper 每一輪的對帳、搬移失敗的紀錄、15 分鐘的緊急升級）、v0024（6 個欄位、9 個 CHECK、trigger 的五種轉換）、API 的 `hold.stage`。
           - `retry-evidence` 的新流程（在 `held/` 加密並驗證 → 開始解除 → 搬回 → 再驗證 → 解除）、`init-runs-layout`（compose 的 `runs-init`：獨立、最小的服務）、`migrate-runs-layout` 與 `make runs-layout-migrate`（以和 `make up` 相同的設定解析實際的 volume、確認標籤與使用者）、retention-status 的「隔離未完成」段落、worker 只以 subpath 掛載 `active/`。
           - 測試：EVID-10–12、審查的四個反例與第二次審查的反例、七個中斷點、18 項空轉檢查（全部被抓到）。
-          - [ ] **Docker 的實際驗證**（§30.13 的決策 3：worker 的掛載、hard link、open FD、`runs-init` 的實際容器與啟動指令、volume 的身分）：需要另外授權，是必要的安全驗收。
+          - [x] **Docker 的實際驗證**（§30.13 的決策 3：worker 的掛載、hard link、open FD、`runs-init` 的實際容器與啟動指令、volume 的身分）：2026-11-11 使用者授權，在獨立、可拋棄的測試環境完成，6 項全部 PASS（`DECISIONS.md` §30.13 的「Docker 實際驗證」）。發現的三項在 2026-11-12 修正：
+            - F1（LOW）：`config runs-init --format json` 的輸出含有 `DB_PASSWORD`。已移到各服務的 environment，回歸測試是 `test_compose_secrets`。
+            - F2：文件措辭。
+            - F3：open FD 的剩餘風險補充，分級 LOW（增量）。
+            - 這一項完成不代表 T23a 或 SEC-14 完成。
           - [ ] 開發環境的升級（`make down` → `make db-up` → `make migrate` → `make runs-layout-migrate DRY_RUN=1` → `make runs-layout-migrate` → `make up`）：由使用者執行。
     - **未完成**：使用者執行 `make env` 之後的完整 `make lint`、`make typecheck`、`make test`（含方案 B）；Live（`make test-live-fixture-findings`、`make test-live-fixture-rescan` 加上證據的斷言，需要另外授權）。Live 通過、符合 DoD 之前 T23a 不標完成；T23a 完成也不代表 SEC-14 完成（剩餘風險見 `DECISIONS.md` §30.9）。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
     - [ ] uid 分離：runner、worker、api 與掃描容器不再共用 uid 10001（`DECISIONS.md` §30.13 的剩餘風險 2）。
-    - [ ] 完整的 FD 撤銷（和 uid 分離是兩件事）：rename、chmod 與 uid 分離都不會撤銷其他程序已開啟的 FD；候選做法是每次解析用短命的程序，以及隔離之後重啟 worker 的機制（§30.13 的剩餘風險 1）。
+    - [ ] 完整的 FD 撤銷（和 uid 分離是兩件事；§30.13 的剩餘風險 1，LOW、增量）：
+      - **問題**：rename、chmod 與 uid 分離都不會撤銷其他程序已開啟的 FD。Docker 驗證確認：
+        - 檔案 FD 與目錄 FD 在 rename 之後仍讀得到明文；
+        - 目錄 FD 看得到隔離之後新增的檔案；
+        - 同一個 worker 容器內同 uid 的程序，可以經由 `/proc/<pid>/fd` 借用；
+        - `..` 的逃逸被核心擋下。
+      - **候選做法**：
+        - 每次解析用短命的程序；
+        - 隔離之後重啟 worker 的機制；
+        - 另外可以評估讓 worker 的程序 non-dumpable（`PR_SET_DUMPABLE`）。這只擋 `/proc` 的借用，不是撤銷。
+      - **驗收標準**：
+        1. 寫入 `isolated_at` 之前，曾經開啟這個目錄的 worker 程序都已結束。做法可以是短命的解析程序，或由機制重啟 worker 並確認。確認不了就不寫入、維持隔離中並計時（看得見），不影響其他 run。
+        2. Docker 驗證重跑 §30.13 的刻意保留情境：隔離完成之後，原本保留的檔案 FD、目錄 FD，以及其他程序經由 `/proc/<pid>/fd` 的借用都失敗。
+        3. 測試涵蓋：
+           - 持有 FD 的程序不肯結束；
+           - 重啟失敗；
+           - 解析進行中開始隔離；
+           - 正常的解析流程不受影響。
   - [ ] T23c：SEC-20、SEC-09/10 關閉、最終 live 故障／安全重跑、各核心模組 branch coverage 與文件／API 一致性。
   - [ ] T23d：乾淨 clone／compose project／volume 的重建 smoke 與清理（Gate E）。
   - DoD：安全負向測試全通過；整體 coverage ≥ 80%、核心模組 branch coverage ≥ 90%；原始證據加密；文件與 API 一致；乾淨環境重建通過。
