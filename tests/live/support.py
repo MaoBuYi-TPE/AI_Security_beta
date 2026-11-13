@@ -33,6 +33,10 @@ SPEC = Path(__file__).resolve().parents[1] / "fixtures" / "openapi" / "vampi-ope
 BUSYBOX = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
 LAB_IP = "10.89.10.20"
 GUARD_IMAGE = "secscan-guard:dev"
+# guard 映像宣告了 VOLUME（mitmproxy 的設定目錄）：和 compose 的 guard 一樣以 tmpfs 蓋住。
+# 沒有蓋住時，docker run -d 會建立匿名 volume，docker rm -f 又不會刪除它
+# （G3 留下了 12 個，DECISIONS §31.13）。
+GUARD_IMAGE_VOLUME_TMPFS = "/home/mitmproxy/.mitmproxy:size=1m,mode=0700"
 
 
 def docker(*arguments: str, stdin: str | None = None, check: bool = True) -> str:

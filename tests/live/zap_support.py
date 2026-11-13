@@ -15,7 +15,15 @@ from typing import Any
 
 from tests.live.evidence_assertions import run_file as evidence_run_file
 from tests.live.guard_support import HERE, guard_log
-from tests.live.support import BUSYBOX, GUARD_IMAGE, LAB_NET, Api, docker, wait_for
+from tests.live.support import (
+    BUSYBOX,
+    GUARD_IMAGE,
+    GUARD_IMAGE_VOLUME_TMPFS,
+    LAB_NET,
+    Api,
+    docker,
+    wait_for,
+)
 
 PREFIX = "secscan-live-zap-"
 SITE_IP = "10.89.10.210"
@@ -61,6 +69,8 @@ def start_site(name: str, *, ip: str, alias: str, port: int = SITE_PORT) -> Site
         "ALL",
         "--security-opt",
         "no-new-privileges:true",
+        "--tmpfs",
+        GUARD_IMAGE_VOLUME_TMPFS,
         "--entrypoint",
         "python3",
         "-v",

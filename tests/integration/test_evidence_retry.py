@@ -625,6 +625,49 @@ def test_retention_status_shows_unfinished_isolation_as_urgent(
     assert str(runs) not in err
 
 
+@pytest.mark.parametrize(
+    ("host_offset", "urgent_after", "urgent"),
+    [
+        # 主機的時鐘比 DB 慢：以主機的時間計算，經過時間是負的、不會列為緊急。
+        (timedelta(hours=-1), timedelta(0), 1),
+        # 主機的時鐘比 DB 快：以主機的時間計算，剛隔離的目錄也會超過 15 分鐘的門檻。
+        (timedelta(hours=1), timedelta(minutes=15), 0),
+    ],
+)
+def test_retention_status_measures_isolation_time_with_the_database_clock(
+    environment: None,
+    queue_engine: Engine,
+    runs: Path,
+    store: EvidenceStore,
+    monkeypatch: pytest.MonkeyPatch,
+    capsysbinary: pytest.CaptureFixture[bytes],
+    host_offset: timedelta,
+    urgent_after: timedelta,
+    urgent: int,
+) -> None:
+    """held_at 由 DB 的時鐘寫入：經過時間與緊急的判斷也用 DB 的時鐘，主機與 DB 容器的時鐘誤差
+    不影響結果（原本以主機的時間計算，誤差幾毫秒就讓上面的測試間歇性失敗）。"""
+
+    class SkewedClock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:  # type: ignore[override]
+            return datetime.now(tz) + host_offset
+
+    name = uuid4()
+    _deep(runs, name)
+    store.hold(name, None, EvidenceHoldCode.TREE_TOO_DEEP, 3, inode(runs, name))
+    monkeypatch.setattr(evidence_cli, "datetime", SkewedClock)
+    monkeypatch.setattr(evidence_cli, "ISOLATION_URGENT_AFTER", urgent_after)
+    threshold = int(urgent_after.total_seconds() // 60)
+
+    assert main(["retention-status"]) == EXIT_OK
+
+    err = _err(capsysbinary)
+    assert f"隔離未完成 1（其中超過 {threshold} 分鐘、需要緊急處理 {urgent}）" in err
+    label = "需要緊急處理，已 0 分鐘" if urgent else "已 0 分鐘"
+    assert f"{name}（{label}）" in err
+
+
 def test_a_failed_check_in_held_does_not_start_the_release(
     held_run: EvidenceRun,
     queue_seed: Seeder,

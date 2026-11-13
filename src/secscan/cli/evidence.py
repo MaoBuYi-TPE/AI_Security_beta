@@ -34,7 +34,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.cli.services import EXIT_FAILURE, EXIT_OK, Report, audit_local, with_database
@@ -268,10 +268,21 @@ def _project_of(engine: Engine, run_id: UUID) -> UUID | None:
 # --- retention-status --------------------------------------------------------------------------
 
 
+def _database_now(engine: Engine) -> datetime:
+    """DB 的時鐘：held_at 等時間由 DB 寫入（clock_timestamp），經過時間也用同一個時鐘計算。
+
+    主機與 DB 容器的時鐘有誤差（即使只有幾毫秒），以主機的時間計算會得到負的經過時間、錯過緊急的
+    判斷，或把剛隔離的目錄算成已經超過門檻。
+    """
+    with engine.connect() as connection:
+        now: datetime = connection.execute(select(func.clock_timestamp())).scalar_one()
+    return now
+
+
 def _status(engine: Engine, settings: Settings, report: Report) -> int:
     store = EvidenceStore(sessionmaker(engine, expire_on_commit=False), engine=engine)
     summary = store.summary(
-        now=datetime.now(UTC),
+        now=_database_now(engine),
         retention_days=settings.evidence_retention_days,
         max_minutes=settings.evidence_plaintext_max_minutes,
     )
@@ -296,7 +307,7 @@ def _status(engine: Engine, settings: Settings, report: Report) -> int:
 
 def _holds_status(engine: Engine, report: Report) -> None:
     sessions = sessionmaker(engine, expire_on_commit=False)
-    _isolation_status(sessions, report)
+    _isolation_status(sessions, _database_now(engine), report)
     holds = EvidenceHolds(sessions).summary(listed=MAX_LISTED)
     codes = "、".join(f"{code.value} {count}" for code, count in sorted(holds.by_code.items()))
     report(
@@ -316,10 +327,9 @@ def _holds_status(engine: Engine, report: Report) -> None:
         report("以 secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> 處理。")
 
 
-def _isolation_status(sessions: sessionmaker[Session], report: Report) -> None:
+def _isolation_status(sessions: sessionmaker[Session], now: datetime, report: Report) -> None:
     """隔離未完成（明文仍在 active/，worker 可能讀得到）的段落；超過門檻的需要緊急處理
-    （§30.13）。"""
-    now = datetime.now(UTC)
+    （§30.13）。now 是 DB 的時鐘（_database_now）。"""
     summary = HoldIsolationStore(sessions).summary(
         now=now, urgent_after=ISOLATION_URGENT_AFTER, listed=MAX_LISTED
     )
@@ -341,7 +351,8 @@ def _isolation_status(sessions: sessionmaker[Session], report: Report) -> None:
 
 
 def _isolating_line(item: HeldDirectory, now: datetime) -> str:
-    elapsed = int((now - item.hold.held_at).total_seconds() // 60)
+    # 取得 now 之後才 commit 的隔離紀錄可能比 now 晚一點：顯示成 0 分鐘，不是負數。
+    elapsed = max(int((now - item.hold.held_at).total_seconds() // 60), 0)
     urgent = "需要緊急處理，" if now - item.hold.held_at >= ISOLATION_URGENT_AFTER else ""
     moves = item.moves
     if moves.count and moves.last_code is not None and moves.last_at is not None:
