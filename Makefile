@@ -20,7 +20,7 @@ LAB_IP_RANGE ?= 10.89.7.0/25
 LAB_PROFILES ?= juice-shop vampi
 LAB_PROFILE_ARGS := $(foreach p,$(LAB_PROFILES),--profile $(p))
 # make env 會補齊的本機秘密（隨機 hex，只寫進不進 git 的 .env）。
-LOCAL_SECRET_KEYS := DB_PASSWORD DB_ADMIN_PASSWORD TEST_DB_PASSWORD
+LOCAL_SECRET_KEYS := DB_PASSWORD DB_ADMIN_PASSWORD TEST_DB_PASSWORD DB_OWNER_PASSWORD
 # 平台的三組加密金鑰（docs/DECISIONS.md §12.1、§30.2）：目標 secret、原始證據、報告與人工複測摘錄。
 # 每組都是 Fernet 金鑰（url-safe base64 的 32 bytes，44 個字元），各自獨立產生、分給不同的程序。
 ENCRYPTION_KEYS_VARS := SECRET_ENCRYPTION_KEYS EVIDENCE_ENCRYPTION_KEYS CONTENT_ENCRYPTION_KEYS
@@ -53,6 +53,7 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
+	db-roles-migrate test-live-db-roles \
 	lab-net lab-up lab-down lab-verify lab-images build images ensure-net scan-net up down \
 	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
 	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check \
@@ -133,11 +134,19 @@ test-db-up: env docker-check
 db-down:
 	$(COMPOSE) -f $(DB_FILE) --profile test down
 
-# 把開發資料庫升級到最新 schema（Alembic upgrade head）；不做任何破壞性重置。
-# 最後印出目前版本（例如 0001 (head)），確認實際升級到哪裡。
+# 把開發資料庫升級到最新 schema（Alembic upgrade head）；不做任何破壞性重置。以 owner 角色
+# （DB_OWNER_*）執行，每次先檢查角色（docs/DECISIONS.md §31.4）；沒有 DB_OWNER_PASSWORD 就停止，
+# 不退回應用程式角色。T23b-b1 之前建立的開發 DB 先執行 make db-roles-migrate（README）。
+# 最後印出目前版本（例如 0025 (head)），確認實際升級到哪裡。
 migrate:
 	$(UV_RUN) alembic upgrade head
 	@$(UV_RUN) alembic current
+
+# 既有的開發 DB（T23b-b1 之前由應用程式角色擁有）：把擁有權移轉給 owner，只需要一次（§31.5）。
+# 在主機上以 superuser（DB_ADMIN_PASSWORD）執行；範圍不符就拒絕、不做任何改變。先以 DRY_RUN=1
+# 確認列出的範圍，再執行一次，之後 make migrate。執行之前先 make down（不能有應用程式的連線）。
+db-roles-migrate:
+	$(UV_RUN) secscan-admin migrate-db-roles $(if $(DRY_RUN),--dry-run,)
 
 # 啟動隔離 lab 靶場（只接 internal network，不發布 port）。
 lab-up: docker-check lab-net
@@ -298,6 +307,12 @@ test-live-runner: env docker-check images build
 # （tests/live/zap_site.py），不啟動 Juice Shop、VAmPI。
 test-live-zap: LIVE_TESTS := tests/live/test_zap_live.py
 test-live-zap: test-live-runner
+
+# DDL／DML 分權的 live 驗收（T23b-b1；docs/DECISIONS.md §31）：同一個獨立的 secscan-live 專案與流程。
+# 在真的 stack 上確認 initdb 建立了兩個角色、migration 以 owner 執行、api／runner／worker 都以應用程式
+# 角色連線、應用程式角色的 DDL 被拒，三個服務的環境變數名稱中沒有 owner 的密碼。
+test-live-db-roles: LIVE_TESTS := tests/live/test_db_roles_live.py
+test-live-db-roles: test-live-runner
 
 # 錄製 ZAP 的真實輸出（docs/DECISIONS.md §19.9）：同一個 live 流程，只執行錄製的情境（anonymous），
 # 輸出到 recordings/zap/<情境>/（gitignore）。人工審查之後才搬進 tests/fixtures/zap/。約 15 分鐘。

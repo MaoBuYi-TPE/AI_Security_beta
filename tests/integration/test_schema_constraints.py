@@ -242,11 +242,11 @@ def test_append_only_triggers_exist(db_session: Session) -> None:
     assert triggers == {"audit_events_append_only", "audit_events_no_truncate"}
 
 
-def test_project_with_keys_cannot_be_deleted(db_session: Session) -> None:
-    project_id = _project(db_session)
-    _key(db_session, role=Role.VIEWER.value, project_id=project_id)
+def test_project_with_keys_cannot_be_deleted(owner_session: Session) -> None:
+    project_id = _project(owner_session)
+    _key(owner_session, role=Role.VIEWER.value, project_id=project_id)
 
-    error = _violation(db_session, "DELETE FROM projects WHERE id = :id", {"id": project_id})
+    error = _violation(owner_session, "DELETE FROM projects WHERE id = :id", {"id": project_id})
 
     assert (error.sqlstate, error.diag.constraint_name) == (
         RESTRICT_VIOLATION,
@@ -292,14 +292,14 @@ def test_audit_changes_are_required(db_session: Session) -> None:
     ],
     ids=["update", "delete", "truncate"],
 )
-def test_audit_events_are_append_only(db_session: Session, statement: str) -> None:
-    event_id = _execute(db_session, INSERT_AUDIT, _audit_params())
+def test_audit_events_are_append_only(owner_session: Session, statement: str) -> None:
+    event_id = _execute(owner_session, INSERT_AUDIT, _audit_params())
 
-    error = _violation(db_session, statement, {"id": event_id})
+    error = _violation(owner_session, statement, {"id": event_id})
 
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
     assert "append-only" in str(error)
-    remaining = db_session.execute(text("SELECT count(*) FROM audit_events")).scalar()
+    remaining = owner_session.execute(text("SELECT count(*) FROM audit_events")).scalar()
     assert remaining == 1
 
 

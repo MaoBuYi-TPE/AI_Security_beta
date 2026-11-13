@@ -3,6 +3,9 @@
 直接用 SQL 驗證 schema 本身：即使程式有 bug，DB 也保證快照引用的資料屬於同一個 target、
 一個 target 同時只有一個進行中的 scan、lease 與狀態一致、終止的 scan 與 run 不可再改、
 事件與凍結的 operation 不可修改。
+
+T23b-b1：這個檔案驗證 trigger 與約束那一層，以 owner 執行（owner_session）；應用程式角色的權限
+那一層（例如沒有 DELETE、TRUNCATE）見 test_db_privileges.py。
 """
 
 from collections.abc import Mapping
@@ -133,24 +136,24 @@ def _profile(session: Session, principal: Principal, target_id: UUID) -> UUID:
 
 
 @pytest.fixture
-def snap(db_session: Session) -> Snapshot:
-    team = members(db_session, NOW)
+def snap(owner_session: Session) -> Snapshot:
+    team = members(owner_session, NOW)
     admin = team.admin
-    target = _target(db_session, admin, team.project_a, "vampi-a")
-    sibling = _target(db_session, admin, team.project_a, "vampi-b")
+    target = _target(owner_session, admin, team.project_a, "vampi-a")
+    sibling = _target(owner_session, admin, team.project_a, "vampi-b")
     return Snapshot(
         key_id=admin.key_id,
         project_a=team.project_a,
         project_b=team.project_b,
         target=target,
         sibling=sibling,
-        other_project_target=_target(db_session, admin, team.project_b, "vampi-c"),
-        grant=_grant(db_session, admin, target, "vampi-a"),
-        sibling_grant=_grant(db_session, admin, sibling, "vampi-b"),
-        spec=_spec(db_session, admin, target),
-        sibling_spec=_spec(db_session, admin, sibling),
-        profile=_profile(db_session, admin, target),
-        sibling_profile=_profile(db_session, admin, sibling),
+        other_project_target=_target(owner_session, admin, team.project_b, "vampi-c"),
+        grant=_grant(owner_session, admin, target, "vampi-a"),
+        sibling_grant=_grant(owner_session, admin, sibling, "vampi-b"),
+        spec=_spec(owner_session, admin, target),
+        sibling_spec=_spec(owner_session, admin, sibling),
+        profile=_profile(owner_session, admin, target),
+        sibling_profile=_profile(owner_session, admin, sibling),
     )
 
 
@@ -225,12 +228,12 @@ def _blocked(
 
 
 def test_a_valid_snapshot_is_stored_with_a_queue_position(
-    db_session: Session, snap: Snapshot
+    owner_session: Session, snap: Snapshot
 ) -> None:
-    first = _insert_scan(db_session, snap)
-    second = _insert_scan(db_session, snap, target_id=snap.sibling, **_sibling(snap))
+    first = _insert_scan(owner_session, snap)
+    second = _insert_scan(owner_session, snap, target_id=snap.sibling, **_sibling(snap))
 
-    positions = db_session.execute(
+    positions = owner_session.execute(
         text("SELECT queue_position FROM scans WHERE id IN (:a, :b) ORDER BY queue_position"),
         {"a": first, "b": second},
     ).scalars()
@@ -247,14 +250,14 @@ def _sibling(snap: Snapshot) -> dict[str, object]:
 
 
 def test_the_queue_position_is_generated_by_the_database(
-    db_session: Session, snap: Snapshot
+    owner_session: Session, snap: Snapshot
 ) -> None:
     """identity（GENERATED ALWAYS）：client 不能指定佇列的位置插隊 [S82]。"""
     statement = INSERT_SCAN.replace("(project_id,", "(queue_position, project_id,").replace(
         "VALUES (:project_id,", "VALUES (1, :project_id,"
     )
-    with pytest.raises(DBAPIError) as caught, db_session.begin_nested():
-        db_session.execute(text(statement), _scan_params(snap))
+    with pytest.raises(DBAPIError) as caught, owner_session.begin_nested():
+        owner_session.execute(text(statement), _scan_params(snap))
     assert getattr(caught.value.orig, "sqlstate", None) == "428C9"
 
 
@@ -289,17 +292,17 @@ def test_the_queue_position_is_generated_by_the_database(
     ],
 )
 def test_scan_checks(
-    db_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
+    owner_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
 ) -> None:
-    assert _rejected(db_session, INSERT_SCAN, _scan_params(snap, **overrides)) == (
+    assert _rejected(owner_session, INSERT_SCAN, _scan_params(snap, **overrides)) == (
         CHECK_VIOLATION,
         constraint,
     )
 
 
-def test_an_anonymous_web_scan_is_valid(db_session: Session, snap: Snapshot) -> None:
+def test_an_anonymous_web_scan_is_valid(owner_session: Session, snap: Snapshot) -> None:
     _insert_scan(
-        db_session,
+        owner_session,
         snap,
         auth_profile_id=None,
         auth_profile_version=None,
@@ -322,7 +325,7 @@ def test_an_anonymous_web_scan_is_valid(db_session: Session, snap: Snapshot) -> 
     ],
 )
 def test_the_snapshot_references_belong_to_the_same_target(
-    db_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
+    owner_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
 ) -> None:
     """快照引用的 grant、規格、profile 都屬於 scan 的 target；target 屬於 scan 的 project。"""
     resolved = {
@@ -334,36 +337,38 @@ def test_the_snapshot_references_belong_to_the_same_target(
     }
     params = {key: resolved.get(str(value), value) for key, value in overrides.items()}
 
-    assert _rejected(db_session, INSERT_SCAN, _scan_params(snap, **params)) == (
+    assert _rejected(owner_session, INSERT_SCAN, _scan_params(snap, **params)) == (
         FOREIGN_KEY_VIOLATION,
         constraint,
     )
 
 
-def test_an_idempotency_key_is_unique_within_a_project(db_session: Session, snap: Snapshot) -> None:
+def test_an_idempotency_key_is_unique_within_a_project(
+    owner_session: Session, snap: Snapshot
+) -> None:
     key = uuid4().hex
-    _insert_scan(db_session, snap, idempotency_key=key, status="failed", finished_at=LATER)
+    _insert_scan(owner_session, snap, idempotency_key=key, status="failed", finished_at=LATER)
 
     sibling = _scan_params(snap, idempotency_key=key, target_id=snap.sibling, **_sibling(snap))
-    assert _rejected(db_session, INSERT_SCAN, sibling) == (
+    assert _rejected(owner_session, INSERT_SCAN, sibling) == (
         UNIQUE_VIOLATION,
         "uq_scans_project_id_idempotency_key",
     )
 
 
-def test_only_one_active_scan_per_target(db_session: Session, snap: Snapshot) -> None:
-    first = _insert_scan(db_session, snap)
+def test_only_one_active_scan_per_target(owner_session: Session, snap: Snapshot) -> None:
+    first = _insert_scan(owner_session, snap)
 
-    assert _rejected(db_session, INSERT_SCAN, _scan_params(snap)) == (
+    assert _rejected(owner_session, INSERT_SCAN, _scan_params(snap)) == (
         UNIQUE_VIOLATION,
         "uq_scans_active_target",
     )
 
-    db_session.execute(
+    owner_session.execute(
         text("UPDATE scans SET status = 'failed', finished_at = now() WHERE id = :id"),
         {"id": first},
     )
-    _insert_scan(db_session, snap)
+    _insert_scan(owner_session, snap)
 
 
 @pytest.mark.parametrize(
@@ -375,29 +380,33 @@ def test_only_one_active_scan_per_target(db_session: Session, snap: Snapshot) ->
         "UPDATE scans SET created_at = now() - interval '1 day' WHERE id = :id",
     ],
 )
-def test_the_snapshot_cannot_change(db_session: Session, snap: Snapshot, statement: str) -> None:
-    scan_id = _insert_scan(db_session, snap)
+def test_the_snapshot_cannot_change(owner_session: Session, snap: Snapshot, statement: str) -> None:
+    scan_id = _insert_scan(owner_session, snap)
 
-    _blocked(db_session, statement, {"id": scan_id}, "scans")
+    _blocked(owner_session, statement, {"id": scan_id}, "scans")
 
 
-def test_the_status_of_an_unfinished_scan_can_change(db_session: Session, snap: Snapshot) -> None:
-    scan_id = _insert_scan(db_session, snap)
+def test_the_status_of_an_unfinished_scan_can_change(
+    owner_session: Session, snap: Snapshot
+) -> None:
+    scan_id = _insert_scan(owner_session, snap)
 
-    db_session.execute(text("UPDATE scans SET status = 'running' WHERE id = :id"), {"id": scan_id})
-    db_session.execute(
+    owner_session.execute(
+        text("UPDATE scans SET status = 'running' WHERE id = :id"), {"id": scan_id}
+    )
+    owner_session.execute(
         text("UPDATE scans SET status = 'cancelling', cancel_requested_at = now() WHERE id = :id"),
         {"id": scan_id},
     )
-    db_session.execute(
+    owner_session.execute(
         text("UPDATE scans SET status = 'cancelled', finished_at = now() WHERE id = :id"),
         {"id": scan_id},
     )
 
 
-def test_a_cancel_request_cannot_be_changed(db_session: Session, snap: Snapshot) -> None:
-    scan_id = _insert_scan(db_session, snap)
-    db_session.execute(
+def test_a_cancel_request_cannot_be_changed(owner_session: Session, snap: Snapshot) -> None:
+    scan_id = _insert_scan(owner_session, snap)
+    owner_session.execute(
         text("UPDATE scans SET cancel_requested_at = now() WHERE id = :id"), {"id": scan_id}
     )
 
@@ -405,14 +414,17 @@ def test_a_cancel_request_cannot_be_changed(db_session: Session, snap: Snapshot)
         "UPDATE scans SET cancel_requested_at = NULL WHERE id = :id",
         "UPDATE scans SET cancel_requested_at = now() + interval '1s' WHERE id = :id",
     ):
-        _blocked(db_session, statement, {"id": scan_id}, "scans")
+        _blocked(owner_session, statement, {"id": scan_id}, "scans")
 
 
-def test_a_finished_scan_cannot_change(db_session: Session, snap: Snapshot) -> None:
-    scan_id = _insert_scan(db_session, snap, status="completed", finished_at=LATER)
+def test_a_finished_scan_cannot_change(owner_session: Session, snap: Snapshot) -> None:
+    scan_id = _insert_scan(owner_session, snap, status="completed", finished_at=LATER)
 
     _blocked(
-        db_session, "UPDATE scans SET status = 'completed' WHERE id = :id", {"id": scan_id}, "scans"
+        owner_session,
+        "UPDATE scans SET status = 'completed' WHERE id = :id",
+        {"id": scan_id},
+        "scans",
     )
 
 
@@ -422,11 +434,11 @@ def test_a_finished_scan_cannot_change(db_session: Session, snap: Snapshot) -> N
     [("DELETE FROM scans WHERE id = :id", "scans"), ("TRUNCATE scans CASCADE", "scan")],
 )
 def test_scans_cannot_be_deleted(
-    db_session: Session, snap: Snapshot, statement: str, table: str
+    owner_session: Session, snap: Snapshot, statement: str, table: str
 ) -> None:
-    scan_id = _insert_scan(db_session, snap)
+    scan_id = _insert_scan(owner_session, snap)
 
-    _blocked(db_session, statement, {"id": scan_id}, table)
+    _blocked(owner_session, statement, {"id": scan_id}, table)
 
 
 # --- scanner_runs --------------------------------------------------------------------------
@@ -443,11 +455,11 @@ LEASE = {"lease_owner": "runner-1", "lease_expires_at": LATER, "heartbeat_at": L
     ],
 )
 def test_a_new_run_is_queued_without_a_lease(
-    db_session: Session, snap: Snapshot, overrides: dict[str, object], message: str
+    owner_session: Session, snap: Snapshot, overrides: dict[str, object], message: str
 ) -> None:
-    scan_id = _insert_scan(db_session, snap)
+    scan_id = _insert_scan(owner_session, snap)
 
-    error = violation(db_session, INSERT_RUN, _run_params(scan_id, **overrides))
+    error = violation(owner_session, INSERT_RUN, _run_params(scan_id, **overrides))
 
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
     assert message in str(error)
@@ -517,11 +529,11 @@ def _run_update(run_id: UUID, **overrides: object) -> dict[str, object]:
     ],
 )
 def test_run_checks(
-    db_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
+    owner_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
 ) -> None:
-    run_id = _insert_run(db_session, _insert_scan(db_session, snap))
+    run_id = _insert_run(owner_session, _insert_scan(owner_session, snap))
 
-    assert _rejected(db_session, RUN_UPDATE, _run_update(run_id, **overrides)) == (
+    assert _rejected(owner_session, RUN_UPDATE, _run_update(run_id, **overrides)) == (
         CHECK_VIOLATION,
         constraint,
     )
@@ -536,32 +548,34 @@ def test_run_checks(
     ],
 )
 def test_run_identity_checks(
-    db_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
+    owner_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
 ) -> None:
-    scan_id = _insert_scan(db_session, snap)
+    scan_id = _insert_scan(owner_session, snap)
 
-    assert _rejected(db_session, INSERT_RUN, _run_params(scan_id, **overrides)) == (
+    assert _rejected(owner_session, INSERT_RUN, _run_params(scan_id, **overrides)) == (
         CHECK_VIOLATION,
         constraint,
     )
 
 
-def test_a_scan_has_one_run_per_engine_and_sequence(db_session: Session, snap: Snapshot) -> None:
-    scan_id = _insert_scan(db_session, snap)
-    _insert_run(db_session, scan_id, engine="zap", sequence=1)
+def test_a_scan_has_one_run_per_engine_and_sequence(owner_session: Session, snap: Snapshot) -> None:
+    scan_id = _insert_scan(owner_session, snap)
+    _insert_run(owner_session, scan_id, engine="zap", sequence=1)
 
-    assert _rejected(db_session, INSERT_RUN, _run_params(scan_id, engine="nuclei", sequence=1)) == (
+    assert _rejected(
+        owner_session, INSERT_RUN, _run_params(scan_id, engine="nuclei", sequence=1)
+    ) == (
         UNIQUE_VIOLATION,
         "uq_scanner_runs_scan_id_sequence",
     )
-    assert _rejected(db_session, INSERT_RUN, _run_params(scan_id, engine="zap", sequence=2)) == (
+    assert _rejected(owner_session, INSERT_RUN, _run_params(scan_id, engine="zap", sequence=2)) == (
         UNIQUE_VIOLATION,
         "uq_scanner_runs_scan_id_engine",
     )
 
 
-def test_a_run_goes_through_its_lifecycle(db_session: Session, snap: Snapshot) -> None:
-    run_id = _insert_run(db_session, _insert_scan(db_session, snap))
+def test_a_run_goes_through_its_lifecycle(owner_session: Session, snap: Snapshot) -> None:
+    run_id = _insert_run(owner_session, _insert_scan(owner_session, snap))
     lease = {"lease_owner": "runner-1", "lease_expires_at": LATER, "heartbeat_at": LATER}
 
     for overrides in (
@@ -571,7 +585,7 @@ def test_a_run_goes_through_its_lifecycle(db_session: Session, snap: Snapshot) -
         {"status": "normalizing", "started_at": LATER, **lease},
         {"status": "succeeded", "started_at": LATER, "finished_at": LATER},
     ):
-        db_session.execute(text(RUN_UPDATE), _run_update(run_id, **overrides))
+        owner_session.execute(text(RUN_UPDATE), _run_update(run_id, **overrides))
 
 
 @pytest.mark.parametrize(
@@ -583,20 +597,22 @@ def test_a_run_goes_through_its_lifecycle(db_session: Session, snap: Snapshot) -
     ],
 )
 def test_the_identity_of_a_run_cannot_change(
-    db_session: Session, snap: Snapshot, statement: str
+    owner_session: Session, snap: Snapshot, statement: str
 ) -> None:
-    run_id = _insert_run(db_session, _insert_scan(db_session, snap))
-    other_scan = _insert_scan(db_session, snap, target_id=snap.sibling, **_sibling(snap))
+    run_id = _insert_run(owner_session, _insert_scan(owner_session, snap))
+    other_scan = _insert_scan(owner_session, snap, target_id=snap.sibling, **_sibling(snap))
 
-    _blocked(db_session, statement, {"id": run_id, "other": other_scan}, "scanner_runs")
+    _blocked(owner_session, statement, {"id": run_id, "other": other_scan}, "scanner_runs")
 
 
-def test_a_finished_run_cannot_change(db_session: Session, snap: Snapshot) -> None:
-    run_id = _insert_run(db_session, _insert_scan(db_session, snap))
-    db_session.execute(text(RUN_UPDATE), _run_update(run_id, status="cancelled", finished_at=LATER))
+def test_a_finished_run_cannot_change(owner_session: Session, snap: Snapshot) -> None:
+    run_id = _insert_run(owner_session, _insert_scan(owner_session, snap))
+    owner_session.execute(
+        text(RUN_UPDATE), _run_update(run_id, status="cancelled", finished_at=LATER)
+    )
 
     _blocked(
-        db_session,
+        owner_session,
         "UPDATE scanner_runs SET status = 'cancelled' WHERE id = :id",
         {"id": run_id},
         "scanner_runs",
@@ -611,11 +627,11 @@ def test_a_finished_run_cannot_change(db_session: Session, snap: Snapshot) -> No
     ],
 )
 def test_runs_cannot_be_deleted(
-    db_session: Session, snap: Snapshot, statement: str, table: str
+    owner_session: Session, snap: Snapshot, statement: str, table: str
 ) -> None:
-    run_id = _insert_run(db_session, _insert_scan(db_session, snap))
+    run_id = _insert_run(owner_session, _insert_scan(owner_session, snap))
 
-    _blocked(db_session, statement, {"id": run_id}, table)
+    _blocked(owner_session, statement, {"id": run_id}, table)
 
 
 # --- scan_events ---------------------------------------------------------------------------
@@ -644,33 +660,33 @@ def _event_params(scan_id: UUID, **overrides: object) -> dict[str, object]:
     ],
 )
 def test_event_checks(
-    db_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
+    owner_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
 ) -> None:
-    scan_id = _insert_scan(db_session, snap)
+    scan_id = _insert_scan(owner_session, snap)
 
-    assert _rejected(db_session, INSERT_EVENT, _event_params(scan_id, **overrides)) == (
+    assert _rejected(owner_session, INSERT_EVENT, _event_params(scan_id, **overrides)) == (
         CHECK_VIOLATION,
         constraint,
     )
 
 
-def test_an_event_names_a_run_of_the_same_scan(db_session: Session, snap: Snapshot) -> None:
-    scan_id = _insert_scan(db_session, snap)
-    other_scan = _insert_scan(db_session, snap, target_id=snap.sibling, **_sibling(snap))
-    other_run = _insert_run(db_session, other_scan)
+def test_an_event_names_a_run_of_the_same_scan(owner_session: Session, snap: Snapshot) -> None:
+    scan_id = _insert_scan(owner_session, snap)
+    other_scan = _insert_scan(owner_session, snap, target_id=snap.sibling, **_sibling(snap))
+    other_run = _insert_run(owner_session, other_scan)
     params = _event_params(scan_id, event_type="run.status", scanner_run_id=other_run)
 
-    assert _rejected(db_session, INSERT_EVENT, params) == (
+    assert _rejected(owner_session, INSERT_EVENT, params) == (
         FOREIGN_KEY_VIOLATION,
         "fk_scan_events_run_scan",
     )
 
 
-def test_event_sequences_are_unique_per_scan(db_session: Session, snap: Snapshot) -> None:
-    scan_id = _insert_scan(db_session, snap)
-    db_session.execute(text(INSERT_EVENT), _event_params(scan_id))
+def test_event_sequences_are_unique_per_scan(owner_session: Session, snap: Snapshot) -> None:
+    scan_id = _insert_scan(owner_session, snap)
+    owner_session.execute(text(INSERT_EVENT), _event_params(scan_id))
 
-    assert _rejected(db_session, INSERT_EVENT, _event_params(scan_id)) == (
+    assert _rejected(owner_session, INSERT_EVENT, _event_params(scan_id)) == (
         UNIQUE_VIOLATION,
         "pk_scan_events",
     )
@@ -684,11 +700,11 @@ def test_event_sequences_are_unique_per_scan(db_session: Session, snap: Snapshot
         "TRUNCATE scan_events",
     ],
 )
-def test_events_are_append_only(db_session: Session, snap: Snapshot, statement: str) -> None:
-    scan_id = _insert_scan(db_session, snap)
-    db_session.execute(text(INSERT_EVENT), _event_params(scan_id))
+def test_events_are_append_only(owner_session: Session, snap: Snapshot, statement: str) -> None:
+    scan_id = _insert_scan(owner_session, snap)
+    owner_session.execute(text(INSERT_EVENT), _event_params(scan_id))
 
-    _blocked(db_session, statement, {"id": scan_id}, "scan_events")
+    _blocked(owner_session, statement, {"id": scan_id}, "scan_events")
 
 
 # --- scan_operations -----------------------------------------------------------------------
@@ -720,21 +736,23 @@ def _operation_params(scan_id: UUID, **overrides: object) -> dict[str, object]:
     ],
 )
 def test_operation_checks(
-    db_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
+    owner_session: Session, snap: Snapshot, overrides: dict[str, object], constraint: str
 ) -> None:
-    scan_id = _insert_scan(db_session, snap)
+    scan_id = _insert_scan(owner_session, snap)
 
-    assert _rejected(db_session, INSERT_OPERATION, _operation_params(scan_id, **overrides)) == (
+    assert _rejected(owner_session, INSERT_OPERATION, _operation_params(scan_id, **overrides)) == (
         CHECK_VIOLATION,
         constraint,
     )
 
 
-def test_operations_are_unique_per_scan(db_session: Session, snap: Snapshot) -> None:
-    scan_id = _insert_scan(db_session, snap)
-    db_session.execute(text(INSERT_OPERATION), _operation_params(scan_id, reason="PATH_EXCLUDED"))
+def test_operations_are_unique_per_scan(owner_session: Session, snap: Snapshot) -> None:
+    scan_id = _insert_scan(owner_session, snap)
+    owner_session.execute(
+        text(INSERT_OPERATION), _operation_params(scan_id, reason="PATH_EXCLUDED")
+    )
 
-    assert _rejected(db_session, INSERT_OPERATION, _operation_params(scan_id, ordinal=1)) == (
+    assert _rejected(owner_session, INSERT_OPERATION, _operation_params(scan_id, ordinal=1)) == (
         UNIQUE_VIOLATION,
         "uq_scan_operations_scan_id_method_path",
     )
@@ -753,9 +771,11 @@ def test_operations_are_unique_per_scan(db_session: Session, snap: Snapshot) -> 
     ],
 )
 def test_operations_are_append_only(
-    db_session: Session, snap: Snapshot, statement: str, tables: str | tuple[str, ...]
+    owner_session: Session, snap: Snapshot, statement: str, tables: str | tuple[str, ...]
 ) -> None:
-    scan_id = _insert_scan(db_session, snap)
-    db_session.execute(text(INSERT_OPERATION), _operation_params(scan_id, reason="PATH_EXCLUDED"))
+    scan_id = _insert_scan(owner_session, snap)
+    owner_session.execute(
+        text(INSERT_OPERATION), _operation_params(scan_id, reason="PATH_EXCLUDED")
+    )
 
-    _blocked(db_session, statement, {"id": scan_id}, tables)
+    _blocked(owner_session, statement, {"id": scan_id}, tables)

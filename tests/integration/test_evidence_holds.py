@@ -420,17 +420,19 @@ def test_a_run_is_resolved_only_with_sealed_evidence_and_only_once(
     "statement",
     ["DELETE FROM evidence_holds", "TRUNCATE evidence_holds"],
 )
-def test_holds_cannot_be_deleted(queue_engine: Engine, queue_seed: Seeder, statement: str) -> None:
+def test_holds_cannot_be_deleted(
+    queue_owner_engine: Engine, queue_seed: Seeder, statement: str
+) -> None:
     directory = uuid4()
     _execute(
-        queue_engine,
+        queue_owner_engine,
         "INSERT INTO evidence_holds (directory, error_code, attempts, source_ino) "
         "VALUES (:directory, 'EVIDENCE_TREE_TOO_MANY_ENTRIES', 3, 1)",
         directory=directory,
     )
 
     with pytest.raises(DBAPIError, match="blocked"):
-        _execute(queue_engine, statement)
+        _execute(queue_owner_engine, statement)
 
     assert _hold_row(queue_seed, directory) is not None
 

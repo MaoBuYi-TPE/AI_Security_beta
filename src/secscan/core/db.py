@@ -39,6 +39,7 @@ NAMING_CONVENTION = {
 
 DRIVER = "postgresql+psycopg"
 DEFAULT_APPLICATION_NAME = "secscan-api"
+REQUIRE_SCRAM = "scram-sha-256"
 MILLISECONDS_PER_SECOND = 1_000
 
 
@@ -125,18 +126,22 @@ def create_db_engine(
     *,
     application_name: str = DEFAULT_APPLICATION_NAME,
     pooled: bool = True,
+    require_scram: bool = False,
 ) -> Engine:
     """建立 engine（不會立即連線）。pooled=False 給一次性的程序，例如 migration。
 
     hide_parameters：SQL 參數（key hash、稽核內容、日後的密文）不出現在例外訊息與日誌中。
+    require_scram：只接受 SCRAM 認證（libpq 16 起的 require_auth），port 被別的服務占用時對方不能
+    要求明文密碼。migration 的 owner 連線使用（T23b-b1）；應用程式的連線留給 b2。
     """
-    url = database_url(settings).update_query_dict(
-        {
-            "application_name": application_name,
-            "connect_timeout": str(settings.db_connect_timeout_seconds),
-            "options": session_options(settings),
-        }
-    )
+    query = {
+        "application_name": application_name,
+        "connect_timeout": str(settings.db_connect_timeout_seconds),
+        "options": session_options(settings),
+    }
+    if require_scram:
+        query["require_auth"] = REQUIRE_SCRAM
+    url = database_url(settings).update_query_dict(query)
     if pooled:
         return create_engine(url, pool_pre_ping=True, hide_parameters=True)
     return create_engine(url, poolclass=NullPool, hide_parameters=True)
@@ -151,13 +156,20 @@ class DatabaseStatus(StrEnum):
 def probe_database(engine: Engine, expected_revision: str) -> DatabaseStatus:
     """readiness 用：能否連線，以及 schema 是否正好在預期的 migration 版本。
 
-    DB 錯誤一律回報 UNAVAILABLE 並記下例外類別與 SQLSTATE；不記錯誤訊息，因為驅動的訊息
-    含主機、port 與帳號。
+    應用程式角色讀不到 alembic_version（v0025 的逐表權限還沒套用；docs/DECISIONS.md §31）也是
+    SCHEMA_OUTDATED。DB 錯誤一律回報 UNAVAILABLE 並記下例外類別與 SQLSTATE；不記錯誤訊息，因為驅動的
+    訊息含主機、port 與帳號。
     """
     try:
         with engine.connect() as connection:
-            table = connection.execute(text("SELECT to_regclass('alembic_version')")).scalar()
-            if table is None:
+            # has_table_privilege(regclass) 是 strict：表不存在時是 NULL，不依賴 AND 的求值順序。
+            readable = connection.execute(
+                text(
+                    "SELECT coalesce(has_table_privilege(to_regclass('alembic_version'), "
+                    "'SELECT'), false)"
+                )
+            ).scalar()
+            if not readable:
                 return DatabaseStatus.SCHEMA_OUTDATED
             revisions = connection.execute(text("SELECT version_num FROM alembic_version"))
             current = list(revisions.scalars())

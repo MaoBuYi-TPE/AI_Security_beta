@@ -1,6 +1,9 @@
 """api_specs 與 api_spec_operations 的 DB 約束與 trigger（docs/DECISIONS.md §11.5）。
 
 直接用 SQL 驗證 schema 本身：即使程式有 bug，DB 也會擋下不合規則的資料與任何修改、刪除。
+
+T23b-b1：這個檔案驗證 trigger 與約束那一層，以 owner 執行（owner_session）；應用程式角色的權限
+那一層（例如沒有 DELETE、TRUNCATE）見 test_db_privileges.py。
 """
 
 import hashlib
@@ -51,11 +54,11 @@ class Lab:
 
 
 @pytest.fixture
-def lab(db_session: Session) -> Lab:
-    project_id = insert_project(db_session)
-    target_id = returning_id(db_session, INSERT_TARGET, {"project_id": project_id})
+def lab(owner_session: Session) -> Lab:
+    project_id = insert_project(owner_session)
+    target_id = returning_id(owner_session, INSERT_TARGET, {"project_id": project_id})
     assert target_id is not None
-    return Lab(key_id=insert_key(db_session), target_id=target_id)
+    return Lab(key_id=insert_key(owner_session), target_id=target_id)
 
 
 def _spec_params(lab: Lab, **overrides: object) -> dict[str, object]:
@@ -101,15 +104,15 @@ def _rejected(session: Session, statement: str, params: Mapping[str, object]) ->
     return error.sqlstate or "", error.diag.constraint_name or ""
 
 
-def test_valid_spec_and_operations_are_stored(db_session: Session, lab: Lab) -> None:
-    spec_id = _insert_spec(db_session, lab, base_path="/b2b/v2", operation_count=2)
-    db_session.execute(text(INSERT_OPERATION), _operation_params(spec_id))
-    db_session.execute(
+def test_valid_spec_and_operations_are_stored(owner_session: Session, lab: Lab) -> None:
+    spec_id = _insert_spec(owner_session, lab, base_path="/b2b/v2", operation_count=2)
+    owner_session.execute(text(INSERT_OPERATION), _operation_params(spec_id))
+    owner_session.execute(
         text(INSERT_OPERATION),
         _operation_params(spec_id, ordinal=1, method="TRACE", path="/", operation_id=None),
     )
 
-    row = db_session.execute(
+    row = owner_session.execute(
         text("SELECT created_at, document FROM api_specs WHERE id = :id"), {"id": spec_id}
     ).one()
     assert row.document == DOCUMENT
@@ -152,22 +155,22 @@ def test_valid_spec_and_operations_are_stored(db_session: Session, lab: Lab) -> 
     ],
 )
 def test_spec_checks(
-    db_session: Session, lab: Lab, overrides: dict[str, object], constraint: str
+    owner_session: Session, lab: Lab, overrides: dict[str, object], constraint: str
 ) -> None:
     params = _spec_params(lab, **overrides)
 
-    assert _rejected(db_session, INSERT_SPEC, params) == (CHECK_VIOLATION, constraint)
+    assert _rejected(owner_session, INSERT_SPEC, params) == (CHECK_VIOLATION, constraint)
 
 
 @pytest.mark.parametrize("size", [1, MiB])
-def test_source_size_bounds_are_inclusive(db_session: Session, lab: Lab, size: int) -> None:
-    _insert_spec(db_session, lab, source_size_bytes=size)
+def test_source_size_bounds_are_inclusive(owner_session: Session, lab: Lab, size: int) -> None:
+    _insert_spec(owner_session, lab, source_size_bytes=size)
 
 
-def test_version_is_unique_per_target(db_session: Session, lab: Lab) -> None:
-    _insert_spec(db_session, lab)
+def test_version_is_unique_per_target(owner_session: Session, lab: Lab) -> None:
+    _insert_spec(owner_session, lab)
 
-    assert _rejected(db_session, INSERT_SPEC, _spec_params(lab)) == (
+    assert _rejected(owner_session, INSERT_SPEC, _spec_params(lab)) == (
         UNIQUE_VIOLATION,
         "uq_api_specs_target_id_version",
     )
@@ -181,11 +184,11 @@ def test_version_is_unique_per_target(db_session: Session, lab: Lab) -> None:
     ],
 )
 def test_spec_references_must_exist(
-    db_session: Session, lab: Lab, field: str, constraint: str
+    owner_session: Session, lab: Lab, field: str, constraint: str
 ) -> None:
     params = _spec_params(lab, **{field: uuid4()})
 
-    assert _rejected(db_session, INSERT_SPEC, params) == (FOREIGN_KEY_VIOLATION, constraint)
+    assert _rejected(owner_session, INSERT_SPEC, params) == (FOREIGN_KEY_VIOLATION, constraint)
 
 
 @pytest.mark.parametrize(
@@ -200,46 +203,46 @@ def test_spec_references_must_exist(
     ],
 )
 def test_operation_checks(
-    db_session: Session, lab: Lab, overrides: dict[str, object], constraint: str
+    owner_session: Session, lab: Lab, overrides: dict[str, object], constraint: str
 ) -> None:
-    spec_id = _insert_spec(db_session, lab)
+    spec_id = _insert_spec(owner_session, lab)
     params = _operation_params(spec_id, **overrides)
 
-    assert _rejected(db_session, INSERT_OPERATION, params) == (CHECK_VIOLATION, constraint)
+    assert _rejected(owner_session, INSERT_OPERATION, params) == (CHECK_VIOLATION, constraint)
 
 
-def test_operations_are_unique_per_spec(db_session: Session, lab: Lab) -> None:
-    spec_id = _insert_spec(db_session, lab)
-    db_session.execute(text(INSERT_OPERATION), _operation_params(spec_id, operation_id=None))
-    db_session.execute(
+def test_operations_are_unique_per_spec(owner_session: Session, lab: Lab) -> None:
+    spec_id = _insert_spec(owner_session, lab)
+    owner_session.execute(text(INSERT_OPERATION), _operation_params(spec_id, operation_id=None))
+    owner_session.execute(
         text(INSERT_OPERATION),
         _operation_params(spec_id, ordinal=1, method="PUT", operation_id=None),
     )
-    db_session.execute(
+    owner_session.execute(
         text(INSERT_OPERATION), _operation_params(spec_id, ordinal=2, path="/a", operation_id="op")
     )
 
     same_route = _operation_params(spec_id, ordinal=3, operation_id="other")
     same_id = _operation_params(spec_id, ordinal=3, path="/b", operation_id="op")
     same_ordinal = _operation_params(spec_id, path="/c", operation_id=None)
-    assert _rejected(db_session, INSERT_OPERATION, same_route) == (
+    assert _rejected(owner_session, INSERT_OPERATION, same_route) == (
         UNIQUE_VIOLATION,
         "uq_api_spec_operations_spec_id_method_path",
     )
-    assert _rejected(db_session, INSERT_OPERATION, same_id) == (
+    assert _rejected(owner_session, INSERT_OPERATION, same_id) == (
         UNIQUE_VIOLATION,
         "uq_api_spec_operations_spec_id_operation_id",
     )
-    assert _rejected(db_session, INSERT_OPERATION, same_ordinal) == (
+    assert _rejected(owner_session, INSERT_OPERATION, same_ordinal) == (
         UNIQUE_VIOLATION,
         "pk_api_spec_operations",
     )
 
 
-def test_operation_spec_must_exist(db_session: Session) -> None:
+def test_operation_spec_must_exist(owner_session: Session) -> None:
     params = _operation_params(uuid4())
 
-    assert _rejected(db_session, INSERT_OPERATION, params) == (
+    assert _rejected(owner_session, INSERT_OPERATION, params) == (
         FOREIGN_KEY_VIOLATION,
         "fk_api_spec_operations_spec_id_api_specs",
     )
@@ -267,23 +270,23 @@ def test_operation_spec_must_exist(db_session: Session) -> None:
         "truncate-both",
     ],
 )
-def test_specs_are_immutable(db_session: Session, lab: Lab, statement: str) -> None:
-    spec_id = _insert_spec(db_session, lab, operation_count=1)
-    db_session.execute(text(INSERT_OPERATION), _operation_params(spec_id))
+def test_specs_are_immutable(owner_session: Session, lab: Lab, statement: str) -> None:
+    spec_id = _insert_spec(owner_session, lab, operation_count=1)
+    owner_session.execute(text(INSERT_OPERATION), _operation_params(spec_id))
 
-    error = violation(db_session, statement, {"id": spec_id})
+    error = violation(owner_session, statement, {"id": spec_id})
 
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
     assert "immutable" in str(error)
-    counts = db_session.execute(
+    counts = owner_session.execute(
         text("SELECT (SELECT count(*) FROM api_specs), (SELECT count(*) FROM api_spec_operations)")
     ).one()
     assert tuple(counts) == (1, 1)
 
 
-def test_immutability_triggers_exist(db_session: Session) -> None:
+def test_immutability_triggers_exist(owner_session: Session) -> None:
     triggers = set(
-        db_session.execute(
+        owner_session.execute(
             text(
                 "SELECT tgrelid::regclass || '.' || tgname FROM pg_trigger "
                 "WHERE tgrelid IN ('api_specs'::regclass, 'api_spec_operations'::regclass) "

@@ -688,11 +688,12 @@ def test_a_collected_run_without_a_collected_event_still_expires(
     scannable: Scannable,
     store: EvidenceStore,
     moment: Moment,
+    queue_owner_seed: Seeder,
 ) -> None:
     """舊資料或手動資料沒有 collected 的事件時，以 run 建立的時間起算（不會永遠不逾期）。"""
     lease = _claim(queue, queue_seed, world, scannable)
     _collected(queue, lease)
-    queue_seed.execute_together(
+    queue_owner_seed.execute_together(
         "ALTER TABLE scan_events DISABLE TRIGGER USER",
         "DELETE FROM scan_events WHERE scanner_run_id = :id",
         "ALTER TABLE scan_events ENABLE TRIGGER USER",

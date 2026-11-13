@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
-from tests.integration.conftest import app_engine
+from tests.integration.conftest import owner_engine
 from tests.integration.database import ProvisionedDatabase
 from tests.integration.scan_support import create_scan, scan_world
 from tests.integration.sql_support import (
@@ -176,7 +176,7 @@ def test_pending_containers_have_a_partial_index(db_session: Session) -> None:
 
 
 def test_downgrade_restores_the_previous_guard(fresh_database: ProvisionedDatabase) -> None:
-    engine: Engine = app_engine(fresh_database)
+    engine: Engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "head")
         _migrate(engine, "down", "0008")

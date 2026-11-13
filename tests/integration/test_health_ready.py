@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from secscan.core.config import Settings
 from secscan.main import create_app
-from tests.integration.conftest import app_engine
+from tests.integration.conftest import owner_engine
 from tests.integration.database import ProvisionedDatabase
 
 pytestmark = pytest.mark.integration
@@ -70,7 +70,7 @@ def test_not_ready_before_migrations_run(fresh_database: ProvisionedDatabase) ->
 
 
 def test_not_ready_when_schema_revision_differs(fresh_database: ProvisionedDatabase) -> None:
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         with engine.begin() as connection:
             connection.execute(text("CREATE TABLE alembic_version (version_num varchar(32))"))

@@ -163,11 +163,11 @@ def _expired_excerpts(engine: Engine, item: Scenario, world: World) -> None:
 
 
 def test_excerpts_rotate_while_kept_and_are_purged_once(
-    queue_engine: Engine, item: Scenario, world: World
+    queue_owner_engine: Engine, item: Scenario, world: World
 ) -> None:
-    _expired_excerpts(queue_engine, item, world)
+    _expired_excerpts(queue_owner_engine, item, world)
 
-    with sessionmaker(queue_engine)() as session:
+    with sessionmaker(queue_owner_engine)() as session:
         session.execute(
             text(EXCERPT_ROTATE), {"id": item.sqli, "token": _sealed(item, "request", REQUEST)}
         )
@@ -181,7 +181,7 @@ def test_excerpts_rotate_while_kept_and_are_purged_once(
             error = violation(session, statement, {"id": item.sqli, **extra})
             assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION, statement
     [count] = (
-        sessionmaker(queue_engine)()
+        sessionmaker(queue_owner_engine)()
         .execute(
             text("SELECT count(*) FROM finding_triage_excerpts WHERE finding_id = :id"),
             {"id": item.sqli},

@@ -163,11 +163,17 @@ def test_a_sealed_record_can_be_purged_once(
     ],
 )
 def test_other_changes_are_refused(
-    queue: ScanQueue, queue_seed: Seeder, queue_engine: Engine, statement: str
+    queue: ScanQueue,
+    queue_seed: Seeder,
+    queue_engine: Engine,
+    queue_owner_engine: Engine,
+    statement: str,
 ) -> None:
+    """trigger 那一層（以 owner 執行：應用程式角色沒有 DELETE；見 test_db_privileges.py）。"""
     lease = _sealed(queue, queue_seed, queue_engine)
 
-    assert _code(queue_engine, statement, {"run": lease.run_id}) == INTEGRITY_CONSTRAINT_VIOLATION
+    code = _code(queue_owner_engine, statement, {"run": lease.run_id})
+    assert code == INTEGRITY_CONSTRAINT_VIOLATION
 
 
 def test_none_cannot_become_purged(
@@ -189,10 +195,14 @@ def test_purging_cannot_precede_sealing(
     assert _code(queue_engine, PURGE, params) == CHECK_VIOLATION
 
 
-def test_truncate_is_refused(queue: ScanQueue, queue_seed: Seeder, queue_engine: Engine) -> None:
+def test_truncate_is_refused(
+    queue: ScanQueue, queue_seed: Seeder, queue_engine: Engine, queue_owner_engine: Engine
+) -> None:
+    """trigger 那一層（以 owner 執行：應用程式角色沒有 TRUNCATE）。"""
     _sealed(queue, queue_seed, queue_engine)
 
-    assert _code(queue_engine, "TRUNCATE run_evidence", {}) == INTEGRITY_CONSTRAINT_VIOLATION
+    code = _code(queue_owner_engine, "TRUNCATE run_evidence", {})
+    assert code == INTEGRITY_CONSTRAINT_VIOLATION
 
 
 def test_purging_cannot_be_dated_in_the_future(

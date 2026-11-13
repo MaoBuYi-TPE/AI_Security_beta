@@ -27,7 +27,7 @@ from secscan.main import create_app
 from secscan.migrations import alembic_config, head_revision
 from secscan.reports.domain.model import MAX_REPORT_BYTES, report_context
 from tests.integration.api_support import Seeder, World
-from tests.integration.conftest import app_engine
+from tests.integration.conftest import owner_alembic_config, owner_engine
 from tests.integration.database import ProvisionedDatabase
 from tests.integration.test_triage_schema import EVENT, confirm, params
 from tests.integration.triage_support import Scenario, db_now, eligible, scenario
@@ -41,7 +41,7 @@ REQUEST, RESPONSE = "GET / HTTP/1.1", "HTTP/1.1 200 canary-legacy-excerpt"
 
 @pytest.fixture
 def engine(fresh_database: ProvisionedDatabase) -> Iterator[Engine]:
-    opened = app_engine(fresh_database)
+    opened = owner_engine(fresh_database)
     _migrate(opened, "up", "0021")
     yield opened
     opened.dispose()
@@ -49,7 +49,7 @@ def engine(fresh_database: ProvisionedDatabase) -> Iterator[Engine]:
 
 def _migrate(engine: Engine, direction: str, target: str, keys: str | None = None) -> None:
     with engine.begin() as connection:
-        config = alembic_config(connection=connection, content_encryption_keys=keys)
+        config = owner_alembic_config(connection, content_encryption_keys=keys)
         if direction == "up":
             command.upgrade(config, target)
         else:

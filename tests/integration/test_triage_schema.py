@@ -18,9 +18,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.findings.domain.triage import EXCERPT_MAX_BYTES, ExcerptKind, excerpt_context
 from secscan.findings.models import FindingModel
-from secscan.migrations import alembic_config
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from tests.integration.api_support import Seeder, World
+from tests.integration.conftest import owner_alembic_config
 from tests.integration.finding_support import web_scan
 from tests.integration.sql_support import (
     CHECK_VIOLATION,
@@ -57,8 +57,9 @@ def item(queue_engine: Engine, queue_seed: Seeder, world: World) -> Scenario:
 
 
 @pytest.fixture
-def session(queue_engine: Engine) -> Iterator[Session]:
-    with sessionmaker(queue_engine)() as opened:
+def session(queue_owner_engine: Engine) -> Iterator[Session]:
+    """驗證 trigger 與約束那一層（T23b-b1：以 owner 執行；權限那一層見 test_db_privileges.py）。"""
+    with sessionmaker(queue_owner_engine)() as opened:
         yield opened
         opened.rollback()
 
@@ -246,12 +247,12 @@ SEALED_EXCERPT = (
 
 
 def test_excerpts_are_sealed_complete_and_immutable(
-    queue_engine: Engine, item: Scenario, world: World
+    queue_owner_engine: Engine, item: Scenario, world: World
 ) -> None:
     """TRIAGE-06（v0022 修訂）：摘錄必須是密文（Fernet token 的形狀）、每個人工複測事件恰好兩段，
     之後只能換版或到期清除（見 test_sealed_content_schema.py）。明文的雜湊與長度改由 api 核對。"""
-    comparison = eligible(queue_engine, item)
-    sessions = sessionmaker(queue_engine)
+    comparison = eligible(queue_owner_engine, item)
+    sessions = sessionmaker(queue_owner_engine)
     request, response = "GET / HTTP/1.1", "HTTP/1.1 200"
     valid = json.dumps(
         {
@@ -376,10 +377,10 @@ def test_system_events_cannot_cite_a_run_of_another_target(
 
 
 def test_downgrade_with_resolved_findings_succeeds(
-    queue_engine: Engine, queue_seed: Seeder, item: Scenario, world: World
+    queue_owner_engine: Engine, queue_owner_seed: Seeder, item: Scenario, world: World
 ) -> None:
-    comparison = eligible(queue_engine, item)
-    with sessionmaker(queue_engine)() as opened:
+    comparison = eligible(queue_owner_engine, item)
+    with sessionmaker(queue_owner_engine)() as opened:
         confirm(opened, item, world)
         opened.execute(
             text(
@@ -401,11 +402,11 @@ def test_downgrade_with_resolved_findings_succeeds(
             ),
         )
         opened.commit()
-    with queue_engine.begin() as connection:
-        command.downgrade(alembic_config(connection=connection), "0016")
-    [row] = queue_seed.query(
+    with queue_owner_engine.begin() as connection:
+        command.downgrade(owner_alembic_config(connection), "0016")
+    [row] = queue_owner_seed.query(
         "SELECT triage_state, lifecycle_state FROM findings WHERE id = :id", id=item.sqli
     )
     assert (row.triage_state, row.lifecycle_state) == ("unreviewed", "open")
-    with queue_engine.begin() as connection:
-        command.upgrade(alembic_config(connection=connection), "head")
+    with queue_owner_engine.begin() as connection:
+        command.upgrade(owner_alembic_config(connection), "head")

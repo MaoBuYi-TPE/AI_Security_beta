@@ -18,10 +18,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from secscan.findings.models import FindingModel
 from secscan.findings.service import FindingLinker
-from secscan.migrations import alembic_config
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.queue import ScanQueue
 from tests.integration.api_support import LAB, Seeder
+from tests.integration.conftest import owner_alembic_config
 from tests.integration.finding_support import ZAP_CORS, ZAP_SQLI, parsed_run, web_scan, web_target
 from tests.integration.sql_support import (
     CHECK_VIOLATION,
@@ -62,8 +62,9 @@ def linked(queue_engine: Engine, queue_seed: Seeder) -> Linked:
 
 
 @pytest.fixture
-def session(queue_engine: Engine) -> Iterator[Session]:
-    with Session(queue_engine) as opened:
+def session(queue_owner_engine: Engine) -> Iterator[Session]:
+    """驗證 trigger 與約束那一層（T23b-b1：以 owner 執行；權限那一層見 test_db_privileges.py）。"""
+    with Session(queue_owner_engine) as opened:
         yield opened
         opened.rollback()
 
@@ -231,14 +232,14 @@ def test_new_findings_start_unreviewed_and_open(
 
 
 def test_v0014_marks_existing_findings_unclassified_and_needing_review(
-    queue_engine: Engine, linked: Linked
+    queue_owner_engine: Engine, linked: Linked
 ) -> None:
     """升級時既有的列沒有經過 v2 的分類：unclassified，並標 needs_review（安全審查）。"""
-    with queue_engine.begin() as connection:
-        config = alembic_config(connection=connection)
+    with queue_owner_engine.begin() as connection:
+        config = owner_alembic_config(connection)
         command.downgrade(config, "0013")
         command.upgrade(config, "head")
-    with Session(queue_engine) as session:
+    with Session(queue_owner_engine) as session:
         row = session.execute(
             text("SELECT category, needs_review FROM findings WHERE id = :id"),
             {"id": linked.finding},
@@ -500,11 +501,11 @@ def test_a_second_writer_waits_and_readers_see_a_consistent_prefix(
 
 
 def test_the_upgrade_numbers_existing_links_in_link_order(
-    queue_engine: Engine, linked: Linked
+    queue_owner_engine: Engine, linked: Linked
 ) -> None:
-    with queue_engine.begin() as connection:
-        command.downgrade(alembic_config(connection=connection), "0014")
-    with Session(queue_engine) as session, session.begin():
+    with queue_owner_engine.begin() as connection:
+        command.downgrade(owner_alembic_config(connection), "0014")
+    with Session(queue_owner_engine) as session, session.begin():
         later = _observation(session, linked.run, linked.scan)
         session.execute(
             text(
@@ -515,9 +516,9 @@ def test_the_upgrade_numbers_existing_links_in_link_order(
             ),
             {"observation": later, "finding": linked.finding},
         )
-    with queue_engine.begin() as connection:
-        command.upgrade(alembic_config(connection=connection), "head")
-    with Session(queue_engine) as session:
+    with queue_owner_engine.begin() as connection:
+        command.upgrade(owner_alembic_config(connection), "head")
+    with Session(queue_owner_engine) as session:
         assert _sequences(session, linked.finding) == (2, [1, 2])
         last = session.execute(
             text("SELECT observation_id FROM finding_observations WHERE link_sequence = 2")
@@ -526,20 +527,23 @@ def test_the_upgrade_numbers_existing_links_in_link_order(
 
 
 def test_the_upgrade_refuses_links_across_targets(
-    queue_engine: Engine, linked: Linked, foreign: Foreign
+    queue_owner_engine: Engine, linked: Linked, foreign: Foreign
 ) -> None:
     """升級前核對既有資料：不一致就失敗（fail closed），不靜默排除。"""
-    with queue_engine.begin() as connection:
-        command.downgrade(alembic_config(connection=connection), "0014")
-    with Session(queue_engine) as session, session.begin():
+    with queue_owner_engine.begin() as connection:
+        command.downgrade(owner_alembic_config(connection), "0014")
+    with Session(queue_owner_engine) as session, session.begin():
         session.execute(
             text(_INSERT_LINK_V14),
             {"observation": foreign.observation, "finding": linked.finding},
         )
 
-    with pytest.raises(IntegrityError, match="mix targets"), queue_engine.begin() as connection:
-        command.upgrade(alembic_config(connection=connection), "head")
+    with (
+        pytest.raises(IntegrityError, match="mix targets"),
+        queue_owner_engine.begin() as connection,
+    ):
+        command.upgrade(owner_alembic_config(connection), "head")
 
-    with queue_engine.connect() as connection:
+    with queue_owner_engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
     assert version == "0014"

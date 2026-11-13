@@ -1,6 +1,9 @@
 """targets 與 scope_grants 的 DB 約束與 trigger（docs/DECISIONS.md §10.4）。
 
 直接用 SQL 驗證 schema 本身：即使程式有 bug，DB 也會擋下不合規則的資料、狀態轉換與範圍修改。
+
+T23b-b1：這個檔案驗證 trigger 與約束那一層，以 owner 執行（owner_session）；應用程式角色的權限
+那一層（例如沒有 DELETE、TRUNCATE）見 test_db_privileges.py。
 """
 
 from collections.abc import Callable
@@ -82,14 +85,14 @@ def _insert_target(session: Session, project_id: UUID, **overrides: object) -> U
 
 
 @pytest.fixture
-def lab(db_session: Session) -> Lab:
-    project_id = insert_project(db_session)
-    now = db_session.execute(text("SELECT now()")).scalar()
+def lab(owner_session: Session) -> Lab:
+    project_id = insert_project(owner_session)
+    now = owner_session.execute(text("SELECT now()")).scalar()
     assert isinstance(now, datetime)
     return Lab(
         project_id=project_id,
-        key_id=insert_key(db_session),
-        target_id=_insert_target(db_session, project_id),
+        key_id=insert_key(owner_session),
+        target_id=_insert_target(owner_session, project_id),
         now=now,
     )
 
@@ -159,8 +162,8 @@ def _insert_grant(session: Session, lab: Lab, **overrides: object) -> UUID:
 # --- targets --------------------------------------------------------------------------------
 
 
-def test_target_is_enabled_by_default(db_session: Session, lab: Lab) -> None:
-    row = db_session.execute(
+def test_target_is_enabled_by_default(owner_session: Session, lab: Lab) -> None:
+    row = owner_session.execute(
         text("SELECT enabled, created_at FROM targets WHERE id = :id"), {"id": lab.target_id}
     ).one()
 
@@ -168,8 +171,8 @@ def test_target_is_enabled_by_default(db_session: Session, lab: Lab) -> None:
     assert row.created_at.utcoffset() == timedelta(0)
 
 
-def test_target_project_must_exist(db_session: Session) -> None:
-    error = violation(db_session, INSERT_TARGET, _target_params(uuid4()))
+def test_target_project_must_exist(owner_session: Session) -> None:
+    error = violation(owner_session, INSERT_TARGET, _target_params(uuid4()))
 
     assert (error.sqlstate, error.diag.constraint_name) == (
         FOREIGN_KEY_VIOLATION,
@@ -177,14 +180,14 @@ def test_target_project_must_exist(db_session: Session) -> None:
     )
 
 
-def test_target_origin_is_unique_within_a_project(db_session: Session, lab: Lab) -> None:
-    error = violation(db_session, INSERT_TARGET, _target_params(lab.project_id, name="again"))
+def test_target_origin_is_unique_within_a_project(owner_session: Session, lab: Lab) -> None:
+    error = violation(owner_session, INSERT_TARGET, _target_params(lab.project_id, name="again"))
 
     assert (error.sqlstate, error.diag.constraint_name) == (
         UNIQUE_VIOLATION,
         "uq_targets_project_id_canonical_origin",
     )
-    assert _insert_target(db_session, insert_project(db_session, "other"))
+    assert _insert_target(owner_session, insert_project(owner_session, "other"))
 
 
 @pytest.mark.parametrize(
@@ -201,16 +204,16 @@ def test_target_origin_is_unique_within_a_project(db_session: Session, lab: Lab)
         ("canonical_origin", "", "ck_targets_origin_canonical"),
     ],
 )
-def test_target_checks(db_session: Session, column: str, value: str, constraint: str) -> None:
-    project_id = insert_project(db_session)
+def test_target_checks(owner_session: Session, column: str, value: str, constraint: str) -> None:
+    project_id = insert_project(owner_session)
 
-    error = violation(db_session, INSERT_TARGET, _target_params(project_id, **{column: value}))
+    error = violation(owner_session, INSERT_TARGET, _target_params(project_id, **{column: value}))
 
     assert (error.sqlstate, error.diag.constraint_name) == (CHECK_VIOLATION, constraint)
 
 
-def test_project_with_targets_cannot_be_deleted(db_session: Session, lab: Lab) -> None:
-    error = violation(db_session, "DELETE FROM projects WHERE id = :id", {"id": lab.project_id})
+def test_project_with_targets_cannot_be_deleted(owner_session: Session, lab: Lab) -> None:
+    error = violation(owner_session, "DELETE FROM projects WHERE id = :id", {"id": lab.project_id})
 
     assert (error.sqlstate, error.diag.constraint_name) == (
         RESTRICT_VIOLATION,
@@ -221,24 +224,24 @@ def test_project_with_targets_cannot_be_deleted(db_session: Session, lab: Lab) -
 # --- scope_grants：資料 ---------------------------------------------------------------------
 
 
-def test_consistent_grants_are_accepted(db_session: Session, lab: Lab) -> None:
+def test_consistent_grants_are_accepted(owner_session: Session, lab: Lab) -> None:
     later = lab.now + timedelta(seconds=1)
 
-    assert _insert_grant(db_session, lab)
+    assert _insert_grant(owner_session, lab)
     assert _insert_grant(
-        db_session, lab, version=2, allowed_paths=[], allow_all_paths=True, **_approval(lab)
+        owner_session, lab, version=2, allowed_paths=[], allow_all_paths=True, **_approval(lab)
     )
-    assert _insert_grant(db_session, lab, version=3, **_revocation(lab))
-    assert _insert_grant(db_session, lab, version=4, **_approved_then_revoked(lab))
+    assert _insert_grant(owner_session, lab, version=3, **_revocation(lab))
+    assert _insert_grant(owner_session, lab, version=4, **_approved_then_revoked(lab))
     assert _insert_grant(
-        db_session, lab, version=5, **_approved_then_revoked(lab, revoked_at=later)
+        owner_session, lab, version=5, **_approved_then_revoked(lab, revoked_at=later)
     )
 
 
-def test_ips_are_stored_as_inet(db_session: Session, lab: Lab) -> None:
-    grant_id = _insert_grant(db_session, lab, allowed_ips=["10.89.7.20", "10.89.7.21"])
+def test_ips_are_stored_as_inet(owner_session: Session, lab: Lab) -> None:
+    grant_id = _insert_grant(owner_session, lab, allowed_ips=["10.89.7.20", "10.89.7.21"])
 
-    row = db_session.execute(
+    row = owner_session.execute(
         text(
             "SELECT pg_typeof(allowed_ips)::text AS type, "
             "allowed_ips = CAST(:expected AS inet[]) AS same FROM scope_grants WHERE id = :id"
@@ -247,8 +250,8 @@ def test_ips_are_stored_as_inet(db_session: Session, lab: Lab) -> None:
     ).one()
 
     assert (row.type, row.same) == ("inet[]", True)
-    with pytest.raises(DataError), db_session.begin_nested():
-        _insert_grant(db_session, lab, version=2, allowed_ips=["vampi-vuln"])
+    with pytest.raises(DataError), owner_session.begin_nested():
+        _insert_grant(owner_session, lab, version=2, allowed_ips=["vampi-vuln"])
 
 
 @pytest.mark.parametrize(
@@ -261,19 +264,19 @@ def test_ips_are_stored_as_inet(db_session: Session, lab: Lab) -> None:
     ],
 )
 def test_grant_references_must_exist(
-    db_session: Session, lab: Lab, column: str, constraint: str
+    owner_session: Session, lab: Lab, column: str, constraint: str
 ) -> None:
     params = _grant_params(lab, **{**_approved_then_revoked(lab), column: uuid4()})
 
-    error = violation(db_session, INSERT_GRANT, params)
+    error = violation(owner_session, INSERT_GRANT, params)
 
     assert (error.sqlstate, error.diag.constraint_name) == (FOREIGN_KEY_VIOLATION, constraint)
 
 
-def test_version_is_unique_per_target(db_session: Session, lab: Lab) -> None:
-    _insert_grant(db_session, lab)
+def test_version_is_unique_per_target(owner_session: Session, lab: Lab) -> None:
+    _insert_grant(owner_session, lab)
 
-    error = violation(db_session, INSERT_GRANT, _grant_params(lab))
+    error = violation(owner_session, INSERT_GRANT, _grant_params(lab))
 
     assert (error.sqlstate, error.diag.constraint_name) == (
         UNIQUE_VIOLATION,
@@ -399,8 +402,8 @@ BAD_ROWS: list[tuple[str, Overrides, str]] = [
     [(overrides, check) for _, overrides, check in BAD_ROWS],
     ids=[case_id for case_id, _, _ in BAD_ROWS],
 )
-def test_grant_checks(db_session: Session, lab: Lab, overrides: Overrides, check: str) -> None:
-    error = violation(db_session, INSERT_GRANT, _grant_params(lab, **overrides(lab)))
+def test_grant_checks(owner_session: Session, lab: Lab, overrides: Overrides, check: str) -> None:
+    error = violation(owner_session, INSERT_GRANT, _grant_params(lab, **overrides(lab)))
 
     assert (error.sqlstate, error.diag.constraint_name) == (
         CHECK_VIOLATION,
@@ -408,10 +411,10 @@ def test_grant_checks(db_session: Session, lab: Lab, overrides: Overrides, check
     )
 
 
-def test_target_with_grants_cannot_be_deleted(db_session: Session, lab: Lab) -> None:
-    _insert_grant(db_session, lab)
+def test_target_with_grants_cannot_be_deleted(owner_session: Session, lab: Lab) -> None:
+    _insert_grant(owner_session, lab)
 
-    error = violation(db_session, "DELETE FROM targets WHERE id = :id", {"id": lab.target_id})
+    error = violation(owner_session, "DELETE FROM targets WHERE id = :id", {"id": lab.target_id})
 
     assert (error.sqlstate, error.diag.constraint_name) == (
         RESTRICT_VIOLATION,
@@ -430,17 +433,17 @@ def _status(session: Session, grant_id: UUID) -> str:
     return value
 
 
-def test_allowed_transitions(db_session: Session, lab: Lab) -> None:
-    approved_then_revoked = _insert_grant(db_session, lab, version=1)
-    revoked_while_pending = _insert_grant(db_session, lab, version=2)
+def test_allowed_transitions(owner_session: Session, lab: Lab) -> None:
+    approved_then_revoked = _insert_grant(owner_session, lab, version=1)
+    revoked_while_pending = _insert_grant(owner_session, lab, version=2)
 
-    db_session.execute(text(APPROVE), {"id": approved_then_revoked, "key": lab.key_id})
-    assert _status(db_session, approved_then_revoked) == "approved"
-    db_session.execute(text(REVOKE), {"id": approved_then_revoked, "key": lab.key_id})
-    db_session.execute(text(REVOKE), {"id": revoked_while_pending, "key": lab.key_id})
+    owner_session.execute(text(APPROVE), {"id": approved_then_revoked, "key": lab.key_id})
+    assert _status(owner_session, approved_then_revoked) == "approved"
+    owner_session.execute(text(REVOKE), {"id": approved_then_revoked, "key": lab.key_id})
+    owner_session.execute(text(REVOKE), {"id": revoked_while_pending, "key": lab.key_id})
 
-    assert _status(db_session, approved_then_revoked) == "revoked"
-    assert _status(db_session, revoked_while_pending) == "revoked"
+    assert _status(owner_session, approved_then_revoked) == "revoked"
+    assert _status(owner_session, revoked_while_pending) == "revoked"
 
 
 def _rejected_update(session: Session, statement: str, params: dict[str, object]) -> str:
@@ -465,15 +468,15 @@ def _rejected_update(session: Session, statement: str, params: dict[str, object]
     ids=["approved-to-pending", "re-approve", "approve-revoked", "edit-revoked", "edit-pending"],
 )
 def test_other_status_changes_are_rejected(
-    db_session: Session, lab: Lab, state: str, statement: str
+    owner_session: Session, lab: Lab, state: str, statement: str
 ) -> None:
     extra = {"pending": {}, "approved": _approval(lab), "revoked": _revocation(lab)}[state]
-    grant_id = _insert_grant(db_session, lab, **extra)
+    grant_id = _insert_grant(owner_session, lab, **extra)
 
-    message = _rejected_update(db_session, statement, {"id": grant_id, "key": lab.key_id})
+    message = _rejected_update(owner_session, statement, {"id": grant_id, "key": lab.key_id})
 
     assert "status change" in message
-    assert _status(db_session, grant_id) == state
+    assert _status(owner_session, grant_id) == state
 
 
 @pytest.mark.parametrize(
@@ -499,57 +502,59 @@ def test_other_status_changes_are_rejected(
     ],
 )
 def test_scope_cannot_change_even_during_a_valid_transition(
-    db_session: Session, lab: Lab, assignment: str
+    owner_session: Session, lab: Lab, assignment: str
 ) -> None:
-    grant_id = _insert_grant(db_session, lab)
+    grant_id = _insert_grant(owner_session, lab)
     other_target = _insert_target(
-        db_session, lab.project_id, canonical_origin="http://juice-shop:3000"
+        owner_session, lab.project_id, canonical_origin="http://juice-shop:3000"
     )
     statement = REVOKE.replace(" WHERE", f", {assignment} WHERE")
 
     message = _rejected_update(
-        db_session,
+        owner_session,
         statement,
         {
             "id": grant_id,
             "key": lab.key_id,
             "other_target": other_target,
-            "other_key": insert_key(db_session),
+            "other_key": insert_key(owner_session),
         },
     )
 
     assert "immutable" in message
 
 
-def test_approval_is_fixed_once_recorded(db_session: Session, lab: Lab) -> None:
-    grant_id = _insert_grant(db_session, lab, **_approval(lab))
+def test_approval_is_fixed_once_recorded(owner_session: Session, lab: Lab) -> None:
+    grant_id = _insert_grant(owner_session, lab, **_approval(lab))
     statement = REVOKE.replace(" WHERE", ", approval_note = 'rewritten' WHERE")
 
-    message = _rejected_update(db_session, statement, {"id": grant_id, "key": lab.key_id})
+    message = _rejected_update(owner_session, statement, {"id": grant_id, "key": lab.key_id})
 
     assert "approval" in message
 
 
-def test_revoking_a_pending_grant_cannot_record_an_approval(db_session: Session, lab: Lab) -> None:
-    grant_id = _insert_grant(db_session, lab)
+def test_revoking_a_pending_grant_cannot_record_an_approval(
+    owner_session: Session, lab: Lab
+) -> None:
+    grant_id = _insert_grant(owner_session, lab)
     statement = REVOKE.replace(
         " WHERE",
         ", approved_by_key_id = :key, approved_at = now(), approval_note = 'sneaky' WHERE",
     )
 
-    message = _rejected_update(db_session, statement, {"id": grant_id, "key": lab.key_id})
+    message = _rejected_update(owner_session, statement, {"id": grant_id, "key": lab.key_id})
 
     assert "approval" in message
 
 
-def test_approving_cannot_record_a_revocation(db_session: Session, lab: Lab) -> None:
-    grant_id = _insert_grant(db_session, lab)
+def test_approving_cannot_record_a_revocation(owner_session: Session, lab: Lab) -> None:
+    grant_id = _insert_grant(owner_session, lab)
     statement = APPROVE.replace(
         " WHERE",
         ", revoked_by_key_id = :key, revoked_at = now(), revocation_reason = 'odd' WHERE",
     )
 
-    message = _rejected_update(db_session, statement, {"id": grant_id, "key": lab.key_id})
+    message = _rejected_update(owner_session, statement, {"id": grant_id, "key": lab.key_id})
 
     assert "revocation" in message
 
@@ -560,18 +565,18 @@ def test_approving_cannot_record_a_revocation(db_session: Session, lab: Lab) -> 
     ["DELETE FROM scope_grants WHERE id = :id", "TRUNCATE scope_grants CASCADE"],
     ids=["delete", "truncate"],
 )
-def test_grants_cannot_be_removed(db_session: Session, lab: Lab, statement: str) -> None:
-    grant_id = _insert_grant(db_session, lab)
+def test_grants_cannot_be_removed(owner_session: Session, lab: Lab, statement: str) -> None:
+    grant_id = _insert_grant(owner_session, lab)
 
-    message = _rejected_update(db_session, statement, {"id": grant_id, "key": lab.key_id})
+    message = _rejected_update(owner_session, statement, {"id": grant_id, "key": lab.key_id})
 
     assert "blocked" in message
-    assert _status(db_session, grant_id) == "pending"
+    assert _status(owner_session, grant_id) == "pending"
 
 
-def test_scope_grant_triggers_exist(db_session: Session) -> None:
+def test_scope_grant_triggers_exist(owner_session: Session) -> None:
     triggers = set(
-        db_session.execute(
+        owner_session.execute(
             text(
                 "SELECT tgname FROM pg_trigger "
                 "WHERE tgrelid = 'scope_grants'::regclass AND NOT tgisinternal"

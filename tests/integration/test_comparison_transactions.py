@@ -182,12 +182,14 @@ def test_audit_failure_rolls_back_the_header_and_all_finding_rows(
 def test_committed_snapshot_and_rows_reject_truncate(
     client: TestClient,
     queue_engine: Engine,
+    queue_owner_engine: Engine,
     queue_seed: Seeder,
     world: World,
 ) -> None:
     body = pair(queue_engine, queue_seed, world)
     assert client.post(URL, json=body, headers=world.operator_a.headers).status_code == 201
-    with Session(queue_engine) as session:
+    # trigger 那一層以 owner 執行（應用程式角色沒有 TRUNCATE；見 test_db_privileges.py）。
+    with Session(queue_owner_engine) as session:
         # T21 的 triage 事件以 FK 引用 scan_comparison_findings：不加 CASCADE 時 PostgreSQL 在
         # trigger 之前就拒絕；加 CASCADE 時由各表的 no-truncate trigger 拒絕。
         for statement in (

@@ -1,4 +1,8 @@
-"""T22 比較快照：同一 target、先後與封存後不可再追加。"""
+"""T22 比較快照：同一 target、先後與封存後不可再追加。
+
+T23b-b1：這個檔案驗證 trigger 與約束那一層，以 owner 執行（owner_session）；應用程式角色的權限
+那一層（例如沒有 DELETE、TRUNCATE）見 test_db_privileges.py。
+"""
 
 from uuid import UUID
 
@@ -47,28 +51,28 @@ def _snapshot(session: Session, values: dict[str, object]) -> UUID:
 
 
 def test_snapshot_is_unique_and_cannot_be_changed_after_sealing(
-    db_session: Session, snap: Snapshot
+    owner_session: Session, snap: Snapshot
 ) -> None:
-    values = _pair(db_session, snap)
-    comparison = _snapshot(db_session, values)
-    db_session.execute(
+    values = _pair(owner_session, snap)
+    comparison = _snapshot(owner_session, values)
+    owner_session.execute(
         text("UPDATE scan_comparisons SET sealed = true WHERE id = :id"), {"id": comparison}
     )
-    assert violation(db_session, INSERT, values).sqlstate == UNIQUE_VIOLATION
+    assert violation(owner_session, INSERT, values).sqlstate == UNIQUE_VIOLATION
     for statement in (
         "UPDATE scan_comparisons SET comparability = 'comparable' WHERE id = :id",
         "UPDATE scan_comparisons SET sealed = false WHERE id = :id",
         "DELETE FROM scan_comparisons WHERE id = :id",
     ):
-        assert violation(db_session, statement, {"id": comparison}).sqlstate == (
+        assert violation(owner_session, statement, {"id": comparison}).sqlstate == (
             INTEGRITY_CONSTRAINT_VIOLATION
         )
 
 
-def test_cross_target_scan_is_rejected(db_session: Session, snap: Snapshot) -> None:
-    values = _pair(db_session, snap)
+def test_cross_target_scan_is_rejected(owner_session: Session, snap: Snapshot) -> None:
+    values = _pair(owner_session, snap)
     other = _insert_scan(
-        db_session,
+        owner_session,
         snap,
         target_id=snap.sibling,
         target_origin="http://vampi-b:5000",
@@ -78,7 +82,7 @@ def test_cross_target_scan_is_rejected(db_session: Session, snap: Snapshot) -> N
         status="failed",
         finished_at=LATER,
     )
-    assert violation(db_session, INSERT, {**values, "current": other}).sqlstate == (
+    assert violation(owner_session, INSERT, {**values, "current": other}).sqlstate == (
         FOREIGN_KEY_VIOLATION
     )
 
@@ -92,20 +96,20 @@ def test_cross_target_scan_is_rejected(db_session: Session, snap: Snapshot) -> N
     ],
 )
 def test_invalid_snapshot_fields_are_rejected(
-    db_session: Session, snap: Snapshot, field: str, value: object
+    owner_session: Session, snap: Snapshot, field: str, value: object
 ) -> None:
-    values = _pair(db_session, snap)
-    assert violation(db_session, INSERT, {**values, field: value}).sqlstate == CHECK_VIOLATION
+    values = _pair(owner_session, snap)
+    assert violation(owner_session, INSERT, {**values, field: value}).sqlstate == CHECK_VIOLATION
 
 
-def test_same_scan_is_rejected(db_session: Session, snap: Snapshot) -> None:
-    values = _pair(db_session, snap)
-    assert violation(db_session, INSERT, {**values, "current": values["baseline"]}).sqlstate == (
+def test_same_scan_is_rejected(owner_session: Session, snap: Snapshot) -> None:
+    values = _pair(owner_session, snap)
+    assert violation(owner_session, INSERT, {**values, "current": values["baseline"]}).sqlstate == (
         CHECK_VIOLATION
     )
 
 
-def test_unsealed_snapshot_cannot_commit(db_session: Session, snap: Snapshot) -> None:
-    _snapshot(db_session, _pair(db_session, snap))
-    error = violation(db_session, "SET CONSTRAINTS ALL IMMEDIATE", {})
+def test_unsealed_snapshot_cannot_commit(owner_session: Session, snap: Snapshot) -> None:
+    _snapshot(owner_session, _pair(owner_session, snap))
+    error = violation(owner_session, "SET CONSTRAINTS ALL IMMEDIATE", {})
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION

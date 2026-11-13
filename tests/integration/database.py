@@ -4,11 +4,15 @@
 - 連線設定只讀 TEST_DB_*（環境變數或 .env），與應用程式的 DB_* 是不同的鍵、不同的伺服器。
 - 只接受 loopback 位址上、cluster_name = secscan-test 的伺服器；設定指錯（例如指到開發用 db）
   時直接拒絕。psycopg 經 libpq 連線，pytest-socket 管不到，所以由這裡把關。
-- 每個測試 session 建立專屬的非 superuser 角色與它擁有的全新資料庫，結束時刪除，
-  權限和開發／正式環境的應用程式角色一致（不以 superuser 執行 migration 與測試）。
+- 每個測試資料庫有兩個專屬的非 superuser 角色，和開發／正式環境相同（T23b-b1；DECISIONS §31）：
+  `<db>_owner` 擁有資料庫與所有物件，只用於 migration 與需要 DDL 的測試；`<db>_app` 只有 v0025
+  授予的逐表 DML，其他測試一律以它執行。結束時刪除資料庫與兩個角色。
 - 佇列的測試另外從 migrated 的 template 複製（CREATE DATABASE … TEMPLATE）每個測試專用的資料庫：
   佇列會認領任何排隊中的 run，共用資料庫時會認領到別的測試留下的 run。複製的資料庫沿用
-  template 的角色（資料表的擁有者），刪除時只刪資料庫。
+  template 的兩個角色；資料庫層級的權限不會從 template 複製，所以另外授予 app 的 CONNECT。
+  刪除時只刪資料庫。
+- 舊版的資料庫（legacy=True；migrate-db-roles 的測試用）：只有 app 角色，資料庫由它擁有，和
+  T23b-b1 之前的開發 DB 相同；owner 角色由移轉指令建立，刪除時一併刪除。
 - 測試角色的預設時區刻意設成 Asia/Taipei：伺服器本身是 UTC 時，看不出應用程式的
   UTC 設定有沒有作用。
 """
@@ -85,30 +89,45 @@ def ensure_test_cluster(cluster_name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class ProvisionedDatabase:
-    """一個測試專用資料庫；密碼為隨機值。
+    """一個測試專用資料庫與它的兩個角色（`<base>_owner`、`<base>_app`）；密碼為隨機值。
 
-    角色與資料庫同名；從 template 複製的資料庫（role 有值）沿用 template 的角色。
+    base 是建立時的資料庫名稱；從 template 複製的資料庫（cloned）沿用 template 的 base 與角色。
     """
 
     name: str
     host: str
     port: int
     password: str = field(repr=False)
-    role: str | None = None
+    owner_password: str = field(repr=False)
+    base: str
+    cloned: bool = False
 
     @property
     def user(self) -> str:
-        return self.role if self.role is not None else self.name
+        """應用程式角色（逐表 DML）。"""
+        return f"{self.base}_app"
+
+    @property
+    def owner_user(self) -> str:
+        """owner 角色（擁有資料庫與所有物件；migration 與需要 DDL 的測試）。"""
+        return f"{self.base}_owner"
 
     def app_settings(self) -> Settings:
         """以應用程式角色連到這個資料庫的 Settings（不讀 .env）。"""
+        return self._settings(self.user, self.password)
+
+    def owner_settings(self) -> Settings:
+        """以 owner 角色連到這個資料庫的 Settings（不讀 .env）。"""
+        return self._settings(self.owner_user, self.owner_password)
+
+    def _settings(self, user: str, password: str) -> Settings:
         return Settings(
             app_env="test",
             db_host=self.host,
             db_port=self.port,
             db_name=self.name,
-            db_user=self.user,
-            db_password=SecretStr(self.password),
+            db_user=user,
+            db_password=SecretStr(password),
             secret_encryption_keys=encryption_keys(),
             content_encryption_keys=content_keys(),
             _env_file=None,
@@ -131,55 +150,89 @@ class DatabaseProvisioner:
             cluster_name = connection.execute(text("SHOW cluster_name")).scalar_one()
         ensure_test_cluster(str(cluster_name))
 
-    def create(self) -> ProvisionedDatabase:
+    def create(self, *, legacy: bool = False) -> ProvisionedDatabase:
+        """全新的資料庫；legacy=True 時只建立 app 角色，資料庫由它擁有（T23b-b1 之前的狀態）。"""
         name = DATABASE_PREFIX + secrets.token_hex(6)
-        password = secrets.token_hex(24)
-        ident = sql.Identifier(name)
+        database = ProvisionedDatabase(
+            name=name,
+            host=self._settings.host,
+            port=self._settings.port,
+            password=secrets.token_hex(24),
+            owner_password=secrets.token_hex(24),
+            base=name,
+        )
+        roles = [(database.user, database.password)]
+        if not legacy:
+            roles.insert(0, (database.owner_user, database.owner_password))
+        # 先登記：中途失敗時 close() 也會刪除已經建立的角色與資料庫（_drop 都是 IF EXISTS）。
+        self._created.append(name)
         with self._engine.connect() as connection:
             raw = _driver_connection(connection)
-            # CREATE ROLE 失敗時，預設會把整句（含密碼）寫進伺服器日誌。
-            raw.execute("SET log_min_error_statement = panic")
-            raw.execute(
-                sql.SQL(
-                    "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                    "NOREPLICATION NOBYPASSRLS PASSWORD {}"
-                ).format(ident, sql.Literal(password))
-            )
-            raw.execute(
-                sql.SQL("ALTER ROLE {} SET timezone = {}").format(
-                    ident, sql.Literal(TEST_ROLE_TIMEZONE)
-                )
-            )
-            raw.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(ident, ident))
+            for role, password in roles:
+                create_login_role(raw, role, password)
+            owner = database.user if legacy else database.owner_user
+            ident = sql.Identifier(name)
+            raw.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(ident, sql.Identifier(owner)))
             raw.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(ident))
-        self._created.append(name)
-        return ProvisionedDatabase(
-            name=name, host=self._settings.host, port=self._settings.port, password=password
-        )
+            if not legacy:
+                # 和 initdb 相同：應用程式角色只能連線，資料表的權限由 v0025 授予。
+                raw.execute(
+                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                        ident, sql.Identifier(database.user)
+                    )
+                )
+        return database
 
     def clone(self, template: ProvisionedDatabase) -> ProvisionedDatabase:
-        """以 template（已 migrate、沒有任何連線）複製一個新的資料庫，擁有者是 template 的角色。"""
+        """以 template（已 migrate、沒有任何連線）複製新的資料庫，擁有者是 template 的 owner。"""
         name = DATABASE_PREFIX + secrets.token_hex(6)
         ident = sql.Identifier(name)
         with self._engine.connect() as connection:
             raw = _driver_connection(connection)
             raw.execute(
                 sql.SQL("CREATE DATABASE {} TEMPLATE {} OWNER {}").format(
-                    ident, sql.Identifier(template.name), sql.Identifier(template.user)
+                    ident, sql.Identifier(template.name), sql.Identifier(template.owner_user)
                 )
             )
             raw.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(ident))
+            # 資料庫層級的權限不會從 template 複製（CREATE DATABASE 的文件）；物件的權限會。
+            raw.execute(
+                sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                    ident, sql.Identifier(template.user)
+                )
+            )
         self._clones.append(name)
         return ProvisionedDatabase(
             name=name,
             host=template.host,
             port=template.port,
             password=template.password,
-            role=template.user,
+            owner_password=template.owner_password,
+            base=template.base,
+            cloned=True,
         )
 
+    def create_role(self, database: ProvisionedDatabase) -> tuple[str, str]:
+        """只有這個資料庫 CONNECT 權限的角色（ROLE-01：確認 PUBLIC 的 EXECUTE 已關閉）。
+
+        刪除資料庫時一併刪除（_drop）；只用於 create() 建立的資料庫。
+        """
+        role, password = f"{database.base}_probe", secrets.token_hex(24)
+        with self._engine.connect() as connection:
+            raw = _driver_connection(connection)
+            create_login_role(raw, role, password)
+            raw.execute(
+                sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                    sql.Identifier(database.name), sql.Identifier(role)
+                )
+            )
+        return role, password
+
+    def superuser_settings(self) -> IntegrationDbSettings:
+        return self._settings
+
     def drop(self, database: ProvisionedDatabase) -> None:
-        if database.role is not None:
+        if database.cloned:
             self._drop_database(database.name)
             self._clones.remove(database.name)
             return
@@ -198,15 +251,36 @@ class DatabaseProvisioner:
 
     def _drop(self, name: str) -> None:
         self._drop_database(name)
+        roles = [f"{name}_probe", f"{name}_app", f"{name}_owner"]
         with self._engine.connect() as connection:
             raw = _driver_connection(connection)
-            raw.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name)))
+            for role in roles:
+                raw.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
 
     def _drop_database(self, name: str) -> None:
         ident = sql.Identifier(name)
         with self._engine.connect() as connection:
             raw = _driver_connection(connection)
             raw.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(ident))
+
+
+def create_login_role(
+    raw: psycopg.Connection[tuple[object, ...]], role: str, password: str
+) -> None:
+    """和 initdb 相同屬性的 LOGIN 角色；預設時區刻意設成 Asia/Taipei（見模組說明）。"""
+    ident = sql.Identifier(role)
+    # CREATE ROLE 失敗時，預設會把整句（含密碼）寫進伺服器日誌。
+    raw.execute("SET log_min_error_statement = panic")
+    raw.execute(
+        sql.SQL(
+            "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+            "NOREPLICATION NOBYPASSRLS PASSWORD {}"
+        ).format(ident, sql.Literal(password))
+    )
+    raw.execute("RESET log_min_error_statement")
+    raw.execute(
+        sql.SQL("ALTER ROLE {} SET timezone = {}").format(ident, sql.Literal(TEST_ROLE_TIMEZONE))
+    )
 
 
 def _driver_connection(connection: Connection) -> psycopg.Connection[tuple[object, ...]]:

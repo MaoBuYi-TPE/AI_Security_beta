@@ -20,7 +20,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE = ROOT / "Makefile"
-LOCAL_SECRETS = ("DB_PASSWORD", "DB_ADMIN_PASSWORD", "TEST_DB_PASSWORD")
+# DB_OWNER_PASSWORD：migration 的 owner 角色（T23b-b1；ROLE-07）。
+LOCAL_SECRETS = ("DB_PASSWORD", "DB_ADMIN_PASSWORD", "TEST_DB_PASSWORD", "DB_OWNER_PASSWORD")
 KEY_NAMES = ("SECRET_ENCRYPTION_KEYS", "EVIDENCE_ENCRYPTION_KEYS", "CONTENT_ENCRYPTION_KEYS")
 GENERATED = "已在 .env 產生"
 # 既有的金鑰（固定的測試值，不是真的金鑰）：make env 不得改動它。
@@ -88,7 +89,12 @@ def test_existing_values_are_kept_and_only_missing_keys_are_appended(tmp_path: P
     text = env_file.read_text(encoding="utf-8")
     assert text.startswith(original + "\n")
     appended = _values_from(text[len(original) + 1 :])
-    assert set(appended) == {"DB_ADMIN_PASSWORD", "TEST_DB_PASSWORD", *KEY_NAMES[1:]}
+    assert set(appended) == {
+        "DB_ADMIN_PASSWORD",
+        "TEST_DB_PASSWORD",
+        "DB_OWNER_PASSWORD",
+        *KEY_NAMES[1:],
+    }
     assert text.count("SECRET_ENCRYPTION_KEYS") == 1
     assert [line for line in text.splitlines() if line.startswith("DB_PASSWORD=")] == [
         "DB_PASSWORD=keep-me"

@@ -94,11 +94,15 @@ def _tree(volume: Path) -> set[str]:
 
 
 def test_dry_run_changes_nothing(
-    queue_engine: Engine, queue_seed: Seeder, volume: Path, messages: list[str]
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    volume: Path,
+    messages: list[str],
+    queue_owner_engine: Engine,
 ) -> None:
     normal = _run_directory(volume)
     held = _run_directory(volume)
-    _legacy_hold(queue_engine, held)
+    _legacy_hold(queue_owner_engine, held)
     (volume / "notes\x1b[31m.txt").write_bytes(b"x")
     before = _tree(volume)
 
@@ -114,12 +118,16 @@ def test_dry_run_changes_nothing(
 
 
 def test_the_volume_is_migrated_and_legacy_holds_are_isolated(
-    queue_engine: Engine, queue_seed: Seeder, volume: Path, messages: list[str]
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    volume: Path,
+    messages: list[str],
+    queue_owner_engine: Engine,
 ) -> None:
     normal = _run_directory(volume)
     held = _run_directory(volume)
     held_ino = (volume / held).stat().st_ino
-    _legacy_hold(queue_engine, held)
+    _legacy_hold(queue_owner_engine, held)
     (volume / "notes.txt").write_bytes(b"x")
 
     assert _migrate(queue_engine, volume, messages) == EXIT_OK
@@ -161,14 +169,18 @@ def test_an_empty_volume_only_gets_the_structure(
 
 
 def test_an_interrupted_migration_is_finished_by_running_again(
-    queue_engine: Engine, queue_seed: Seeder, volume: Path, messages: list[str]
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    volume: Path,
+    messages: list[str],
+    queue_owner_engine: Engine,
 ) -> None:
     """中斷在搬進暫存目錄之後、改名成 active 之前，以及搬到 held/ 之後、寫 isolated_at 之前。"""
     moved = _run_directory(volume)
     remaining = _run_directory(volume)
     held = _run_directory(volume)
     held_ino = (volume / held).stat().st_ino
-    _legacy_hold(queue_engine, held)
+    _legacy_hold(queue_owner_engine, held)
     with Session(queue_engine) as session, session.begin():
         session.execute(
             text("UPDATE evidence_holds SET source_ino = :ino WHERE directory = :id"),
@@ -188,10 +200,14 @@ def test_an_interrupted_migration_is_finished_by_running_again(
 
 
 def test_a_conflict_keeps_both_directories_and_does_not_finish(
-    queue_engine: Engine, queue_seed: Seeder, volume: Path, messages: list[str]
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    volume: Path,
+    messages: list[str],
+    queue_owner_engine: Engine,
 ) -> None:
     held = _run_directory(volume)
-    _legacy_hold(queue_engine, held)
+    _legacy_hold(queue_owner_engine, held)
     (volume / "held" / held).mkdir(parents=True)
     (volume / "held" / held / "existing.txt").write_bytes(b"keep")
     normal = _run_directory(volume)
@@ -232,13 +248,17 @@ def test_a_uuid_named_symlink_is_not_followed_and_blocks_the_plan(
 
 
 def test_an_unverified_isolation_does_not_stop_the_others(
-    queue_engine: Engine, queue_seed: Seeder, volume: Path, messages: list[str]
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    volume: Path,
+    messages: list[str],
+    queue_owner_engine: Engine,
 ) -> None:
     """程式碼審查 L1：held/ 中的目錄身分和紀錄不符時不寫入 isolated_at，其他紀錄照常完成。"""
     good = _run_directory(volume)
-    _legacy_hold(queue_engine, good)
+    _legacy_hold(queue_owner_engine, good)
     stray = str(uuid4())
-    _legacy_hold(queue_engine, stray)
+    _legacy_hold(queue_owner_engine, stray)
     with Session(queue_engine) as session, session.begin():
         session.execute(
             text("UPDATE evidence_holds SET source_ino = 1 WHERE directory = :id"), {"id": stray}

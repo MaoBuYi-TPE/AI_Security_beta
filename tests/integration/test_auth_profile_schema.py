@@ -2,6 +2,9 @@
 
 直接用 SQL 驗證 schema 本身：即使程式有 bug，DB 也只收 Fernet token 形式的密文，每個 profile
 最多一份密文，版本列只允許「清除密文」與「重新加密」兩種修改。
+
+T23b-b1：這個檔案驗證 trigger 與約束那一層，以 owner 執行（owner_session）；應用程式角色的權限
+那一層（例如沒有 DELETE、TRUNCATE）見 test_db_privileges.py。
 """
 
 import json
@@ -64,11 +67,11 @@ class Lab:
 
 
 @pytest.fixture
-def lab(db_session: Session) -> Lab:
-    project_id = insert_project(db_session)
-    target_id = returning_id(db_session, INSERT_TARGET, {"project_id": project_id})
+def lab(owner_session: Session) -> Lab:
+    project_id = insert_project(owner_session)
+    target_id = returning_id(owner_session, INSERT_TARGET, {"project_id": project_id})
     assert target_id is not None
-    return Lab(key_id=insert_key(db_session), target_id=target_id)
+    return Lab(key_id=insert_key(owner_session), target_id=target_id)
 
 
 def _profile_params(lab: Lab, **overrides: object) -> dict[str, object]:
@@ -115,11 +118,11 @@ def _rejected(session: Session, statement: str, params: Mapping[str, object]) ->
     return error.sqlstate or "", error.diag.constraint_name or ""
 
 
-def test_valid_profile_and_version_are_stored(db_session: Session, lab: Lab) -> None:
-    profile_id = _insert_profile(db_session, lab)
-    db_session.execute(text(INSERT_VERSION), _version_params(profile_id, lab))
-    admin_id = _insert_profile(db_session, lab, role_label="admin")
-    db_session.execute(
+def test_valid_profile_and_version_are_stored(owner_session: Session, lab: Lab) -> None:
+    profile_id = _insert_profile(owner_session, lab)
+    owner_session.execute(text(INSERT_VERSION), _version_params(profile_id, lab))
+    admin_id = _insert_profile(owner_session, lab, role_label="admin")
+    owner_session.execute(
         text(INSERT_VERSION),
         _version_params(
             admin_id,
@@ -130,7 +133,7 @@ def test_valid_profile_and_version_are_stored(db_session: Session, lab: Lab) -> 
         ),
     )
 
-    row = db_session.execute(
+    row = owner_session.execute(
         text(
             "SELECT created_at, preflight_expected_json FROM auth_profile_versions "
             "WHERE profile_id = :id"
@@ -157,17 +160,17 @@ def test_valid_profile_and_version_are_stored(db_session: Session, lab: Lab) -> 
     ids=["blank-name", "uppercase", "digit-first", "hyphen", "newline", "anonymous"],
 )
 def test_profile_checks(
-    db_session: Session, lab: Lab, overrides: dict[str, object], constraint: str
+    owner_session: Session, lab: Lab, overrides: dict[str, object], constraint: str
 ) -> None:
     params = _profile_params(lab, **overrides)
 
-    assert _rejected(db_session, INSERT_PROFILE, params) == (CHECK_VIOLATION, constraint)
+    assert _rejected(owner_session, INSERT_PROFILE, params) == (CHECK_VIOLATION, constraint)
 
 
-def test_role_label_is_unique_per_target(db_session: Session, lab: Lab) -> None:
-    _insert_profile(db_session, lab)
+def test_role_label_is_unique_per_target(owner_session: Session, lab: Lab) -> None:
+    _insert_profile(owner_session, lab)
 
-    assert _rejected(db_session, INSERT_PROFILE, _profile_params(lab)) == (
+    assert _rejected(owner_session, INSERT_PROFILE, _profile_params(lab)) == (
         UNIQUE_VIOLATION,
         "uq_auth_profiles_target_id_role_label",
     )
@@ -181,11 +184,11 @@ def test_role_label_is_unique_per_target(db_session: Session, lab: Lab) -> None:
     ],
 )
 def test_profile_references_must_exist(
-    db_session: Session, lab: Lab, field: str, constraint: str
+    owner_session: Session, lab: Lab, field: str, constraint: str
 ) -> None:
     params = _profile_params(lab, **{field: uuid4()})
 
-    assert _rejected(db_session, INSERT_PROFILE, params) == (FOREIGN_KEY_VIOLATION, constraint)
+    assert _rejected(owner_session, INSERT_PROFILE, params) == (FOREIGN_KEY_VIOLATION, constraint)
 
 
 @pytest.mark.parametrize(
@@ -199,10 +202,10 @@ def test_profile_references_must_exist(
     ],
     ids=["rename", "same-value", "delete", "truncate"],
 )
-def test_profiles_are_immutable(db_session: Session, lab: Lab, statement: str) -> None:
-    profile_id = _insert_profile(db_session, lab)
+def test_profiles_are_immutable(owner_session: Session, lab: Lab, statement: str) -> None:
+    profile_id = _insert_profile(owner_session, lab)
 
-    error = violation(db_session, statement, {"id": profile_id})
+    error = violation(owner_session, statement, {"id": profile_id})
 
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
     assert "immutable" in str(error)
@@ -258,21 +261,21 @@ def _version_checks() -> list[tuple[dict[str, object], str]]:
 
 @pytest.mark.parametrize(("overrides", "constraint"), _version_checks())
 def test_version_checks(
-    db_session: Session, lab: Lab, overrides: dict[str, object], constraint: str
+    owner_session: Session, lab: Lab, overrides: dict[str, object], constraint: str
 ) -> None:
-    profile_id = _insert_profile(db_session, lab)
+    profile_id = _insert_profile(owner_session, lab)
     params = _version_params(profile_id, lab, **overrides)
 
-    assert _rejected(db_session, INSERT_VERSION, params) == (CHECK_VIOLATION, constraint)
+    assert _rejected(owner_session, INSERT_VERSION, params) == (CHECK_VIOLATION, constraint)
 
 
-def test_the_largest_token_fits(db_session: Session, lab: Lab) -> None:
-    profile_id = _insert_profile(db_session, lab)
+def test_the_largest_token_fits(owner_session: Session, lab: Lab) -> None:
+    profile_id = _insert_profile(owner_session, lab)
     longest = Credential(AuthType.API_KEY_HEADER, header_name="x" * 64)
     token = shared_cipher().seal('"' * 4096, context=secret_context(profile_id, longest))
     assert len(token) == MAX_ENCRYPTED_SECRET_BYTES
 
-    db_session.execute(
+    owner_session.execute(
         text(INSERT_VERSION), _version_params(profile_id, lab, encrypted_secret=token)
     )
 
@@ -285,36 +288,38 @@ def test_the_largest_token_fits(db_session: Session, lab: Lab) -> None:
     ],
 )
 def test_version_references_must_exist(
-    db_session: Session, lab: Lab, field: str, constraint: str
+    owner_session: Session, lab: Lab, field: str, constraint: str
 ) -> None:
-    profile_id = _insert_profile(db_session, lab)
+    profile_id = _insert_profile(owner_session, lab)
     params = {**_version_params(profile_id, lab), field: uuid4()}
 
-    assert _rejected(db_session, INSERT_VERSION, params) == (FOREIGN_KEY_VIOLATION, constraint)
+    assert _rejected(owner_session, INSERT_VERSION, params) == (FOREIGN_KEY_VIOLATION, constraint)
 
 
-def test_version_is_unique_per_profile(db_session: Session, lab: Lab) -> None:
-    profile_id = _insert_profile(db_session, lab)
-    db_session.execute(text(INSERT_VERSION), _version_params(profile_id, lab))
-    db_session.execute(text(ERASE), {"id": profile_id, "version": 1})
+def test_version_is_unique_per_profile(owner_session: Session, lab: Lab) -> None:
+    profile_id = _insert_profile(owner_session, lab)
+    owner_session.execute(text(INSERT_VERSION), _version_params(profile_id, lab))
+    owner_session.execute(text(ERASE), {"id": profile_id, "version": 1})
 
-    assert _rejected(db_session, INSERT_VERSION, _version_params(profile_id, lab)) == (
+    assert _rejected(owner_session, INSERT_VERSION, _version_params(profile_id, lab)) == (
         UNIQUE_VIOLATION,
         "pk_auth_profile_versions",
     )
 
 
-def test_a_profile_holds_at_most_one_secret(db_session: Session, lab: Lab) -> None:
+def test_a_profile_holds_at_most_one_secret(owner_session: Session, lab: Lab) -> None:
     """部分唯一索引：上一版的密文沒有清除，就不能寫入下一版。"""
-    profile_id = _insert_profile(db_session, lab)
-    db_session.execute(text(INSERT_VERSION), _version_params(profile_id, lab))
+    profile_id = _insert_profile(owner_session, lab)
+    owner_session.execute(text(INSERT_VERSION), _version_params(profile_id, lab))
 
-    assert _rejected(db_session, INSERT_VERSION, _version_params(profile_id, lab, version=2)) == (
+    assert _rejected(
+        owner_session, INSERT_VERSION, _version_params(profile_id, lab, version=2)
+    ) == (
         UNIQUE_VIOLATION,
         "uq_auth_profile_versions_live_secret",
     )
-    db_session.execute(text(ERASE), {"id": profile_id, "version": 1})
-    db_session.execute(text(INSERT_VERSION), _version_params(profile_id, lab, version=2))
+    owner_session.execute(text(ERASE), {"id": profile_id, "version": 1})
+    owner_session.execute(text(INSERT_VERSION), _version_params(profile_id, lab, version=2))
 
 
 # --- auth_profile_versions：trigger ---------------------------------------------------------
@@ -326,12 +331,12 @@ def _stored_version(session: Session, lab: Lab) -> UUID:
     return profile_id
 
 
-def test_erasing_the_secret_is_allowed(db_session: Session, lab: Lab) -> None:
-    profile_id = _stored_version(db_session, lab)
+def test_erasing_the_secret_is_allowed(owner_session: Session, lab: Lab) -> None:
+    profile_id = _stored_version(owner_session, lab)
 
-    db_session.execute(text(ERASE), {"id": profile_id, "version": 1})
+    owner_session.execute(text(ERASE), {"id": profile_id, "version": 1})
 
-    row = db_session.execute(
+    row = owner_session.execute(
         text(
             "SELECT encrypted_secret, secret_erased_at FROM auth_profile_versions "
             "WHERE profile_id = :id"
@@ -342,11 +347,11 @@ def test_erasing_the_secret_is_allowed(db_session: Session, lab: Lab) -> None:
     assert row.secret_erased_at is not None
 
 
-def test_reencrypting_the_secret_is_allowed(db_session: Session, lab: Lab) -> None:
-    profile_id = _stored_version(db_session, lab)
+def test_reencrypting_the_secret_is_allowed(owner_session: Session, lab: Lab) -> None:
+    profile_id = _stored_version(owner_session, lab)
     new_token = _token(profile_id)
 
-    db_session.execute(
+    owner_session.execute(
         text(
             "UPDATE auth_profile_versions SET encrypted_secret = :token "
             "WHERE profile_id = :id AND version = 1"
@@ -354,7 +359,7 @@ def test_reencrypting_the_secret_is_allowed(db_session: Session, lab: Lab) -> No
         {"token": new_token, "id": profile_id},
     )
 
-    stored = db_session.execute(
+    stored = owner_session.execute(
         text("SELECT encrypted_secret FROM auth_profile_versions WHERE profile_id = :id"),
         {"id": profile_id},
     ).scalar()
@@ -387,14 +392,14 @@ def test_reencrypting_the_secret_is_allowed(db_session: Session, lab: Lab) -> No
     ],
 )
 def test_other_changes_to_versions_are_blocked(
-    db_session: Session, lab: Lab, statement: str
+    owner_session: Session, lab: Lab, statement: str
 ) -> None:
-    profile_id = _stored_version(db_session, lab)
+    profile_id = _stored_version(owner_session, lab)
 
-    error = violation(db_session, statement, {"id": profile_id})
+    error = violation(owner_session, statement, {"id": profile_id})
 
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
-    remaining = db_session.execute(
+    remaining = owner_session.execute(
         text(
             "SELECT count(*) FROM auth_profile_versions "
             "WHERE profile_id = :id AND encrypted_secret IS NOT NULL AND preflight_path = '/me'"
@@ -404,12 +409,12 @@ def test_other_changes_to_versions_are_blocked(
     assert remaining == 1
 
 
-def test_an_erased_secret_cannot_be_restored(db_session: Session, lab: Lab) -> None:
-    profile_id = _stored_version(db_session, lab)
-    db_session.execute(text(ERASE), {"id": profile_id, "version": 1})
+def test_an_erased_secret_cannot_be_restored(owner_session: Session, lab: Lab) -> None:
+    profile_id = _stored_version(owner_session, lab)
+    owner_session.execute(text(ERASE), {"id": profile_id, "version": 1})
 
     error = violation(
-        db_session,
+        owner_session,
         "UPDATE auth_profile_versions SET encrypted_secret = :token, secret_erased_at = NULL "
         "WHERE profile_id = :id",
         {"token": _token(profile_id), "id": profile_id},
@@ -418,15 +423,15 @@ def test_an_erased_secret_cannot_be_restored(db_session: Session, lab: Lab) -> N
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
 
 
-def test_a_new_version_must_carry_a_secret(db_session: Session, lab: Lab) -> None:
+def test_a_new_version_must_carry_a_secret(owner_session: Session, lab: Lab) -> None:
     """清除過的狀態只能由 UPDATE 而來：INSERT 一個已清除的版本，也被 trigger 擋下。
 
     BEFORE trigger 先於 CHECK 執行，所以「密文是 NULL」的 INSERT 都由 trigger 擋下。
     """
-    profile_id = _insert_profile(db_session, lab)
+    profile_id = _insert_profile(owner_session, lab)
     params = _version_params(profile_id, lab, encrypted_secret=None, secret_erased_at=ERASED_AT)
 
-    error = violation(db_session, INSERT_VERSION, params)
+    error = violation(owner_session, INSERT_VERSION, params)
 
     assert error.sqlstate == INTEGRITY_CONSTRAINT_VIOLATION
     assert "secret" in str(error)
@@ -440,10 +445,10 @@ def test_a_new_version_must_carry_a_secret(db_session: Session, lab: Lab) -> Non
     ],
 )
 def test_size_checks_match_the_domain_limits(
-    db_session: Session, constraint: str, value: int
+    owner_session: Session, constraint: str, value: int
 ) -> None:
     """migration 寫死的上限要和 domain 的常數相同：只比對 CHECK 名稱的測試看不出內容的漂移。"""
-    definition = db_session.execute(
+    definition = owner_session.execute(
         text("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :name"),
         {"name": constraint},
     ).scalar_one()
@@ -451,9 +456,9 @@ def test_size_checks_match_the_domain_limits(
     assert f"<= {value}" in definition
 
 
-def test_guard_triggers_exist(db_session: Session) -> None:
+def test_guard_triggers_exist(owner_session: Session) -> None:
     triggers = set(
-        db_session.execute(
+        owner_session.execute(
             text(
                 "SELECT tgrelid::regclass || '.' || tgname FROM pg_trigger "
                 "WHERE tgrelid IN ('auth_profiles'::regclass, 'auth_profile_versions'::regclass) "

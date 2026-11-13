@@ -77,18 +77,18 @@ def test_get_project_returns_none_when_missing(db_session: Session) -> None:
     assert repository.get(uuid4()) is None
 
 
-def test_list_projects_oldest_first_and_paginated(db_session: Session) -> None:
-    repository = ProjectRepository(db_session)
+def test_list_projects_oldest_first_and_paginated(owner_session: Session) -> None:
+    repository = ProjectRepository(owner_session)
     created = [repository.create(NewProject(name=f"lab-{n}")) for n in range(3)]
     # 同一個 transaction 內 now() 相同；改成不同的建立時間（最後建立的最舊），才驗得到主排序鍵。
     for minutes_ago, project in zip((10, 20, 30), created, strict=True):
-        db_session.execute(
+        owner_session.execute(
             text(
                 "UPDATE projects SET created_at = now() - make_interval(mins => :m) WHERE id = :id"
             ),
             {"m": minutes_ago, "id": project.id},
         )
-    db_session.expire_all()
+    owner_session.expire_all()
 
     first = repository.list_page(PageRequest(page=1, limit=2), scope=AllProjects())
     second = repository.list_page(PageRequest(page=2, limit=2), scope=AllProjects())
