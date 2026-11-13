@@ -1624,7 +1624,10 @@
         - ROLE-01 至 08、空轉檢查 16 項；
         - 三項審查（`DECISIONS.md` §31.11）；
         - api、worker、runner 與 CLI 的整合測試以應用程式角色執行；schema 層與 DDL 的故障注入以 owner 執行（`tests/integration/conftest.py` 的說明）
-      - [ ] G2 使用者的 `make env`（補上 `DB_OWNER_PASSWORD`）與完整的 `make test`
+      - [x] G2 使用者的 `make env`（補上 `DB_OWNER_PASSWORD`）與完整的 `make test`（2026-11-13，`DECISIONS.md` §31.12）：
+        - `.env` 是 600、468 bytes；
+        - 第二次的 `make test`：7,883 passed、2 skipped，coverage 98.75%。2 個 skipped 是既有的、依環境略過的測試。
+        - 第一次的 1 項失敗是 T23a 測試的間歇性失敗，和 b1 無關。
       - [ ] G3 Live（另外授權）：`make test-live-db-roles`、`make test-live-runner`、`make test-live-fixture-findings`、`make test-live-fixture-rescan`
       - [ ] G4 審查與合併
       - [ ] G5 開發 DB 的移轉（使用者執行：`make db-roles-migrate DRY_RUN=1` → `make db-roles-migrate` → `make migrate`）

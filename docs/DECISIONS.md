@@ -3752,3 +3752,24 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 | 程式碼 LOW | <ul><li>fixture 中途失敗留下角色；</li><li>碰撞搜尋失敗時的訊息；</li><li>例外的型別；</li><li>變數遮蔽；</li><li>過期的文件</li></ul> | 都已修正。`owner_alembic_config` 以命名推出應用程式角色，維持現狀並寫明約定 |
 
 空轉檢查 16 項：計畫列出的都被測試抓到。L4 第一次沒抓到「session 層級的鎖」：NullPool 的連線在 commit 之後就關閉。改成在連線還開著時檢查之後，抓到了。
+
+### 31.12 G2 的結果（使用者，2026-11-13）
+
+- **`make env`**：補上 `DB_OWNER_PASSWORD`；`.env` 是 600、468 bytes，和計畫相同。
+- **第一次的 `make test`**：7,882 passed、1 failed，失敗的是 `test_evidence_retry.py::test_retention_status_shows_unfinished_isolation_as_urgent`。
+  - **原因**（推論，依程式碼與量測；失敗的當下沒有量到時鐘差）：
+    - `retention-status` 判斷「需要緊急處理」時，比較的是 trigger 以 DB 容器時鐘寫入的 `held_at`，和主機的 `datetime.now(UTC)`（`cli/evidence.py` 的 `_isolation_status`、`_isolating_line`）。
+    - 測試把門檻設成 0 分鐘。DB 容器的時鐘比主機快、而且快過兩次取時間的間隔時，緊急的數量就是 0。
+    - 事後量到 DB 比主機快 0.2 到 9 ms。
+  - **和 b1 無關**：
+    - 這個測試與程式屬於 T23a，這個 PR 沒有修改；
+    - 分權之前的基準與三次完整執行都通過；
+    - 單獨重跑 12 次都通過；
+    - 那段期間沒有睡眠紀錄。
+- **第二次的 `make test`**：7,883 passed、2 skipped，coverage 98.75%。
+  - 2 個 skipped 是既有的、依環境略過的測試：
+    - `test_workspace.py:397`：檔案系統不接受非 UTF-8 的檔名；
+    - `test_taxonomy_contract.py:89`：需要 gitignore 的錄製。
+- **提議**（待使用者決定，b1 的範圍之外）：`retention-status` 改以 DB 的時鐘判斷經過的時間。
+  - 到期清除已經以 DB 的時鐘判斷（`worker/retention.py`），這裡用主機的時鐘並不一致；
+  - 改了之後，這個測試就不受主機與容器的時鐘差影響。
