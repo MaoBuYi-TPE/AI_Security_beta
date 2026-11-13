@@ -3723,8 +3723,8 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 | G1 | 離線實作、測試與審查，開 PR、不合併 | 我（Claude） |
 | G2 | `make env` 與完整的 `make test` | 使用者 |
 | G3 | 四項 Live，另外授權 | — |
-| G4 | 合併 | 使用者 |
-| G5 | 開發 DB 的移轉 | 使用者 |
+| G4 | 合併 | 使用者（2026-11-13 改由使用者要求 Claude 最終核對後合併，§31.14） |
+| G5 | 開發 DB 的移轉 | 使用者（2026-11-13 改由使用者授權 Claude 依 7 項條件執行，§31.14） |
 
 - b1 在 G1 到 G5 都完成之後才標完成。
 - **SEC-14 仍不標完成。**
@@ -3813,3 +3813,85 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
   - 這是 T11 起既有的行為，和 b1 無關。
   - 沒有刪除，由使用者決定。
   - **提議**：`docker rm -f -v`。不在 b1 的範圍內，可以和 §31.12 的時鐘修正一起處理。
+  - **處理**（§31.14）：2026-11-13 依使用者的決定定向清除；修正在 PR #39。
+
+### 31.14 G4、G5 的結果與殘留的處理（使用者，2026-11-13）
+
+**使用者的決定**：
+- 不重跑四項 Live；不為了既有的匿名 volume 擴大 PR #38 的範圍。
+- 依序執行：
+  1. 定向清除 12 個匿名 volume；
+  2. PR #38 最終核對並合併；
+  3. G5 的移轉與升級後的驗證；
+  4. 從 main 另開小 PR，處理時鐘誤差與匿名 volume。
+- §31.10 原本由使用者執行的 G4、G5，改由使用者要求 Claude 執行。
+
+**G5 的執行條件**（使用者看過第一次 dry-run 之後提出）：
+1. 正式移轉之前，確認有可還原的備份，也沒有非預期的連線；
+2. 再次確認移轉的範圍和 dry-run 相同；
+3. 依序執行，任何一步失敗就停止，不跳過檢查、不強制修改 DB；
+4. 接上 AC 之後才以 `caffeinate` 執行 `make up`；
+5. 驗證健康狀態、schema 0025、擁有權、逐表權限、default ACL 與三個服務的實際連線角色；
+6. 不刪除或重建開發 DB 的 volume、不重設金鑰、不修改 G5 範圍以外的資源；
+7. 保留紀錄。
+
+**證據**：在 gitignore 的 `recordings/t23b-b1-g5/`。
+- 內容：SUMMARY、各步驟的 log 與結束碼、備份、驗證腳本。
+- 清單：`MANIFEST.sha256`，29 個檔案，本身的 sha256 是 `92bf3b0e8a6be485e44808bc5cdc429d6a84206e0011db1ad9e1d253bcb1f66c`。
+
+| 步驟 | 結果 |
+|---|---|
+| 清除 12 個匿名 volume | <ul><li>先確認每一個都是 G3 前後清單的差集、建立於 `test-live-runner` 期間、只有匿名標籤、沒有容器引用、內容為空；</li><li>以完整 ID 逐一 `docker volume rm`（沒有 prune）；</li><li>之後的清單和 G3 執行前相同（275 個）。</li></ul> |
+| G4：PR #38 | <ul><li>本機 HEAD 等於 PR head，base 是目前的 main；</li><li>`make lint`、`make typecheck` exit 0；</li><li>G2 之後的 commit 只改 Live 測試與文件；沒有設定 CI。</li></ul>合併：`4287eea` |
+| 連線 | 除了查詢自己之外沒有 client 連線（app stack 沒有在執行） |
+| 備份 | <ul><li>`pg_dump -Fc` 與 `pg_dumpall --globals-only --no-role-passwords`；</li><li>`pg_restore --list` 與 `pg_restore -f -` 完整解碼，exit 0；</li><li>30 張表的列數和 DB 相同。開發 DB 只有 3 列：`alembic_version` 1、`runner_instances` 2。</li></ul>**沒有**實際還原到任何資料庫（條件 6） |
+| dry-run ×2 | 兩次都是 S0、exit 0，逐行相同：<ul><li>70 個物件：table 30、sequence 2、trigger function 37、資料庫 1；</li><li>沒有任何拒絕。</li></ul> |
+| `make db-roles-migrate` | <ul><li>exit 0；</li><li>transaction 內重新分類的清單和 dry-run 相同；</li><li>已移轉 70 個物件；</li><li>`secscan_owner` 可以登入。</li></ul> |
+| `make migrate` | exit 0：`0025 (head)` |
+| `make up` | <ul><li>接上 AC，以 `caffeinate -is` 執行；</li><li>exit 0，所有服務 healthy；</li><li>db 容器沒有重建，`secscan_db_data` 仍是 2026-11-12 建立的那一個；</li><li>`.env` 前後都是 600、468 bytes。</li></ul> |
+| 升級後的驗證 | **24/24 通過**，見下方 |
+| 服務 | <ul><li>api、runner、worker、guard 的日誌沒有權限錯誤；</li><li>這次啟動的 runner 與 worker 都有新的心跳（INSERT 之後 UPDATE）。</li></ul> |
+
+**24 項驗證**：
+- **健康狀態**：live 與 ready。
+- **schema**：版本是 0025，等於 head。
+- **擁有權**：
+  - DB 由 owner 擁有；`public` 由 `pg_database_owner` 擁有；
+  - `public` 中的 relation、函式與型別都由 owner 擁有；
+  - app 在所有資料庫都不擁有任何物件；
+  - 兩個角色的屬性正確；
+  - 沒有成員關係，也沒有角色或資料庫層級的設定。
+- **權限**：
+  - 30 張表的權限等於 `tests/db_privileges.py` 的矩陣；
+  - 沒有 GRANT OPTION；
+  - PUBLIC 沒有表的權限，也沒有欄位權限；
+  - app 在 DB 只有 CONNECT，在 public 只有 USAGE；
+  - 37 個函式都有明確的 ACL，app 沒有 EXECUTE，也沒有 SECURITY DEFINER。
+- **default ACL**：只有 owner 的全域函式條目一列。
+- **服務的連線**：
+  - 三個服務在各自的容器內，`current_user` 與 `session_user` 都是 `secscan_app`；
+  - 環境變數中沒有 owner 的帳密；
+  - 所有的 client 連線都是 `secscan_app`。
+
+**執行中的兩個錯誤**（都在驗證的查詢本身，唯讀，沒有任何改變）：
+1. 腳本的 `text || "char"` 運算子有歧義，加上 `::text` 後重跑；
+2. 第一次的心跳檢查把 G5 之前的 2 列舊紀錄也算了進去，同一個紀錄中已更正。
+
+**殘留**：
+- 開發用的 app stack 維持啟動。
+- `runner_instances` 中 2026-11-12 的 2 列舊紀錄：
+  - 由 runner 與 worker 迴圈的 `prune()` 在 7 天沒有心跳之後刪除（`STALE_AFTER`）；
+  - 沒有手動刪除。
+
+**§31.12、§31.13 的兩項提議**：在 PR #39 處理（從 main 另開，待審查與合併）。
+- `retention-status` 改以 DB 的 `clock_timestamp()` 判斷經過時間，並加上主機時鐘快或慢一小時的回歸測試；
+- Live 的接收端以 tmpfs 蓋住 guard 映像的 VOLUME，沿用 `lab_support` 既有的作法；
+- Makefile 的清除改成 `docker rm -f -v`。
+
+**結論**：
+- b1 的 G1 到 G5 都完成，**b1 標示完成**；
+- T23b 的 b2 到 b4 尚未開始；
+- **SEC-14 仍不標完成**（§30.14 的 P0 條件）：
+  - 還需要 T23b 的 b2、b3 與 T23c 完成；
+  - 還要驗證機密不會經由洩漏路徑外流；
+  - 剩餘風險要經使用者確認接受。
