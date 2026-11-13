@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from tests.live.support import GUARD_IMAGE, LAB_NET, docker, wait_for
+from tests.live.support import GUARD_IMAGE, GUARD_IMAGE_VOLUME_TMPFS, LAB_NET, docker, wait_for
 
 LAB_FILE = Path(__file__).resolve().parents[2] / "compose.lab.yaml"
 PREFIX = "secscan-live-lab-"
@@ -32,9 +32,6 @@ FIXTURE_DIR = Path(__file__).resolve().parent / "fixture_app"
 _FIXTURE_LAUNCH = (
     "import sys; sys.path.insert(0, '/site'); from fixture_app.app import main; main()"
 )
-# guard 映像宣告的 VOLUME：和 compose 的 guard 一樣以 tmpfs 蓋住，
-# docker rm -f 才不會留下匿名 volume。
-_GUARD_IMAGE_VOLUME_TMPFS = "/home/mitmproxy/.mitmproxy:size=1m,mode=0700"
 # compose.lab.yaml 的預設（掃描中途不會過期）。
 LONG_TOKEN_SECONDS = 3600
 # Juice Shop 的種子使用者（data/static/users.yml，customer）；VAmPI 的種子使用者（/createdb）。
@@ -175,7 +172,7 @@ def start_fixture(*, vulnerable: bool, host: str | None = None) -> Target:
         "--memory",
         "256m",
         "--tmpfs",
-        _GUARD_IMAGE_VOLUME_TMPFS,
+        GUARD_IMAGE_VOLUME_TMPFS,
         "--entrypoint",
         "python3",
         "-v",

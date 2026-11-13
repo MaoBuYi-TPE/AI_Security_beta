@@ -16,7 +16,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tests.live.support import GUARD_IMAGE, GUARD_IP, LAB_NET, SCAN_NET, container, docker, wait_for
+from tests.live.support import (
+    GUARD_IMAGE,
+    GUARD_IMAGE_VOLUME_TMPFS,
+    GUARD_IP,
+    LAB_NET,
+    SCAN_NET,
+    container,
+    docker,
+    wait_for,
+)
 
 HERE = Path(__file__).resolve().parent
 PREFIX = "secscan-live-t11-"
@@ -295,6 +304,8 @@ def start_receiver(
         "ALL",
         "--security-opt",
         "no-new-privileges:true",
+        "--tmpfs",
+        GUARD_IMAGE_VOLUME_TMPFS,
         "--entrypoint",
         "python3",
         "-v",
