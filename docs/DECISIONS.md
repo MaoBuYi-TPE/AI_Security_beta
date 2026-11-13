@@ -3773,3 +3773,43 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 - **提議**（待使用者決定，b1 的範圍之外）：`retention-status` 改以 DB 的時鐘判斷經過的時間。
   - 到期清除已經以 DB 的時鐘判斷（`worker/retention.py`），這裡用主機的時鐘並不一致；
   - 改了之後，這個測試就不受主機與容器的時鐘差影響。
+
+### 31.13 G3 的結果（Live，使用者 2026-11-13 授權）
+
+**執行條件**：
+- 每一項都以 `caffeinate -is` 執行，AC 電源；
+- 可拋棄的 `secscan-live` stack；
+- `.env` 執行前後都是 600、468 bytes；
+- 沒有使用開發用的 db。
+
+**證據**：在 gitignore 的 `recordings/t23b-b1-live/`。
+- 內容：SUMMARY、各項的 log 與結束碼、Docker 前後的快照，以及兩個錄製目錄。
+- 清單：`MANIFEST.sha256`，37 個檔案，本身的 sha256 是 `300d05d50e912791d33caeceec636690175d066c42924ab466b2b016c73fb75f`。
+
+| 指令 | 結果 |
+|---|---|
+| `make test-live-db-roles`（attempt 1） | 10 passed、1 failed：測試的設計不對（見下） |
+| `make test-live-db-roles` | 14 passed |
+| `make test-live-runner` | 42 passed |
+| `make test-live-fixture-findings` | 3 passed |
+| `make test-live-fixture-rescan` | 1 passed |
+
+**attempt 1 的失敗**：
+- 原本的寫法：要求在同一次 `pg_stat_activity` 快照中同時看到三個服務的連線。
+- 為什麼看不到：runner 與 worker 使用 NullPool，每 2 秒輪詢時才連線幾毫秒。
+- 修正之後：
+  - 在每個服務的容器內，以那個程序自己的環境設定連線，確認 `current_user`、`session_user` 都是應用程式角色。只輸出角色名稱，密碼不離開容器。
+  - api 的連線池中的連線，以 `pg_stat_activity` 確認也是應用程式角色。
+
+**和 T23a 驗收的對照**：
+- findings 的 `[量測]` 行逐行相同；
+- rescan 只差執行秒數，以及一個 ZAP 告警回報的路由（`/greet` 與 `/go`）。T22 的 `rescan-final.log` 也是 `/greet`，所以是 ZAP 本身的變動。
+- 分權沒有改變掃描結果。
+
+**殘留**：
+- 容器與網路和執行前相同。
+- 另有 12 個空的匿名 volume，都建立於 `make test-live-runner` 期間：
+  - **原因**：guard 映像宣告了 `VOLUME /home/mitmproxy/.mitmproxy`。Live 的接收端以 `docker run -d` 啟動，以沒有 `-v` 的 `docker rm -f` 刪除，Makefile 的清除也一樣。
+  - 這是 T11 起既有的行為，和 b1 無關。
+  - 沒有刪除，由使用者決定。
+  - **提議**：`docker rm -f -v`。不在 b1 的範圍內，可以和 §31.12 的時鐘修正一起處理。

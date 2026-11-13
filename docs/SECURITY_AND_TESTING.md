@@ -478,14 +478,14 @@ T23b-b1 的 DDL／DML 分權（`DECISIONS.md` §31；預期矩陣在 `tests/db_p
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。
 
-T23b-b1 的 live 驗收（`make test-live-db-roles`，`tests/live/test_db_roles_live.py`；**尚未執行**，G3 需要另外授權）：
+T23b-b1 的 live 驗收（`make test-live-db-roles`，`tests/live/test_db_roles_live.py`；2026-11-13 執行，14 passed，`DECISIONS.md` §31.13）：
 - 全新的 volume 由 initdb 建立兩個非 superuser 的角色，資料庫由 owner 擁有；
 - migration 以 owner 執行：每個物件的擁有者是 owner、版本是 head、權限等於預期矩陣、只有 owner 的全域函式 default ACL；
-- api、runner、worker 的連線都是應用程式角色；
+- api、runner、worker 的帳密都是應用程式角色：在各自的容器內連線確認；api 連線池中的連線也一樣；
 - 應用程式角色的 DDL、停用 trigger、TRUNCATE、`session_replication_role` 被拒；
 - 三個服務的環境變數名稱中沒有 owner 的帳密：只在容器內列出名稱，值不離開容器。
 
-G3 另外重跑 `test-live-runner`、`test-live-fixture-findings`、`test-live-fixture-rescan`，確認分權之後的端到端流程。
+G3 另外重跑 `test-live-runner`（42 passed）、`test-live-fixture-findings`（3 passed）、`test-live-fixture-rescan`（1 passed），確認分權之後的端到端流程；量測和 T23a 的驗收相同。
 
 T11 已涵蓋（`tests/live/test_guard_live.py`；live 自己的 lab 網路 10.89.10.0/24 上的接收端 lab-target、lab-canary，以及 control_net 上的 control canary；接收端記下每一個 TCP accept）：
 - guard 非 root、唯讀、沒有 capability、只接 scan 與 lab（固定在 .254）、policy 唯讀，healthcheck 通過；lab 那一側連不到 guard 的 proxy。

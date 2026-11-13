@@ -6,7 +6,7 @@ initdb 建立兩個角色，recipe 在主機上以 owner 執行 migration，之�
 1. initdb 建立了兩個非 superuser 的角色，資料庫由 owner 擁有；
 2. migration 以 owner 執行：public 中每個物件的擁有者都是 owner，版本是 head；應用程式角色的權限
    等於預期矩陣，default privileges 只有 owner 的全域函式條目；
-3. api、runner、worker 的連線都是應用程式角色；
+3. api、runner、worker 的帳密都是應用程式角色（在各自的容器內連線確認），api 連線池中的連線也是；
 4. 應用程式角色的 DDL 被拒；
 5. 三個服務的環境變數名稱中沒有 owner 的帳密（只取名稱，值不離開容器）。
 
@@ -106,25 +106,46 @@ def test_migrations_ran_as_the_owner_and_granted_the_matrix() -> None:
     assert defaults == [["t", "f", "0"]]
 
 
-def test_the_services_connect_as_the_app_role() -> None:
-    def observed() -> dict[str, set[str]] | None:
-        rows = _owner_rows(
-            "SELECT application_name, usename = :'app' FROM pg_stat_activity "
-            "WHERE datname = current_database() AND application_name IN "
-            "('secscan-api', 'secscan-runner', 'secscan-worker');"
-        )
-        found: dict[str, set[str]] = {}
-        for name, is_app in rows:
-            found.setdefault(name, set()).add(is_app)
-        return found if set(found) == set(SERVICES.values()) else None
+@pytest.mark.parametrize("service", sorted(SERVICES))
+def test_each_service_authenticates_as_the_app_role(service: str) -> None:
+    """在服務的容器內，以那個程序自己的環境設定連線：只輸出角色名稱，密碼不離開容器。
 
-    # runner、worker 輪詢時才連線：等到三個都出現過。api 的 readiness 會連線。
+    runner 與 worker 用 NullPool、每 2 秒輪詢時才短暫連線，pg_stat_activity 的快照很難剛好看到
+    （第一次 Live 的教訓）；這裡直接確認它們的帳密是哪一個角色。
+    """
+    [[app]] = _owner_rows("SELECT :'app';")
+
+    output = docker("exec", container(service), "python", "-c", _WHO_AM_I).split()
+
+    assert output == [app, app]
+
+
+def test_the_api_pool_holds_only_app_role_connections() -> None:
+    """api 用連線池：readiness 之後連線留在池中，pg_stat_activity 看得到它實際的角色。"""
     docker("exec", container("api"), "python", "-c", _READY)
-    found = wait_for(observed, timeout=60)
 
-    assert found == {name: {"t"} for name in SERVICES.values()}
+    def observed() -> list[list[str]] | None:
+        rows = _owner_rows(
+            "SELECT usename = :'app' FROM pg_stat_activity "
+            "WHERE datname = current_database() AND application_name = 'secscan-api';"
+        )
+        return rows or None
+
+    rows = wait_for(observed, timeout=30)
+
+    assert rows == [["t"]] * len(rows)
 
 
+_WHO_AM_I = (
+    "from sqlalchemy import text\n"
+    "from secscan.core.config import Settings\n"
+    "from secscan.core.db import create_db_engine\n"
+    "engine = create_db_engine(Settings(), application_name='secscan-live-role-check', "
+    "pooled=False)\n"
+    "with engine.connect() as connection:\n"
+    "    row = connection.execute(text('SELECT current_user, session_user')).one()\n"
+    "print(row[0], row[1])\n"
+)
 _READY = (
     "import urllib.request\n"
     "urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=10).read()\n"

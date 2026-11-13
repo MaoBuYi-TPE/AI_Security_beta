@@ -1628,7 +1628,12 @@
         - `.env` 是 600、468 bytes；
         - 第二次的 `make test`：7,883 passed、2 skipped，coverage 98.75%。2 個 skipped 是既有的、依環境略過的測試。
         - 第一次的 1 項失敗是 T23a 測試的間歇性失敗，和 b1 無關。
-      - [ ] G3 Live（另外授權）：`make test-live-db-roles`、`make test-live-runner`、`make test-live-fixture-findings`、`make test-live-fixture-rescan`
+      - [x] G3 Live（使用者 2026-11-13 授權；`DECISIONS.md` §31.13）：
+        - `make test-live-db-roles`：14 passed。attempt 1 是 10 passed、1 failed，原因是測試的設計，已修正；
+        - `make test-live-runner`：42 passed；
+        - `make test-live-fixture-findings`：3 passed；
+        - `make test-live-fixture-rescan`：1 passed；
+        - 證據在 gitignore 的 `recordings/t23b-b1-live/`（MANIFEST 有 37 個檔案）。
       - [ ] G4 審查與合併
       - [ ] G5 開發 DB 的移轉（使用者執行：`make db-roles-migrate DRY_RUN=1` → `make db-roles-migrate` → `make migrate`）
       - 原本的要求：
