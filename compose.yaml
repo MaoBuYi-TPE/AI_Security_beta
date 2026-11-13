@@ -76,6 +76,10 @@ services:
       <<: *postgres-env
       # superuser 只給初始化與手動維運使用，應用程式一律用下面的非 superuser 角色。
       POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?請先執行 make env 產生 .env}
+      # owner 角色（T23b-b1；docs/DECISIONS.md §31）：擁有 schema，只用於 migration（主機上的
+      # make migrate）。密碼只交給 db 的 initdb，不交給 api、runner、worker。
+      SECSCAN_OWNER_DB_USER: ${DB_OWNER_USER:-secscan_owner}
+      SECSCAN_OWNER_DB_PASSWORD: ${DB_OWNER_PASSWORD:?請先執行 make env 產生 .env}
       SECSCAN_APP_DB_USER: ${DB_USER:-secscan_app}
       SECSCAN_APP_DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
       SECSCAN_APP_DB_NAME: ${DB_NAME:-secscan}

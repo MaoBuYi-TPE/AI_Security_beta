@@ -156,7 +156,12 @@ def test_runs_and_operations_are_only_added_while_creating_the_scan(
 
 
 def test_a_run_of_a_finished_scan_is_never_claimed(
-    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, scannable: Scannable
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    world: World,
+    scannable: Scannable,
+    queue_owner_engine: Engine,
 ) -> None:
     """萬一已終止的 scan 有排隊中的 run（只有停用 trigger 才做得到），也不會卡住佇列：
     認領之後的 settle 會被 scans_guard 擋下，FIFO 每次又選到同一個 run（安全審查發現）。
@@ -167,7 +172,7 @@ def test_a_run_of_a_finished_scan_is_never_claimed(
     lease = _claimed(queue)
     queue.advance(lease, R.FAILED, error_code=RunErrorCode.ENGINE_FAILED)
     assert _scan_status(queue_seed, scan.id) == "failed"
-    with Session(queue_engine) as session, session.begin():
+    with Session(queue_owner_engine) as session, session.begin():
         session.connection().exec_driver_sql(
             "ALTER TABLE scanner_runs DISABLE TRIGGER scanner_runs_guard_rows"
         )

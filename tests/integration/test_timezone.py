@@ -22,7 +22,7 @@ def test_role_default_timezone_is_not_utc(migrated_database: ProvisionedDatabase
         host=migrated_database.host,
         port=migrated_database.port,
         dbname=migrated_database.name,
-        user=migrated_database.name,
+        user=migrated_database.user,
         password=migrated_database.password,
         connect_timeout=5,
     ) as connection:

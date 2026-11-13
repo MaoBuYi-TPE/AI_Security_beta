@@ -105,9 +105,9 @@ def test_new_reports_start_queued(queue_engine: Engine, item: Scenario, world: W
 
 
 def test_only_allowed_transitions_and_columns(
-    queue_engine: Engine, item: Scenario, world: World
+    queue_owner_engine: Engine, item: Scenario, world: World
 ) -> None:
-    with sessionmaker(queue_engine)() as session:
+    with sessionmaker(queue_owner_engine)() as session:
         report = queued(session, item, world)
         for statement in (
             "UPDATE reports SET status = 'succeeded' WHERE id = :id",
@@ -132,9 +132,9 @@ def test_only_allowed_transitions_and_columns(
 
 
 def test_finished_reports_and_contents_are_immutable(
-    queue_engine: Engine, item: Scenario, world: World
+    queue_owner_engine: Engine, item: Scenario, world: World
 ) -> None:
-    sessions = sessionmaker(queue_engine)
+    sessions = sessionmaker(queue_owner_engine)
     with sessions() as session:
         report = queued(session, item, world)
         succeed(session, report)

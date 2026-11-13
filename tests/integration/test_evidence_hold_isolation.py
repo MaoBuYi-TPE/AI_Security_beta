@@ -54,7 +54,7 @@ def _execute(engine: Engine, statement: str, **params: object) -> None:
 def _orphan(engine: Engine, source_ino: int | None = 7) -> UUID:
     directory = uuid4()
     if source_ino is None:
-        # v0024 之前留下的紀錄：暫時關閉 trigger 寫入（只有測試這樣做）。
+        # v0024 之前留下的紀錄：暫時關閉 trigger 寫入（只有測試這樣做；需要 owner 的 engine）。
         with Session(engine) as session, session.begin():
             session.execute(text("ALTER TABLE evidence_holds DISABLE TRIGGER evidence_holds_guard"))
             session.execute(
@@ -166,9 +166,12 @@ def test_the_full_lifecycle_through_the_store(
 
 
 def test_the_source_inode_is_recorded_once_for_legacy_holds(
-    queue_engine: Engine, queue_seed: Seeder, isolation: HoldIsolationStore
+    queue_engine: Engine,
+    queue_owner_engine: Engine,
+    queue_seed: Seeder,
+    isolation: HoldIsolationStore,
 ) -> None:
-    legacy = _orphan(queue_engine, None)
+    legacy = _orphan(queue_owner_engine, None)
 
     assert isolation.record_source(legacy, 42)
     assert not isolation.record_source(legacy, 43)
@@ -182,9 +185,12 @@ def test_the_source_inode_is_recorded_once_for_legacy_holds(
 
 
 def test_isolation_needs_an_inode(
-    queue_engine: Engine, holds: EvidenceHolds, isolation: HoldIsolationStore
+    queue_engine: Engine,
+    queue_owner_engine: Engine,
+    holds: EvidenceHolds,
+    isolation: HoldIsolationStore,
 ) -> None:
-    legacy = _orphan(queue_engine, None)
+    legacy = _orphan(queue_owner_engine, None)
 
     with pytest.raises(DBAPIError, match="isolation steps"):
         _execute(
@@ -288,16 +294,16 @@ def test_checks_reject_unknown_move_codes(
     ],
 )
 def test_the_nine_checks_hold_even_without_the_trigger(
-    queue_engine: Engine, columns: str, constraint: str
+    queue_owner_engine: Engine, columns: str, constraint: str
 ) -> None:
     """trigger 之外的第二道防線：關閉 trigger 直接改寫，CHECK 仍然擋下不一致的列。"""
-    directory = _orphan(queue_engine)
+    directory = _orphan(queue_owner_engine)
 
     statement = f"UPDATE evidence_holds SET {columns} WHERE directory = :id"  # noqa: S608
 
     with (  # noqa: PT012 - 關閉 trigger 與改寫在同一個 transaction（失敗時一起回滾）
         pytest.raises(DBAPIError, match=constraint),
-        Session(queue_engine) as session,
+        Session(queue_owner_engine) as session,
         session.begin(),
     ):
         session.execute(text("ALTER TABLE evidence_holds DISABLE TRIGGER evidence_holds_guard"))

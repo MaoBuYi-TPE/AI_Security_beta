@@ -773,7 +773,12 @@ def test_a_lost_lease_leaves_the_run_to_the_reconciler(
 
 
 def test_worker_persists_only_complete_comparison_telemetry(
-    queue: ScanQueue, queue_engine: Engine, queue_seed: Seeder, world: World, dirs: Dirs
+    queue: ScanQueue,
+    queue_engine: Engine,
+    queue_seed: Seeder,
+    queue_owner_seed: Seeder,
+    world: World,
+    dirs: Dirs,
 ) -> None:
     request = ForwardedRequest(1, 1.0, "GET", "/search", False, rule="40018")
     telemetry = encode_line(request) + encode_line(UpstreamResponse(1, 1.1, 200))
@@ -795,7 +800,8 @@ def test_worker_persists_only_complete_comparison_telemetry(
         hashlib.sha256(b"/search").hexdigest(),
         False,
     )
-    [rule] = queue_seed.query(
+    # 應用程式角色只能新增 run_rule_locations、不能讀取：以 owner 查證。
+    [rule] = queue_owner_seed.query(
         "SELECT rule, parameters_unknown FROM run_rule_locations WHERE scanner_run_id = :run",
         run=lease.run_id,
     )

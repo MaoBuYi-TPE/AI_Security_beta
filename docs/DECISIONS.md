@@ -150,6 +150,7 @@
 限制與後續：
 
 - 資料庫擁有者仍能停用或刪除 audit_events 的 trigger。trigger 擋得住程式錯誤造成的誤改，擋不住已取得 DDL 能力的攻擊者，所以目前只稱「防誤改」，不稱「防竄改」。把 DDL 與 DML 角色分開（migration 角色擁有 schema；應用程式角色只有 DML，對 audit_events 只有 INSERT/SELECT），列為 M2/T23 的強化項目。
+  - **已由 §31（T23b-b1）處理**：schema 改由 owner 角色擁有，應用程式角色只有逐表 DML（audit_events 只有 SELECT、INSERT）。共用角色等剩餘風險見 §31.9。
 - 開發用 db 的應用程式角色密碼，只在第一次初始化 volume 時寫入；之後修改 `.env` 不會同步（見 README）。
 - superuser 密碼（`DB_ADMIN_PASSWORD`、`TEST_DB_PASSWORD`）與應用程式密碼放在同一個 `.env`，而應用程式每次啟動都會讀這個檔。M2 容器化時改用 compose `secrets:` 與 `POSTGRES_PASSWORD_FILE`，把基礎設施與應用程式的秘密分開。
 - DB 連線尚未設定 `sslmode`。只在單機 loopback 使用時影響不大；M2（離開單機）前補上。`statement_timeout`、`lock_timeout` 與 `idle_in_transaction_session_timeout` 已在 T09 設定（§13.8）。
@@ -3462,3 +3463,353 @@ PostgreSQL 的物件擁有者有特殊權限，不能只靠 `REVOKE` 就認定�
        4. **適用範圍**：只適用於 lab、單一操作者的環境。提議正式部署之前一定要有主動告警（T35）。
 
 **順序**：T23a 的文件 PR 合併之後，才撰寫 T23b-b1 的細部計畫；核准之前不實作。
+
+## 31. T23b-b1：DDL／DML 分權（2026-11-12 計畫核准、實作）
+
+### 31.1 決定的來源
+
+- **2026-11-12**（§30.14）：b1 只做 DDL／DML 分權，有四項要求：
+  1. 撤銷驗證，含繞過的途徑；
+  2. migration 使用獨立的憑證；
+  3. 分權之後重測 T23a；
+  4. 記錄剩餘風險。
+- **細部計畫第一輪**（使用者）：
+  - 只能新增的表只給 SELECT、INSERT；
+  - 其他表依實際業務需求授權，不為了方便開放 CRUD；
+  - 保留既有的 trigger；
+  - 不能經由擁有權、繼承或其他機制繞過；
+  - 考慮未來的 table、sequence 與 function；
+  - 正向與負向測試。
+- **第二輪審查**（M1–M3）：
+  - M1：default privileges 改用全域的 `FOR ROLE`；
+  - M2：REASSIGN OWNED 的範圍要列舉、fail closed；
+  - M3：advisory lock 的並行分析。
+- **核准時的選擇**（2026-11-12）：
+  - 報告鎖採方案 A（advisory lock，L1–L8 通過之後接受雜湊碰撞的額外等待）；
+  - G3 保留全部四項 Live；
+  - G5（開發 DB 的移轉）由使用者自己執行。
+
+### 31.2 角色與權限
+
+**兩個角色**，都是 NOSUPERUSER、NOCREATEDB、NOCREATEROLE、NOREPLICATION、NOBYPASSRLS，沒有成員關係：
+
+| 角色 | 擁有 | 誰使用 |
+|---|---|---|
+| `secscan_owner`（`DB_OWNER_USER`） | 資料庫與所有物件 | 只有 migration（主機上的 `make migrate`、Live 的 recipe） |
+| `secscan_app`（`DB_USER`） | 不擁有任何物件 | api、worker、runner 與主機的 admin CLI |
+
+**資料表的權限**：依執行期的實際用法；預期值在 `tests/db_privileges.py`，migration v0025 另有一份快照。
+
+| 類別 | 資料表 | 權限 |
+|---|---|---|
+| 只能新增（trigger 拒絕 UPDATE、DELETE） | `audit_events`、`api_specs`、`api_spec_operations`、`artifacts`、`observations`、`scan_events`、`scan_operations`、`run_coverage`、`run_locations`、`finding_observations`、`finding_triage_events`、`scan_comparison_findings` | SELECT、INSERT |
+| 只新增、從不讀取 | `run_rule_locations` | INSERT |
+| 有狀態轉換 | `api_keys`、`auth_profiles`、`auth_profile_versions`、`evidence_holds`、`finding_triage_excerpts`、`findings`、`reports`、`run_evidence`、`scan_comparisons`、`scanner_runs`、`scans`、`scope_grants`、`targets` | SELECT、INSERT、UPDATE（執行期的修改與列鎖；`FOR UPDATE／SHARE` 需要 UPDATE） |
+| 需要刪除 | `report_contents`（換版、到期刪除）、`runner_instances`（心跳的 upsert、刪除過期的實例） | 另加 DELETE |
+| 執行期不修改 | `projects` | SELECT、INSERT（報告建立的排隊改用 advisory lock，§31.6） |
+| 版本檢查 | `alembic_version` | SELECT |
+
+- **一律不授予**：
+  - TRUNCATE、REFERENCES、TRIGGER、MAINTAIN；
+  - GRANT OPTION、欄位層級的權限。
+- **既有的 trigger 與 CHECK 全部保留**：
+  - 只能新增的表有兩層：權限與 trigger；
+  - 其他表的轉換規則仍由 trigger 決定。
+- **資料表以外**：
+  - 資料庫只有 CONNECT：initdb 建立資料庫時就授予，所以 migration 之前 readiness 也能回報「schema 不是目前版本」；v0025 再確認一次；
+  - schema `public` 只有 USAGE。`public` 由 `pg_database_owner` 擁有；PUBLIC 保留 PG 15 起預設的 USAGE；
+  - sequence 沒有權限：identity 取號不檢查；
+  - 函式沒有 EXECUTE：trigger 觸發時不檢查。
+- **函式的 default privileges**：
+  - 既有的函式與 procedure（`ALL ROUTINES`）：撤銷 PUBLIC 的 EXECUTE。
+  - 之後建立的函式：以**全域**的 `ALTER DEFAULT PRIVILEGES FOR ROLE <owner> REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` 處理。PostgreSQL 18 文件明確說明，per-schema 的寫法撤銷不了全域或內建的預設，所以不使用。
+- **readiness**（`core/db.py` 的 `probe_database`）：應用程式角色讀不到 `alembic_version` 時，回 SCHEMA_OUTDATED，不是 UNAVAILABLE。這是 v0025 還沒套用的情況。
+
+### 31.3 實作的檔案
+
+| 對象 | 內容 |
+|---|---|
+| `migrations/versions/v0025_app_role_privileges.py` | <ul><li>檢查：未分類的表、應用程式角色。</li><li>先撤銷，再依矩陣授權。</li><li>函式的 default ACL。</li><li>downgrade 還原內建預設；資料庫的 CONNECT 保留。</li></ul> |
+| `migrations/credentials.py` | `MigrationCredentials`：`DB_OWNER_USER`、`DB_OWNER_PASSWORD`。 |
+| `migrations/roles.py` | 每次 migration 之前的角色檢查（§31.4）。 |
+| `migrations/env.py` | <ul><li>以 owner 連線，不退回應用程式角色的帳密。</li><li>連線失敗時不轉印驅動程式的訊息。</li></ul> |
+| `cli/db_roles.py`、`cli/db_roles_catalog.py`、`cli/db_roles_scope.py`、`cli/scram.py` | `secscan-admin migrate-db-roles`（§31.5）。 |
+| `reports/service.py` | `lock_project_reports`（§31.6）。 |
+| `deploy/postgres/initdb/10-roles.sql`（原 `10-app-role.sql`） | 建立兩個角色；資料庫由 owner 擁有。 |
+| `compose.yaml` | `DB_OWNER_*` 只交給 `db`。 |
+| `Makefile` | <ul><li>`LOCAL_SECRET_KEYS` 加上 `DB_OWNER_PASSWORD`；</li><li>新的 `db-roles-migrate`、`test-live-db-roles`。</li></ul> |
+
+### 31.4 migration 的守門（`migrations/roles.py`）
+
+每次 migration 之前，在同一個 transaction 中檢查。不符合就停止，資料不變：
+
+1. 目前的角色（owner）：
+   - 不是 superuser，而且擁有目前的資料庫；
+   - 沒有 CREATEDB、CREATEROLE、REPLICATION、BYPASSRLS；
+   - 沒有成員關係。
+2. 應用程式角色的條件：
+   - 存在，而且不是目前的角色；
+   - 沒有任何高風險屬性；
+   - 沒有任何成員關係，所以不能經由繼承取得 owner 或預先定義角色的權限。
+3. 應用程式角色在目前的資料庫與共用物件中不擁有任何物件。
+4. 應用程式角色含經由 PUBLIC，都沒有：
+   - 資料庫的 CREATE、TEMPORARY；
+   - `public` 的 CREATE。
+5. 角色與資料庫層級的設定（`pg_db_role_setting`）：
+   - 範圍：應用程式角色、目前的角色、目前的資料庫，以及 `ALTER ROLE ALL`；
+   - 只允許 `timezone`；
+   - 目前連線的 `session_replication_role` 也必須是 `origin`；
+   - 應用程式角色含經由 PUBLIC，都不能以 `GRANT SET ON PARAMETER` 設定 `session_replication_role` 或 `lo_compat_privileges`。
+   - 理由：例如 superuser 設定的 `session_replication_role = replica`，會讓應用程式的連線不觸發任何 trigger。
+6. `pg_default_acl` 只能有 v0025 的那一列：owner 的全域函式條目，ACL 只有 owner 自己。
+
+**例外**：傳入連線、沒有 `app_role` 時不做這些檢查。這只用於測試，例如建立舊的狀態，或升到 v0025 之前的版本。v0025 本身沒有應用程式角色的名稱就停止。
+
+### 31.5 既有資料庫的移轉（`make db-roles-migrate [DRY_RUN=1]`）
+
+**做法**：
+- 只用於 T23b-b1 之前建立的開發 DB；新建的 DB 由 initdb 直接建立兩個角色。
+- 在主機上以 superuser（`DB_ADMIN_PASSWORD`）執行：
+  - 主機只接受 loopback；
+  - `cluster_name` 必須是 `secscan-dev`。
+- 以 `pg_shdepend` 列舉應用程式角色與 owner 在**所有資料庫**中的依賴，分類器（純函式）只允許下列範圍：
+  - 應用程式角色擁有：目標資料庫本身，以及 `public` 中的表、sequence 與 trigger 函式（S0）；
+  - owner 擁有：同上，加上 v0025 的全域函式 default ACL；
+  - S2 時應用程式角色的授權：目標資料庫的 CONNECT、`public` 的 USAGE、`public` 中資料表的權限。
+- **其他一律拒絕**，例如：
+  - 其他資料庫或 tablespace；
+  - schema、large object、不是 trigger 的函式、view；
+  - 其他資料庫中的依賴；
+  - policy、init privileges；
+  - 目標資料庫中第三個角色的物件。bootstrap superuser 擁有的物件不記在 `pg_shdepend`，所以另外以每個有擁有者欄位的 catalog 列舉，條件是 oid ≥ 16384；
+  - 涉及應用程式角色的 default privileges；
+  - 成員關係；
+  - 角色或資料庫層級的設定；
+  - 應用程式角色或 owner 的連線。
+- **owner 已存在時**：
+  - 屬性、成員關係、擁有的物件都要相符；
+  - `.env` 的密碼要和它的 SCRAM-SHA-256 verifier 相符：在任何改變之前，由 superuser 讀出 verifier、在本機核對。
+
+**執行**：在同一個 transaction 中依序：
+1. 工具專用的 advisory lock；設定 `lock_timeout`，關閉 `log_statement`、`log_min_error_statement` 與 `log_min_duration_statement`；
+2. 重新列舉與分類；
+3. 讀取應用程式角色實際擁有的物件，必須等於分類的那一組。理由：READ COMMITTED 下兩者是不同的語句，空檔中新增的物件沒有經過分類，不移轉；
+4. 沒有 owner 時 `CREATE ROLE`：
+   - 密碼以本機產生的 SCRAM-SHA-256 verifier 傳送，明文不到伺服器，也就不會進伺服器的任何日誌；
+5. `REASSIGN OWNED`：同時移轉目標資料庫本身；
+6. 事後檢查：
+   - 應用程式角色不擁有任何物件；
+   - owner 擁有原本兩者的聯集；
+   - 所有資料庫中其他角色的擁有權依賴前後相同；
+   - 目標資料庫中第三個角色的物件前後相同；
+   - 在同一個 transaction 中重新分類，必須是 S1，而且沒有任何拒絕的項目；
+7. 同一個 transaction 中寫 audit `db_roles.migrated`：只記狀態與數量；
+8. commit，之後以 owner 另外登入一次。
+
+- superuser 與 owner 的連線都要求 `require_auth=scram-sha-256`（libpq 16 起）。理由：port 被別的服務占用時，對方不能要求明文密碼。`make migrate` 的 owner 連線也一樣。
+- **失敗時的說明**：
+  - 連不上：說明要確認的設定；
+  - 等鎖逾時（55P03）：另一個移轉正在執行，或還有連線持有鎖，沒有任何改變；
+  - commit 本身失敗：結果不確定，請以 `DRY_RUN=1` 確認是 S0 還是 S1。
+
+**fail closed**：
+- 任何一步失敗都 rollback，沒有中間狀態；再執行一次就完成。
+- S1、S2 不寫入任何東西。
+- CREATE ROLE 以 psycopg 直接執行，例外不含語句。
+- 終端與錯誤都不含密碼。
+
+**和計畫不同的地方**：
+
+| 計畫 | 實作 | 理由 |
+|---|---|---|
+| 「owner 已存在時，在任何改變之前確認能以 `.env` 的密碼登入」 | 改為核對 SCRAM verifier | S0 時 owner 連不進任何資料庫：initdb 撤銷了 PUBLIC 的 CONNECT，資料庫又由應用程式角色擁有 |
+| 「沿用 `audit_local`」 | 改以同一個連線的 session 寫 audit | 才能和移轉同一個 transaction |
+
+### 31.6 報告建立的 project 鎖
+
+**修改**：原本以 `FOR NO KEY UPDATE` 鎖住 projects 的列，那需要 projects 的 UPDATE。改成交易層級的 `pg_advisory_xact_lock(28005, hashtext(project_id::text))`。
+
+**位置與語意**：
+- 取得的位置、鎖的順序不變；
+- 同一個 project 互斥；
+- commit 或 rollback 時自動釋放；
+- 等鎖逾時是 55P03，可以重試。
+
+**分析**：沒有其他程式或 trigger 依賴 projects 的列鎖；FK 檢查用的 `FOR KEY SHARE` 本來就不和它衝突。
+
+**碰撞**：n 個 project 至少一組碰撞的機率約 n²／2³³（1,000 個時約 1.2×10⁻⁴）。碰撞只讓兩個 project 的報告建立互相排隊。
+
+**沒有採用的替代方案**：
+- 保留列鎖，加上拒絕所有 UPDATE 的 trigger；
+- 另外建立鎖表。
+
+**測試**：L1–L8（`tests/integration/test_report_lock.py`）。
+
+### 31.7 測試與假設的結論
+
+ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測試照下列原則調整：
+- **不改斷言的意義，只換連線的角色**；
+- **需要 DDL 的故障注入**：改用 owner；
+- **驗證 trigger 那一層、但應用程式角色已經沒有該權限的語句**：改用 owner；
+- **整個檔案改用 owner**：只驗證 schema 的 6 個檔案。它們的 fixture 以同一個 session 建立資料；
+- **其他測試都維持應用程式角色**：api、worker、runner 與 CLI 的功能回歸，就在新的權限下執行。
+
+| 假設 | 結論 | 測試 |
+|---|---|---|
+| A1 trigger 觸發時不檢查函式的 EXECUTE | 成立：違規得到 23000，不是 42501 | ROLE-04 |
+| A2 identity 取號不檢查 sequence 的權限 | 成立 | ROLE-04 |
+| A3 default ACL 還原成內建預設時，那一列被刪除 | 成立 | ROLE-05 |
+| A4 advisory lock 的等待 | 成立：<ul><li>`wait_event_type = 'Lock'`；</li><li>`lock_timeout` 得到 55P03；</li><li>int8 與兩個 int4 的鍵是不同的空間。</li></ul> | L1、L3、L5、L6 |
+| A5 移轉之後應用程式角色不擁有任何物件 | 成立，含 identity sequence | ROLE-06 |
+| A6 `public` 由 `pg_database_owner` 擁有 | 成立 | ROLE-02 |
+| A7 沒有 grant option 的 GRANT 只發出警告 | 成立，ACL 不變 | ROLE-03 |
+| A8 應用程式角色可以修改自己 | 部分成立：<ul><li>可以 `ALTER ROLE` 自己的參數，例如 `default_transaction_read_only`；</li><li>`DROP OWNED BY` 自己可以執行，但**撤銷不了** owner 授予的權限：實測，和計畫的假設不同；</li><li>擁有權、trigger 與約束都不變。</li></ul>列為剩餘風險 2 | ROLE-03 |
+
+### 31.8 回復（只用於開發；不提供指令）
+
+1. 以 owner 執行 `alembic downgrade 0024`：撤銷逐表權限，還原函式的 PUBLIC EXECUTE 與 default ACL。
+2. 以 superuser 執行 `REASSIGN OWNED BY secscan_owner TO secscan_app`。
+3. 切回 T23b-b1 之前的程式。
+
+### 31.9 剩餘風險
+
+1. **共用角色**：三個服務與主機的 admin CLI 共用 `secscan_app`，任何一個被入侵，就有全部服務的 DML 權限。DDL／DML 分權不是服務級的隔離，服務級的角色是 b3 之後的子項目。
+   - **runner 被入侵時，分權沒有限制力**（安全審查 M1）：socket-proxy 不檢查 create 的 body（§14.1）。runner 可以：
+     - 建立 privileged、`PidMode: host` 的容器，讀 db 的 postmaster 的 `/proc/<pid>/environ`，裡面有 `POSTGRES_PASSWORD` 與 `SECSCAN_OWNER_DB_PASSWORD`；
+     - 以本機的 postgres 映像掛載 `db_data`，直接讀寫資料檔。
+
+     改善留給 b2：例如以 `*_FILE`，讓 db 初始化之後不把密碼留在容器的環境；以及 b3 之後的部署強化。
+   - 其他例子：
+   - api 被入侵，可以依 trigger 允許的轉換寫入 `evidence_holds` 的隔離完成，但目錄並沒有搬走。能發現它的是 keeper 的對帳（§30.13），不是 DB 權限；
+   - worker 被入侵，可以改 `scanner_runs`、`findings`；
+   - 每個服務都讀得到全部的密文欄位，解不解得開取決於金鑰（§30.2）。
+2. **只會造成服務中斷的操作**（A8）：
+   - 應用程式角色可以：
+     - `ALTER ROLE` 自己的密碼與可由使用者設定的參數，例如 `default_transaction_read_only`：之後的連線都不能寫入；
+     - 對同一個角色的連線 `pg_terminate_backend`；
+     - 占用 keeper 或報告的 advisory lock；
+     - `LOCK TABLE`；
+     - 建立自己擁有的 large object（`lo_create`），或設定自己的 default privileges（`ALTER DEFAULT PRIVILEGES FOR ROLE secscan_app …`）。之後 migration 的守門會拒絕執行，`make migrate` 就被擋住；owner 不是 superuser，清除不了（資料庫審查 M2）。
+   - **復原**：
+     - 密碼與參數、large object 與 default privileges：**只有 superuser** 能處理，owner 是 NOCREATEROLE。例如：
+       - `ALTER ROLE secscan_app RESET ALL`；
+       - 重設密碼；
+       - `SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE lomowner = 'secscan_app'::regrole`；
+       - `ALTER DEFAULT PRIVILEGES FOR ROLE secscan_app` 撤銷。
+     - 權限：owner 執行 `alembic downgrade 0024 && alembic upgrade head`。
+   - `DROP OWNED BY` 自己撤銷不了 owner 授予的權限（ROLE-03 實測）。
+   - **可以減少的部分**（沒有在 b1 實作，請使用者決定）：由 superuser 在 initdb 與 migrate-db-roles 中撤銷 `pg_catalog.lo_creat`、`lo_create`、`lo_from_bytea` 對 PUBLIC 的 EXECUTE（程式沒有用到 large object）。
+     - 這是新的一類變更，要修改 pg_catalog 的 ACL，也需要新的測試與移轉支援；
+     - default privileges 的部分擋不了。
+3. **superuser 的設定可以繞過 trigger**（例如 `session_replication_role`）：
+   - b1 只能偵測：migration 的守門、移轉指令、ROLE-02；
+   - 擋不住 superuser 之後再設定。
+4. **密碼的存放**：
+   - owner、superuser 與應用程式角色的密碼都在主機的 `.env`；
+   - db 容器的 environment 也有 owner 的密碼，`docker inspect` 看得到；
+   - 改善留給 b2。
+5. **owner 本來就有完整的 DDL 權限**：取得 owner 的帳密就能停用 trigger；`pg_hba` 也沒有限制 owner 的連線來源。
+6. **UPDATE 是表層級的**：能改成什麼由 trigger 決定；trigger 的錯誤，權限補不了。
+7. **報告鎖的雜湊碰撞**：只會讓兩個 project 的報告建立互相排隊。
+8. **large object**：一般角色預設就能建立 large object。它不涉及資料表的權限；ROLE-02 確認應用程式角色不擁有任何 large object。但被入侵的應用程式角色可以建立 large object，擋住之後的 migration（見第 2 點）。
+9. **開發 DB 的狀態**：你執行移轉（G5）之前，它仍是分權之前的狀態。
+   - 移轉之後、`make migrate` 之前，應用程式角色連不上：REASSIGN OWNED 也移轉資料庫的 ACL。
+   - 所以這段期間，readiness 與 runner、worker 的啟動檢查都會回報「無法連線」。
+
+### 31.10 關卡
+
+| 關卡 | 內容 | 執行者 |
+|---|---|---|
+| G1 | 離線實作、測試與審查，開 PR、不合併 | 我（Claude） |
+| G2 | `make env` 與完整的 `make test` | 使用者 |
+| G3 | 四項 Live，另外授權 | — |
+| G4 | 合併 | 使用者 |
+| G5 | 開發 DB 的移轉 | 使用者 |
+
+- b1 在 G1 到 G5 都完成之後才標完成。
+- **SEC-14 仍不標完成。**
+
+### 31.11 審查與處理（G1，2026-11-13）
+
+三項審查都以 opus 進行（唯讀）：資料庫、安全、程式碼。都沒有 CRITICAL。
+
+| 來源 | 項目 | 處理 |
+|---|---|---|
+| 安全 M1 | runner 經由 socket-proxy 讀得到 owner 與 superuser 的密碼，§31.9 漏寫 | 寫進 §31.9 第 1 點；改善留給 b2 |
+| 安全 L1、資料庫 L2 | CREATE ROLE 的明文密碼可能經由 `log_min_duration_statement`、`pg_stat_statements` 等進入日誌 | 改以本機產生的 SCRAM verifier 傳送，並關閉 `log_min_duration_statement` |
+| 安全 L2、資料庫 M3 | 分類與移轉之間的 TOCTOU：空檔中新增的物件未經分類就被移轉 | <ul><li>`Dependency` 帶 `(dbid, classid, objid, objsubid)`，實際擁有的物件必須等於分類的那一組；</li><li>REASSIGN 之後重新分類，必須是 S1；</li><li>測試：分類之後才新增物件就拒絕。</li></ul> |
+| 安全 L3、程式碼 M2 | commit 失敗被說成「沒有做任何改變」；等鎖逾時被說成「連不上」 | 連線與 transaction 分開；commit 失敗回報結果不確定；55P03 另外說明。三者都有測試 |
+| 安全 L4 | 連線沒有要求 SCRAM | b1 新增的 owner、superuser 連線加上 `require_auth=scram-sha-256`；應用程式的連線留給 b2 |
+| 安全 L5、資料庫 M2 | 復原方式寫錯：owner 改不了應用程式角色自己的設定，也清不掉它的 large object；被入侵的應用程式角色可以擋住 migration | 更正 §31.9 第 2、8 點。撤銷 `lo_create` 等的做法列為提議、沒有實作 |
+| 安全 L6 | 守門沒有檢查 owner 自己的屬性與成員關係；`DB_OWNER_USER` 沒有命名規則 | 守門加上檢查；`DB_OWNER_USER`、`DB_USER`、v0025 都不接受 `pg_` 開頭；有測試 |
+| 資料庫 M1 | 沒有檢查 `GRANT SET ON PARAMETER session_replication_role`（含 PUBLIC），可以讓 trigger 不觸發 | 守門與移轉都以 `has_parameter_privilege` 檢查 `session_replication_role`、`lo_compat_privileges`；ROLE-02、05、06 有測試 |
+| 資料庫 L1 | 守門沒有把 PUBLIC 的權限算進去 | 改用 `has_database_privilege`、`has_schema_privilege`；`pg_default_acl` 只允許預期的那一列 |
+| 資料庫 L3 | <ul><li>`ALL FUNCTIONS` 不含 procedure；</li><li>表名沒有 schema；</li><li>角色名稱可以 `pg_` 開頭；</li><li>readiness 依賴 AND 的求值順序</li></ul> | <ul><li>改成 `ALL ROUTINES`；</li><li>GRANT 加上 `public.`；</li><li>不接受 `pg_` 開頭；</li><li>readiness 改成 `coalesce(has_table_privilege(to_regclass(…)), false)`</li></ul> |
+| 資料庫 L4 | 測試缺口 | ROLE-02 加上應用程式角色所有授權依賴的盤點；ROLE-05、06 加上 `ALTER ROLE ALL`、parameter ACL |
+| 程式碼 HIGH | A8 的測試與文件矛盾 | 審查看到的是修正之前的版本：已改成實測結果，即撤銷不了權限，和文件一致 |
+| 程式碼 M3 | cluster 範圍的快照與 `pg_locks` 不依賴自己的範圍 | 快照只取這個測試自己的角色與資料庫；`pg_locks` 以資料庫過濾 |
+| 程式碼 M4 | 文件高估了以應用程式角色執行的測試範圍 | 更正 S&T 與 TASKS 的敘述，和 `tests/integration/conftest.py` 一致 |
+| 程式碼 LOW | <ul><li>fixture 中途失敗留下角色；</li><li>碰撞搜尋失敗時的訊息；</li><li>例外的型別；</li><li>變數遮蔽；</li><li>過期的文件</li></ul> | 都已修正。`owner_alembic_config` 以命名推出應用程式角色，維持現狀並寫明約定 |
+
+空轉檢查 16 項：計畫列出的都被測試抓到。L4 第一次沒抓到「session 層級的鎖」：NullPool 的連線在 commit 之後就關閉。改成在連線還開著時檢查之後，抓到了。
+
+### 31.12 G2 的結果（使用者，2026-11-13）
+
+- **`make env`**：補上 `DB_OWNER_PASSWORD`；`.env` 是 600、468 bytes，和計畫相同。
+- **第一次的 `make test`**：7,882 passed、1 failed，失敗的是 `test_evidence_retry.py::test_retention_status_shows_unfinished_isolation_as_urgent`。
+  - **原因**（推論，依程式碼與量測；失敗的當下沒有量到時鐘差）：
+    - `retention-status` 判斷「需要緊急處理」時，比較的是 trigger 以 DB 容器時鐘寫入的 `held_at`，和主機的 `datetime.now(UTC)`（`cli/evidence.py` 的 `_isolation_status`、`_isolating_line`）。
+    - 測試把門檻設成 0 分鐘。DB 容器的時鐘比主機快、而且快過兩次取時間的間隔時，緊急的數量就是 0。
+    - 事後量到 DB 比主機快 0.2 到 9 ms。
+  - **和 b1 無關**：
+    - 這個測試與程式屬於 T23a，這個 PR 沒有修改；
+    - 分權之前的基準與三次完整執行都通過；
+    - 單獨重跑 12 次都通過；
+    - 那段期間沒有睡眠紀錄。
+- **第二次的 `make test`**：7,883 passed、2 skipped，coverage 98.75%。
+  - 2 個 skipped 是既有的、依環境略過的測試：
+    - `test_workspace.py:397`：檔案系統不接受非 UTF-8 的檔名；
+    - `test_taxonomy_contract.py:89`：需要 gitignore 的錄製。
+- **提議**（待使用者決定，b1 的範圍之外）：`retention-status` 改以 DB 的時鐘判斷經過的時間。
+  - 到期清除已經以 DB 的時鐘判斷（`worker/retention.py`），這裡用主機的時鐘並不一致；
+  - 改了之後，這個測試就不受主機與容器的時鐘差影響。
+
+### 31.13 G3 的結果（Live，使用者 2026-11-13 授權）
+
+**執行條件**：
+- 每一項都以 `caffeinate -is` 執行，AC 電源；
+- 可拋棄的 `secscan-live` stack；
+- `.env` 執行前後都是 600、468 bytes；
+- 沒有使用開發用的 db。
+
+**證據**：在 gitignore 的 `recordings/t23b-b1-live/`。
+- 內容：SUMMARY、各項的 log 與結束碼、Docker 前後的快照，以及兩個錄製目錄。
+- 清單：`MANIFEST.sha256`，37 個檔案，本身的 sha256 是 `300d05d50e912791d33caeceec636690175d066c42924ab466b2b016c73fb75f`。
+
+| 指令 | 結果 |
+|---|---|
+| `make test-live-db-roles`（attempt 1） | 10 passed、1 failed：測試的設計不對（見下） |
+| `make test-live-db-roles` | 14 passed |
+| `make test-live-runner` | 42 passed |
+| `make test-live-fixture-findings` | 3 passed |
+| `make test-live-fixture-rescan` | 1 passed |
+
+**attempt 1 的失敗**：
+- 原本的寫法：要求在同一次 `pg_stat_activity` 快照中同時看到三個服務的連線。
+- 為什麼看不到：runner 與 worker 使用 NullPool，每 2 秒輪詢時才連線幾毫秒。
+- 修正之後：
+  - 在每個服務的容器內，以那個程序自己的環境設定連線，確認 `current_user`、`session_user` 都是應用程式角色。只輸出角色名稱，密碼不離開容器。
+  - api 的連線池中的連線，以 `pg_stat_activity` 確認也是應用程式角色。
+
+**和 T23a 驗收的對照**：
+- findings 的 `[量測]` 行逐行相同；
+- rescan 只差執行秒數，以及一個 ZAP 告警回報的路由（`/greet` 與 `/go`）。T22 的 `rescan-final.log` 也是 `/greet`，所以是 ZAP 本身的變動。
+- 分權沒有改變掃描結果。
+
+**殘留**：
+- 容器與網路和執行前相同。
+- 另有 12 個空的匿名 volume，都建立於 `make test-live-runner` 期間：
+  - **原因**：guard 映像宣告了 `VOLUME /home/mitmproxy/.mitmproxy`。Live 的接收端以 `docker run -d` 啟動，以沒有 `-v` 的 `docker rm -f` 刪除，Makefile 的清除也一樣。
+  - 這是 T11 起既有的行為，和 b1 無關。
+  - 沒有刪除，由使用者決定。
+  - **提議**：`docker rm -f -v`。不在 b1 的範圍內，可以和 §31.12 的時鐘修正一起處理。

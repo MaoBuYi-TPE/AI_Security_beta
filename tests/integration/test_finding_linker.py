@@ -516,7 +516,11 @@ def test_the_worker_parses_a_scans_runs_in_order(
 
 
 def test_linker_records_mapping_and_locations_atomically_even_without_observations(
-    queue: ScanQueue, linker: FindingLinker, queue_seed: Seeder, world: World
+    queue: ScanQueue,
+    linker: FindingLinker,
+    queue_seed: Seeder,
+    queue_owner_seed: Seeder,
+    world: World,
 ) -> None:
     from secscan.findings.domain.taxonomy import mapping_identity
     from secscan.scans.domain.coverage import Exchange
@@ -544,7 +548,8 @@ def test_linker_records_mapping_and_locations_atomically_even_without_observatio
         hashlib.sha256(b"/items").hexdigest(),
         True,
     )
-    [rule] = queue_seed.query(
+    # 應用程式角色只能新增 run_rule_locations、不能讀取：以 owner 查證。
+    [rule] = queue_owner_seed.query(
         "SELECT rule, parameters_unknown FROM run_rule_locations WHERE scanner_run_id = :run",
         run=lease.run_id,
     )
@@ -603,6 +608,7 @@ def test_comparison_locations_store_only_path_digests(
     queue: ScanQueue,
     linker: FindingLinker,
     queue_seed: Seeder,
+    queue_owner_seed: Seeder,
     world: World,
 ) -> None:
     from secscan.scans.domain.locations import Location, LocationSummary, RuleLocation
@@ -618,7 +624,7 @@ def test_comparison_locations_store_only_path_digests(
     )
     linker.link(lease, locations=summary)
     for table in ("run_locations", "run_rule_locations"):
-        [row] = queue_seed.query(
+        [row] = queue_owner_seed.query(
             f"SELECT to_jsonb(t)::text AS data FROM {table} t WHERE scanner_run_id = :run",  # noqa: S608
             run=lease.run_id,
         )

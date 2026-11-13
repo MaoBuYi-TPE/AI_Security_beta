@@ -19,14 +19,22 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent
 
 # v0022 讀取 CONTENT_ENCRYPTION_KEYS 的位置（env.py 由 Settings 放入；測試直接傳入）。
 CONTENT_KEYS_ATTRIBUTE = "content_encryption_keys"
+# 應用程式角色的名稱（T23b-b1；docs/DECISIONS.md §31）：env.py 每次 migration 之前以它檢查角色，
+# v0025 依它授予逐表權限。env.py 取自 DB_USER；測試直接傳入；offline 用 `-x app_role=…`。
+APP_ROLE_ATTRIBUTE = "app_role"
 
 
 def alembic_config(
-    *, connection: Connection | None = None, content_encryption_keys: str | None = None
+    *,
+    connection: Connection | None = None,
+    content_encryption_keys: str | None = None,
+    app_role: str | None = None,
 ) -> Config:
     """不讀設定檔的 Alembic Config；傳入 connection 時，env.py 會直接使用它。
 
     content_encryption_keys：v0022 加密既有的報告與摘錄時用的金鑰（只有已經有資料時才需要）。
+    app_role：應用程式角色。傳入 connection 時，有 app_role 才檢查角色（env.py）；升級到 v0025
+    以後一定要有。connection 必須以 owner 角色連線。
     """
     config = Config()
     # Config 以 configparser 讀值，路徑中的 % 必須跳脫。
@@ -35,6 +43,8 @@ def alembic_config(
         config.attributes["connection"] = connection
     if content_encryption_keys is not None:
         config.attributes[CONTENT_KEYS_ATTRIBUTE] = content_encryption_keys
+    if app_role is not None:
+        config.attributes[APP_ROLE_ATTRIBUTE] = app_role
     return config
 
 

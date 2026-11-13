@@ -17,7 +17,7 @@ from secscan.migrations.metadata import target_metadata
 from secscan.scans.domain.allocation import EngineBudgetRequest
 from secscan.scans.domain.catalog import Engine as ScanEngine
 from secscan.scans.service import ScanService
-from tests.integration.conftest import app_engine
+from tests.integration.conftest import owner_alembic_config, owner_engine
 from tests.integration.database import ProvisionedDatabase
 from tests.integration.scan_support import web_scan
 from tests.integration.scope_support import LAB
@@ -94,8 +94,9 @@ TRIGGER_FUNCTIONS = (
 
 
 def _migrate(engine: Engine, direction: str, target: str) -> None:
+    """以 owner 的 engine 升降級（T23b-b1）。"""
     with engine.begin() as connection:
-        config = alembic_config(connection=connection)
+        config = owner_alembic_config(connection)
         if direction == "up":
             command.upgrade(config, target)
         else:
@@ -125,7 +126,7 @@ def _existing_functions(engine: Engine) -> set[str]:
 
 
 def test_fresh_database_upgrades_to_head(fresh_database: ProvisionedDatabase) -> None:
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "head")
 
@@ -137,7 +138,7 @@ def test_fresh_database_upgrades_to_head(fresh_database: ProvisionedDatabase) ->
 
 
 def test_downgrade_to_base_then_upgrade_again(fresh_database: ProvisionedDatabase) -> None:
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "head")
         _migrate(engine, "down", "base")
@@ -167,18 +168,23 @@ def test_models_and_migrations_do_not_drift(db_engine: Engine) -> None:
 def test_env_reads_connection_from_settings(
     fresh_database: ProvisionedDatabase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """`make migrate` 的路徑：不傳連線時，env.py 依 DB_* 環境變數連線（這裡不讀 repo 的 .env）。"""
+    """`make migrate` 的路徑：不傳連線時，env.py 依 DB_* 環境變數連線（這裡不讀 repo 的 .env）。
+
+    以 DB_OWNER_* 的 owner 連線；應用程式角色取自 DB_USER（v0025 依它授權）。
+    """
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("APP_ENV", raising=False)
     monkeypatch.setenv("DB_HOST", fresh_database.host)
     monkeypatch.setenv("DB_PORT", str(fresh_database.port))
     monkeypatch.setenv("DB_NAME", fresh_database.name)
-    monkeypatch.setenv("DB_USER", fresh_database.name)
+    monkeypatch.setenv("DB_USER", fresh_database.user)
     monkeypatch.setenv("DB_PASSWORD", fresh_database.password)
+    monkeypatch.setenv("DB_OWNER_USER", fresh_database.owner_user)
+    monkeypatch.setenv("DB_OWNER_PASSWORD", fresh_database.owner_password)
 
     command.upgrade(alembic_config(), "head")
 
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         assert _current_revisions(engine) == [head_revision()]
     finally:
@@ -189,7 +195,7 @@ def test_downgrade_refuses_unfinished_runs_with_engine_budgets(
     fresh_database: ProvisionedDatabase,
 ) -> None:
     """v0020（T31）：降回去時舊程式會讓它們分到剩下的全部，子預算悄悄消失，所以拒絕。"""
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     split = (
         EngineBudgetRequest(ScanEngine.ZAP, max_requests=760, max_duration_seconds=380),
         EngineBudgetRequest(ScanEngine.NUCLEI, max_requests=440, max_duration_seconds=220),
@@ -222,7 +228,7 @@ def test_downgrade_refuses_recorded_evidence(
 ) -> None:
     """v0021：有 sealed 的紀錄時舊程式讀不了加密檔；有 purged 的紀錄時，降級再升級之後已清除的
     run 會被記成「從來沒有目錄」（資料庫審查 L3）。兩者都拒絕。"""
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "head")
         with Session(engine) as session, session.begin():
@@ -263,7 +269,7 @@ def test_downgrade_refuses_evidence_holds(
 ) -> None:
     """v0023：舊程式不認得隔離，會讓 keeper 再次一直加密失敗；已解除的紀錄是處置的稽核依據
     （docs/DECISIONS.md §30.12）。兩者都拒絕，沒有紀錄時可以降級。"""
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "head")
         with Session(engine) as session, session.begin():
@@ -308,7 +314,7 @@ def test_downgrade_refuses_evidence_holds(
 
 
 def test_downgrade_without_holds_removes_the_table(fresh_database: ProvisionedDatabase) -> None:
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "head")
         _migrate(engine, "down", "0022")
@@ -336,7 +342,7 @@ def _legacy_hold(engine: Engine) -> UUID:
 
 def test_v0024_keeps_legacy_holds_isolating(fresh_database: ProvisionedDatabase) -> None:
     """既有的資料不回填（§30.13）：還沒解除的紀錄維持隔離中（沒有 inode），由搬移指令處理。"""
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "0023")
         directory = _legacy_hold(engine)
@@ -354,7 +360,7 @@ def test_v0024_keeps_legacy_holds_isolating(fresh_database: ProvisionedDatabase)
 
 def test_v0024_downgrade_refuses_isolation_records(fresh_database: ProvisionedDatabase) -> None:
     """舊程式不認得 held/：有 inode、隔離或解除的時間、搬移失敗的紀錄就拒絕降級。"""
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "head")
         with Session(engine) as session, session.begin():
@@ -375,7 +381,7 @@ def test_v0024_downgrade_refuses_isolation_records(fresh_database: ProvisionedDa
 
 def test_v0024_downgrade_restores_the_previous_guard(fresh_database: ProvisionedDatabase) -> None:
     """沒有隔離的資料時可以降級：刪除欄位與 CHECK，還原 0023 的 trigger（不要求 inode）。"""
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "0023")
         legacy = _legacy_hold(engine)
@@ -401,7 +407,7 @@ def test_v0024_downgrade_refuses_after_a_layout_migration(
 ) -> None:
     """資料庫審查 M1：已經搬到新的 layout（audit runs_layout.*）時，舊程式會把 active/ 的目錄記成
     「沒有目錄」：拒絕降級。"""
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     try:
         _migrate(engine, "up", "head")
         audit_local(engine, "runs_layout.migrated", {}, object_type="runs_volume")
@@ -417,7 +423,7 @@ def test_v0024_downgrade_restores_the_exact_previous_function(
     fresh_database: ProvisionedDatabase,
 ) -> None:
     """資料庫審查 L2：降級之後的 trigger 函式和 0023 的完全相同（UPDATE 的規則也還原）。"""
-    engine = app_engine(fresh_database)
+    engine = owner_engine(fresh_database)
     definition = "SELECT pg_get_functiondef('evidence_holds_guard()'::regprocedure)"
     try:
         _migrate(engine, "up", "0023")

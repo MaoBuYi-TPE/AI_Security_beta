@@ -16,7 +16,7 @@ from secscan.api_keys.domain import Role
 from secscan.main import create_app
 from secscan.security.api_key_tokens import generate_key, hash_key, parse_prefix
 from tests.integration.api_support import Seeder, World
-from tests.integration.conftest import app_engine, migrate_to_head
+from tests.integration.conftest import app_engine, migrate_to_head, owner_engine
 from tests.integration.database import ProvisionedDatabase
 
 pytestmark = pytest.mark.integration
@@ -236,14 +236,16 @@ def test_a_commit_failure_is_reported_as_500_not_201(
     """
     migrate_to_head(fresh_database)
     seed = Seeder(engine := app_engine(fresh_database))
+    owner = owner_engine(fresh_database)
     try:
         admin = seed.admin()
-        seed.execute(
+        # 故障注入是 DDL：以 owner 建立（應用程式角色沒有 CREATE；trigger 觸發時不檢查 EXECUTE）。
+        Seeder(owner).execute(
             "CREATE FUNCTION reject_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$ "
             "BEGIN IF NEW.name = 'fail-at-commit' THEN RAISE EXCEPTION 'rejected at commit'; "
             "END IF; RETURN NULL; END $$"
         )
-        seed.execute(
+        Seeder(owner).execute(
             "CREATE CONSTRAINT TRIGGER projects_reject_at_commit AFTER INSERT ON projects "
             "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_at_commit()"
         )
@@ -254,6 +256,7 @@ def test_a_commit_failure_is_reported_as_500_not_201(
         [count] = seed.query("SELECT count(*) AS n FROM projects WHERE name = 'fail-at-commit'")
     finally:
         engine.dispose()
+        owner.dispose()
 
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "INTERNAL_ERROR"

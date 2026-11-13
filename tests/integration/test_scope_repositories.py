@@ -301,16 +301,16 @@ def test_grant_lock_reads_the_latest_row_and_locks_only_the_grant(db_session: Se
     assert "FOR UPDATE OF scope_grants" in statements[1]
 
 
-def test_stored_network_is_never_read_as_a_single_host(db_session: Session) -> None:
+def test_stored_network_is_never_read_as_a_single_host(owner_session: Session) -> None:
     """DB 中若出現網段（只可能直接寫 SQL），讀取時失敗，不會被當成單一主機位址（fail closed）。"""
-    target = _target(db_session, _project(db_session))
-    grant = _grant(db_session, target, insert_key(db_session))
-    db_session.execute(text("ALTER TABLE scope_grants DISABLE TRIGGER scope_grants_guard_rows"))
-    db_session.execute(
+    target = _target(owner_session, _project(owner_session))
+    grant = _grant(owner_session, target, insert_key(owner_session))
+    owner_session.execute(text("ALTER TABLE scope_grants DISABLE TRIGGER scope_grants_guard_rows"))
+    owner_session.execute(
         text("UPDATE scope_grants SET allowed_ips = '{10.89.7.0/24}' WHERE id = :id"),
         {"id": grant.id},
     )
-    db_session.expire_all()
+    owner_session.expire_all()
 
     with pytest.raises(ValueError, match="IPv4"):
-        ScopeGrantRepository(db_session).get(grant.id)
+        ScopeGrantRepository(owner_session).get(grant.id)

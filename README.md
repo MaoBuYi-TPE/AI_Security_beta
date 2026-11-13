@@ -94,13 +94,53 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
 
 - **密碼**：都在 `.env`（權限 600，不進 git）。`make env` 只會補上缺少的隨機值，不會覆寫既有的值；`dev`、`db-up`、`test-db-up`、`test` 會自動呼叫它。
 - **加密金鑰**：`make env` 也會在 `.env` 產生三組平台金鑰，各自只交給需要的容器：`SECRET_ENCRYPTION_KEYS`（認證設定的 secret；api、runner）、`EVIDENCE_ENCRYPTION_KEYS`（runs volume 的原始證據；只有 runner）、`CONTENT_ENCRYPTION_KEYS`（報告內容與人工複測摘錄；api、worker）。缺少自己的那一組時程序不會啟動。`make env` 只補上缺少的那一行，不改、不重設、不輪替既有的值，也不在終端顯示金鑰（T23a 之前建立的 `.env` 要再執行一次 `make env` 補上兩組新金鑰）。**請備份這三行**：遺失之後，已保存的 secret、尚未清除的原始證據、報告與摘錄都解不開。換版的做法見下方「認證設定」與「資料保護」。
-- **連線角色**：應用程式與 migration 用非 superuser 的 `secscan_app`。superuser 只給容器初始化與手動維運。
-- **整合測試**：每次 session 都在 db-test 建立專屬角色與全新資料庫，結束時刪除。只接受 `cluster_name=secscan-test` 的伺服器，不會碰到開發資料庫。
+- **連線角色**（T23b-b1，`docs/DECISIONS.md` §31）：兩個非 superuser 的角色。
+  - `secscan_owner`（`DB_OWNER_USER`）擁有資料庫與所有物件，只有 `make migrate` 以它連線，密碼 `DB_OWNER_PASSWORD` 只交給 db 的 initdb；
+  - api、runner、worker 與主機的 admin CLI 共用 `secscan_app`（`DB_USER`），只有逐表 DML：例如 audit_events 只能 SELECT、INSERT，任何表都不能 TRUNCATE，也不能 DDL 或停用 trigger。
+  - superuser 只給容器初始化、`make db-roles-migrate` 與手動維運。
+  - 三個服務仍共用同一個應用程式角色，這不是服務級的隔離（§31.9）。
+- **T23b-b1 之前建立的開發 DB**：由 `secscan_app` 擁有，要移轉一次，依序執行：
+  1. `make env`：補上 `DB_OWNER_PASSWORD`；compose 的 `db` 需要它，所以這一步之前任何 compose 指令都會失敗。
+  2. `make down`：停止 api、runner、worker，不能有應用程式的連線。
+  3. `make db-up`。
+  4. `make db-roles-migrate DRY_RUN=1`：只列出要移轉的物件與小計，不做任何改變。
+  5. 確認範圍之後，執行 `make db-roles-migrate`。
+  6. `make migrate`：以 owner 套用 v0025 的逐表權限。
+  7. `make up`。
+
+  說明：
+  - 範圍之外的項目，指令一律拒絕、不做任何改變，例如：
+    - 其他資料庫中的物件；
+    - 第三個角色的物件；
+    - 角色或資料庫層級的設定。
+    由你確認處理之後再執行。
+  - 指令在同一個 transaction 中完成，失敗就整個 rollback；可以重跑。
+  - 第 5 步之後、第 6 步之前，應用程式角色連不上資料庫，readiness 會回報無法連線。
+  - 回復步驟（只用於開發）見 `docs/DECISIONS.md` §31.8。
+- **應用程式角色被改壞時**：它可以改自己的密碼與參數（例如 `default_transaction_read_only`），只會造成服務中斷。
+  - 密碼與角色設定：由 superuser 重設，例如 `ALTER ROLE secscan_app RESET ALL`；
+  - 權限：以 owner 執行 `uv run alembic downgrade 0024 && uv run alembic upgrade head` 重新授權（§31.9 的剩餘風險 2）。
+- **整合測試**：每次 session 都在 db-test 建立專屬的 owner 與應用程式角色和全新資料庫，結束時刪除。只接受 `cluster_name=secscan-test` 的伺服器，不會碰到開發資料庫。
 - **停止**：`make db-down` 停止兩者，但保留開發資料。
 - **不要分享的輸出**：`docker-compose config` 與 `docker inspect` 會顯示 `.env` 裡的明文密碼，不要貼到 issue、報告或聊天中。pre-commit 會擋下 `.env` 檔（即使用 `git add -f`）。
 - **改了 `.env` 的 `DB_PASSWORD` 之後**：要讓新密碼生效，得重建開發資料庫。這會**刪除所有開發資料**：`make db-down && docker volume rm secscan_db_data && make db-up && make migrate`。
 
 新增 schema 變更時：先寫會失敗的測試，再改 model，最後產生 migration。例如：`uv run alembic revision --autogenerate --rev-id 0002 -m "<說明>"`。產生後補上升降級說明並檢查內容；`tests/integration/test_migrations.py` 會檢查 model 與 migration 沒有漂移。
+
+v0025 之後的授權檢查清單（T23b-b1）：
+- 新的資料表沒有任何預設授權。依 v0025 的寫法明確 GRANT 給應用程式角色（`config.attributes["app_role"]`），每種權限旁註明業務需求；不要為了方便給全部 CRUD。
+  - 只能新增的紀錄只給 SELECT、INSERT；
+  - 只有確實需要時才給 UPDATE（列鎖也需要它）或 DELETE；
+  - 永遠不給 TRUNCATE、REFERENCES、TRIGGER、MAINTAIN、GRANT OPTION。
+- 同時更新 `tests/db_privileges.py` 的預期矩陣：ROLE-01 遇到未分類的表就失敗，v0025 的檢查也一樣。
+- sequence 優先用 identity，不需要授權。
+- 新的函式必須是：
+  - trigger 函式；
+  - SECURITY INVOKER；
+  - `SET search_path = pg_catalog`。
+
+  owner 的全域 default ACL 會讓它只有 owner 能執行。SECURITY DEFINER 要列入允許清單並寫明理由。
+- 新的型別、view、extension：先在預期值中分類。型別有 PUBLIC USAGE 的內建預設。
 
 #### 平台 API key（T05）
 

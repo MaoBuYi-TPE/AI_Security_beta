@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from secscan.cli import EXIT_FAILURE, EXIT_OK, main
 from secscan.security.api_key_tokens import hash_key, parse_prefix
 from tests.integration.api_support import Seeder, unique_name
-from tests.integration.conftest import app_engine, migrate_to_head
+from tests.integration.conftest import app_engine, migrate_to_head, owner_seed
 from tests.integration.database import ProvisionedDatabase
 
 pytestmark = pytest.mark.integration
@@ -31,7 +31,7 @@ def _use_database(
     monkeypatch.setenv("DB_HOST", database.host)
     monkeypatch.setenv("DB_PORT", str(port if port is not None else database.port))
     monkeypatch.setenv("DB_NAME", database.name)
-    monkeypatch.setenv("DB_USER", database.name)
+    monkeypatch.setenv("DB_USER", database.user)
     monkeypatch.setenv("DB_PASSWORD", database.password)
 
 
@@ -187,13 +187,12 @@ def test_commit_failure_prints_no_key_and_leaves_no_file(
     migrate_to_head(fresh_database)
     seed = Seeder(engine := app_engine(fresh_database))
     try:
-        seed.execute(
+        # 故障注入是 DDL：以 owner 建立（應用程式角色沒有 CREATE）。
+        owner_seed(fresh_database).execute_together(
             "CREATE FUNCTION reject_keys_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$ "
-            "BEGIN RAISE EXCEPTION 'rejected at commit'; END $$"
-        )
-        seed.execute(
+            "BEGIN RAISE EXCEPTION 'rejected at commit'; END $$",
             "CREATE CONSTRAINT TRIGGER api_keys_reject_at_commit AFTER INSERT ON api_keys "
-            "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_keys_at_commit()"
+            "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_keys_at_commit()",
         )
         _use_database(monkeypatch, fresh_database)
         target = tmp_path / "admin.key"

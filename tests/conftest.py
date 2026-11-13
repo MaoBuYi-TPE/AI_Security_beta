@@ -6,8 +6,10 @@ from fastapi.testclient import TestClient
 from hypothesis import settings as hypothesis_settings
 from pydantic import SecretStr
 
+from secscan.cli.db_roles import AdminCredentials
 from secscan.core.config import AppEnv, Settings
 from secscan.main import create_app
+from secscan.migrations.credentials import MigrationCredentials
 from secscan.runner.config import RunnerSettings
 from secscan.worker.config import WorkerSettings
 from tests.secret_support import content_keys, encryption_keys
@@ -34,6 +36,11 @@ DB_ENV_KEYS = (
     "DB_STATEMENT_TIMEOUT_SECONDS",
     "DB_LOCK_TIMEOUT_SECONDS",
     "DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS",
+    # migration 的 owner 與 migrate-db-roles 的 superuser（T23b-b1）。
+    "DB_OWNER_USER",
+    "DB_OWNER_PASSWORD",
+    "DB_ADMIN_USER",
+    "DB_ADMIN_PASSWORD",
 )
 # 三組加密金鑰也一樣不沿用（shell 或 .env 裡可能是真的金鑰）；需要的 fixture 帶測試用的金鑰。
 SECRET_ENV_KEYS = (
@@ -75,12 +82,19 @@ class DatabaseAccessBlockedError(RuntimeError):
 
 @pytest.fixture(autouse=True)
 def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Settings、RunnerSettings 與 WorkerSettings 不讀 .env（pytest 在 repo 根目錄執行，那裡有真實的
-    本機密碼與金鑰），也不讀 DB_*、RUNNER_*、金鑰與保留期限等環境變數。
+    """Settings、RunnerSettings、WorkerSettings、MigrationCredentials 與 AdminCredentials 不讀
+    .env（pytest 在 repo 根目錄執行，那裡有真實的本機密碼與金鑰），也不讀 DB_*、RUNNER_*、金鑰與
+    保留期限等環境變數。
 
     要測 .env 讀取行為的測試，自行把 env_file 設回來。
     """
-    for settings_class in (Settings, RunnerSettings, WorkerSettings):
+    for settings_class in (
+        Settings,
+        RunnerSettings,
+        WorkerSettings,
+        MigrationCredentials,
+        AdminCredentials,
+    ):
         monkeypatch.setitem(settings_class.model_config, "env_file", None)
     for key in (*DB_ENV_KEYS, *SECRET_ENV_KEYS, *RETENTION_ENV_KEYS, *RUNNER_ENV_KEYS):
         monkeypatch.delenv(key, raising=False)

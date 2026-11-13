@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet
 from secscan.cli import EXIT_FAILURE, EXIT_OK, MAX_LISTED_PROFILES, main
 from secscan.security.secret_cipher import SecretCipher, SecretUnreadableError
 from tests.integration.api_support import Seeder
-from tests.integration.conftest import app_engine, migrate_to_head
+from tests.integration.conftest import app_engine, migrate_to_head, owner_seed
 from tests.integration.database import ProvisionedDatabase
 from tests.secret_support import TEST_SECRET_ENCRYPTION_KEYS, bearer_context
 
@@ -55,7 +55,7 @@ def _use(
     monkeypatch.setenv("DB_HOST", database.host)
     monkeypatch.setenv("DB_PORT", str(port if port is not None else database.port))
     monkeypatch.setenv("DB_NAME", database.name)
-    monkeypatch.setenv("DB_USER", database.name)
+    monkeypatch.setenv("DB_USER", database.user)
     monkeypatch.setenv("DB_PASSWORD", database.password)
     monkeypatch.setenv("SECRET_ENCRYPTION_KEYS", keys)
 
@@ -144,13 +144,12 @@ def test_a_failed_commit_changes_nothing(
 
     做法同 test_cli.py 的 commit 失敗。
     """
-    lab.seed.execute(
+    # 故障注入是 DDL：以 owner 建立（應用程式角色沒有 CREATE）。
+    owner_seed(lab.database).execute_together(
         "CREATE FUNCTION reject_rotation_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$ "
-        "BEGIN RAISE EXCEPTION 'rejected at commit'; END $$"
-    )
-    lab.seed.execute(
+        "BEGIN RAISE EXCEPTION 'rejected at commit'; END $$",
         "CREATE CONSTRAINT TRIGGER versions_reject_at_commit AFTER UPDATE ON auth_profile_versions "
-        "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_rotation_at_commit()"
+        "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_rotation_at_commit()",
     )
     before = _tokens(lab)
     new = Fernet.generate_key().decode()

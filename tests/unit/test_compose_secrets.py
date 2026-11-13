@@ -26,6 +26,7 @@ import pytest
 import yaml
 
 from secscan.cli.runs_volume import parse
+from secscan.migrations.credentials import DEFAULT_OWNER_USER
 from tests.isolation import BLOCKED_DOCKER_HOST
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +40,7 @@ APP_SERVICES = ("api", "runner", "worker")
 SECRET_VARIABLES = frozenset(
     {
         "DB_PASSWORD",
+        "DB_OWNER_PASSWORD",
         "DB_ADMIN_PASSWORD",
         "TEST_DB_PASSWORD",
         "SECRET_ENCRYPTION_KEYS",
@@ -48,7 +50,8 @@ SECRET_VARIABLES = frozenset(
 )
 # 每個服務可以取得的秘密；沒列出的服務（runs-init、guard、socket-proxy）一個都沒有。
 SERVICE_SECRETS: dict[str, set[str]] = {
-    "db": {"DB_ADMIN_PASSWORD", "DB_PASSWORD"},
+    # owner 的密碼只給 db（initdb 建立角色）：api、runner、worker 沒有它（T23b-b1）。
+    "db": {"DB_ADMIN_PASSWORD", "DB_OWNER_PASSWORD", "DB_PASSWORD"},
     "db-test": {"TEST_DB_PASSWORD"},
     "api": {"DB_PASSWORD", "SECRET_ENCRYPTION_KEYS", "CONTENT_ENCRYPTION_KEYS"},
     "runner": {"DB_PASSWORD", "SECRET_ENCRYPTION_KEYS", "EVIDENCE_ENCRYPTION_KEYS"},
@@ -105,6 +108,23 @@ def test_the_database_creates_the_role_the_app_services_use() -> None:
     assert environment["SECSCAN_APP_DB_USER"] == DATABASE_SETTINGS["DB_USER"]
     assert environment["SECSCAN_APP_DB_PASSWORD"] == DATABASE_SETTINGS["DB_PASSWORD"]
     assert environment["SECSCAN_APP_DB_NAME"] == DATABASE_SETTINGS["DB_NAME"]
+
+
+def test_the_database_creates_the_owner_role_that_migrations_use() -> None:
+    """initdb 的 owner 和 make migrate（MigrationCredentials）讀的是同一組變數，預設值也相同。"""
+    environment = SERVICES["db"]["environment"]
+
+    assert environment["SECSCAN_OWNER_DB_USER"] == f"${{DB_OWNER_USER:-{DEFAULT_OWNER_USER}}}"
+    assert environment["SECSCAN_OWNER_DB_PASSWORD"] == f"${{DB_OWNER_PASSWORD:?{REQUIRED}}}"
+
+
+@pytest.mark.parametrize("name", APP_SERVICES)
+def test_app_services_never_see_the_owner(name: str) -> None:
+    """ROLE-07：api、runner、worker 的 environment 沒有任何 DB_OWNER_* 或 SECSCAN_OWNER_*。"""
+    text = json.dumps(SERVICES[name], ensure_ascii=False)
+
+    assert "DB_OWNER" not in text
+    assert "SECSCAN_OWNER" not in text
 
 
 # --- 以真的 docker compose 解析（虛構的秘密、暫存的 project directory、不連 daemon）-------------

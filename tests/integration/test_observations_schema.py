@@ -273,14 +273,14 @@ def test_the_scan_cannot_be_deleted_under_the_records(
     ],
 )
 def test_records_are_append_only(
-    queue_engine: Engine, runs: Runs, statement: str, table: str
+    queue_owner_engine: Engine, runs: Runs, statement: str, table: str
 ) -> None:
-    with Session(queue_engine) as session:
+    with Session(queue_owner_engine) as session:
         artifact = _inserted(session, INSERT_ARTIFACT, _artifact(runs))
         _inserted(session, INSERT_OBSERVATION, _observation(runs, artifact=artifact))
         session.commit()
 
-    with Session(queue_engine) as session, pytest.raises(DBAPIError) as caught:
+    with Session(queue_owner_engine) as session, pytest.raises(DBAPIError) as caught:
         session.execute(text(statement))
 
     orig: Any = caught.value.orig

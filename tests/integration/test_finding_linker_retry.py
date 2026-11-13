@@ -32,7 +32,10 @@ ZAP = ScanEngine.ZAP
 
 
 def _retry_evidence(seed: Seeder, run_id: UUID) -> tuple[object, ...]:
-    """取得不可變證據快照；不包含重試時正常改變的 lease 與 coverage。"""
+    """取得不可變證據快照；不包含重試時正常改變的 lease 與 coverage。
+
+    seed 必須是 owner（queue_owner_seed）：應用程式角色只能新增 run_rule_locations，不能讀取。
+    """
     run = seed.query(
         "SELECT link_mapping_version, link_taxonomy_sha256, locations_recorded "
         "FROM scanner_runs WHERE id = :run",
@@ -70,6 +73,7 @@ def test_worker_retries_committed_links_with_a_different_mapping(
     linker: FindingLinker,
     queue_engine: Engine,
     queue_seed: Seeder,
+    queue_owner_seed: Seeder,
     world: World,
     monkeypatch: pytest.MonkeyPatch,
     has_observations: bool,
@@ -81,7 +85,7 @@ def test_worker_retries_committed_links_with_a_different_mapping(
     lease = parsed_run(queue, ZAP, (ZAP_SQLI,) if has_observations else ())
     original = summarize_locations((Exchange("GET", "/search", False, 200, "40018"),))
     assert linker.link(lease, locations=original) == int(has_observations)
-    before = _retry_evidence(queue_seed, lease.run_id)
+    before = _retry_evidence(queue_owner_seed, lease.run_id)
     [run] = queue_seed.query(
         "SELECT coverage_recorded, status FROM scanner_runs WHERE id = :run", run=lease.run_id
     )
@@ -111,7 +115,7 @@ def test_worker_retries_committed_links_with_a_different_mapping(
         "SELECT status, coverage_recorded FROM scanner_runs WHERE id = :run", run=lease.run_id
     )
     assert (completed.status, completed.coverage_recorded) == ("succeeded", True)
-    assert _retry_evidence(queue_seed, lease.run_id) == before
+    assert _retry_evidence(queue_owner_seed, lease.run_id) == before
 
 
 @pytest.mark.parametrize("changed_part", ["version", "taxonomy"])
@@ -119,6 +123,7 @@ def test_unlinked_observations_reject_a_different_frozen_mapping(
     queue: ScanQueue,
     queue_engine: Engine,
     queue_seed: Seeder,
+    queue_owner_seed: Seeder,
     world: World,
     monkeypatch: pytest.MonkeyPatch,
     changed_part: str,
@@ -135,7 +140,7 @@ def test_unlinked_observations_reject_a_different_frozen_mapping(
         store = records.FindingRecords(session)
         store.lock_run(lease)
         store.record_comparison(lease, mapping, summary)
-    before = _retry_evidence(queue_seed, lease.run_id)
+    before = _retry_evidence(queue_owner_seed, lease.run_id)
     changed = (
         (mapping[0] + "-new", mapping[1]) if changed_part == "version" else (mapping[0], "f" * 64)
     )
@@ -146,7 +151,7 @@ def test_unlinked_observations_reject_a_different_frozen_mapping(
     with pytest.raises(MappingChangedError, match="mapping") as error:
         new_linker.link(lease, locations=summary)
     assert isinstance(error.value, ValueError)
-    assert _retry_evidence(queue_seed, lease.run_id) == before
+    assert _retry_evidence(queue_owner_seed, lease.run_id) == before
     [run] = queue_seed.query(
         "SELECT status, coverage_recorded FROM scanner_runs WHERE id = :run", run=lease.run_id
     )
@@ -159,6 +164,7 @@ def test_frozen_retry_still_requires_a_valid_lease(
     queue: ScanQueue,
     linker: FindingLinker,
     queue_seed: Seeder,
+    queue_owner_seed: Seeder,
     world: World,
     has_observations: bool,
     invalid_part: str,
@@ -167,7 +173,7 @@ def test_frozen_retry_still_requires_a_valid_lease(
     web_scan(queue_seed, world, target, grant, (ZAP,))
     lease = parsed_run(queue, ZAP, (ZAP_SQLI,) if has_observations else ())
     assert linker.link(lease) == int(has_observations)
-    before = _retry_evidence(queue_seed, lease.run_id)
+    before = _retry_evidence(queue_owner_seed, lease.run_id)
     invalid = (
         replace(lease, owner="another-worker")
         if invalid_part == "owner"
@@ -176,7 +182,7 @@ def test_frozen_retry_still_requires_a_valid_lease(
 
     with pytest.raises(LeaseLostError):
         linker.link(invalid)
-    assert _retry_evidence(queue_seed, lease.run_id) == before
+    assert _retry_evidence(queue_owner_seed, lease.run_id) == before
 
 
 @pytest.mark.parametrize("has_observations", [True, False], ids=["linked", "zero-observations"])
@@ -184,6 +190,7 @@ def test_frozen_retry_does_not_backfill_missing_locations(
     queue: ScanQueue,
     linker: FindingLinker,
     queue_seed: Seeder,
+    queue_owner_seed: Seeder,
     world: World,
     has_observations: bool,
 ) -> None:
@@ -191,11 +198,11 @@ def test_frozen_retry_does_not_backfill_missing_locations(
     web_scan(queue_seed, world, target, grant, (ZAP,))
     lease = parsed_run(queue, ZAP, (ZAP_SQLI,) if has_observations else ())
     assert linker.link(lease) == int(has_observations)
-    before = _retry_evidence(queue_seed, lease.run_id)
+    before = _retry_evidence(queue_owner_seed, lease.run_id)
     summary = summarize_locations((Exchange("GET", "/search", False, 200, "40018"),))
 
     assert linker.link(lease, locations=summary) == 0
-    assert _retry_evidence(queue_seed, lease.run_id) == before
+    assert _retry_evidence(queue_owner_seed, lease.run_id) == before
     [run] = queue_seed.query(
         "SELECT locations_recorded FROM scanner_runs WHERE id = :run", run=lease.run_id
     )
@@ -207,6 +214,7 @@ def test_unlinked_observations_with_the_same_mapping_can_finish_without_replacin
     linker: FindingLinker,
     queue_engine: Engine,
     queue_seed: Seeder,
+    queue_owner_seed: Seeder,
     world: World,
 ) -> None:
     target, grant = web_target(queue_seed, world)
@@ -217,11 +225,11 @@ def test_unlinked_observations_with_the_same_mapping_can_finish_without_replacin
         store = records.FindingRecords(session)
         store.lock_run(lease)
         store.record_comparison(lease, mapping_identity(), original)
-    before = _retry_evidence(queue_seed, lease.run_id)
+    before = _retry_evidence(queue_owner_seed, lease.run_id)
     replacement = summarize_locations((Exchange("GET", "/new-location", False, 200, "new"),))
 
     assert linker.link(lease, locations=replacement) == 1
-    after = _retry_evidence(queue_seed, lease.run_id)
+    after = _retry_evidence(queue_owner_seed, lease.run_id)
     assert after[0] == before[0]
     assert after[-2:] == before[-2:]
     [linked] = queue_seed.query("SELECT count(*) AS n FROM finding_observations")
@@ -233,13 +241,14 @@ def test_a_late_link_failure_rolls_back_all_comparison_and_finding_evidence(
     queue: ScanQueue,
     linker: FindingLinker,
     queue_seed: Seeder,
+    queue_owner_seed: Seeder,
     world: World,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target, grant = web_target(queue_seed, world)
     web_scan(queue_seed, world, target, grant, (ZAP,))
     lease = parsed_run(queue, ZAP, (ZAP_SQLI,))
-    before = _retry_evidence(queue_seed, lease.run_id)
+    before = _retry_evidence(queue_owner_seed, lease.run_id)
     summary = summarize_locations((Exchange("GET", "/search", False, 200, "40018"),))
     with monkeypatch.context() as patch:
         patch.setattr(
@@ -249,5 +258,5 @@ def test_a_late_link_failure_rolls_back_all_comparison_and_finding_evidence(
         )
         with pytest.raises(RuntimeError, match="link write failed"):
             linker.link(lease, locations=summary)
-    assert _retry_evidence(queue_seed, lease.run_id) == before
+    assert _retry_evidence(queue_owner_seed, lease.run_id) == before
     assert linker.link(lease, locations=summary) == 1

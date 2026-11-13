@@ -2,8 +2,12 @@
 
 - 建立：先以 scan 的 project 授權（其他 project 404、角色不足 403）；Idempotency-Key 的範圍是
   project，同一個 key、同樣的內容回原本的報告，內容不同（包含 format）回 409。scan 必須已終止。
-  配額（每個 project 5 份進行中、每個 scan 20 份未失敗的報告）在鎖住 project 列之後計數與寫入，
-  同時送出也不會超額。報告由 worker 產生，這裡只排入佇列（202）。
+  配額（每個 project 5 份進行中、每個 scan 20 份未失敗的報告）在取得 project 的 advisory lock 之後
+  計數與寫入，同時送出也不會超額。報告由 worker 產生，這裡只排入佇列（202）。
+- project 的鎖（T23b-b1；docs/DECISIONS.md §31.6）：交易層級的 advisory lock，鍵是
+  (REPORT_CREATE_LOCK_CLASS, hashtext(project_id))；commit 或 rollback 時自動釋放。原本以
+  FOR NO KEY UPDATE 鎖住 projects 的列，那需要 projects 的 UPDATE 權限，而應用程式角色只能新增
+  project。語意相同：同一個 project 的建立排隊；不同 project 的雜湊碰撞（約 n²／2³³）只會多等待。
 - 下載：只有 succeeded 能下載；內容已過期清除時回 410（REPORT_EXPIRED）。解密（context 綁定這份
   報告）之後重新核對 sha256，解不開或不符就回 500、不送出內容。只能以 report id 下載，沒有 path 或
   storage_key 參數。
@@ -18,7 +22,7 @@ from datetime import datetime
 from http import HTTPStatus
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, Text, Uuid, cast, func, literal, select
 from sqlalchemy.orm import Session
 
 from secscan.api_keys.access import authorize
@@ -26,7 +30,6 @@ from secscan.api_keys.domain import Permission, Principal
 from secscan.audit.service import AuditTrail
 from secscan.core.errors import AppError, ErrorCode, not_found_error
 from secscan.core.pagination import Page, PageRequest
-from secscan.projects.models import ProjectModel
 from secscan.reports.domain.model import (
     ACTIVE_REPORT_STATUSES,
     MAX_REPORT_BYTES,
@@ -46,6 +49,9 @@ logger = logging.getLogger(__name__)
 MAX_ACTIVE_PER_PROJECT = 5
 MAX_PER_SCAN = 20
 REQUEST_VERSION = 1
+# 報告建立的 advisory lock 的第一個鍵（固定的類別）：和 v0023 的 23012 不同；兩個 int4 的鍵和
+# keeper 以一個 bigint 為鍵的 lock 不在同一個鍵空間。
+REPORT_CREATE_LOCK_CLASS = 28005
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +80,19 @@ class Report:
         return self.status in {ReportStatus.SUCCEEDED, ReportStatus.FAILED}
 
 
+def lock_project_reports(session: Session, project_id: UUID) -> None:
+    """同一個 project 的報告建立排隊（見模組說明）：交易層級的 advisory lock，commit 或 rollback 時
+    自動釋放；等鎖受 lock_timeout 限制（55P03，可重試）。"""
+    session.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                literal(REPORT_CREATE_LOCK_CLASS, Integer),
+                func.hashtext(cast(literal(project_id, Uuid), Text)),
+            )
+        )
+    )
+
+
 def request_fingerprint(scan_id: UUID, report_format: ReportFormat) -> bytes:
     content = {"v": REQUEST_VERSION, "scan_id": str(scan_id), "format": report_format.value}
     return hashlib.sha256(
@@ -100,11 +119,7 @@ class ReportService:
         authorize(principal, Permission.PROJECT_WRITE, scan.project_id)
         fingerprint = request_fingerprint(scan_id, report_format)
         # 先鎖住 project：同一個 project 的建立排隊，配額與 idempotency 的判斷都看得到前一個的結果。
-        self._session.execute(
-            select(ProjectModel.id)
-            .where(ProjectModel.id == scan.project_id)
-            .with_for_update(key_share=True)
-        )
+        lock_project_reports(self._session, scan.project_id)
         replay = self._replay(scan.project_id, idempotency_key, fingerprint)
         if replay is not None:
             return replay, False

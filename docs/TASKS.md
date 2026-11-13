@@ -65,7 +65,7 @@
   - 交付（2026-10-18，done）：
     - 範圍：資料層基礎，以及第一批資料表 projects、api_keys、audit_events（T05 的 key 與稽核要用）。其餘資料表由 T06–T09 各自以 migration 與測試加入，不預先建立還沒有功能測試驅動的欄位（`ARCHITECTURE.md` §6.2）。
     - 檔案：
-      - 環境：`compose.yaml`（`db`、`db-test`）、`deploy/postgres/initdb/10-app-role.sql`、`Makefile`（`env`、`db-up`、`test-db-up`、`db-down`、`migrate`；`make test` 會先啟動 db-test）、`.env.example`、`pyproject.toml`（`[tool.alembic]`、import-linter、coverage）、`.pre-commit-config.yaml`（擋下 `.env`）
+      - 環境：`compose.yaml`（`db`、`db-test`）、`deploy/postgres/initdb/10-app-role.sql`（T23b-b1 改名為 `10-roles.sql`）、`Makefile`（`env`、`db-up`、`test-db-up`、`db-down`、`migrate`；`make test` 會先啟動 db-test）、`.env.example`、`pyproject.toml`（`[tool.alembic]`、import-linter、coverage）、`.pre-commit-config.yaml`（擋下 `.env`）
       - 程式：`src/secscan/core/`（`config`、`db`、`errors`、`request_id`、`pagination`、`text`、`json_types`）、`src/secscan/{projects,api_keys,audit}/`（`domain`、`models`、`repository`）、`src/secscan/migrations/`（`env.py`、`metadata.py`、`versions/v0001_identity_and_audit.py`）、`/health/ready`
       - 測試：`tests/integration/`、`tests/unit/`、`tests/api/test_errors.py`
     - 依賴（uv 實際解析）：sqlalchemy 2.1.5、alembic 1.20.0、psycopg[binary] 3.3.6。PostgreSQL 映像為 `postgres:18.6-trixie@sha256:74935e72…`（arm64；19 仍是 RC，不採用）。
@@ -1619,14 +1619,31 @@
       - T23a 完成不代表 SEC-14 完成：P0 的完成條件見 `DECISIONS.md` §30.14，剩餘風險見 §30.9。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
     - 2026-11-12 拆成 b1–b4。b1 的範圍由使用者決定；其他各項在細部計畫時確認。SEC-14 的 P0 需要 b1–b3（`DECISIONS.md` §30.14）。
-    - [ ] **b1：DDL／DML 分權**（只做這一項；細部計畫在 T23a 的文件 PR 合併之後撰寫，核准之前不實作）：
+    - [ ] **b1：DDL／DML 分權**（只做這一項；細部計畫 2026-11-12 核准，`DECISIONS.md` §31）：
+      - [x] G1 離線實作（分支 `feat/t23b-b1-db-roles`）：
+        - ROLE-01 至 08、空轉檢查 16 項；
+        - 三項審查（`DECISIONS.md` §31.11）；
+        - api、worker、runner 與 CLI 的整合測試以應用程式角色執行；schema 層與 DDL 的故障注入以 owner 執行（`tests/integration/conftest.py` 的說明）
+      - [x] G2 使用者的 `make env`（補上 `DB_OWNER_PASSWORD`）與完整的 `make test`（2026-11-13，`DECISIONS.md` §31.12）：
+        - `.env` 是 600、468 bytes；
+        - 第二次的 `make test`：7,883 passed、2 skipped，coverage 98.75%。2 個 skipped 是既有的、依環境略過的測試。
+        - 第一次的 1 項失敗是 T23a 測試的間歇性失敗，和 b1 無關。
+      - [x] G3 Live（使用者 2026-11-13 授權；`DECISIONS.md` §31.13）：
+        - `make test-live-db-roles`：14 passed。attempt 1 是 10 passed、1 failed，原因是測試的設計，已修正；
+        - `make test-live-runner`：42 passed；
+        - `make test-live-fixture-findings`：3 passed；
+        - `make test-live-fixture-rescan`：1 passed；
+        - 證據在 gitignore 的 `recordings/t23b-b1-live/`（MANIFEST 有 37 個檔案）。
+      - [ ] G4 審查與合併
+      - [ ] G5 開發 DB 的移轉（使用者執行：`make db-roles-migrate DRY_RUN=1` → `make db-roles-migrate` → `make migrate`）
+      - 原本的要求：
       1. 驗證權限確實被撤銷：
          - `secscan_app` 不能執行 `ALTER TABLE`、`DROP TABLE`、`ALTER TRIGGER` 或其他未授權的結構操作；
          - 也要檢查經由物件擁有權、繼承的角色或特殊函式的繞過。
       2. migration 使用獨立的憑證：`secscan_owner` 不長期提供給 api、worker、runner。
       3. 分權之後重新測試 T23a 的安全不變條件：`active/`／`held/` 隔離所依賴的 trigger 與 DB 約束。
       4. 記錄剩餘風險：三個服務仍共用 `secscan_app`，DDL／DML 分權不是服務級的隔離。
-      - PostgreSQL 的物件擁有者有特殊權限，不能只靠 `REVOKE`：目前 `secscan_app` 擁有資料庫與所有物件。
+      - PostgreSQL 的物件擁有者有特殊權限，不能只靠 `REVOKE`：T23b-b1 之前 `secscan_app` 擁有資料庫與所有物件，所以擁有權要移轉給 `secscan_owner`（`DECISIONS.md` §31.5）。
     - [ ] b2（提議）：compose secrets、掃描容器的 log driver、主機全碟加密的部署要求。
     - [ ] b3（分組是提議）：uid 分離與完整的 FD 撤銷（下方兩項）。
       - 這兩項**不可省略**：它們是 SEC-14 P0 的必要條件，不能以接受剩餘風險取代。

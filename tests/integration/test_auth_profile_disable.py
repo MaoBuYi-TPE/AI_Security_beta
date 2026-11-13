@@ -130,9 +130,9 @@ def test_a_queued_scan_fails_before_the_secret_is_handed_over(
 
 
 def test_the_database_only_allows_disabling_once(
-    client: TestClient, queue_engine: Engine, world: World, scannable: Scannable
+    client: TestClient, queue_owner_engine: Engine, world: World, scannable: Scannable
 ) -> None:
-    with sessionmaker(queue_engine)() as session:
+    with sessionmaker(queue_owner_engine)() as session:
         for statement in (
             "UPDATE auth_profiles SET name = 'renamed' WHERE id = :id",
             "UPDATE auth_profiles SET disabled_at = now() WHERE id = :id",
@@ -141,7 +141,7 @@ def test_the_database_only_allows_disabling_once(
             error = violation(session, statement, {"id": scannable.profile.id})
             assert error.sqlstate in {INTEGRITY_CONSTRAINT_VIOLATION, "23514"}, statement
     assert disable(client, scannable, world.operator_a.headers).status_code == 200  # type: ignore[attr-defined]
-    with sessionmaker(queue_engine)() as session:
+    with sessionmaker(queue_owner_engine)() as session:
         for statement in (
             "UPDATE auth_profiles SET disabled_at = NULL, disabled_by_key_id = NULL WHERE id = :id",
             "UPDATE auth_profiles SET disabled_at = now() WHERE id = :id",
