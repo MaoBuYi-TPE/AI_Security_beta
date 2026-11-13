@@ -177,7 +177,14 @@ T07 加入上傳用的規格 fixture `tests/fixtures/openapi/vampi-openapi3.yml`
 
 ### 4.3 Integration
 
-以 PostgreSQL（compose 的 `db-test`，見 `DECISIONS.md` §7）+ FakeRunner 驗證。每個測試 session 以專屬的非 superuser 角色與全新資料庫執行，伺服器必須是 `cluster_name=secscan-test`；測試程序本身不碰 Docker daemon。驗證項目：
+以 PostgreSQL（compose 的 `db-test`，見 `DECISIONS.md` §7）+ FakeRunner 驗證。伺服器必須是 `cluster_name=secscan-test`；測試程序本身不碰 Docker daemon。
+
+每個測試資料庫有兩個專屬的非 superuser 角色，和開發／正式環境相同（T23b-b1，`DECISIONS.md` §31）：
+- `<db>_owner`：擁有資料庫與所有物件，只用於 migration、DDL 的故障注入，以及驗證 trigger 那一層的語句；
+- `<db>_app`：只有 v0025 的逐表 DML。api、worker、runner 與 CLI 的測試以它執行。
+- **以 owner 執行**：只驗證 schema 的 6 個模組、findings 與 triage 的 `session` fixture，以及個別測試中的 DELETE、TRUNCATE、停用 trigger 與 DDL 的故障注入（`tests/integration/conftest.py` 的說明）。
+
+驗證項目：
 
 - 交易一致性
 - SKIP LOCKED 認領、重複認領、lease 過期
@@ -454,9 +461,31 @@ T20 已涵蓋（`DECISIONS.md` §26）：
 
 空轉檢查（故意改壞之後必須有測試失敗，確認之後改回、不提交）：拿掉「先驗證才刪除」、容器確認刪除之前就加密、到期之前就清除、拿掉最後一塊的檢查、逾期改從最後一次 `collected` 起算、加密失敗時引擎仍然可用——六項都被抓到。Live 的證據斷言（`tests/live/evidence_assertions.py`：run 目錄只剩密文、沒有 canary、export 的 sha256 等於 artifact）已更新，2026-11-12 在 `make test-live-fixture-findings` 與 `make test-live-fixture-rescan` 中執行通過。export 的 sha256 比對只在 findings 中執行（`DECISIONS.md` §30.13 的「Live 驗收」）。
 
+T23b-b1 的 DDL／DML 分權（`DECISIONS.md` §31；預期矩陣在 `tests/db_privileges.py`）：
+
+| 編號 | 內容 | 位置 |
+|---|---|---|
+| ROLE-01 | <ul><li>catalog 和預期矩陣完全相同：每張表的八種權限、沒有 GRANT OPTION 與欄位授權、PUBLIC 沒有任何表與 sequence 的權限；</li><li>資料庫只有 CONNECT，schema 只有 USAGE，sequence 沒有權限；</li><li>函式都是 trigger 函式、SECURITY INVOKER、固定 `search_path`，ACL 只有 owner；</li><li>`pg_default_acl` 只有 owner 的全域函式條目。之後新建的 SQL 函式與 trigger 函式，ACL 也只有 owner：應用程式角色與只有 CONNECT 的角色呼叫都是 42501；</li><li>有未分類的表就失敗。</li></ul> | integration：db_privileges |
+| ROLE-02 | <ul><li>所有資料庫中應用程式角色的擁有權是 0；</li><li>資料庫與每個物件由 owner 擁有，`public` 由 `pg_database_owner` 擁有；</li><li>兩個角色的屬性；沒有成員關係，也不經繼承成為 owner 或任何預先定義角色；</li><li>角色與資料庫層級的設定只有 `timezone`；</li><li>應用程式角色所有的授權依賴（`pg_shdepend` 的 a），只有目標資料庫、`public` 與矩陣中的表；</li><li>不能以 `GRANT ON PARAMETER` 設定 `session_replication_role`、`lo_compat_privileges`。</li></ul> | integration：db_privileges |
+| ROLE-03 | <ul><li>以應用程式角色執行，都是 42501，共約 120 個語句：<ul><li>DDL；</li><li>停用、修改、刪除與新增 trigger；</li><li>改寫函式、刪除約束；</li><li>建立 table、temp table、schema、function、view、rule、policy、index，以及啟用 RLS；</li><li>COMMENT、OWNER TO、REASSIGN OWNED；</li><li>ALTER DATABASE、ALTER SCHEMA；</li><li>SET ROLE、SET SESSION AUTHORIZATION；</li><li>三種方式設定 `session_replication_role`；</li><li>ALTER SYSTEM、CREATE EXTENSION；</li><li>COPY PROGRAM、`pg_read_file`、`lo_import`、REINDEX；</li><li>以 DO 執行 DDL；</li><li>每張表的 TRUNCATE，只能新增的表的 UPDATE、DELETE，其他表的 DELETE；</li><li>projects 與 audit_events 的列鎖；</li><li>`run_rule_locations` 的 SELECT、`alembic_version` 的寫入。</li></ul></li><li>`GRANT … TO PUBLIC` 只有警告、ACL 不變。</li><li>之後 trigger、函式定義、CHECK 與擁有者都不變。</li><li>應用程式角色能改自己的參數，造成服務中斷（剩餘風險 2）。`DROP OWNED BY` 自己撤銷不了 owner 授予的權限。</li></ul> | integration：db_privileges |
+| ROLE-04 | <ul><li>沒有 EXECUTE 時 trigger 照常觸發：23000，不是 42501；</li><li>identity 取號不需要 sequence 的權限；</li><li>執行期的每一種列鎖、advisory lock；</li><li>readiness 是 READY。</li></ul>**報告鎖**（L1 至 L8）：<ul><li>L1 同一個 idempotency key 等鎖之後取得第一份報告；</li><li>L2 不同的 project 不阻塞；</li><li>L3 雜湊碰撞只排隊；</li><li>L4 commit 與 rollback 都釋放；</li><li>L5 等鎖逾時是可重試的 55P03；</li><li>L6 和 keeper、v0023 的鍵空間不同；</li><li>L7 既有的並行測試照常通過；</li><li>L8 projects 的列鎖是 42501。</li></ul>**加上** api、worker、runner 與 CLI 的整合測試都以應用程式角色執行。 | integration：db_privileges、report_lock、report_queue |
+| ROLE-05 | **下列情況都停止，資料不變**：<ul><li>沒有 `DB_OWNER_PASSWORD`；</li><li>owner 與應用程式角色相同；</li><li>以 superuser、應用程式角色或不擁有資料庫的角色執行；</li><li>應用程式角色擁有物件；</li><li>角色或資料庫層級的設定；</li><li>default privileges；</li><li>成員關係與高風險屬性；</li><li>找不到應用程式角色；</li><li>v0025 沒有應用程式角色的名稱、或有未分類的表；</li><li>owner 有高風險屬性或成員關係；</li><li>PUBLIC 有 TEMPORARY 或 `public` 的 CREATE；</li><li>非預期的 default privileges；</li><li>parameter ACL（應用程式角色或 PUBLIC）；</li><li>`ALTER ROLE ALL`。</li></ul>**其他**：<ul><li>連不上 owner 時不轉印驅動程式的訊息；</li><li>offline 的 SQL，含 `-x app_role`；</li><li>head → 0024：default ACL 那一列消失、PUBLIC EXECUTE 還原；再升到 head 時，權限與 ACL 和第一次完全相同。</li></ul> | integration：migration_roles、migrations；unit：db_roles_cli |
+| ROLE-06 | `migrate-db-roles`：<ul><li>**dry-run**：列出的物件等於實際的物件，沒有任何改變；</li><li>**移轉**：<ul><li>應用程式角色不擁有物件，owner 擁有原本兩者的聯集；</li><li>第三個角色的資料庫與物件、`postgres` 中的物件不變；</li><li>之後 migrate 到 head，權限符合矩陣、readiness 是 READY；</li></ul></li><li>**拒絕、而且沒有任何改變**：參數化的 20 種情境，加上兩個獨立的測試：<ul><li>第二個資料庫；</li><li>其他資料庫中的物件或授權；</li><li>schema、large object、一般函式、view；</li><li>第三個角色的物件、superuser 的物件；</li><li>default privileges、成員關係、角色或資料庫層級的設定；</li><li>owner 已存在，但屬性、成員關係、密碼或其他資料庫不符；</li><li>parameter ACL（應用程式角色或 PUBLIC）、`ALTER ROLE ALL`；</li><li>獨立的測試：開著的連線、不同的 cluster；</li></ul></li><li>**錯誤的路徑**：<ul><li>分類之後才新增的物件；</li><li>建立 owner 失敗：訊息不含密碼；</li><li>DB 錯誤、事後檢查不符：都 rollback；</li><li>等鎖逾時：可重試；</li><li>commit 失敗：結果不確定；</li><li>superuser 的密碼錯誤；</li><li>owner 登入失敗。</li></ul></li><li>**owner 的密碼**：以本機產生的 SCRAM verifier 建立；沒有 migration 的資料庫不寫 audit；</li><li>**中斷**：完全 rollback，再執行一次就完成；</li><li>**重跑**：S1、S2 不寫入任何東西；</li><li>**密碼**：輸出與日誌都不含密碼（canary）；</li><li>**unit**：以合成的 `pg_shdepend` 資料測分類器；SCRAM 的核對；非 loopback 與缺少的密碼。</li></ul> | integration：db_roles_cli；unit：db_roles_scope、db_roles_cli |
+| ROLE-07 | <ul><li>`DB_OWNER_PASSWORD` 只在 `db` 的 environment，api、runner、worker 沒有任何 `DB_OWNER_*`；</li><li>initdb 和 `MigrationCredentials` 是同一組變數；</li><li>`make env` 補上它，而且冪等。</li></ul> | unit：compose_secrets、make_env |
+| ROLE-08 | 分權之後的 T23a：<ul><li>應用程式角色不能停用 `evidence_holds_guard`、`run_evidence_hold_check`、`run_evidence_guard`；</li><li>不能刪除 9 個 CHECK、不能以 `session_replication_role` 繞過；</li><li>不能 DELETE 或 TRUNCATE `evidence_holds`、`run_evidence`。</li></ul>EVID 與隔離的既有測試以應用程式角色執行；「關閉 trigger 也擋得下」的 CHECK 測試由 owner 執行。 | integration：db_privileges、evidence_hold_isolation、evidence_holds |
+
 ### 4.4 Live E2E
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。
+
+T23b-b1 的 live 驗收（`make test-live-db-roles`，`tests/live/test_db_roles_live.py`；**尚未執行**，G3 需要另外授權）：
+- 全新的 volume 由 initdb 建立兩個非 superuser 的角色，資料庫由 owner 擁有；
+- migration 以 owner 執行：每個物件的擁有者是 owner、版本是 head、權限等於預期矩陣、只有 owner 的全域函式 default ACL；
+- api、runner、worker 的連線都是應用程式角色；
+- 應用程式角色的 DDL、停用 trigger、TRUNCATE、`session_replication_role` 被拒；
+- 三個服務的環境變數名稱中沒有 owner 的帳密：只在容器內列出名稱，值不離開容器。
+
+G3 另外重跑 `test-live-runner`、`test-live-fixture-findings`、`test-live-fixture-rescan`，確認分權之後的端到端流程。
 
 T11 已涵蓋（`tests/live/test_guard_live.py`；live 自己的 lab 網路 10.89.10.0/24 上的接收端 lab-target、lab-canary，以及 control_net 上的 control canary；接收端記下每一個 TCP accept）：
 - guard 非 root、唯讀、沒有 capability、只接 scan 與 lab（固定在 .254）、policy 唯讀，healthcheck 通過；lab 那一側連不到 guard 的 proxy。

@@ -390,6 +390,15 @@ ExecutionPlan 只能包含：
 
 JSONB 可以用來存固定版本的 snapshot 或各來源的差異欄位，但不能把所有資料都塞進單一 JSON 欄位，導致失去授權與查詢約束。
 
+- **DB 角色**（T23b-b1，`DECISIONS.md` §31）：
+  - `secscan_owner` 擁有資料庫與所有物件，只有 migration 以它連線；
+  - api、worker、runner 共用的 `secscan_app` 不擁有任何物件，只有逐表的 DML，例如：
+    - 只能新增的紀錄只有 SELECT、INSERT；
+    - 任何表都沒有 TRUNCATE；
+  - trigger 與 CHECK 仍是轉換規則的那一層，權限是另外一層；
+  - 報告建立的排隊用 advisory lock，不鎖 projects 的列；
+  - 三個服務共用同一個角色，不是服務級的隔離（b3 之後）。
+
 ### 6.2 實作狀態
 
 - **T04（migration `0001`）已建立 projects、api_keys、audit_events**：

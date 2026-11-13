@@ -82,7 +82,7 @@
 
 ## 7. CLI 約定的建立時點
 
-M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立；`test-live-fixture` 已在 T30 建立；`nuclei-templates`、`nuclei-templates-check` 已在 T17 建立；`test-live-fixture-nuclei` 已在 T18 建立；`owasp-top10`、`owasp-top10-check`、`test-live-fixture-findings` 已在 T19 建立；`bench-key`、`bench-seal` 與 `secscan-admin` 的 `check-encryption-keys`、`rotate-content-keys`、`rotate-evidence-keys`、`export-evidence`、`retention-status` 已在 T23a 建立；`runs-layout-migrate` 與 `secscan-admin` 的 `init-runs-layout`、`migrate-runs-layout` 已在 T23a 的機密性隔離建立。其餘命令仍只是約定的名稱：
+M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`lab-up`／`lab-down` 已在 T03 與 `compose.lab.yaml` 一起建立；`env`、`db-up`、`test-db-up`、`db-down`、`migrate` 已在 T04 與 `compose.yaml` 一起建立；本機管理指令 `uv run secscan-admin` 已在 T05 建立（T08 加入 `rotate-secret-keys`、T09 加入 `fake-runner`、T10 加入 `runner` 與 `worker`）；`build`、`images`、`scan-net`、`up`、`down`、`test-live-runner` 已在 T10 建立；`lab-net` 已在 T11 建立；`test-live-zap` 已在 T14 建立；`test-contract`、`record-fixtures` 已在 T15 建立；`test-live-lab`、`lab-images` 已在 T16 建立；`test-live-fixture` 已在 T30 建立；`nuclei-templates`、`nuclei-templates-check` 已在 T17 建立；`test-live-fixture-nuclei` 已在 T18 建立；`owasp-top10`、`owasp-top10-check`、`test-live-fixture-findings` 已在 T19 建立；`bench-key`、`bench-seal` 與 `secscan-admin` 的 `check-encryption-keys`、`rotate-content-keys`、`rotate-evidence-keys`、`export-evidence`、`retention-status` 已在 T23a 建立；`runs-layout-migrate` 與 `secscan-admin` 的 `init-runs-layout`、`migrate-runs-layout` 已在 T23a 的機密性隔離建立；`db-roles-migrate`、`test-live-db-roles` 與 `secscan-admin migrate-db-roles` 已在 T23b-b1 建立（`make migrate` 改以 owner 角色執行）。其餘命令仍只是約定的名稱：
 
 | 命令 | 建立階段 | 預期行為 |
 |---|---|---|
@@ -97,7 +97,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | make env | M1（T04 已建立） | 建立或補齊 `.env`（權限 600）中缺少的本機 DB 密碼與加密金鑰（隨機值；T23a 加上 `EVIDENCE_ENCRYPTION_KEYS`、`CONTENT_ENCRYPTION_KEYS`），不覆寫、不輪替既有的值，不在終端顯示金鑰 |
 | make db-up／make db-down | M1（T04 已建立） | 啟動開發用 PostgreSQL（只綁 127.0.0.1:55432）／停止 db 與 db-test（保留開發資料） |
 | make test-db-up | M1（T04 已建立） | 啟動整合測試用 PostgreSQL（tmpfs，只綁 127.0.0.1:55433） |
-| make migrate | M1（T04 已建立） | 執行 Alembic upgrade head，並印出目前版本；不含破壞性重置 |
+| make migrate | M1（T04 已建立；T23b-b1 起以 owner 執行） | 執行 Alembic upgrade head，並印出目前版本；不含破壞性重置。以 `DB_OWNER_*` 的 owner 角色連線，每次先檢查角色（`DECISIONS.md` §31.4） |
 | uv run secscan-admin create-admin-key --name … [--output PATH] | M1（T05 已建立） | 建立 platform_admin key（預設 90 天、最多 365 天）；完整的 key 只寫出一次（stdout，或新建、權限 600 的檔案），DB 只存 hash（`API_CONTRACT.md` §13.4） |
 | uv run secscan-admin rotate-secret-keys | M1（T08 已建立） | 以 `SECRET_ENCRYPTION_KEYS` 的第一個金鑰重新加密所有的 secret；有任何一份解不開就全部回滾（`API_CONTRACT.md` §16.6） |
 | uv run secscan-admin check-encryption-keys | M5（T23a 已建立） | 檢查三組平台金鑰都合法、互不共用；只顯示數量，不連資料庫（`API_CONTRACT.md` §20） |
@@ -105,6 +105,8 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | secscan-admin rotate-evidence-keys | M5（T23a 已建立） | 在 runner 容器內執行：以 `EVIDENCE_ENCRYPTION_KEYS` 的第一個金鑰重新加密 runs volume 的加密檔；和 keeper 互斥 |
 | secscan-admin export-evidence --run ID [--path P] | M5（T23a 已建立） | 在 runner 容器內執行：列出一個 run 的加密檔，或先驗證、寫 audit 再把一個檔案的明文寫到 stdout（break-glass） |
 | secscan-admin retry-evidence --directory D --reason R [--max-depth N] [--max-entries N] [--max-path-chars N] | M5（T23a 方案 B 已建立） | 在 runner 容器內執行：人工處理一個已搬到 `held/` 的隔離目錄；先寫 audit，在 `held/` 以較高的上限加密並驗證，搬回 `active/` 再驗證，才解除隔離（`API_CONTRACT.md` §20） |
+| make db-roles-migrate [DRY_RUN=1] | M5（T23b-b1 已建立） | T23b-b1 之前建立的開發 DB：以 superuser 把擁有權由應用程式角色移轉給 owner，範圍不符就拒絕；同一個 transaction，可以重跑（`DECISIONS.md` §31.5）；由使用者執行 |
+| make test-live-db-roles | M5（T23b-b1 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在 test-live-runner 的同一個隔離 stack 上確認兩個角色、owner 執行的 migration、服務以應用程式角色連線、DDL 被拒、服務沒有 owner 的帳密 |
 | make runs-layout-migrate [DRY_RUN=1] | M5（T23a 機密性隔離已建立） | 既有的 runs volume 搬到 `active/`／`held/` 的 layout：以和 `make up` 相同的設定解析實際的 volume、確認標籤與沒有任何容器使用它，再在 runner 容器內搬移（`DECISIONS.md` §30.13）；由使用者執行 |
 | secscan-admin init-runs-layout | M5（T23a 機密性隔離已建立） | compose 的一次性服務 `runs-init` 執行：建立或檢查 layout，不通過時 runner 與 worker 不啟動；不需要 DB 與金鑰 |
 | uv run secscan-admin retention-status | M5（T23a 已建立） | 唯讀：原始證據、需要人工處理的目錄、報告與摘錄各保留狀態的數量 |
