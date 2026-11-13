@@ -1619,7 +1619,7 @@
       - T23a 完成不代表 SEC-14 完成：P0 的完成條件見 `DECISIONS.md` §30.14，剩餘風險見 §30.9。
   - [ ] T23b：API 安全 header／速率限制、DDL/DML 角色、金鑰與部署強化。
     - 2026-11-12 拆成 b1–b4。b1 的範圍由使用者決定；其他各項在細部計畫時確認。SEC-14 的 P0 需要 b1–b3（`DECISIONS.md` §30.14）。
-    - [ ] **b1：DDL／DML 分權**（只做這一項；細部計畫 2026-11-12 核准，`DECISIONS.md` §31）：
+    - [x] **b1：DDL／DML 分權**（只做這一項；細部計畫 2026-11-12 核准，2026-11-13 完成，`DECISIONS.md` §31）：
       - [x] G1 離線實作（分支 `feat/t23b-b1-db-roles`）：
         - ROLE-01 至 08、空轉檢查 16 項；
         - 三項審查（`DECISIONS.md` §31.11）；
@@ -1634,8 +1634,14 @@
         - `make test-live-fixture-findings`：3 passed；
         - `make test-live-fixture-rescan`：1 passed；
         - 證據在 gitignore 的 `recordings/t23b-b1-live/`（MANIFEST 有 37 個檔案）。
-      - [ ] G4 審查與合併
-      - [ ] G5 開發 DB 的移轉（使用者執行：`make db-roles-migrate DRY_RUN=1` → `make db-roles-migrate` → `make migrate`）
+      - [x] G4 審查與合併（2026-11-13，使用者要求最終核對後合併：PR #38，`4287eea`；`DECISIONS.md` §31.14）
+      - [x] G5 開發 DB 的移轉（2026-11-13，使用者授權、依 7 項條件執行；`DECISIONS.md` §31.14）：
+        - 移轉之前：可還原的備份（解碼與列數驗證）、沒有其他連線、兩次 dry-run 相同（70 個物件、S0、沒有拒絕）；
+        - `make db-roles-migrate` → `make migrate`（`0025 (head)`）→ 接上 AC 之後 `make up`，每一步都是 exit 0；
+        - 升級後的驗證 24/24 通過：健康狀態、schema、擁有權、逐表權限、default ACL、三個服務的實際連線角色；
+        - 證據在 gitignore 的 `recordings/t23b-b1-g5/`（MANIFEST 有 29 個檔案）。
+      - 殘留：G3 的 12 個匿名 volume 已定向清除；時鐘誤差與匿名 volume 的修正在 PR #39。
+      - **SEC-14 仍不標完成**（P0 還需要 b2、b3、T23c、洩漏路徑的驗證與剩餘風險的確認，`DECISIONS.md` §30.14）。
       - 原本的要求：
       1. 驗證權限確實被撤銷：
          - `secscan_app` 不能執行 `ALTER TABLE`、`DROP TABLE`、`ALTER TRIGGER` 或其他未授權的結構操作；
