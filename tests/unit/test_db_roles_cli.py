@@ -12,10 +12,13 @@ import io
 import re
 import secrets
 from pathlib import Path
+from typing import cast
 
 import pytest
 from alembic import command
+from psycopg import sql
 from pydantic import SecretStr, ValidationError
+from sqlalchemy import Connection
 
 from secscan.cli import db_roles
 from secscan.cli.db_roles import (
@@ -298,3 +301,69 @@ def test_the_command_is_registered_with_a_dry_run_flag() -> None:
 
     assert _parser().parse_args(["migrate-db-roles", "--dry-run"]).dry_run is True
     assert _parser().parse_args(["migrate-db-roles"]).dry_run is False
+
+
+# ---------------------------------------------------------------- ROLE-09（T23b-b1 的補正）
+
+
+def test_the_target_carries_a_verifier_of_the_owner_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """verifier 在連線之前算好（格式錯誤的密碼在這裡就以設定錯誤回報）。"""
+    _credentials(monkeypatch, DB_OWNER_PASSWORD=OWNER_PASSWORD, DB_ADMIN_PASSWORD=ADMIN_PASSWORD)
+
+    target = target_from(_settings())
+
+    verifier = target.owner_verifier.get_secret_value()
+    assert verifier.startswith("SCRAM-SHA-256$4096:")
+    assert scram_matches(verifier, OWNER_PASSWORD)
+    assert OWNER_PASSWORD not in verifier
+    assert verifier not in repr(target)
+
+
+def test_a_non_ascii_owner_password_is_refused_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    password = "密碼" + secrets.token_hex(8)
+    _credentials(monkeypatch, DB_OWNER_PASSWORD=password, DB_ADMIN_PASSWORD=ADMIN_PASSWORD)
+
+    def must_not_connect(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("設定錯誤時不應該連線")
+
+    monkeypatch.setattr(db_roles, "migrate_db_roles", must_not_connect)
+    messages: list[str] = []
+    args = argparse.Namespace(command=db_roles.COMMAND, dry_run=False)
+
+    assert db_roles.run(args, _settings(), messages.append) == EXIT_FAILURE
+
+    assert "可列印的 ASCII" in messages[0]
+    assert all(password not in line and ADMIN_PASSWORD not in line for line in messages)
+
+
+class _StatementRecorder:
+    """代替 psycopg 連線：只記下送出的語句。"""
+
+    def __init__(self) -> None:
+        self.statements: list[sql.Composable] = []
+
+    def execute(self, statement: sql.Composable) -> None:
+        self.statements.append(statement)
+
+
+def test_the_owner_is_created_with_the_verifier_not_the_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CREATE ROLE 只送本機產生的 verifier，明文密碼不送到伺服器（T23b-b2 計畫的 C23）。"""
+    _credentials(monkeypatch, DB_OWNER_PASSWORD=OWNER_PASSWORD, DB_ADMIN_PASSWORD=ADMIN_PASSWORD)
+    target = target_from(_settings())
+    recorder = _StatementRecorder()
+    monkeypatch.setattr(db_roles, "psycopg_connection", lambda _connection: recorder)
+
+    db_roles._create_owner(cast(Connection, object()), target)
+
+    [statement] = recorder.statements
+    rendered = statement.as_string()
+    assert rendered.startswith('CREATE ROLE "secscan_owner" LOGIN NOSUPERUSER')
+    assert target.owner_verifier.get_secret_value() in rendered
+    assert "SCRAM-SHA-256$4096:" in rendered
+    assert OWNER_PASSWORD not in rendered

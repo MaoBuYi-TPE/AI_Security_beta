@@ -26,8 +26,8 @@ from sqlalchemy import Engine, text
 from secscan.cli import db_roles
 from secscan.cli.db_roles import EXIT_FAILURE, EXIT_OK, Target, migrate_db_roles
 from secscan.cli.db_roles_scope import classify as real_classify
-from secscan.cli.scram import scram_matches
-from secscan.core.db import DatabaseStatus, probe_database
+from secscan.cli.scram import scram_matches, scram_verifier
+from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
 from secscan.migrations import alembic_config, head_revision
 from tests.db_privileges import APP_TABLE_PRIVILEGES
 from tests.integration.conftest import app_engine, migrate_to_head
@@ -62,15 +62,21 @@ class Legacy:
     cleanup: list[sql.Composed | sql.SQL] = field(default_factory=list)
 
     def target(
-        self, *, owner_password: str | None = None, cluster: str = TEST_CLUSTER_NAME
+        self,
+        *,
+        owner_password: str | None = None,
+        owner_verifier: str | None = None,
+        cluster: str = TEST_CLUSTER_NAME,
     ) -> Target:
+        password = owner_password or self.database.owner_password
         return Target(
             host=self.database.host,
             port=self.database.port,
             database=self.database.name,
             app_role=self.database.user,
             owner_role=self.database.owner_user,
-            owner_password=SecretStr(owner_password or self.database.owner_password),
+            owner_password=SecretStr(password),
+            owner_verifier=SecretStr(owner_verifier or scram_verifier(password)),
             admin_user=self.root.user,
             admin_password=self.root.password,
             connect_timeout_seconds=5,
@@ -324,12 +330,14 @@ def test_passwords_never_appear_in_the_output(
     messages: list[str] = []
     target = legacy.target(owner_password=canary)
     admin = target.admin_password.get_secret_value()
+    verifier = target.owner_verifier.get_secret_value()
 
     for dry_run in (True, False):
         migrate_db_roles(target, dry_run=dry_run, report=messages.append)
 
     text_out = "\n".join(messages) + caplog.text
     assert canary not in text_out
+    assert verifier not in text_out
     assert admin not in text_out
     assert legacy.database.password not in text_out
 
@@ -513,16 +521,72 @@ def test_a_database_without_migrations_is_transferred_without_an_audit(
     assert any("可以登入" in line for line in messages)
 
 
-def test_the_owner_is_created_with_a_scram_verifier(small_legacy: Legacy) -> None:
-    """明文密碼不送到伺服器：保存的是本機產生的 verifier，而且和 .env 的密碼相符。"""
-    assert migrate_db_roles(small_legacy.target(), dry_run=False, report=lambda _: None) == EXIT_OK
+def test_the_owner_is_created_with_the_local_verifier(small_legacy: Legacy) -> None:
+    """ROLE-09：CREATE ROLE 送的是本機產生的 verifier，明文密碼不送到伺服器；之後以 SCRAM 登入。
 
-    [(verifier,)] = small_legacy.root.rows(
+    伺服器收到明文時會以自己的 salt 雜湊，保存的值就不會逐字等於本機的 verifier。只檢查前綴與
+    密碼相符分辨不出兩者（T23b-b2 計畫的 C23）。
+    """
+    password = small_legacy.database.owner_password
+    verifier = scram_verifier(password)
+    messages: list[str] = []
+
+    result = migrate_db_roles(
+        small_legacy.target(owner_verifier=verifier), dry_run=False, report=messages.append
+    )
+
+    assert result == EXIT_OK
+    [(stored,)] = small_legacy.root.rows(
         "SELECT rolpassword FROM pg_authid WHERE rolname = :name",
         name=small_legacy.database.owner_user,
     )
-    assert str(verifier).startswith("SCRAM-SHA-256$4096:")
-    assert scram_matches(str(verifier), small_legacy.database.owner_password)
+    assert stored == verifier
+    assert scram_matches(str(stored), password)
+    assert any("可以登入" in line for line in messages)
+    assert all(password not in line and verifier not in line for line in messages)
+    engine = create_db_engine(
+        small_legacy.database.owner_settings(),
+        application_name="secscan-role09",
+        pooled=False,
+        require_scram=True,
+    )
+    try:
+        with engine.connect() as connection:
+            current = connection.execute(text("SELECT current_user")).scalar_one()
+    finally:
+        engine.dispose()
+    assert current == small_legacy.database.owner_user
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    [
+        pytest.param("SCRAM-SHA-256$4096:not-a-verifier", id="malformed"),
+        pytest.param(scram_verifier("other-" + secrets.token_hex(16)), id="another-password"),
+    ],
+)
+def test_a_verifier_that_does_not_match_the_password_rolls_back(
+    small_legacy: Legacy, verifier: str
+) -> None:
+    """ROLE-09：保存的值和 .env 的密碼不符時，事後檢查拒絕，整個 transaction rollback。
+
+    依 PostgreSQL 的原始碼（get_password_type）：格式不符的 verifier 會被當成明文再雜湊，別的密碼的
+    verifier 會原樣保存。這個測試只確認兩者都因「密碼不符」被拒絕，owner 沒有建立。
+    """
+    messages: list[str] = []
+
+    result = migrate_db_roles(
+        small_legacy.target(owner_verifier=verifier), dry_run=False, report=messages.append
+    )
+
+    assert result == EXIT_FAILURE
+    assert any(
+        "事後檢查不符" in line and "DB_OWNER_PASSWORD 和它的密碼不符" in line for line in messages
+    )
+    assert not _owner_exists(small_legacy)
+    assert small_legacy.root.rows(OWNED_COUNT, role=small_legacy.database.user) != [(0,)]
+    password = small_legacy.database.owner_password
+    assert all(password not in line and verifier not in line for line in messages)
 
 
 def test_a_wrong_admin_password_changes_nothing(small_legacy: Legacy) -> None:
@@ -626,14 +690,14 @@ def test_a_failure_to_create_the_owner_rolls_back_without_the_password(
 
     monkeypatch.setattr("secscan.cli.db_roles.classify", classify_then_create)
     messages: list[str] = []
+    target = small_legacy.target()
+    verifier = target.owner_verifier.get_secret_value()
 
-    assert (
-        migrate_db_roles(small_legacy.target(), dry_run=False, report=messages.append)
-        == EXIT_FAILURE
-    )
+    assert migrate_db_roles(target, dry_run=False, report=messages.append) == EXIT_FAILURE
 
     assert any("無法建立 owner 角色（SQLSTATE 42710）" in line for line in messages)
-    assert all(small_legacy.database.owner_password not in line for line in messages)
+    password = small_legacy.database.owner_password
+    assert all(password not in line and verifier not in line for line in messages)
     assert small_legacy.root.rows(OWNED_COUNT, role=small_legacy.database.user) != [(0,)]
 
 
