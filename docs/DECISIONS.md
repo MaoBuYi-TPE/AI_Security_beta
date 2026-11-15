@@ -3596,6 +3596,7 @@ PostgreSQL 的物件擁有者有特殊權限，不能只靠 `REVOKE` 就認定�
 3. 讀取應用程式角色實際擁有的物件，必須等於分類的那一組。理由：READ COMMITTED 下兩者是不同的語句，空檔中新增的物件沒有經過分類，不移轉；
 4. 沒有 owner 時 `CREATE ROLE`：
    - 密碼以本機產生的 SCRAM-SHA-256 verifier 傳送，明文不到伺服器，也就不會進伺服器的任何日誌；
+   - **更正（2026-11-15）**：這一點到 2026-11-15 為止和實作不一致，實際上仍送出明文（同一個 transaction 以 SET LOCAL 關閉語句日誌），見 §31.15；
 5. `REASSIGN OWNED`：同時移轉目標資料庫本身；
 6. 事後檢查：
    - 應用程式角色不擁有任何物件；
@@ -3736,7 +3737,7 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 | 來源 | 項目 | 處理 |
 |---|---|---|
 | 安全 M1 | runner 經由 socket-proxy 讀得到 owner 與 superuser 的密碼，§31.9 漏寫 | 寫進 §31.9 第 1 點；改善留給 b2 |
-| 安全 L1、資料庫 L2 | CREATE ROLE 的明文密碼可能經由 `log_min_duration_statement`、`pg_stat_statements` 等進入日誌 | 改以本機產生的 SCRAM verifier 傳送，並關閉 `log_min_duration_statement` |
+| 安全 L1、資料庫 L2 | CREATE ROLE 的明文密碼可能經由 `log_min_duration_statement`、`pg_stat_statements` 等進入日誌 | 改以本機產生的 SCRAM verifier 傳送，並關閉 `log_min_duration_statement`。**更正（2026-11-15）**：只完成了關閉 `log_min_duration_statement`；verifier 雖然有產生的函式，但 `_create_owner` 仍送出明文，測試也分辨不出兩者。2026-11-15 補正，見 §31.15 |
 | 安全 L2、資料庫 M3 | 分類與移轉之間的 TOCTOU：空檔中新增的物件未經分類就被移轉 | <ul><li>`Dependency` 帶 `(dbid, classid, objid, objsubid)`，實際擁有的物件必須等於分類的那一組；</li><li>REASSIGN 之後重新分類，必須是 S1；</li><li>測試：分類之後才新增物件就拒絕。</li></ul> |
 | 安全 L3、程式碼 M2 | commit 失敗被說成「沒有做任何改變」；等鎖逾時被說成「連不上」 | 連線與 transaction 分開；commit 失敗回報結果不確定；55P03 另外說明。三者都有測試 |
 | 安全 L4 | 連線沒有要求 SCRAM | b1 新增的 owner、superuser 連線加上 `require_auth=scram-sha-256`；應用程式的連線留給 b2 |
@@ -3883,6 +3884,17 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
   - 由 runner 與 worker 迴圈的 `prune()` 在 7 天沒有心跳之後刪除（`STALE_AFTER`）；
   - 沒有手動刪除。
 
+**CREATE ROLE 的實際作法（2026-11-15 加註）**：
+- G5 以當時的程式建立開發 DB 的 `secscan_owner`。CREATE ROLE 送出的是**明文**的密碼，不是上面 §31.5 所寫的 SCRAM verifier：
+  - 經由主機 loopback 的 TCP 連線，再經 OrbStack 的 port forwarder 到 db 容器；
+  - 沒有 TLS（DB 連線不使用 `sslmode`）。
+- 程式在同一個 transaction 以 SET LOCAL 關閉 `log_statement`、`log_min_error_statement` 與 `log_min_duration_statement`：
+  - 這是依程式的推論；當時沒有另外檢查伺服器的日誌；
+  - 語句執行期間，superuser 可以在 `pg_stat_activity` 看到它；
+  - 伺服器以 SCRAM-SHA-256 雜湊保存。
+- 這個歷史紀錄不因 §31.15 的補正而改變。
+- 既有的 owner 與密碼不重建、不換版（T23b-b2 計畫的 D12）。這列為剩餘風險，在 SEC-14 的 P0 驗收時由使用者確認。
+
 **§31.12、§31.13 的兩項提議**：在 PR #39 處理（從 main 另開；2026-11-14 合併，merge commit `d427498`）。
 - `retention-status` 改以 DB 的 `clock_timestamp()` 判斷經過時間，並加上主機時鐘快或慢一小時的回歸測試；
 - Live 的接收端以 tmpfs 蓋住 guard 映像的 VOLUME，沿用 `lab_support` 既有的作法；
@@ -3895,3 +3907,62 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
   - 還需要 T23b 的 b2、b3 與 T23c 完成；
   - 還要驗證機密不會經由洩漏路徑外流；
   - 剩餘風險要經使用者確認接受。
+
+### 31.15 補正：owner 以 SCRAM verifier 建立（2026-11-15，T23b-b2 計畫的 PR-0）
+
+**發現**：T23b-b2 計畫的唯讀盤點（C23）發現，§31.5 第 4 步與 §31.11 的 L1 寫「以 SCRAM verifier 傳送」，實作卻不是：
+- `scram.py` 有產生 verifier 的函式，但 `_create_owner` 以 `sql.Literal(<明文>)` 送出密碼；
+- 既有的測試分辨不出兩者：
+  - unit 測試只測 `scram_verifier` 本身；
+  - 整合測試只檢查保存的值以 `SCRAM-SHA-256$4096:` 開頭、和密碼相符。伺服器收到明文時，也以同樣的迭代次數雜湊，所以兩種作法都會通過。
+
+**補正**（使用者 2026-11-15 授權，範圍只限這一項）：
+- `target_from` 在連線之前就算好 verifier，放進 `Target.owner_verifier`（`SecretStr`）：
+  - 不能計算的密碼（不是可列印的 ASCII）以設定錯誤回報，不連線；
+  - 訊息不含密碼。
+- `_create_owner` 只送 verifier。日誌的抑制照舊：verifier 不是密碼，但同樣不寫進伺服器日誌。
+- verifier 和 `.env` 的密碼不符時，既有的事後檢查（`classify` 對已存在的 owner 核對密碼）拒絕，並 rollback：
+  - 格式不符的 verifier：PostgreSQL 當成明文再雜湊；
+  - 別的密碼的 verifier：PostgreSQL 原樣保存；
+  - 這兩點依 PostgreSQL 的原始碼（`get_password_type`、`parse_scram_secret`，資料庫審查）。測試只確認兩者都因「密碼不符」被拒絕。
+
+**ROLE-09**（S&T §4.3）：
+- unit：
+  - 攔截送出的語句：只有 verifier，沒有明文的密碼；
+  - `Target` 的 verifier 和密碼相符，`repr` 不含它；
+  - 非 ASCII 的密碼在連線之前就拒絕，訊息不含密碼。
+- 整合（db-test）：
+  - 保存的 `rolpassword` **逐字等於**本機產生的 verifier；明文的作法會得到伺服器自己的 salt，不會相等；
+  - 之後以 `require_auth=scram-sha-256` 登入，`current_user` 是 owner；
+  - 格式不符、別的密碼的 verifier：exit 1，事後檢查以「密碼不符」拒絕；owner 沒有建立，應用程式角色仍擁有物件；輸出不含密碼與 verifier。
+  - 既有的防洩漏測試加上 verifier：canary 的輸出、建立失敗（42710）的訊息。
+- **ROLE-09 的空轉檢查**：
+  - 和 §31.11 的「空轉檢查 16 項」無關：當時的 16 項沒有抓到這個缺陷。
+  - 作法：把 `_create_owner` 改回送明文，4 項測試失敗，原因都是斷言本身：
+    - unit 的語句攔截；
+    - 整合的逐字比對；
+    - 兩個負向案例改成 exit 0。
+  - 改回之後通過。
+  - 執行紀錄附在 PR 的說明。
+
+**審查**（opus，唯讀；程式碼、安全、資料庫）：
+- 三項都沒有 CRITICAL、HIGH、MEDIUM。
+- **已處理的 LOW**：
+  - 防洩漏測試加上 verifier；
+  - 負向測試改成斷言「密碼不符」；
+  - 模組 docstring 補上 `log_min_duration_statement`；
+  - 本節與 §31.14 加註的說法，改成依證據的範圍。
+- **未處理的 LOW**（範圍只限這一項補正，列為之後的強化）：
+  - 抽樣日誌：`log_min_duration_sample`、`log_transaction_sample_rate`；
+  - 執行期間 `pg_stat_activity` 看得到 verifier：可以用 `track_activities = off` 處理；
+  - 日後若載入 pg_stat_statements，utility 語句會連同 verifier 一起保存；
+  - verifier 固定 4096 次迭代，不跟著伺服器的 `scram_iterations`；
+  - 送出之前沒有檢查 verifier 的前綴；
+  - 新建的 owner 密碼不符時，拒絕的訊息仍寫「owner 角色已存在」。
+  - 依 compose 的設定，前三項都是預設值，目前沒有實際的暴露。這次沒有查詢開發 DB。
+
+**不改變的事**：
+- G5（2026-11-13）以明文建立開發 DB 的 owner，見 §31.14 的加註。這個歷史紀錄不因補正而改變；
+- 既有的 owner 與密碼不重建、不換版；
+- 這次沒有操作開發 DB，也沒有執行 Live。
+- **T23b-b1 維持完成**（這是補正）；**SEC-14 仍不標完成**。
