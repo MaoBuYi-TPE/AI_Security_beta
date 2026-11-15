@@ -17,8 +17,10 @@ T23b-b1 之前，應用程式角色（DB_USER）擁有開發 DB 與其中所有�
   物件、owner 擁有原本兩者的聯集、其他角色的物件前後相同）、audit db_roles.migrated，然後 commit。
   任何一步失敗都 rollback，沒有中間狀態；之後以 owner 另外登入一次確認。
 - 已移轉（S1、S2）時不寫入任何東西；中斷之後再執行一次就完成。
-- 終端、log 與錯誤都不含密碼：CREATE ROLE 以 psycopg 直接執行（例外不含語句），這個 transaction
-  關閉 log_statement 與 log_min_error_statement。
+- 終端、log 與錯誤都不含密碼：CREATE ROLE 只送本機產生的 SCRAM verifier（secscan.cli.scram），
+  明文密碼不送到伺服器；verifier 在連線之前算好，不能計算的密碼以設定錯誤回報。以 psycopg 直接
+  執行（例外不含語句），這個 transaction 也關閉 log_statement、log_min_error_statement 與
+  log_min_duration_statement（verifier 同樣不寫進伺服器日誌）。
 """
 
 import argparse
@@ -38,6 +40,7 @@ from secscan.audit.service import AuditTrail
 from secscan.cli import db_roles_catalog as catalog
 from secscan.cli.db_roles_scope import Plan, State, classify
 from secscan.cli.keys import Subparsers
+from secscan.cli.scram import scram_verifier
 from secscan.cli.services import Report
 from secscan.core.config import ENV_FILE, Settings
 from secscan.migrations.credentials import (
@@ -89,6 +92,8 @@ class Target:
     app_role: str
     owner_role: str
     owner_password: SecretStr
+    # CREATE ROLE 送的 SCRAM verifier（由 owner_password 在本機產生）；不是密碼，但同樣不輸出。
+    owner_verifier: SecretStr
     admin_user: str
     admin_password: SecretStr
     connect_timeout_seconds: int
@@ -136,6 +141,8 @@ def target_from(settings: Settings) -> Target:
         raise ValueError(f"DB_HOST 只接受 loopback 位址 {sorted(LOOPBACK_HOSTS)}")
     if not valid_role_name(settings.db_user):
         raise ValueError("DB_USER 只接受小寫英數與底線，不可以 pg_ 開頭（v0025 的規則）")
+    # UnsupportedPasswordError 是 ValueError：run() 以設定錯誤回報，訊息不含密碼。
+    verifier = scram_verifier(owner_password.get_secret_value())
     return Target(
         host=settings.db_host,
         port=settings.db_port,
@@ -143,6 +150,7 @@ def target_from(settings: Settings) -> Target:
         app_role=settings.db_user,
         owner_role=owner.user,
         owner_password=owner_password,
+        owner_verifier=SecretStr(verifier),
         admin_user=admin.user,
         admin_password=admin.password,
         connect_timeout_seconds=settings.db_connect_timeout_seconds,
@@ -273,7 +281,7 @@ def _execute(connection: Connection, target: Target, plan: Plan) -> None:
 
 
 def _prepare(connection: Connection) -> None:
-    """這個 transaction 的設定：等鎖的上限、不記錄語句（CREATE ROLE 含密碼），以及工具的鎖。"""
+    """這個 transaction 的設定：等鎖的上限、不記錄語句（CREATE ROLE 含 verifier），以及工具的鎖。"""
     connection.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
     connection.execute(text("SET LOCAL log_statement = 'none'"))
     connection.execute(text("SET LOCAL log_min_error_statement = panic"))
@@ -282,13 +290,17 @@ def _prepare(connection: Connection) -> None:
 
 
 def _create_owner(connection: Connection, target: Target) -> None:
-    """psycopg 直接執行：SQLAlchemy 的例外訊息會帶語句（含密碼），psycopg 的不會。"""
+    """以本機產生的 SCRAM verifier 建立 owner：PostgreSQL 直接保存符合格式的 verifier，明文密碼
+    不送到伺服器。verifier 和 .env 的密碼不符時（格式不符的會被當成明文再雜湊），事後檢查拒絕。
+
+    psycopg 直接執行：SQLAlchemy 的例外訊息會帶語句（含 verifier），psycopg 的不會。
+    """
     raw = psycopg_connection(connection)
     statement = sql.SQL(
         "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS "
         "PASSWORD {}"
     ).format(
-        sql.Identifier(target.owner_role), sql.Literal(target.owner_password.get_secret_value())
+        sql.Identifier(target.owner_role), sql.Literal(target.owner_verifier.get_secret_value())
     )
     try:
         raw.execute(statement)

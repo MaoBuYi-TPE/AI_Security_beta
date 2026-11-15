@@ -1641,6 +1641,10 @@
         - 升級後的驗證 24/24 通過：健康狀態、schema、擁有權、逐表權限、default ACL、三個服務的實際連線角色；
         - 證據在 gitignore 的 `recordings/t23b-b1-g5/`（MANIFEST 有 29 個檔案）。
       - 殘留：G3 的 12 個匿名 volume 已定向清除；時鐘誤差與匿名 volume 的修正在 PR #39。
+      - 補正（2026-11-15）：owner 改以 SCRAM verifier 建立，加上 ROLE-09（`DECISIONS.md` §31.15）。
+        - 原本的實作送出明文，和文件不一致；
+        - G5 當時以明文建立 owner（以 SET LOCAL 關閉語句日誌），這個紀錄不變；
+        - b1 維持完成。
       - **SEC-14 仍不標完成**（P0 還需要 b2、b3、T23c、洩漏路徑的驗證與剩餘風險的確認，`DECISIONS.md` §30.14）。
       - 原本的要求：
       1. 驗證權限確實被撤銷：
