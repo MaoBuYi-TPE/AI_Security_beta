@@ -3883,7 +3883,7 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
   - 由 runner 與 worker 迴圈的 `prune()` 在 7 天沒有心跳之後刪除（`STALE_AFTER`）；
   - 沒有手動刪除。
 
-**§31.12、§31.13 的兩項提議**：在 PR #39 處理（從 main 另開，待審查與合併）。
+**§31.12、§31.13 的兩項提議**：在 PR #39 處理（從 main 另開；2026-11-14 合併，merge commit `d427498`）。
 - `retention-status` 改以 DB 的 `clock_timestamp()` 判斷經過時間，並加上主機時鐘快或慢一小時的回歸測試；
 - Live 的接收端以 tmpfs 蓋住 guard 映像的 VOLUME，沿用 `lab_support` 既有的作法；
 - Makefile 的清除改成 `docker rm -f -v`。
