@@ -70,8 +70,9 @@ class MigrationCredentials(BaseSettings):
         """owner 的密碼；沒有設定，或 owner 和應用程式角色相同時停止。"""
         if self.password is None or not self.password.get_secret_value().strip():
             raise MissingOwnerPasswordError(
-                "缺少 DB_OWNER_PASSWORD：請先執行 make env（migration 以 owner 角色執行，"
-                "不使用應用程式的帳密）"
+                "缺少 DB_OWNER_PASSWORD（.env）或 DB_OWNER_PASSWORD_FILE（Live 的 recipe 以"
+                " -x dotenv=off 提供的拋棄式檔案）：開發環境請先執行 make env（migration 以 owner"
+                " 角色執行，不使用應用程式的帳密）"
             )
         if self.user == settings.db_user:
             raise OwnerIsAppRoleError(

@@ -15,11 +15,17 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 from secscan.core.config import ENV_FILE, Settings
 from secscan.core.settings_errors import SettingsError
 from secscan.migrations import alembic_config
-from secscan.migrations.credentials import MigrationCredentials, MissingOwnerPasswordError
+from secscan.migrations.credentials import (
+    MigrationConnectionError,
+    MigrationCredentials,
+    MissingOwnerPasswordError,
+)
 from tests.conftest import DatabaseAccessBlockedError
 
 FRAGMENT_LENGTH = 8
@@ -142,3 +148,72 @@ def test_an_unknown_dotenv_switch_is_refused(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(SettingsError, match="dotenv"):
         _upgrade_with("dotenv=yes")
+
+
+# --- 資料庫審查 LOW-5、LOW-6：dotenv=off 時的提示與 Settings 這一側 -----------------------------
+
+
+def test_dotenv_off_does_not_read_the_app_settings_from_the_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """LOW-6：Settings 這一側也不讀 .env。prod 必須有 DB_PASSWORD：從 .env 補上就不會在這裡
+    失敗。"""
+    canary = secrets.token_hex(24)
+    _with_dotenv(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text(f"DB_PASSWORD={canary}\n", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV", "prod")
+
+    with pytest.raises(SettingsError) as caught:
+        _upgrade_with("dotenv=off")
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    names_the_setting = "DB_PASSWORD" in rendered
+    leaked = _leaks(rendered, canary)
+    assert names_the_setting
+    assert not leaked
+
+
+def test_the_app_settings_read_the_env_file_without_the_switch_positive_control(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """正向對照：沒有 -x dotenv=off 時，同一個 .env 的 DB_PASSWORD 讀得到（之後才缺 owner 的
+    密碼）。"""
+    _with_dotenv(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text(f"DB_PASSWORD={secrets.token_hex(24)}\n", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV", "prod")
+
+    with pytest.raises(MissingOwnerPasswordError):
+        _upgrade_with()
+
+
+def test_the_missing_owner_password_message_names_both_sources() -> None:
+    """LOW-5：Live（dotenv=off）缺的是 DB_OWNER_PASSWORD_FILE；訊息同時寫出兩種來源。"""
+    credentials = MigrationCredentials(_env_file=None)
+
+    with pytest.raises(MissingOwnerPasswordError) as caught:
+        credentials.required_password(Settings(app_env="test", _env_file=None))
+
+    message = str(caught.value)
+    assert "DB_OWNER_PASSWORD_FILE" in message
+    assert "make env" in message
+
+
+def test_the_connection_error_names_both_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret = tmp_path / "db_owner_password"
+    secret.write_text(secrets.token_hex(24), encoding="ascii")
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("DB_OWNER_PASSWORD_FILE", str(secret))
+
+    def refuse(_engine: object) -> None:
+        raise OperationalError("connect", None, ConnectionRefusedError())
+
+    monkeypatch.setattr(Engine, "connect", refuse)
+
+    with pytest.raises(MigrationConnectionError) as caught:
+        _upgrade_with("dotenv=off")
+
+    message = str(caught.value)
+    assert "DB_OWNER_PASSWORD_FILE" in message
+    assert "DB_OWNER_PASSWORD（.env）" in message

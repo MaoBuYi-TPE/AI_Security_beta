@@ -87,8 +87,9 @@ def run_migrations_online() -> None:
             connection = engine.connect()
         except OperationalError:
             raise MigrationConnectionError(
-                "無法以 migration 的 owner 角色（DB_OWNER_USER）連線：確認 db 已啟動、.env 的 "
-                "DB_OWNER_PASSWORD 正確；既有的資料庫請先執行 make db-roles-migrate（升級沒有進行）"
+                "無法以 migration 的 owner 角色（DB_OWNER_USER）連線：確認 db 已啟動、"
+                "DB_OWNER_PASSWORD（.env）或 DB_OWNER_PASSWORD_FILE（-x dotenv=off）正確；既有的"
+                "資料庫請先執行 make db-roles-migrate（升級沒有進行）"
             ) from None
         with connection:
             _run_with(connection, app_role)
