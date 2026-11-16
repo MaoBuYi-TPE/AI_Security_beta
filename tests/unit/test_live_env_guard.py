@@ -16,12 +16,14 @@ from secscan.cli.secret_files import SECRET_FILES
 from tests.live import env_guard
 from tests.live.env_guard import (
     GuardError,
+    NetworkSpec,
     check_config,
     check_environment,
     check_images,
     check_unresolved,
     compare,
     engine,
+    ensure_networks,
     live_session_problems,
     preflight,
     snapshot,
@@ -376,6 +378,83 @@ def test_images_that_differ_are_refused(images: dict[str, str]) -> None:
         check_images(_images_docker(images), "app", "guard")
 
 
+# --------------------------------------------------------------------------- networks
+
+LIVE_SPECS = [
+    NetworkSpec("secscan_live_scan_net", "10.89.9.0/24", "10.89.9.0/25"),
+    NetworkSpec("secscan_live_lab_net", "10.89.10.0/24", "10.89.10.0/25"),
+]
+
+
+def _network_docker(existing: str = "", **facts: str) -> FakeDocker:
+    docker = FakeDocker({("network", "ls"): existing})
+    for spec in LIVE_SPECS:
+        reply = facts.get(spec.name, f"true|isolated|{spec.subnet} {spec.ip_range}\n")
+        key = ("network", "inspect", "--format", env_guard.NETWORK_FORMAT, spec.name)
+        docker.replies[key] = reply
+    return docker
+
+
+def test_missing_networks_are_created_internal_and_isolated() -> None:
+    docker = _network_docker()
+
+    ensure_networks(docker, LIVE_SPECS)
+
+    created = [call for call in docker.calls if call[:2] == ["network", "create"]]
+    assert [call[-1] for call in created] == [spec.name for spec in LIVE_SPECS]
+    for call, spec in zip(created, LIVE_SPECS, strict=True):
+        assert call[2:9] == [
+            "--internal",
+            "--opt",
+            f"{env_guard.GATEWAY_OPTION}=isolated",
+            "--subnet",
+            spec.subnet,
+            "--ip-range",
+            spec.ip_range,
+        ]
+
+
+def test_existing_networks_are_only_checked() -> None:
+    docker = _network_docker(existing="bridge\nsecscan_live_scan_net\nsecscan_live_lab_net\n")
+
+    ensure_networks(docker, LIVE_SPECS)
+
+    assert not [call for call in docker.calls if call[:2] == ["network", "create"]]
+
+
+@pytest.mark.parametrize(
+    ("facts", "message"),
+    [
+        ({"secscan_live_lab_net": "false|isolated|10.89.10.0/24 10.89.10.0/25\n"}, "internal"),
+        ({"secscan_live_scan_net": "true|nat|10.89.9.0/24 10.89.9.0/25\n"}, "isolated"),
+        ({"secscan_live_scan_net": "true|isolated|10.89.9.0/24 \n"}, "ip-range"),
+        ({"secscan_live_lab_net": "true\n"}, "無法確認"),
+    ],
+    ids=["not-internal", "gateway", "no-ip-range", "unparsable"],
+)
+def test_networks_with_the_wrong_settings_are_refused(facts: dict[str, str], message: str) -> None:
+    with pytest.raises(GuardError, match=message):
+        ensure_networks(_network_docker(**facts), LIVE_SPECS)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("secscan_scan_net", "secscan_live_lab_net"),
+        ("secscan_live_scan_net",),
+        ("secscan_live_scan_net", "secscan_live_lab_net", "secscan_lab_net"),
+    ],
+    ids=["dev-network", "only-one", "extra"],
+)
+def test_only_the_two_live_networks_can_be_created(names: tuple[str, ...]) -> None:
+    docker = _network_docker()
+
+    with pytest.raises(GuardError, match="Live 的兩個網路"):
+        ensure_networks(docker, [NetworkSpec(name, "10.0.0.0/24", "10.0.0.0/25") for name in names])
+
+    assert docker.calls == []
+
+
 # --------------------------------------------------------------------------- Live 的 pytest
 
 
@@ -448,7 +527,16 @@ def test_the_cli_runs_each_subcommand(
         ),
         (["check-unresolved"], json.dumps({"services": {}})),
         (["check-environment", "--allow", "PATH"], "PATH=/bin\n"),
+        (
+            [
+                "networks",
+                *("--network", "secscan_live_scan_net", "10.89.9.0/24", "10.89.9.0/25"),
+                *("--network", "secscan_live_lab_net", "10.89.10.0/24", "10.89.10.0/25"),
+            ],
+            "",
+        ),
     ]
+    docker.replies.update(_network_docker().replies)
     (tmp_path / "base").mkdir()
     for argv, stdin in runs:
         monkeypatch.setattr("sys.stdin", io.StringIO(stdin))

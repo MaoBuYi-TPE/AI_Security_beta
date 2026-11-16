@@ -59,8 +59,8 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 	SECSCAN_GUARD_LAB_IP=10.89.10.254 SECSCAN_GUARD_POLICIES_VOLUME=secscan_live_guard_policies \
 	SECSCAN_GUARD_STATUS_VOLUME=secscan_live_guard_status \
 	SECSCAN_GUARD_TELEMETRY_VOLUME=secscan_live_guard_telemetry
-# Live 的白名單環境（T23b-b2；docs/DECISIONS.md §32；計畫 §3.1.1）。Live 的每一個 docker、compose、uv
-# 與子 make 的呼叫都經由 LIVE_PROC_ENV：env -i 只留下 PATH、HOME、TMPDIR、LC_ALL、非秘密的 Docker
+# Live 的白名單環境（T23b-b2；docs/DECISIONS.md §32；計畫 §3.1.1）。Live 的每一個 docker、compose 與
+# uv 的呼叫都經由 LIVE_PROC_ENV（Live 不呼叫子 make）：env -i 只留下 PATH、HOME、TMPDIR、LC_ALL、非秘密的 Docker
 # 連線變數，以及 LIVE_PASS_ENV（Live 需要、不是秘密的變數；BENCH_KEY_FILE 是金鑰檔的路徑，不是金鑰）。
 # recipe 設定的值（LIVE_FIXED_ENV）放在最後：同名時後面的值勝出。SECSCAN_LIVE_PROJECT 與
 # ENABLE_LIVE_LAB_TESTS 由這裡固定設定，不從 shell 傳入。白名單的變數用 override：命令列、MAKEFLAGS 與
@@ -334,6 +334,9 @@ runs-layout-migrate: env secrets docker-check
 #   compose 不讀專案目錄的 .env（COMPOSE_DISABLE_ENV_FILE=1）；alembic 以 -x dotenv=off 執行、秘密只以
 #   *_FILE 傳入。不依賴 env、secrets、docker-check、images、build：不碰開發的 .env 與 secrets/。
 # - 所有呼叫都經由 LIVE_PROC_ENV（白名單）；Live 專用的 pull、build 與網路也在 recipe 內。
+# - recipe 是一個邏輯行，開頭先檢查 ENABLE_LIVE_LAB_TESTS 與 LIVE_PYTEST_ENV，之後才有任何副作用；
+#   不含 $(MAKE)（直接或經由變數）：GNU make 對含 $(MAKE) 的行在 -n、-q、-t 下仍會執行（安全審查
+#   H1）。所以 make -n／-q／-t 這些 Live 目標不會執行任何一步；網路由 env_guard 建立，不呼叫子 make。
 # - up 之前以 tests/live/env_guard.py 驗證 compose 解析出來的設定（允許清單）；up 之後核對映像 ID；
 #   開始時、up 之前、結束時確認同一個 Engine。開始之前拒絕上一次留下的資源與拋棄式目錄；結束時（含
 #   失敗與中斷）一律清理，並比對開發環境的前後快照，有差異就失敗。
@@ -341,14 +344,14 @@ LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
 	tests/live/test_budget_live.py tests/live/test_revocation_live.py \
 	tests/live/test_guard_failover_live.py
 test-live-runner:
-	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }
-	@for assignment in $(LIVE_PYTEST_ENV); do \
+	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }; \
+	for assignment in $(LIVE_PYTEST_ENV); do \
 		case " $(LIVE_PASS_ENV) " in \
 			*" $${assignment%%=*} "*) ;; \
 			*) echo "LIVE_PYTEST_ENV 只接受這些變數：$(LIVE_PASS_ENV)"; exit 1 ;; \
 		esac; \
-	done
-	@base="$${TMPDIR:-/tmp}"; base="$${base%/}"; secrets_dir=""; snapshot=""; \
+	done; \
+	base="$${TMPDIR:-/tmp}"; base="$${base%/}"; secrets_dir=""; snapshot=""; \
 	live_cleanup() { \
 		code=$$1; trap - EXIT INT TERM HUP; \
 		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
@@ -379,10 +382,9 @@ test-live-runner:
 	app_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan:dev) || exit 1; \
 	guard_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan-guard:dev) \
 		|| exit 1; \
-	$(LIVE_PROC_ENV) $(MAKE) --no-print-directory -f $(SELF_MAKEFILE) ensure-net \
-		NET=$(LIVE_SCAN_NET) SUBNET=$(LIVE_SCAN_SUBNET) IP_RANGE=$(LIVE_SCAN_IP_RANGE) || exit 1; \
-	$(LIVE_PROC_ENV) $(MAKE) --no-print-directory -f $(SELF_MAKEFILE) ensure-net \
-		NET=$(LIVE_LAB_NET) SUBNET=$(LIVE_LAB_SUBNET) IP_RANGE=$(LIVE_LAB_IP_RANGE) || exit 1; \
+	$(LIVE_GUARD) networks \
+		--network $(LIVE_SCAN_NET) $(LIVE_SCAN_SUBNET) $(LIVE_SCAN_IP_RANGE) \
+		--network $(LIVE_LAB_NET) $(LIVE_LAB_SUBNET) $(LIVE_LAB_IP_RANGE) || exit 1; \
 	$(LIVE_COMPOSE) config --format json \
 		| $(LIVE_GUARD) check-config --secrets-dir "$$secrets_dir" --root "$(CURDIR)" || exit 1; \
 	$(LIVE_COMPOSE) config --no-env-resolution --format json \

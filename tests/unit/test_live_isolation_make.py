@@ -66,24 +66,11 @@ ALEMBIC_FILES = {
     "CONTENT_ENCRYPTION_KEYS_FILE": "content_encryption_keys",
 }
 PLACEHOLDER = "/nonexistent/secscan-live-secrets.unset"
-# 子 make（ensure-net）自己加上的變數：命令列的 NET、SUBNET、IP_RANGE 與 Makefile export 的 BENCH_*
-# （白名單之下是空值或 LIVE_PASS_ENV 的值）。只允許出現在子 make 內的呼叫（環境有 MAKELEVEL）。
-SUBMAKE = {
-    "NET",
-    "SUBNET",
-    "IP_RANGE",
-    "MAKEOVERRIDES",
-    "BENCH_TRUTH",
-    "BENCH_ADJUDICATIONS",
-    "BENCH_PAIR_LABELS",
-    "BENCH_INCLUDE_HOLDOUT",
-    "BENCH_SOURCE",
-}
-# 程序本身加上的變數（make、shell）：不是從 shell 帶進來的設定。
+# GNU make 對 -n、-q、-t 的處理（安全審查 H1）：含 $(MAKE) 的 recipe 行在這三種模式下仍會執行。
+DRY_RUN_FLAGS = ("-n", "-q", "-t")
+# 程序本身加上的變數（shell）：不是從 shell 帶進來的設定。Live 的 recipe 不呼叫子 make，所以呼叫的
+# 環境不會有 MAKEFLAGS、MAKELEVEL（env -i 之後也沒有）。
 PLUMBING = {
-    "MAKEFLAGS",
-    "MAKELEVEL",
-    "MFLAGS",
     "PWD",
     "OLDPWD",
     "SHLVL",
@@ -165,6 +152,8 @@ if args[:2] in (["volume", "ls"], ["network", "ls"], ["network", "rm"], ["networ
     out()
 if args[:2] == ["network", "inspect"]:
     fmt = args[args.index("--format") + 1] if "--format" in args else ""
+    if "|" in fmt:
+        out("true|isolated|" + nets[args[-1]] + "\\n")
     if ".Internal" in fmt:
         out("true\\n")
     if "gateway_mode" in fmt:
@@ -190,12 +179,30 @@ if rest[:1] in (["alembic"], ["pytest"]):
 sys.exit(2)
 """
 
+# $(MAKE) 指向這個包裝（命令列的 MAKE=）：記下每一次遞迴的呼叫，再交給真的 make。bench 的遞迴沒有
+# -f（在 repo 的根目錄執行）；暫存的 project directory 沒有 Makefile，所以補上 repo 的 Makefile。
+_FAKE_MAKE = """#!{python}
+import json, os, sys
+args = sys.argv[1:]
+with open({log!r}, "a") as log:
+    log.write(json.dumps({{"tool": "make", "argv": args, "env": dict(os.environ)}}) + "\\n")
+if "-f" not in args:
+    args = ["-f", {makefile!r}, *args]
+os.execv({real_make!r}, [{real_make!r}, *args])
+"""
+
 
 def _real_docker() -> str:
     cli = shutil.which("docker")
     if cli is None:
         pytest.skip("沒有安裝 docker CLI")
     return cli
+
+
+def _real_make() -> str:
+    make = shutil.which("make")
+    assert make is not None, "需要 make"
+    return make
 
 
 class Hostile:
@@ -249,8 +256,10 @@ class Hostile:
             "real_docker": real_docker,
             "blocked": BLOCKED_DOCKER_HOST,
             "admin": str(Path(sys.executable).parent / "secscan-admin"),
+            "real_make": _real_make(),
+            "makefile": str(MAKEFILE_PATH),
         }
-        for name, template in (("docker", _FAKE_DOCKER), ("uv", _FAKE_UV)):
+        for name, template in (("docker", _FAKE_DOCKER), ("uv", _FAKE_UV), ("make", _FAKE_MAKE)):
             script = self.bin / name
             script.write_text(template.format(**values), encoding="utf-8")
             script.chmod(script.stat().st_mode | stat.S_IXUSR)
@@ -278,19 +287,20 @@ class Hostile:
             "SECSCAN_RECORD_DIR": str(self.root / "recordings"),
         }
 
-    def make(self, *args: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
-        make = shutil.which("make")
-        assert make is not None, "需要 make"
-        # 固定的 make 與 repo 的 Makefile；docker 與 uv 是假的執行檔。
+    def make(
+        self, *args: str, target: str = "test-live-runner", **extra_env: str
+    ) -> subprocess.CompletedProcess[str]:
+        # 固定的 make 與 repo 的 Makefile；docker 與 uv 是假的執行檔，$(MAKE) 是記錄呼叫的包裝。
         return subprocess.run(  # noqa: S603
             [
-                make,
+                _real_make(),
                 "--no-print-directory",
                 "-f",
                 str(MAKEFILE_PATH),
+                f"MAKE={self.bin / 'make'}",
                 "UV_RUN=uv run --locked",
                 *args,
-                "test-live-runner",
+                target,
             ],
             cwd=self.project,
             capture_output=True,
@@ -333,11 +343,13 @@ def test_every_call_runs_in_the_whitelisted_environment(hostile: Hostile) -> Non
         rf"{re.escape(str(hostile.tmpdir))}/secscan-live-secrets\.[A-Za-z0-9]{{6}}"
     )
     directories = set()
+    # Live 的 recipe 不遞迴呼叫 make（安全審查 H1：含 $(MAKE) 的行在 -n、-q、-t 下仍會執行）。
+    assert [call["tool"] for call in calls if call["tool"] == "make"] == []
     for call in calls:
         environment = call["env"]
-        assert hostile.leaked(json.dumps(call)) == set(), call["argv"][:3]
-        extra = SUBMAKE if "MAKELEVEL" in environment else set()
-        unexpected = set(environment) - ALLOWED - set(ALEMBIC_FILES) - PLUMBING - extra
+        leaked = hostile.leaked(json.dumps(call))
+        assert leaked == set(), call["argv"][:3]
+        unexpected = set(environment) - ALLOWED - set(ALEMBIC_FILES) - PLUMBING
         assert unexpected == set(), (call["argv"][:3], sorted(unexpected))
         for key, value in FIXED.items():
             assert environment.get(key) == value, (call["argv"][:3], key)
@@ -454,6 +466,48 @@ def test_the_live_switch_is_required(hostile: Hostile) -> None:
 
     assert result.returncode != 0
     assert hostile.calls() == []
+
+
+def _files(root: Path) -> set[str]:
+    """root 之下所有的路徑（不含假執行檔的呼叫紀錄）：-t 會 touch 出新檔，Live 會建立拋棄式目錄。"""
+    return {str(path.relative_to(root)) for path in root.rglob("*") if path.name != "calls.log"}
+
+
+@pytest.mark.parametrize("flag", DRY_RUN_FLAGS)
+@pytest.mark.parametrize("target", ["test-live-runner", "test-live-secrets", "bench"])
+def test_dry_run_flags_execute_nothing(hostile: Hostile, flag: str, target: str) -> None:
+    """安全審查 H1（HIGH-A）：make -n／-q／-t 不得執行 Live 的任何一步（以為是預覽，實際卻跑了
+    Live）。
+
+    惡意的環境照樣打開 ENABLE_LIVE_LAB_TESTS：判斷不能依賴開關或旗標，Live 的 recipe 本身不得含
+    $(MAKE)（GNU make 對含 $(MAKE) 的行在這三種模式下仍會執行）。bench 以 $(MAKE) 遞迴呼叫
+    test-live-runner：子 make 繼承 -n、-q、-t，所以同樣什麼都不執行。
+    """
+    before = _files(hostile.root)
+
+    result = hostile.make(flag, target=target)
+
+    # -q 對 phony 的目標回報「不是最新的」（1）；-n、-t 是 0。
+    assert result.returncode in (0, 1)
+    side_effects = [call["tool"] for call in hostile.calls() if call["tool"] != "make"]
+    assert side_effects == []
+    recursions = [call for call in hostile.calls() if call["tool"] == "make"]
+    # Live 的 recipe 本身不遞迴；只有 bench 遞迴呼叫 test-live-runner（-q 在前置的 phony 目標就
+    # 停止，不一定走到遞迴），而且子 make 繼承了預覽的旗標。
+    if target != "bench":
+        assert recursions == []
+    elif flag != "-q":
+        assert len(recursions) == 1
+    for call in recursions:
+        assert "test-live-runner" in call["argv"]
+        assert flag[1] in _short_flags(call["env"].get("MAKEFLAGS", ""))
+    assert _files(hostile.root) == before
+
+
+def _short_flags(makeflags: str) -> str:
+    """MAKEFLAGS 中的單字母旗標（GNU make 3.81 的子 make：` --no-print-directory -n -- 變數`）。"""
+    words = makeflags.split(" -- ", 1)[0].split()
+    return "".join(word.lstrip("-") for word in words if not word.startswith("--"))
 
 
 # --- (b) 正向對照：不經包裝時，惡意的輸入確實有效 ----------------------------------------------
@@ -578,6 +632,42 @@ def test_the_pass_list_has_no_secret_names() -> None:
     assert not names & SECRET_NAMES
     assert "SECSCAN_LIVE_PROJECT" not in names
     assert "ENABLE_LIVE_LAB_TESTS" not in names
+
+
+def _expanded(text: str, depth: int = 0) -> str:
+    """text 引用的 Makefile 變數，依定義逐層展開成文字（只看 Makefile 中定義的變數）。"""
+    assert depth < 10, "變數的引用太深"
+    expanded = [text]
+    for name in set(re.findall(r"\$\((\w+)\)", text)):
+        match = re.search(rf"^(?:override )?{name} :?= ((?:.*\\\n)*.*)$", MAKEFILE, re.MULTILINE)
+        if match is not None:
+            expanded.append(_expanded(match.group(1), depth + 1))
+    return "\n".join(expanded)
+
+
+def test_the_live_recipe_never_recurses_into_make() -> None:
+    """安全審查 H1：GNU make 對含 $(MAKE)（或 ${MAKE}、行首的 +）的行，在 -n、-q、-t 下仍會執行。
+
+    Live 的 recipe 不得直接或經由變數引用 MAKE；網路改由 env_guard 建立（不再呼叫子 make 的
+    ensure-net）。
+    """
+    recipe = _recipe("test-live-runner")
+
+    assert re.findall(r"\$[({]MAKE[)}]", _expanded(recipe)) == []
+    assert "${" not in recipe.replace("$${", "")
+    assert not [line for line in recipe.splitlines() if line.lstrip("\t@-").startswith("+")]
+
+
+def test_the_checks_come_before_any_side_effect() -> None:
+    """HIGH-A：開關與 LIVE_PYTEST_ENV 的檢查和整個流程在同一個邏輯行、而且在最前面：即使這一行在
+    預覽模式下被執行，也一定先經過檢查。"""
+    recipe = _recipe("test-live-runner").rstrip("\n").split("\n")
+    flattened = " ".join(line.removesuffix("\\") for line in recipe)
+
+    assert all(line.endswith("\\") for line in recipe[:-1])
+    assert flattened.startswith('\t@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || {')
+    first_effect = min(flattened.index(word) for word in ("$(LIVE_GUARD)", "mktemp", " docker "))
+    assert flattened.index("LIVE_PYTEST_ENV 只接受") < first_effect
 
 
 def test_every_live_call_goes_through_the_whitelist() -> None:

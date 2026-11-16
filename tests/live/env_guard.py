@@ -19,6 +19,9 @@ make test-live-runner 在白名單的環境（LIVE_PROC_ENV：env -i 加上允�
 - check-environment --allow NAME...：stdin 是 `config --environment`：變數名稱是精確的允許清單
   （recipe 傳入的名稱，加上 compose 自己加上的幾個），秘密的名稱與 COMPOSE_ENV_FILES 一律拒絕。
 - check-images --app-image ID --guard-image ID：Live 容器的映像等於 build 之後記錄的映像 ID。
+- networks --network NAME SUBNET IP_RANGE（兩次）：建立並檢查 Live 的兩個網路（internal、gateway
+  isolated、固定的網段）。取代子 make 的 ensure-net：Live 的 recipe 不呼叫 $(MAKE)（安全審查 H1：
+  含 $(MAKE) 的行在 make -n、-q、-t 下仍會執行）。
 
 只用標準函式庫、yaml 與 secscan.cli.secret_files（以 -I 執行，不 import tests 與工作目錄的模組）。
 """
@@ -32,6 +35,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +87,11 @@ ALLOWED_BINDS = {
 }
 FILE_MODE = 0o600
 IMAGE_FORMAT = '{{index .Config.Labels "com.docker.compose.service"}} {{.Image}}'
+GATEWAY_OPTION = "com.docker.network.bridge.gateway_mode_ipv4"
+NETWORK_FORMAT = (
+    f'{{{{.Internal}}}}|{{{{index .Options "{GATEWAY_OPTION}"}}}}|'
+    "{{range .IPAM.Config}}{{.Subnet}} {{.IPRange}}{{end}}"
+)
 PROJECT_PATTERN = re.compile(r"secscan-live[a-z0-9-]*")
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -147,6 +156,51 @@ def preflight(base: Path, run: Runner) -> None:
     remaining = {kind: len(names) for kind, names in found.items() if names}
     if remaining:
         raise GuardError(f"已有 {LIVE_PROJECT} 的資源：{remaining}；先清除再執行")
+
+
+# --------------------------------------------------------------------------- networks
+
+
+@dataclass(frozen=True)
+class NetworkSpec:
+    name: str
+    subnet: str
+    ip_range: str
+
+
+def ensure_networks(run: Runner, specs: Sequence[NetworkSpec]) -> None:
+    """Live 的兩個網路（取代子 make 的 ensure-net；名稱只能是 Live 的兩個）。"""
+    if sorted(spec.name for spec in specs) != sorted(LIVE_NETWORKS):
+        raise GuardError("只能建立 Live 的兩個網路")
+    existing = set(run(["network", "ls", "--format", "{{.Name}}"]).split())
+    for spec in specs:
+        if spec.name not in existing:
+            run(
+                [
+                    "network",
+                    "create",
+                    "--internal",
+                    "--opt",
+                    f"{GATEWAY_OPTION}=isolated",
+                    "--subnet",
+                    spec.subnet,
+                    "--ip-range",
+                    spec.ip_range,
+                    spec.name,
+                ]
+            )
+        _check_network(run, spec)
+
+
+def _check_network(run: Runner, spec: NetworkSpec) -> None:
+    facts = run(["network", "inspect", "--format", NETWORK_FORMAT, spec.name]).strip().split("|")
+    if len(facts) != len(("internal", "gateway", "ranges")):
+        raise GuardError(f"無法確認網路 {spec.name} 的設定")
+    internal, gateway, ranges = facts
+    if internal != "true" or gateway != "isolated":
+        raise GuardError(f"{spec.name} 不是 internal、gateway isolated 的網路")
+    if ranges != f"{spec.subnet} {spec.ip_range}":
+        raise GuardError(f"{spec.name} 的網段或 ip-range 不正確")
 
 
 # --------------------------------------------------------------------------- snapshot
@@ -378,6 +432,9 @@ def _parser() -> argparse.ArgumentParser:
     images = commands.add_parser("check-images")
     images.add_argument("--app-image", required=True)
     images.add_argument("--guard-image", required=True)
+    commands.add_parser("networks").add_argument(
+        "--network", nargs=3, action="append", required=True, metavar=("NAME", "SUBNET", "RANGE")
+    )
     return parser
 
 
@@ -412,6 +469,8 @@ def run_command(args: argparse.Namespace, stdin: str, run: Runner) -> str:
         check_unresolved(_json(stdin))
     elif command == "check-environment":
         check_environment(stdin, args.allow)
+    elif command == "networks":
+        ensure_networks(run, [NetworkSpec(*item) for item in args.network])
     else:
         check_images(run, args.app_image, args.guard_image)
     return f"{command} ok"
