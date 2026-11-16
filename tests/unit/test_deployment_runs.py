@@ -154,8 +154,9 @@ def test_only_the_migration_skips_runs_init() -> None:
 
 def test_the_live_stack_starts_the_whole_app_profile() -> None:
     """Live 的 stack 以 --profile app 啟動全部服務，所以也會執行 runs-init（§30.13）。"""
+    # T23b-b2：Live 的 compose 一律經過白名單的環境（LIVE_PROC_ENV，含 LIVE_ENV）。
     assert (
-        "LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app"
-        in (MAKEFILE)
+        "override LIVE_COMPOSE = $(LIVE_PROC_ENV) docker compose -p $(LIVE_PROJECT) -f $(DB_FILE) "
+        "--profile app" in MAKEFILE
     )
-    assert "&& $(LIVE_COMPOSE) up -d --wait \\" in _recipe("test-live-runner")
+    assert "$(LIVE_COMPOSE) up -d --wait || exit 1; \\" in _recipe("test-live-runner")

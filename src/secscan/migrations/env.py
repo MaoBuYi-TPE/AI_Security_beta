@@ -11,6 +11,8 @@
   config.attributes["content_encryption_keys"]；呼叫端已經放了就不覆寫。migration 不讀 os.environ。
 - 設定不正確時拋出 SettingsError：alembic 會印出完整的 traceback，只能有欄位名稱與固定的原因，
   不帶原本的 ValidationError（可能含密碼；core/settings_errors.py）。
+- `-x dotenv=off`（Live 的 recipe；T23b-b2）：Settings 與 MigrationCredentials 不讀 .env，秘密只以
+  環境變數中的 `*_FILE` 傳入（拋棄式的檔案）；沒有提供的值就失敗，不會從開發的 .env 補上。
 - 離線模式（alembic upgrade --sql）：只需要方言，不連線、也不讀取密碼；v0025 的應用程式角色以
   `-x app_role=…` 指定。
 """
@@ -21,7 +23,7 @@ from sqlalchemy.exc import OperationalError
 
 from secscan.core.config import Settings
 from secscan.core.db import create_db_engine
-from secscan.core.settings_errors import build_settings
+from secscan.core.settings_errors import SettingsError, build_settings
 from secscan.migrations import APP_ROLE_ATTRIBUTE, CONTENT_KEYS_ATTRIBUTE, render_item
 from secscan.migrations.credentials import MigrationConnectionError, MigrationCredentials
 from secscan.migrations.keys import migration_content_keys
@@ -30,6 +32,18 @@ from secscan.migrations.roles import verify_migration_roles
 
 OFFLINE_URL = "postgresql+psycopg://"
 MIGRATION_APPLICATION_NAME = "secscan-migrate"
+DOTENV_ARGUMENT = "dotenv"
+DOTENV_OFF = "off"
+
+
+def _settings_sources() -> dict[str, object]:
+    """-x dotenv=off 時不讀 .env；其他的值一律拒絕（不靜默讀 .env）。"""
+    value = context.get_x_argument(as_dictionary=True).get(DOTENV_ARGUMENT)
+    if value is None:
+        return {}
+    if value != DOTENV_OFF:
+        raise SettingsError(f"設定不正確：-x {DOTENV_ARGUMENT} 只接受 {DOTENV_OFF}")
+    return {"_env_file": None}
 
 
 def run_migrations_offline() -> None:
@@ -62,8 +76,9 @@ def run_migrations_online() -> None:
     if isinstance(shared, Connection):
         _run_with(shared, attributes.get(APP_ROLE_ATTRIBUTE))
         return
-    settings = build_settings(Settings)
-    owner = build_settings(MigrationCredentials).owner_settings(settings)
+    sources = _settings_sources()
+    settings = build_settings(Settings, **sources)
+    owner = build_settings(MigrationCredentials, **sources).owner_settings(settings)
     attributes.setdefault(CONTENT_KEYS_ATTRIBUTE, migration_content_keys(settings))
     app_role = attributes.setdefault(APP_ROLE_ATTRIBUTE, settings.db_user)
     engine = create_db_engine(owner, application_name=MIGRATION_APPLICATION_NAME, pooled=False)

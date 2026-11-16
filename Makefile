@@ -1,4 +1,7 @@
 # 開發命令，依 docs/START_HERE.md §7 的約定建立。
+# 這個 Makefile 的絕對路徑與 repo 的目錄（在其他目錄以 make -f 執行時也正確；必須在任何 include 之前）。
+SELF_MAKEFILE := $(abspath $(lastword $(MAKEFILE_LIST)))
+REPO_DIR := $(dir $(SELF_MAKEFILE))
 # 一律使用 uv.lock 鎖定的依賴（--locked）；lock 與 pyproject.toml 不一致時直接失敗，不會默默更新。
 UV_RUN := uv run --locked
 
@@ -56,7 +59,40 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 	SECSCAN_GUARD_LAB_IP=10.89.10.254 SECSCAN_GUARD_POLICIES_VOLUME=secscan_live_guard_policies \
 	SECSCAN_GUARD_STATUS_VOLUME=secscan_live_guard_status \
 	SECSCAN_GUARD_TELEMETRY_VOLUME=secscan_live_guard_telemetry
-LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
+# Live 的白名單環境（T23b-b2；docs/DECISIONS.md §32；計畫 §3.1.1）。Live 的每一個 docker、compose、uv
+# 與子 make 的呼叫都經由 LIVE_PROC_ENV：env -i 只留下 PATH、HOME、TMPDIR、LC_ALL、非秘密的 Docker
+# 連線變數，以及 LIVE_PASS_ENV（Live 需要、不是秘密的變數；BENCH_KEY_FILE 是金鑰檔的路徑，不是金鑰）。
+# recipe 設定的值（LIVE_FIXED_ENV）放在最後：同名時後面的值勝出。SECSCAN_LIVE_PROJECT 與
+# ENABLE_LIVE_LAB_TESTS 由這裡固定設定，不從 shell 傳入。白名單的變數用 override：命令列、MAKEFLAGS 與
+# 環境變數都改不了。LIVE_PYTEST_ENV 只接受 LIVE_PASS_ENV 的名稱（recipe 檢查）。
+LIVE_SECRETS_PREFIX := secscan-live-secrets.
+LIVE_PYTEST_ENV :=
+LIVE_PYTEST_ARGS :=
+override LIVE_PASS_ENV := SECSCAN_RECORD_DIR SECSCAN_PARTIAL_BUDGET_SECONDS BENCH_SPEC BENCH_NAME \
+	BENCH_KEY_FILE
+override LIVE_BASE_ENV = env -i PATH="$$PATH" HOME="$$HOME" TMPDIR="$${TMPDIR:-/tmp}" \
+	$${LC_ALL:+"LC_ALL=$$LC_ALL"} $${DOCKER_HOST:+"DOCKER_HOST=$$DOCKER_HOST"} \
+	$${DOCKER_CONTEXT:+"DOCKER_CONTEXT=$$DOCKER_CONTEXT"} \
+	$${DOCKER_CONFIG:+"DOCKER_CONFIG=$$DOCKER_CONFIG"} \
+	$(foreach name,$(LIVE_PASS_ENV),$${$(name):+"$(name)=$$$(name)"})
+override LIVE_FIXED_ENV = $(LIVE_ENV) SECSCAN_IMAGE_TAG=dev COMPOSE_DISABLE_ENV_FILE=1 \
+	SECSCAN_SECRETS_DIR="$${secrets_dir:-/nonexistent/$(LIVE_SECRETS_PREFIX)unset}" \
+	SECSCAN_LIVE_SECRETS_DIR="$${secrets_dir:-/nonexistent/$(LIVE_SECRETS_PREFIX)unset}" \
+	PGPASSFILE=/dev/null SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) ENABLE_LIVE_LAB_TESTS=1
+override LIVE_PROC_ENV = $(LIVE_BASE_ENV) $(LIVE_FIXED_ENV)
+override LIVE_COMPOSE = $(LIVE_PROC_ENV) docker compose -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
+override LIVE_GUARD = $(LIVE_PROC_ENV) $(UV_RUN) python -I $(REPO_DIR)tests/live/env_guard.py
+# compose config --environment 允許的名稱（白名單的名稱；compose 自己加上的由 env_guard 允許）。
+override LIVE_ALLOWED_NAMES = PATH HOME TMPDIR LC_ALL DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG \
+	$(LIVE_PASS_ENV) $(foreach assignment,$(LIVE_ENV),$(firstword $(subst =, ,$(assignment)))) \
+	SECSCAN_IMAGE_TAG COMPOSE_DISABLE_ENV_FILE SECSCAN_SECRETS_DIR SECSCAN_LIVE_SECRETS_DIR \
+	PGPASSFILE SECSCAN_LIVE_PROJECT ENABLE_LIVE_LAB_TESTS
+# Live 的 alembic 只以 *_FILE 取得拋棄式的秘密（-x dotenv=off：不讀 .env）。
+override LIVE_SECRET_FILES = DB_PASSWORD_FILE="$$secrets_dir/db_password" \
+	DB_OWNER_PASSWORD_FILE="$$secrets_dir/db_owner_password" \
+	SECRET_ENCRYPTION_KEYS_FILE="$$secrets_dir/secret_encryption_keys" \
+	EVIDENCE_ENCRYPTION_KEYS_FILE="$$secrets_dir/evidence_encryption_keys" \
+	CONTENT_ENCRYPTION_KEYS_FILE="$$secrets_dir/content_encryption_keys"
 
 .PHONY: bootstrap dev test lint typecheck env docker-check db-up db-down test-db-up migrate \
 	db-roles-migrate test-live-db-roles \
@@ -293,29 +329,75 @@ runs-layout-migrate: env secrets docker-check
 # 專案建立、測試、一律拆除：先刪掉接在這兩個網路上的容器（測試的接收端、探針與孤兒的掃描容器，
 # 否則 volume 還在使用中刪不掉；-v 一併刪掉它們的匿名 volume），再刪 compose 的服務、volume 與網路。
 # 會中斷 stack 的測試（停掉 guard、kill runner）放在最後執行。
+# Live 的隔離（T23b-b2；docs/DECISIONS.md §32；計畫 §3.1）：
+# - 不讀、不用開發環境的任何秘密：每次以 generate-secret-files 在新的拋棄式目錄（mktemp）產生秘密；
+#   compose 不讀專案目錄的 .env（COMPOSE_DISABLE_ENV_FILE=1）；alembic 以 -x dotenv=off 執行、秘密只以
+#   *_FILE 傳入。不依賴 env、secrets、docker-check、images、build：不碰開發的 .env 與 secrets/。
+# - 所有呼叫都經由 LIVE_PROC_ENV（白名單）；Live 專用的 pull、build 與網路也在 recipe 內。
+# - up 之前以 tests/live/env_guard.py 驗證 compose 解析出來的設定（允許清單）；up 之後核對映像 ID；
+#   開始時、up 之前、結束時確認同一個 Engine。開始之前拒絕上一次留下的資源與拋棄式目錄；結束時（含
+#   失敗與中斷）一律清理，並比對開發環境的前後快照，有差異就失敗。
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
 	tests/live/test_budget_live.py tests/live/test_revocation_live.py \
 	tests/live/test_guard_failover_live.py
-test-live-runner: env docker-check images build
+test-live-runner:
 	@[ "$$ENABLE_LIVE_LAB_TESTS" = 1 ] || { echo "需要設定 ENABLE_LIVE_LAB_TESTS=1"; exit 1; }
-	@$(MAKE) --no-print-directory scan-net SCAN_NET=$(LIVE_SCAN_NET) SCAN_SUBNET=$(LIVE_SCAN_SUBNET) \
-		SCAN_IP_RANGE=$(LIVE_SCAN_IP_RANGE)
-	@$(MAKE) --no-print-directory lab-net LAB_NET=$(LIVE_LAB_NET) LAB_SUBNET=$(LIVE_LAB_SUBNET) \
-		LAB_IP_RANGE=$(LIVE_LAB_IP_RANGE)
-	@status=0; \
-		$(LIVE_COMPOSE) up -d --wait db \
-		&& DB_PORT=55434 $(UV_RUN) alembic upgrade head >/dev/null \
-		&& $(LIVE_COMPOSE) up -d --wait \
-		&& SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) $(LIVE_PYTEST_ENV) $(UV_RUN) pytest -m live \
-			-p no:cacheprovider $(LIVE_PYTEST_ARGS) $(LIVE_TESTS) \
-		|| status=$$?; \
+	@for assignment in $(LIVE_PYTEST_ENV); do \
+		case " $(LIVE_PASS_ENV) " in \
+			*" $${assignment%%=*} "*) ;; \
+			*) echo "LIVE_PYTEST_ENV 只接受這些變數：$(LIVE_PASS_ENV)"; exit 1 ;; \
+		esac; \
+	done
+	@base="$${TMPDIR:-/tmp}"; base="$${base%/}"; secrets_dir=""; snapshot=""; \
+	live_cleanup() { \
+		code=$$1; trap - EXIT INT TERM HUP; \
 		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
-			ids=$$(docker ps -aq --filter "network=$$net"); \
-			[ -z "$$ids" ] || docker rm -f -v $$ids >/dev/null; \
+			ids=$$($(LIVE_PROC_ENV) docker ps -aq --filter "network=$$net"); \
+			[ -z "$$ids" ] || $(LIVE_PROC_ENV) docker rm -f -v $$ids >/dev/null || code=1; \
 		done; \
-		$(LIVE_COMPOSE) down -v --remove-orphans; \
-		docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
-		exit $$status
+		$(LIVE_COMPOSE) down -v --remove-orphans || code=1; \
+		$(LIVE_PROC_ENV) docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
+		case "$$secrets_dir" in \
+			"$$base"/$(LIVE_SECRETS_PREFIX)??????) rm -rf -- "$$secrets_dir" ;; \
+		esac; \
+		if [ -n "$$snapshot" ]; then \
+			printf '%s' "$$snapshot" | $(LIVE_GUARD) compare --root "$(CURDIR)" || code=1; \
+		fi; \
+		exit $$code; \
+	}; \
+	trap 'live_cleanup $$?' EXIT; trap 'live_cleanup 130' INT TERM HUP; \
+	engine=$$($(LIVE_GUARD) engine) || exit 1; \
+	$(LIVE_GUARD) preflight --base "$$base" || exit 1; \
+	snapshot=$$($(LIVE_GUARD) snapshot --root "$(CURDIR)") || exit 1; \
+	secrets_dir=$$(mktemp -d "$$base/$(LIVE_SECRETS_PREFIX)XXXXXX") || exit 1; \
+	$(LIVE_PROC_ENV) $(UV_RUN) secscan-admin generate-secret-files "$$secrets_dir" || exit 1; \
+	for image in $(SCANNER_IMAGES); do \
+		$(LIVE_PROC_ENV) docker pull --quiet "$$image" >/dev/null || exit 1; \
+	done; \
+	$(LIVE_COMPOSE) pull --quiet socket-proxy || exit 1; \
+	$(LIVE_COMPOSE) build api guard || exit 1; \
+	app_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan:dev) || exit 1; \
+	guard_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan-guard:dev) \
+		|| exit 1; \
+	$(LIVE_PROC_ENV) $(MAKE) --no-print-directory -f $(SELF_MAKEFILE) ensure-net \
+		NET=$(LIVE_SCAN_NET) SUBNET=$(LIVE_SCAN_SUBNET) IP_RANGE=$(LIVE_SCAN_IP_RANGE) || exit 1; \
+	$(LIVE_PROC_ENV) $(MAKE) --no-print-directory -f $(SELF_MAKEFILE) ensure-net \
+		NET=$(LIVE_LAB_NET) SUBNET=$(LIVE_LAB_SUBNET) IP_RANGE=$(LIVE_LAB_IP_RANGE) || exit 1; \
+	$(LIVE_COMPOSE) config --format json \
+		| $(LIVE_GUARD) check-config --secrets-dir "$$secrets_dir" --root "$(CURDIR)" || exit 1; \
+	$(LIVE_COMPOSE) config --no-env-resolution --format json \
+		| $(LIVE_GUARD) check-unresolved || exit 1; \
+	$(LIVE_COMPOSE) config --environment \
+		| $(LIVE_GUARD) check-environment --allow $(LIVE_ALLOWED_NAMES) || exit 1; \
+	$(LIVE_GUARD) engine --expect "$$engine" >/dev/null || exit 1; \
+	$(LIVE_COMPOSE) up -d --wait db || exit 1; \
+	$(LIVE_PROC_ENV) $(LIVE_SECRET_FILES) $(UV_RUN) alembic -x dotenv=off upgrade head \
+		>/dev/null || exit 1; \
+	$(LIVE_COMPOSE) up -d --wait || exit 1; \
+	$(LIVE_GUARD) check-images --app-image "$$app_image" --guard-image "$$guard_image" || exit 1; \
+	$(LIVE_BASE_ENV) $(LIVE_PYTEST_ENV) $(LIVE_FIXED_ENV) $(UV_RUN) pytest -m live \
+		-p no:cacheprovider $(LIVE_PYTEST_ARGS) $(LIVE_TESTS) || exit 1; \
+	$(LIVE_GUARD) engine --expect "$$engine" >/dev/null || exit 1
 
 # ZAP 的 live 測試（docs/DECISIONS.md §18.10、§19）：同一個獨立的 secscan-live 專案與流程。runner
 # 啟動時以真的 ZAP 映像執行 capability probe；掃描的是 live 自己 lab 網路上的小型網站

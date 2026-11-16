@@ -5,14 +5,19 @@
 不連任何資料庫。
 """
 
+import argparse
 import secrets
 import traceback
+from pathlib import Path
 
 import pytest
 from alembic import command
 
+from secscan.core.config import ENV_FILE, Settings
 from secscan.core.settings_errors import SettingsError
 from secscan.migrations import alembic_config
+from secscan.migrations.credentials import MigrationCredentials, MissingOwnerPasswordError
+from tests.conftest import DatabaseAccessBlockedError
 
 FRAGMENT_LENGTH = 8
 
@@ -74,3 +79,63 @@ def test_invalid_owner_settings_stop_without_the_original_error(
     assert error.__context__ is None
     rendered = "".join(traceback.format_exception(error))
     assert not _leaks(rendered, canary)
+
+
+# --- CSEC-12：Live 的 alembic 以 -x dotenv=off 執行，不讀 .env ----------------------------------
+
+
+def _with_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
+    """工作目錄放含 canary 的 .env；設定類別的 env_file 設回正式的預設值。"""
+    canary = secrets.token_hex(24)
+    (tmp_path / ".env").write_text(f"DB_OWNER_PASSWORD={canary}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(Settings.model_config, "env_file", ENV_FILE)
+    monkeypatch.setitem(MigrationCredentials.model_config, "env_file", ENV_FILE)
+    monkeypatch.setenv("APP_ENV", "test")
+    return canary
+
+
+def _upgrade_with(*x_arguments: str) -> None:
+    config = alembic_config()
+    config.cmd_opts = argparse.Namespace(x=list(x_arguments))
+    command.upgrade(config, "head")
+
+
+def test_dotenv_is_read_without_the_switch_positive_control(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """正向對照：沒有 -x dotenv=off 時讀得到 .env 的密碼（之後才在連線時被 unit 測試擋下）。"""
+    _with_dotenv(monkeypatch, tmp_path)
+
+    with pytest.raises(DatabaseAccessBlockedError):
+        _upgrade_with()
+
+
+def test_dotenv_off_does_not_fall_back_to_the_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    canary = _with_dotenv(monkeypatch, tmp_path)
+
+    with pytest.raises(MissingOwnerPasswordError) as caught:
+        _upgrade_with("dotenv=off")
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert not _leaks(rendered, canary)
+
+
+def test_dotenv_off_reads_the_secret_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Live 的 recipe 只以 *_FILE 傳入秘密：讀得到檔案，才會往下走到連線。"""
+    _with_dotenv(monkeypatch, tmp_path)
+    secret = tmp_path / "db_owner_password"
+    secret.write_text(secrets.token_hex(24), encoding="ascii")
+    monkeypatch.setenv("DB_OWNER_PASSWORD_FILE", str(secret))
+
+    with pytest.raises(DatabaseAccessBlockedError):
+        _upgrade_with("dotenv=off")
+
+
+def test_an_unknown_dotenv_switch_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+
+    with pytest.raises(SettingsError, match="dotenv"):
+        _upgrade_with("dotenv=yes")
