@@ -101,7 +101,7 @@ override LIVE_SECRET_FILES = DB_PASSWORD_FILE="$$secrets_dir/db_password" \
 	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check \
 	owasp-top10 owasp-top10-check test-live-fixture-findings test-live-fixture-rescan \
 	bench-check bench-live-check bench bench-evaluate bench-key bench-seal runs-layout-migrate \
-	secrets
+	secrets test-live-secrets
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -410,6 +410,12 @@ test-live-zap: test-live-runner
 # 角色連線、應用程式角色的 DDL 被拒，三個服務的環境變數名稱中沒有 owner 的密碼。
 test-live-db-roles: LIVE_TESTS := tests/live/test_db_roles_live.py
 test-live-db-roles: test-live-runner
+
+# compose secrets 與 Live 隔離的 live 驗收（T23b-b2；docs/DECISIONS.md §32）：同一個獨立的 secscan-live
+# 專案與流程（拋棄式的秘密）。容器的設定、服務程序的環境、/run/secrets 的掛載與內容、db 經由 wrapper 的
+# 初始化、compose 的設定、遷移不退回 .env、有效的 log 設定（CSEC-L1 到 L6）。
+test-live-secrets: LIVE_TESTS := tests/live/test_secrets_live.py
+test-live-secrets: test-live-runner
 
 # 錄製 ZAP 的真實輸出（docs/DECISIONS.md §19.9）：同一個 live 流程，只執行錄製的情境（anonymous），
 # 輸出到 recordings/zap/<情境>/（gitignore）。人工審查之後才搬進 tests/fixtures/zap/。約 15 分鐘。
