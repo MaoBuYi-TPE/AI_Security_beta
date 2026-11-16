@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.live_session import LIVE_PRESERVED_ENV
+from tests.live_session import DEFAULT_TMPDIR, LIVE_PRESERVED_ENV, live_session_problems
 
 CONFTEST = """
 from tests.conftest import _isolate_app_settings  # noqa: F401（沿用根 conftest 的 autouse fixture）
@@ -34,6 +34,11 @@ import pytest
 @pytest.mark.live
 def test_live():
     pytest.skip("前提不成立")
+"""
+MODULE_SKIPPED = """
+import pytest
+
+pytest.skip("整個模組的前提不成立", allow_module_level=True)
 """
 SIDE_EFFECT = """
 import pytest
@@ -74,6 +79,8 @@ def live(
     directory = str(tmp_path / "secscan-live-secrets.abc123")
     monkeypatch.setenv("SECSCAN_LIVE_SECRETS_DIR", directory)
     monkeypatch.setenv("SECSCAN_SECRETS_DIR", directory)
+    # recipe 的拋棄式目錄直接在 TMPDIR 之下（R1 核對；TMPDIR 以 / 結尾也一樣）。
+    monkeypatch.setenv("TMPDIR", f"{tmp_path}/")
     monkeypatch.setenv("BENCH_KEY_FILE", "/srv/bench-keys")
     monkeypatch.setenv("DB_PORT", "55434")
     return pytester
@@ -90,6 +97,23 @@ def test_an_all_skipped_live_session_fails(live: pytest.Pytester) -> None:
     live.makepyfile(SKIPPING)
 
     assert live.runpytest("-m", "live").ret == pytest.ExitCode.TESTS_FAILED
+
+
+def test_a_live_module_skipped_at_collection_fails_the_session(live: pytest.Pytester) -> None:
+    """第二輪程式碼審查 LOW-1：模組整個被 skip（收集階段，沒有測試與 live 標記）不能假通過。"""
+    live.makepyfile(test_passing=PASSING, test_skipped_module=MODULE_SKIPPED)
+
+    assert live.runpytest("-m", "live").ret == pytest.ExitCode.TESTS_FAILED
+
+
+def test_a_module_skip_outside_a_live_session_is_not_affected_positive_control(
+    live: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """沒有開關（不是授權的 Live session）：同樣的檔案照 pytest 的規則通過。"""
+    live.makepyfile(test_passing=PASSING, test_skipped_module=MODULE_SKIPPED)
+    monkeypatch.delenv("ENABLE_LIVE_LAB_TESTS")
+
+    assert live.runpytest("-m", "live").ret == pytest.ExitCode.OK
 
 
 def test_only_live_outcomes_are_counted(live: pytest.Pytester) -> None:
@@ -216,3 +240,89 @@ def test_the_live_environment_is_the_recipe_environment(live: pytest.Pytester) -
     )
 
     assert live.runpytest().ret == pytest.ExitCode.OK
+
+
+# --- R1：Live 的 pytest 開始時的環境（live_session_problems）-------------------------------------
+
+DIRECTORY = "secscan-live-secrets.abc123"
+
+
+def _live_environment(tmp_path: Path, **changes: str | None) -> dict[str, str]:
+    directory = str(tmp_path / DIRECTORY)
+    environ = {
+        "SECSCAN_LIVE_PROJECT": "secscan-live",
+        "SECSCAN_LIVE_SECRETS_DIR": directory,
+        "SECSCAN_SECRETS_DIR": directory,
+        "TMPDIR": f"{tmp_path}/",
+        "PATH": "/bin",
+    }
+    for key, value in changes.items():
+        if value is None:
+            environ.pop(key, None)
+        else:
+            environ[key] = value.replace("{tmp}", str(tmp_path))
+    return environ
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {
+            "TMPDIR": None,
+            "SECSCAN_LIVE_SECRETS_DIR": f"{DEFAULT_TMPDIR}/{DIRECTORY}",
+            "SECSCAN_SECRETS_DIR": f"{DEFAULT_TMPDIR}/{DIRECTORY}/",
+        },
+    ],
+    ids=["tmpdir-with-trailing-slash", "default-tmpdir"],
+)
+def test_the_live_session_environment_passes(
+    tmp_path: Path, changes: dict[str, str | None]
+) -> None:
+    assert live_session_problems(_live_environment(tmp_path, **changes)) == []
+
+
+@pytest.mark.parametrize(
+    ("changes", "problem"),
+    [
+        ({"SECSCAN_LIVE_PROJECT": "secscan"}, "SECSCAN_LIVE_PROJECT"),
+        ({"SECSCAN_LIVE_PROJECT": None}, "SECSCAN_LIVE_PROJECT"),
+        ({"SECSCAN_LIVE_SECRETS_DIR": "/Users/someone/secrets"}, "SECSCAN_LIVE_SECRETS_DIR"),
+        ({"SECSCAN_LIVE_SECRETS_DIR": None}, "SECSCAN_LIVE_SECRETS_DIR"),
+        (
+            {"SECSCAN_LIVE_SECRETS_DIR": f"{{tmp}}/{DIRECTORY}/../../etc/{DIRECTORY}"},
+            "SECSCAN_LIVE_SECRETS_DIR",
+        ),
+        ({"SECSCAN_LIVE_SECRETS_DIR": f"{{tmp}}/x/../{DIRECTORY}"}, "SECSCAN_LIVE_SECRETS_DIR"),
+        ({"SECSCAN_LIVE_SECRETS_DIR": DIRECTORY}, "SECSCAN_LIVE_SECRETS_DIR"),
+        ({"SECSCAN_LIVE_SECRETS_DIR": f"/srv/{DIRECTORY}"}, "SECSCAN_LIVE_SECRETS_DIR"),
+        ({"SECSCAN_LIVE_SECRETS_DIR": "{tmp}/secscan-live-secrets.ab"}, "SECSCAN_LIVE_SECRETS_DIR"),
+        ({"SECSCAN_SECRETS_DIR": "./secrets"}, "SECSCAN_SECRETS_DIR"),
+        ({"SECSCAN_SECRETS_DIR": None}, "SECSCAN_SECRETS_DIR"),
+        ({"DB_PASSWORD": "x"}, "DB_PASSWORD"),
+        ({"db_password": "x"}, "db_password"),
+        ({"Content_Encryption_Keys_File": "/x"}, "Content_Encryption_Keys_File"),
+    ],
+    ids=[
+        "dev-project",
+        "no-project",
+        "secrets-elsewhere",
+        "no-secrets",
+        "dot-dot-escape",
+        "dot-dot-inside",
+        "relative",
+        "outside-tmpdir",
+        "bad-name",
+        "compose-secrets-elsewhere",
+        "no-compose-secrets",
+        "secret",
+        "secret-lowercase",
+        "secret-file-mixed-case",
+    ],
+)
+def test_a_live_session_with_the_wrong_environment_is_refused(
+    tmp_path: Path, changes: dict[str, str | None], problem: str
+) -> None:
+    """R1、修正 17、第二輪安全 LOW-3：路徑以 run_id 的規則核對（..、相對路徑、TMPDIR 之外都拒絕），
+    compose 的秘密目錄必須是同一個，秘密的名稱不分大小寫。"""
+    assert problem in live_session_problems(_live_environment(tmp_path, **changes))

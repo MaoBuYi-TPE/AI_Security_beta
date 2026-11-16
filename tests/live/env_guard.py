@@ -1,37 +1,21 @@
 """Live 的隔離檢查（T23b-b2；docs/DECISIONS.md §32；計畫 §3.1、§3.1.1）。
 
-make test-live-runner 在白名單的環境（LIVE_PROC_ENV：env -i 加上允許的變數）中，以
+make test-live-runner 在白名單的環境（LIVE_PROC_ENV）中，以
 `uv run --locked python -I tests/live/env_guard.py <子命令>` 執行；recipe 只負責串接，判斷都在這裡。
-只輸出名稱與數量，不輸出任何值（設定、秘密、.env 的內容都不印出）。
+只輸出名稱與數量，不輸出任何值（設定、秘密、.env 的內容都不印出）。只用標準函式庫、yaml 與
+secscan.cli.secret_files（以 -I 執行，不 import tests 與工作目錄的模組）。細節見各函式的 docstring：
 
-子命令：
-- engine [--expect ID]：DOCKER_HOST 只能是本機的 unix socket；context 是 orbstack；compose 是
-  驗證過的主版本；印出 Engine ID，給定 --expect 時必須相同（開始時、up 之前、結束時各確認一次）。
-- preflight --base DIR：拒絕已存在的 secscan-live 資源、舊的拋棄式目錄（上一次沒有清乾淨）與上一次
-  清理失敗的診斷檔（人工確認之前不再執行）。
-- snapshot --root DIR／compare --root DIR：開發環境的快照（容器的名稱、ID、StartedAt；volume 的
-  名稱、CreatedAt；網路；.env 與 secrets/* 的 mode、size、inode、sha256），compare 從 stdin 讀開始
-  時的快照。
-- check-config --secrets-dir DIR --root DIR：stdin 是 `config --format json`。頂層 secret 只有
-  {file, name}，檔案都在這次的拋棄式目錄之下、是 0600 的一般檔案、擁有者是自己、只有一個連結；
-  各服務的 environment 鍵與 secrets 不超過 repo 的 compose.yaml；沒有 configs、include；bind 的來源
-  只允許 db 的 initdb 目錄與 wrapper。
-- check-unresolved：stdin 是 `config --no-env-resolution --format json`：沒有任何服務有 env_file。
-- check-environment --allow NAME...：stdin 是 `config --environment`：變數名稱是精確的允許清單
-  （recipe 傳入的名稱，加上 compose 自己加上的幾個），秘密的名稱與 COMPOSE_ENV_FILES 一律拒絕。
+- engine [--expect ID]：本機的 Engine 與驗證過的 compose 主版本；印出 Engine ID（開始時、up 之前、
+  結束時各確認一次）。
+- preflight --base DIR：拒絕上一次留下的 Live 資源、拋棄式目錄與清理失敗的診斷檔。
+- snapshot／compare --root DIR：開發環境的前後快照（compare 從 stdin 讀開始時的快照）。
+- check-config --secrets-dir DIR --root DIR、check-unresolved、check-environment --allow NAME...：
+  stdin 是 compose 解析出來的設定、未解析的設定與 config --environment，都以允許清單核對。
 - check-images --app-image ID --guard-image ID：Live 容器的映像等於 build 之後記錄的映像 ID。
-- networks --secrets-dir DIR --network NAME SUBNET IP_RANGE（兩次）：建立並檢查 Live 的兩個網路
-  （internal、gateway isolated、固定的網段），以這次執行的識別（拋棄式目錄的名稱）標記所有權。
-  網路已存在就失敗（另一次 Live 正在執行，或上一次沒有清乾淨）：建立是原子的，所以同時執行的兩次
-  Live 只有一次取得所有權。取代子 make 的 ensure-net：Live 的 recipe 不呼叫 $(MAKE)（安全審查 H1：
-  含 $(MAKE) 的行在 make -n、-q、-t 下仍會執行）。
-- cleanup --base DIR --secrets-dir DIR：只清理確認屬於這次執行的資源（G1 審查 M2、MEDIUM-1、2）。
-  專案、檔案與網路名稱都是這裡的常數，不用 make 的變數。標記不是這次執行的網路不碰；兩個網路都屬於
-  這次執行時才 compose down -v，而且之前核對專案名稱、解析出來的 volume 與網路、既有的 volume 都是
-  Live 的名稱；網路上的容器屬於其他 compose 專案時不刪除。拋棄式目錄只在路徑、名稱與擁有者都符合時
-  刪除。最後確認沒有殘留。任何一步失敗都回報，並在 --base 寫入診斷檔（只有步驟與名稱）。
-
-只用標準函式庫、yaml 與 secscan.cli.secret_files（以 -I 執行，不 import tests 與工作目錄的模組）。
+- networks --secrets-dir DIR --network NAME SUBNET IP_RANGE（兩次）：以這次執行的識別建立並標記 Live
+  的兩個網路，已存在就失敗（另一次 Live 正在執行）。取代子 make 的 ensure-net（安全審查 H1）。
+- cleanup --base DIR --secrets-dir DIR --engine ID [--claimed]：只清理確認屬於這次執行的資源，最後以
+  和 preflight 相同的條件確認沒有殘留；任何一步失敗都回報，並在 --base 寫入診斷檔。
 """
 
 import argparse
@@ -109,16 +93,24 @@ NETWORK_FORMAT = (
 )
 NETWORK_LABEL_FORMAT = f'{{{{index .Labels "{RUN_LABEL}"}}}}'
 PROJECT_LABEL = "com.docker.compose.project"
-PROJECT_LABEL_FORMAT = f'{{{{index .Config.Labels "{PROJECT_LABEL}"}}}}'
+PROJECT_FILTER = f"label={PROJECT_LABEL}={LIVE_PROJECT}"
+# 清理的候選容器：完整的 ID、compose 專案、接的網路（只取這三項，不取 Env）。
+CONTAINER_FORMAT = (
+    f'{{{{.Id}}}}|{{{{index .Config.Labels "{PROJECT_LABEL}"}}}}|'
+    "{{range $name, $value := .NetworkSettings.Networks}}{{$name}} {{end}}"
+)
+CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+# 接在某個網路上的容器（含停止的）：完整的 ID。
+_ON_NETWORK = ("ps", "-aq", "--no-trunc", "--filter")
 # docker 的 index 取不到標籤時印出的文字。
 NO_VALUE = "<no value>"
+DOCKER_TIMEOUT_SECONDS = 120
 # 清理只用這裡的常數（make 的變數可能被覆寫）。
 COMPOSE_FILE = "compose.yaml"
 LIVE_COMPOSE = ("compose", "-p", LIVE_PROJECT, "-f", COMPOSE_FILE, "--profile", "app")
 # down -v 會刪除的 volume 與網路：只能是 Live 的名稱（專案前綴或 LIVE_ENV 的 secscan_live_*）。
 LIVE_RESOURCE_PREFIXES = (f"{LIVE_PROJECT}_", "secscan_live_")
 DIAGNOSTIC_PREFIX = "secscan-live-cleanup-failed."
-PROJECT_PATTERN = re.compile(r"secscan-live[a-z0-9-]*")
 EXIT_OK = 0
 EXIT_FAILURE = 1
 
@@ -131,17 +123,24 @@ class GuardError(Exception):
 
 
 def docker(arguments: Sequence[str]) -> str:
-    """固定的 docker 指令（白名單的環境）；失敗視為無法確認。"""
-    # 參數由這個模組組成，沒有外部輸入；docker 從 PATH 找到（白名單保留 PATH）。
-    result = subprocess.run(  # noqa: S603
-        ["docker", *arguments],  # noqa: S607
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
+    """固定的 docker 指令（白名單的環境）。失敗、逾時、無法執行都轉成 GuardError（第二輪 MEDIUM-1：
+    清理的每一步只記錄失敗、繼續其他獨立的步驟）；訊息只有子命令、結束碼與例外的類別。"""
+    command = arguments[0]
+    try:
+        # 參數由這個模組組成，沒有外部輸入；docker 從 PATH 找到（白名單保留 PATH）。
+        result = subprocess.run(  # noqa: S603
+            ["docker", *arguments],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=DOCKER_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise GuardError(f"docker {command} 逾時（{DOCKER_TIMEOUT_SECONDS}s）：無法確認") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GuardError(f"無法執行 docker {command}（{type(exc).__name__}）：無法確認") from None
     if result.returncode != 0:
-        raise GuardError(f"docker {arguments[0]} 失敗：無法確認，停止")
+        raise GuardError(f"docker {command} 失敗（結束碼 {result.returncode}）：無法確認，停止")
     return result.stdout
 
 
@@ -175,19 +174,36 @@ def preflight(base: Path, run: Runner) -> None:
             f"上一次的清理失敗（{base} 中有 {len(diagnostics)} 個診斷檔）：確認並處理之後刪除"
             "診斷檔再執行"
         )
-    label = f"label=com.docker.compose.project={LIVE_PROJECT}"
-    found = {
-        "容器": run(["ps", "-aq", "--filter", label]).split(),
-        "volume": run(["volume", "ls", "-q", "--filter", label]).split(),
-        "網路": [
+    remaining = _counts(live_resources(run))
+    if remaining:
+        raise GuardError(f"已有 {LIVE_PROJECT} 的資源：{remaining}；先清除再執行")
+
+
+def live_resources(run: Runner) -> dict[str, list[str]]:
+    """Live 的資源：preflight 與清理之後的殘留檢查用同一個條件（第二輪 HIGH 條件 5、6）。
+
+    不只看網路：容器與 volume 以 compose 的專案標記找，volume 另外以 Live 的名稱前綴找（LIVE_ENV 的
+    secscan_live_*；不是 compose 建立的也算），網路是 Live 的兩個與 secscan-live_ 開頭的。
+    """
+    volumes = set(run(["volume", "ls", "-q", "--filter", PROJECT_FILTER]).split())
+    volumes |= {
+        name
+        for name in run(["volume", "ls", "-q"]).split()
+        if name.startswith(LIVE_RESOURCE_PREFIXES)
+    }
+    return {
+        "容器": run(["ps", "-aq", "--no-trunc", "--filter", PROJECT_FILTER]).split(),
+        "volume": sorted(volumes),
+        "網路": sorted(
             name
             for name in run(["network", "ls", "--format", "{{.Name}}"]).split()
             if name in LIVE_NETWORKS or name.startswith(f"{LIVE_PROJECT}_")
-        ],
+        ),
     }
-    remaining = {kind: len(names) for kind, names in found.items() if names}
-    if remaining:
-        raise GuardError(f"已有 {LIVE_PROJECT} 的資源：{remaining}；先清除再執行")
+
+
+def _counts(resources: Mapping[str, Sequence[str]]) -> dict[str, int]:
+    return {kind: len(names) for kind, names in resources.items() if names}
 
 
 # --------------------------------------------------------------------------- networks
@@ -268,32 +284,62 @@ class CleanupReport:
     skipped: list[str] = field(default_factory=list)
 
     def step(self, description: str, arguments: Sequence[str]) -> str | None:
+        """執行一步；失敗時記錄步驟與原因（GuardError 的訊息只有子命令、結束碼與例外的類別）。"""
         try:
             return self.run(arguments)
-        except GuardError:
-            self.failures.append(description)
+        except GuardError as exc:
+            self.failures.append(f"{description}（{exc}）")
             return None
 
 
-def cleanup(run: Runner, base: Path, secrets_dir: str) -> CleanupReport:
-    """只清理確認屬於這次執行的資源；不屬於的不碰（M2：清理段不得使用未經驗證的外部變數）。"""
+def cleanup(
+    run: Runner, base: Path, secrets_dir: str, *, engine_id: str, claimed: bool
+) -> CleanupReport:
+    """只清理確認屬於這次執行的資源；不屬於的不碰（M2：清理段不得使用未經驗證的外部變數）。
+
+    claimed 是 recipe 記錄的所有權：networks 成功（兩個網路都以這次的識別建立並確認）之後才是 True。
+    """
     report = CleanupReport(run)
     if not secrets_dir:
+        if claimed:
+            report.failures.append("記錄了所有權卻沒有拋棄式目錄：沒有清理任何東西")
         return report
     try:
         owner = run_id(Path(secrets_dir), base)
     except GuardError as exc:
         report.failures.append(f"{exc}：沒有清理任何東西")
         return report
+    if _same_engine(report, engine_id):
+        _remove_docker_resources(report, owner, claimed=claimed)
+    _remove_directory(report, Path(secrets_dir))
+    if os.path.lexists(secrets_dir):
+        report.failures.append("清理之後拋棄式目錄還在")
+    return report
+
+
+def _same_engine(report: CleanupReport, engine_id: str) -> bool:
+    """安全 LOW-1：清理之前確認 Engine 和開始時相同；不同或無法確認時不碰任何 Docker 資源。"""
+    try:
+        engine(os.environ, report.run, engine_id)
+    except GuardError as exc:
+        report.failures.append(f"{exc}（清理開始時）：沒有清理、也沒有核對任何 Docker 資源")
+        return False
+    return True
+
+
+def _remove_docker_resources(report: CleanupReport, owner: str, *, claimed: bool) -> None:
     owned = _owned_networks(report, owner)
-    _remove_network_containers(report, owned)
+    if claimed and owned != LIVE_NETWORKS:
+        # 安全 LOW-1：網路被刪除或換掉（外部變更）；stack 可能還在、也可能是別人的：fail closed。
+        report.failures.append(
+            "這次建立的網路不見了或不再屬於這次執行（外部變更）：沒有執行 compose down"
+        )
+    for container in _candidates(report, owned):
+        report.step(f"刪除容器 {container[:12]}", ["rm", "-f", "-v", container])
     if owned == LIVE_NETWORKS:
         _compose_down(report)
-    for name in sorted(owned):
-        report.step(f"刪除網路 {name}", ["network", "rm", name])
-    _remove_directory(report, Path(secrets_dir))
-    _check_residue(report, owned, Path(secrets_dir))
-    return report
+    _remove_networks(report, owned)
+    _check_residue(report, owner, claimed=claimed)
 
 
 def _owned_networks(report: CleanupReport, owner: str) -> frozenset[str]:
@@ -311,28 +357,61 @@ def _owned_networks(report: CleanupReport, owner: str) -> frozenset[str]:
     return frozenset(owned)
 
 
-def _remove_network_containers(report: CleanupReport, owned: frozenset[str]) -> None:
-    """這次執行的網路上的容器（測試的接收端、探針與孤兒的掃描容器）；其他 compose 專案的不刪除。"""
-    removable = []
+def _candidates(report: CleanupReport, owned: frozenset[str]) -> list[str]:
+    """這次執行的網路上、確認屬於這次執行的容器（測試的接收端、探針、孤兒的掃描容器、guard）。
+
+    第二輪 HIGH：以完整的 ID 去重並依 ID 排序，每個容器只刪除一次（guard 同時接在兩個網路上，兩次
+    列出的是同一個 ID；同一個 ID 交給 docker rm 兩次，第二個請求可能衝突而讓清理失敗）。格式不正確的
+    ID、其他 compose 專案的容器、也接在不屬於這次執行的網路上的容器都不刪除。
+    """
+    found: set[str] = set()
     for name in sorted(owned):
-        listing = report.step(
-            f"列出網路 {name} 上的容器", ["ps", "-aq", "--filter", f"network={name}"]
-        )
-        for container in (listing or "").split():
-            project = report.step(
-                f"確認容器 {container[:12]} 的專案",
-                ["inspect", "--format", PROJECT_LABEL_FORMAT, container],
+        listing = report.step(f"列出網路 {name} 上的容器", [*_ON_NETWORK, f"network={name}"])
+        listed = (listing or "").split()
+        malformed = [item for item in listed if CONTAINER_ID.fullmatch(item) is None]
+        if malformed:
+            report.failures.append(
+                f"網路 {name} 上有格式不正確的容器 ID（{len(malformed)} 個）：沒有刪除"
             )
-            if project is None:
-                continue
-            if project.strip() in ("", NO_VALUE, LIVE_PROJECT):
-                removable.append(container)
-            else:
-                report.failures.append(
-                    f"網路 {name} 上有其他 compose 專案的容器 {container[:12]}：沒有刪除"
-                )
-    if removable:
-        report.step("刪除 Live 網路上的容器", ["rm", "-f", "-v", *removable])
+        found.update(item for item in listed if CONTAINER_ID.fullmatch(item))
+    return [container for container in sorted(found) if _belongs(report, container, owned)]
+
+
+def _belongs(report: CleanupReport, container: str, owned: frozenset[str]) -> bool:
+    """容器屬於這次執行：inspect 回報同一個完整 ID、專案是 Live 或沒有、只接 Live 的網路。"""
+    facts = report.step(
+        f"確認容器 {container[:12]} 的專案與網路",
+        ["inspect", "--format", CONTAINER_FORMAT, container],
+    )
+    if facts is None:
+        return False
+    parts = facts.strip().split("|")
+    if len(parts) != len(("id", "project", "networks")) or parts[0] != container:
+        report.failures.append(f"無法確認容器 {container[:12]}：沒有刪除")
+        return False
+    project, attached = parts[1].strip(), set(parts[2].split())
+    if project not in ("", NO_VALUE, LIVE_PROJECT):
+        report.failures.append(f"Live 網路上有其他 compose 專案的容器 {container[:12]}：沒有刪除")
+        return False
+    elsewhere = {name for name in attached - owned if not name.startswith(f"{LIVE_PROJECT}_")}
+    if not attached & owned or elsewhere:
+        report.failures.append(f"容器 {container[:12]} 接在不屬於這次執行的網路上：沒有刪除")
+        return False
+    return True
+
+
+def _remove_networks(report: CleanupReport, owned: frozenset[str]) -> None:
+    """網路確認沒有任何容器（含沒有刪除的）之後才刪除：留著的網路讓下一次的 preflight 拒絕。"""
+    for name in sorted(owned):
+        listing = report.step(f"確認網路 {name} 上沒有容器", [*_ON_NETWORK, f"network={name}"])
+        if listing is None:
+            continue
+        if listing.split():
+            report.failures.append(
+                f"網路 {name} 上還有容器（{len(listing.split())} 個）：沒有刪除網路"
+            )
+            continue
+        report.step(f"刪除網路 {name}", ["network", "rm", name])
 
 
 def _compose_down(report: CleanupReport) -> None:
@@ -379,6 +458,9 @@ def _remove_directory(report: CleanupReport, path: Path) -> None:
         info = path.lstat()
     except FileNotFoundError:
         return
+    except OSError as exc:
+        report.failures.append(f"無法確認拋棄式目錄（{type(exc).__name__}）：沒有刪除")
+        return
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         report.failures.append("拋棄式目錄不是自己擁有的目錄：沒有刪除")
         return
@@ -388,25 +470,42 @@ def _remove_directory(report: CleanupReport, path: Path) -> None:
         report.failures.append(f"無法刪除拋棄式目錄（{exc.strerror or type(exc).__name__}）")
 
 
-def _check_residue(report: CleanupReport, owned: frozenset[str], path: Path) -> None:
-    if os.path.lexists(path):
-        report.failures.append("清理之後拋棄式目錄還在")
-    if not owned:
+def _check_residue(report: CleanupReport, owner: str, *, claimed: bool) -> None:
+    """清理之後以和 preflight 相同的條件確認沒有殘留（安全 LOW-1：網路不存在也檢查容器與 volume）。
+
+    這次沒有取得所有權、剩下的資源由另一次 Live 執行持有（它的網路）時，只記錄、不算失敗：那是正在
+    執行的另一次 Live，這次沒有建立任何 compose 的資源。
+    """
+    try:
+        remaining = live_resources(report.run)
+    except GuardError:
+        report.failures.append("無法確認清理之後沒有殘留")
         return
-    networks = report.step("確認沒有殘留的網路", ["network", "ls", "--format", "{{.Name}}"])
-    remaining = sorted(owned & set((networks or "").split()))
-    if remaining:
-        report.failures.append(f"清理之後還有網路：{'、'.join(remaining)}")
-    if owned != LIVE_NETWORKS:
+    counts = _counts(remaining)
+    if not counts:
         return
-    label = f"label={PROJECT_LABEL}={LIVE_PROJECT}"
-    containers = report.step("確認沒有殘留的容器", ["ps", "-aq", "--filter", label])
-    volumes = report.step("確認沒有殘留的 volume", ["volume", "ls", "-q", "--filter", label])
-    for kind, listing in (("容器", containers), ("volume", volumes)):
-        if listing and listing.split():
-            report.failures.append(
-                f"清理之後還有 {LIVE_PROJECT} 的{kind}（{len(listing.split())} 個）"
-            )
+    holder = None if claimed else _holder(report, owner, remaining["網路"])
+    if holder is not None:
+        report.skipped.append(f"另一次 Live 執行（{holder}）持有的資源 {counts}")
+        return
+    report.failures.append(f"清理之後還有 Live 的資源：{counts}")
+
+
+def _holder(report: CleanupReport, owner: str, networks: Sequence[str]) -> str | None:
+    """持有 Live 網路的另一次執行：存在的 Live 網路都標記同一個、不是這次的執行識別。"""
+    labels = set()
+    for name in sorted(set(networks) & LIVE_NETWORKS):
+        label = report.step(
+            f"確認網路 {name} 的所有權",
+            ["network", "inspect", "--format", NETWORK_LABEL_FORMAT, name],
+        )
+        labels.add((label or "").strip())
+    if len(labels) != 1:
+        return None
+    [label] = labels
+    if label == owner or RUN_ID_PATTERN.fullmatch(label) is None:
+        return None
+    return label
 
 
 def write_diagnostic(base: Path, secrets_dir: str, failures: Sequence[str]) -> Path:
@@ -603,10 +702,9 @@ def check_environment(listing: str, allowed: Iterable[str]) -> None:
 
 
 def check_images(run: Runner, app_image: str, guard_image: str) -> None:
-    label = f"label=com.docker.compose.project={LIVE_PROJECT}"
     expected = dict.fromkeys(APP_SERVICES, app_image) | {"guard": guard_image}
     seen = set()
-    for container_id in run(["ps", "-aq", "--filter", label]).split():
+    for container_id in run(["ps", "-aq", "--filter", PROJECT_FILTER]).split():
         service, image = run(["inspect", "--format", IMAGE_FORMAT, container_id]).split()
         if service in expected:
             seen.add(service)
@@ -615,25 +713,6 @@ def check_images(run: Runner, app_image: str, guard_image: str) -> None:
     missing = (APP_SERVICES - {"runs-init"} | {"guard"}) - seen
     if missing:
         raise GuardError(f"找不到這些服務的容器：{sorted(missing)}")
-
-
-# --------------------------------------------------------------------------- Live 的 pytest
-
-
-def live_session_problems(environ: Mapping[str, str]) -> list[str]:
-    """Live 的 pytest 開始時的環境（tests/live/conftest.py 的 pytest_sessionstart；R1、修正 17）。
-
-    回傳有問題的變數名稱（不含值）：專案必須是 secscan-live（shell 中殘留的 secscan 會讓測試操作
-    開發的專案）；拋棄式目錄必須是 mktemp 建立的那一個；環境中不得有任何秘密的名稱。
-    """
-    problems = []
-    if PROJECT_PATTERN.fullmatch(environ.get("SECSCAN_LIVE_PROJECT", "")) is None:
-        problems.append("SECSCAN_LIVE_PROJECT")
-    secrets_dir = environ.get("SECSCAN_LIVE_SECRETS_DIR", "")
-    if not os.path.basename(os.path.normpath(secrets_dir)).startswith(SECRETS_PREFIX):
-        problems.append("SECSCAN_LIVE_SECRETS_DIR")
-    problems.extend(sorted(name for name in environ if name in SECRET_ENV_NAMES))
-    return problems
 
 
 # --------------------------------------------------------------------------- CLI
@@ -663,6 +742,8 @@ def _parser() -> argparse.ArgumentParser:
     cleanup_parser = commands.add_parser("cleanup")
     cleanup_parser.add_argument("--base", type=Path, required=True)
     cleanup_parser.add_argument("--secrets-dir", required=True)
+    cleanup_parser.add_argument("--engine", required=True)
+    cleanup_parser.add_argument("--claimed", action="store_true")
     return parser
 
 
@@ -701,14 +782,16 @@ def run_command(args: argparse.Namespace, stdin: str, run: Runner) -> str:
         specs = [NetworkSpec(*item) for item in args.network]
         claim_networks(run, specs, run_id(args.secrets_dir))
     elif command == "cleanup":
-        return _cleanup_command(args.base, args.secrets_dir, run)
+        report = cleanup(
+            run, args.base, args.secrets_dir, engine_id=args.engine, claimed=args.claimed
+        )
+        return _cleanup_result(report, args.base, args.secrets_dir)
     else:
         check_images(run, args.app_image, args.guard_image)
     return f"{command} ok"
 
 
-def _cleanup_command(base: Path, secrets_dir: str, run: Runner) -> str:
-    report = cleanup(run, base, secrets_dir)
+def _cleanup_result(report: CleanupReport, base: Path, secrets_dir: str) -> str:
     skipped = f"；沒有處理（不屬於這次執行）：{'、'.join(report.skipped)}" if report.skipped else ""
     if not report.failures:
         return f"cleanup ok{skipped}"
@@ -729,6 +812,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = run_command(args, stdin, docker)
     except GuardError as exc:
         sys.stderr.write(f"env_guard {args.command}：{exc}\n")
+        return EXIT_FAILURE
+    except OSError as exc:
+        # 讀檔、建目錄等失敗：只輸出例外的類別（不輸出 traceback 與路徑以外的內容）。
+        sys.stderr.write(f"env_guard {args.command}：無法存取檔案（{type(exc).__name__}）\n")
         return EXIT_FAILURE
     sys.stdout.write(f"{output}\n")
     return EXIT_OK

@@ -6,22 +6,24 @@
 判定的條件是「開關 ENABLE_LIVE_LAB_TESTS=1，而且這次選中了 live 標記的測試」，不看 -m 的文字
 （M3：不帶 -m、複合的選取 `-m "live and not slow"` 也一樣受保護）。只有通過檢查的 session 才算授權：
 
-- pytest_collection_finish（任何測試執行之前）：SECSCAN_LIVE_PROJECT 必須是 secscan-live（shell 中
-  殘留的 secscan 會讓測試操作開發的專案）、SECSCAN_LIVE_SECRETS_DIR 是這次的拋棄式目錄、環境中沒有
-  任何秘密的名稱；不符就 pytest.exit（fail closed），只輸出名稱。
+- pytest_collection_finish（任何測試執行之前）：live_session_problems 的檢查；不符就 pytest.exit
+  （fail closed），只輸出名稱。
 - 授權的 session 中，live 標記的測試保留 LIVE_PRESERVED_ENV（tests/conftest.py 的
   _isolate_app_settings 對其他測試一律刪除；HIGH-1）。recipe 的白名單環境在設定時另存一份
   （live_environment），Live 的子程序（compose、alembic）明確使用它，不依賴每個測試被改過的環境。
 - pytest_sessionfinish：live 標記的測試通過的數量是 0，或其中有任何 skip，就以非零結束（Live 的目標
-  都明確指定測試，skip 代表前提不成立，不能當成通過）。只計算 live 的測試。
+  都明確指定測試，skip 代表前提不成立，不能當成通過）。只計算 live 的測試，加上收集階段被 skip 的
+  模組（模組整個被 skip 時沒有測試、也沒有 live 標記；第二輪程式碼審查 LOW-1）。
 """
 
 import os
+import re
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 
-from tests.live.env_guard import live_session_problems
+from tests.live.env_guard import SECRET_ENV_NAMES, GuardError, run_id
 
 LIVE_SWITCH = "ENABLE_LIVE_LAB_TESTS"
 LIVE_MARKER = "live"
@@ -32,8 +34,43 @@ EXIT_REFUSED = 3
 LIVE_PRESERVED_ENV = frozenset(
     {"SECSCAN_SECRETS_DIR", "SECSCAN_LIVE_SECRETS_DIR", "BENCH_KEY_FILE"}
 )
+PROJECT_PATTERN = re.compile(r"secscan-live[a-z0-9-]*")
+# recipe 的 TMPDIR 沒有設定時的預設（和 Makefile 相同）。
+DEFAULT_TMPDIR = "/tmp"  # noqa: S108
 _AUTHORIZED = pytest.StashKey[bool]()
 _ENVIRONMENT = pytest.StashKey[Mapping[str, str]]()
+
+
+def live_session_problems(environ: Mapping[str, str]) -> list[str]:
+    """Live 的 pytest 開始時的環境有問題的變數名稱（不含值；R1、修正 17、第二輪安全 LOW-3）。
+
+    - SECSCAN_LIVE_PROJECT 是 secscan-live（shell 中殘留的 secscan 會讓測試操作開發的專案）；
+    - SECSCAN_LIVE_SECRETS_DIR 是 mktemp 建立的那一個：絕對路徑、沒有 ..、直接在 TMPDIR 之下、
+      名稱符合 mktemp 的格式（和清理時的 run_id 相同）；SECSCAN_SECRETS_DIR 是同一個目錄；
+    - 環境中沒有任何秘密的名稱，不分大小寫（pydantic-settings 讀環境變數時不分）。
+    """
+    problems = []
+    if PROJECT_PATTERN.fullmatch(environ.get("SECSCAN_LIVE_PROJECT", "")) is None:
+        problems.append("SECSCAN_LIVE_PROJECT")
+    secrets_dir = environ.get("SECSCAN_LIVE_SECRETS_DIR", "")
+    if not _disposable_directory(secrets_dir, environ.get("TMPDIR") or DEFAULT_TMPDIR):
+        problems.append("SECSCAN_LIVE_SECRETS_DIR")
+    elif os.path.normpath(environ.get("SECSCAN_SECRETS_DIR") or ".") != os.path.normpath(
+        secrets_dir
+    ):
+        problems.append("SECSCAN_SECRETS_DIR")
+    problems.extend(sorted(name for name in environ if name.upper() in SECRET_ENV_NAMES))
+    return problems
+
+
+def _disposable_directory(path: str, base: str) -> bool:
+    if not os.path.isabs(path) or ".." in Path(path).parts:
+        return False
+    try:
+        run_id(Path(path), Path(base))
+    except GuardError:
+        return False
+    return True
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -76,7 +113,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     stats = getattr(reporter, "stats", {})
     passed = [report for report in stats.get("passed", []) if _live(report)]
-    skipped = [report for report in stats.get("skipped", []) if _live(report)]
+    skipped = [
+        report
+        for report in stats.get("skipped", [])
+        if _live(report) or isinstance(report, pytest.CollectReport)
+    ]
     if not passed or skipped:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 

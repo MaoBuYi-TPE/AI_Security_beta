@@ -353,9 +353,12 @@ runs-layout-migrate: env secrets docker-check
 #   診斷檔。
 # - 所有權與清理（G1 審查 M2、MEDIUM-1、2）：engine、preflight、快照都通過、拋棄式目錄建立之後才安裝
 #   trap，接著立刻以這次的識別（拋棄式目錄的名稱）標記並建立兩個網路：網路已存在就停止（另一次 Live
-#   正在執行），不清理別人的資源。清理（含失敗與中斷）由 env_guard cleanup 執行，只處理標記屬於這次
-#   執行的資源；down -v 之前核對專案、volume 與網路的名稱；失敗時回報並在 TMPDIR 留下診斷檔（下一次
-#   的 preflight 看到它就拒絕執行）。最後比對開發環境的前後快照，有差異就失敗。
+#   正在執行），不清理別人的資源。兩個網路都建立並確認之後才記錄所有權（claimed）。清理（含失敗與
+#   中斷）由 env_guard cleanup 執行：先確認 Engine 和開始時相同；只處理標記屬於這次執行的資源，容器以
+#   完整的 ID 去重、各刪除一次；記錄了所有權卻找不到這次的網路就 fail closed；down -v 之前核對專案、
+#   volume 與網路的名稱；最後以和 preflight 相同的條件確認沒有殘留（第二輪的 HIGH、安全 LOW-1）。失敗
+#   時回報並在 TMPDIR 留下診斷檔（下一次的 preflight 看到它就拒絕執行）。最後比對開發環境的前後快照，
+#   有差異就失敗。
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
 	tests/live/test_budget_live.py tests/live/test_revocation_live.py \
 	tests/live/test_guard_failover_live.py
@@ -367,10 +370,11 @@ test-live-runner:
 			*) echo "LIVE_PYTEST_ENV 只接受這些變數：$(LIVE_PASS_ENV)"; exit 1 ;; \
 		esac; \
 	done; \
-	base="$${TMPDIR:-/tmp}"; base="$${base%/}"; secrets_dir=""; snapshot=""; \
+	base="$${TMPDIR:-/tmp}"; base="$${base%/}"; secrets_dir=""; snapshot=""; claimed=""; \
 	live_cleanup() { \
 		code=$$1; trap - EXIT INT TERM HUP; \
-		$(LIVE_GUARD) cleanup --base "$$base" --secrets-dir "$$secrets_dir" || code=1; \
+		$(LIVE_GUARD) cleanup --base "$$base" --secrets-dir "$$secrets_dir" \
+			--engine "$$engine" $${claimed:+--claimed} || code=1; \
 		printf '%s' "$$snapshot" | $(LIVE_GUARD) compare --root "$(CURDIR)" || code=1; \
 		exit $$code; \
 	}; \
@@ -382,6 +386,7 @@ test-live-runner:
 	$(LIVE_GUARD) networks --secrets-dir "$$secrets_dir" \
 		--network $(LIVE_SCAN_NET) $(LIVE_SCAN_SUBNET) $(LIVE_SCAN_IP_RANGE) \
 		--network $(LIVE_LAB_NET) $(LIVE_LAB_SUBNET) $(LIVE_LAB_IP_RANGE) || exit 1; \
+	claimed=1; \
 	$(LIVE_PROC_ENV) $(UV_RUN) secscan-admin generate-secret-files "$$secrets_dir" || exit 1; \
 	for image in $(SCANNER_IMAGES); do \
 		$(LIVE_PROC_ENV) docker pull --quiet "$$image" >/dev/null || exit 1; \

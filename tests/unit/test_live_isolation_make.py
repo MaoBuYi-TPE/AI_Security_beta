@@ -17,6 +17,7 @@ PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定�
 """
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -103,16 +104,21 @@ ALLOWED = (
     }
 )
 
-# 假的 docker：狀態（網路與所有權的標記、Live stack 是否啟動、接在網路上的容器）存在 JSON 檔；
+# 假的 docker：狀態（網路與所有權的標記、Live stack 的容器與 volume）存在 JSON 檔。容器有完整的
+# ID 與實際接的網路：guard 同時接在兩個 Live 網路上（第二輪 HIGH）。docker rm 收到重複的 ID 時回傳
+# 失敗：這是審查者依 docker CLI 與 daemon 的原始碼推論的行為（第二個刪除請求衝突），沒有以真的
+# Docker 驗證；替身照最嚴格的推論失敗，去重是否有效才測得出來。網路上還有容器時 network rm 失敗。
 # scenario 讓某一步失敗或預先放入資源（另一次執行的網路、其他專案的容器）。compose config 交給真的
 # docker compose（只在用戶端解析）。
 _FAKE_DOCKER = """#!{python}
-import json, os, subprocess, sys
+import hashlib, json, os, subprocess, sys
 args = sys.argv[1:]
 with open({log!r}, "a") as log:
     log.write(json.dumps({{"tool": "docker", "argv": args, "env": dict(os.environ)}}) + "\\n")
 scenario = json.loads(open({scenario!r}).read())
 state = json.loads(open({state!r}).read())
+state.setdefault("volumes", [])
+state.setdefault("compose_networks", [])
 def save():
     open({state!r}, "w").write(json.dumps(state))
 def out(text="", code=0):
@@ -120,18 +126,34 @@ def out(text="", code=0):
     sys.exit(code)
 def option(name):
     return args[args.index(name) + 1] if name in args else ""
+def cid(name):
+    return hashlib.sha256(name.encode()).hexdigest()
+def nets(container):
+    return container.get("networks") or [container["network"]]
+def lines(items):
+    return "".join(f"{{item}}\\n" for item in items)
 ranges = {{"secscan_live_scan_net": "10.89.9.0/24 10.89.9.0/25",
           "secscan_live_lab_net": "10.89.10.0/24 10.89.10.0/25"}}
+LIVE = "secscan-live"
+COMPOSE_NETS = ["secscan-live_default", "secscan-live_control_net", "secscan-live_docker_net"]
+def start(services):
+    for service, attached in services:
+        state["containers"].append(
+            {{"id": cid(service), "service": service, "project": LIVE, "networks": attached}})
+    state["compose_networks"] = COMPOSE_NETS
 if args[:2] == ["context", "show"]:
     out("orbstack\\n")
 if args[:1] in (["version"], ["pull"]):
     out()
 if args[:1] == ["info"]:
-    out("engine-1\\n")
+    out(state.get("engine", "engine-1") + "\\n")
 if args[:1] == ["rm"]:
     ids = [item for item in args[1:] if not item.startswith("-")]
     state["containers"] = [c for c in state["containers"] if c["id"] not in ids]
     save()
+    if len(ids) != len(set(ids)):
+        sys.stderr.write("removal of container is already in progress\\n")
+        out(code=1)
     out()
 if args[:1] == ["compose"]:
     if "version" in args:
@@ -150,42 +172,59 @@ if args[:1] == ["compose"]:
     if "up" in args:
         if scenario.get("up_fails"):
             out(code=1)
-        if "db" not in args:
+        if "db" in args:
+            start([("db", ["secscan-live_default", "secscan-live_control_net"])])
+            state["volumes"].append({{"name": "secscan-live_db_data", "project": LIVE}})
+        else:
             state["up"] = True
+            start([("api", ["secscan-live_default", "secscan-live_control_net"]),
+                   ("runner", ["secscan-live_control_net", "secscan-live_docker_net"]),
+                   ("worker", ["secscan-live_control_net"]),
+                   ("socket-proxy", ["secscan-live_docker_net"]),
+                   ("guard", ["secscan_live_scan_net", "secscan_live_lab_net"])])
+            state["volumes"].append({{"name": "secscan_live_runs", "project": LIVE}})
             state["containers"] += scenario.get("extra_containers", [])
-            save()
+            if scenario.get("networks_vanish"):
+                state["networks"] = {{}}
+            if scenario.get("engine_changes"):
+                state["engine"] = "engine-2"
+        save()
         out()
     if "down" in args:
         if scenario.get("down_fails"):
             out(code=1)
         state["up"] = False
-        state["containers"] = [c for c in state["containers"] if c.get("project") != "secscan-live"]
+        state["containers"] = [c for c in state["containers"] if c.get("project") != LIVE]
+        state["volumes"] = [v for v in state["volumes"] if v["project"] != LIVE]
+        state["compose_networks"] = []
         save()
         out()
     out()
 if args[:1] == ["ps"]:
     target = option("--filter")
     if target == "label=com.docker.compose.project=secscan-live":
-        live = [c["id"] for c in state["containers"] if c.get("project") == "secscan-live"]
-        stack = "c-api\\nc-runner\\nc-worker\\nc-guard\\n" if state["up"] else ""
-        out("".join(f"{{name}}\\n" for name in live) or stack)
+        out(lines(c["id"] for c in state["containers"] if c.get("project") == LIVE))
     if target.startswith("network="):
-        on = [c["id"] for c in state["containers"] if c.get("network") == target[8:]]
-        out("".join(f"{{name}}\\n" for name in on))
+        out(lines(c["id"] for c in state["containers"] if target[8:] in nets(c)))
     out()
 if args[:1] == ["inspect"]:
     fmt = option("--format")
-    if "com.docker.compose.project" in fmt and "service" not in fmt:
-        found = [c for c in state["containers"] if c["id"] == args[-1]]
-        out((found[0].get("project") or "<no value>") + "\\n" if found else "", 0 if found else 1)
-    service = args[-1][2:]
+    found = [c for c in state["containers"] if c["id"] == args[-1]]
+    if not found:
+        out(code=1)
+    [container] = found
+    if "NetworkSettings" in fmt:
+        project = container.get("project") or "<no value>"
+        out(container["id"] + "|" + project + "|" + " ".join(nets(container)) + " \\n")
+    service = container.get("service", "")
     out(service + (" sha256:guard\\n" if service == "guard" else " sha256:app\\n"))
 if args[:2] == ["image", "inspect"]:
     out("sha256:guard\\n" if args[-1].startswith("secscan-guard") else "sha256:app\\n")
 if args[:2] == ["volume", "ls"]:
-    out()
+    labelled = "--filter" in args
+    out(lines(v["name"] for v in state["volumes"] if not labelled or v["project"] == LIVE))
 if args[:2] == ["network", "ls"]:
-    out("".join(f"{{name}}\\n" for name in state["networks"]))
+    out(lines([*state["networks"], *state["compose_networks"]]))
 if args[:2] == ["network", "create"]:
     name = args[-1]
     if name in state["networks"] or name in scenario.get("taken", []):
@@ -198,6 +237,9 @@ if args[:2] == ["network", "rm"]:
     if scenario.get("network_rm_fails"):
         out(code=1)
     for name in args[2:]:
+        if any(name in nets(c) for c in state["containers"]):
+            sys.stderr.write("error while removing network: network has active endpoints\\n")
+            out(code=1)
         state["networks"].pop(name, None)
     save()
     out()
@@ -588,12 +630,18 @@ def test_losing_the_race_for_a_network_removes_only_its_own_directory(hostile: H
     assert hostile.diagnostics() == []
 
 
+def _cid(name: str) -> str:
+    """假的 docker 的完整容器 ID（stack 的服務以服務名稱計算）。"""
+    return hashlib.sha256(name.encode()).hexdigest()
+
+
 def test_a_container_of_another_project_is_never_removed(hostile: Hostile) -> None:
     """Live 的網路上出現其他 compose 專案（例如開發的 secscan）的容器：不刪除，清理以失敗回報。"""
+    dev, probe = _cid("c-dev"), _cid("c-probe")
     hostile.set_scenario(
         extra_containers=[
-            {"id": "c-dev", "project": "secscan", "network": "secscan_live_scan_net"},
-            {"id": "c-probe", "project": "", "network": "secscan_live_scan_net"},
+            {"id": dev, "project": "secscan", "network": "secscan_live_scan_net"},
+            {"id": probe, "project": "", "network": "secscan_live_scan_net"},
         ]
     )
 
@@ -601,12 +649,13 @@ def test_a_container_of_another_project_is_never_removed(hostile: Hostile) -> No
 
     assert result.returncode != 0
     removed = [argv for argv in hostile.docker_argvs() if argv[:1] == ["rm"]]
-    assert [argv[-1:] for argv in removed] == [["c-probe"]]
-    assert "c-dev" in {item["id"] for item in hostile.docker_state()["containers"]}
+    assert sorted(argv[-1] for argv in removed) == sorted([_cid("guard"), probe])
+    assert all(argv == ["rm", "-f", "-v", argv[-1]] for argv in removed)
+    assert dev in {item["id"] for item in hostile.docker_state()["containers"]}
     [diagnostic] = hostile.diagnostics()
     assert stat.S_IMODE(diagnostic.stat().st_mode) == 0o600
-    assert "c-dev" in diagnostic.read_text(encoding="utf-8")
-    assert "c-dev" in result.stderr
+    assert dev[:12] in diagnostic.read_text(encoding="utf-8")
+    assert dev[:12] in result.stderr
 
 
 @pytest.mark.parametrize("failure", ["down_fails", "network_rm_fails"])
