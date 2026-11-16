@@ -3999,10 +3999,11 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 - 容器內是 `/run/secrets/<名稱>`（唯讀的 bind mount），`environment` 只有 `*_FILE` 的路徑，沒有任何秘密的值或插值；`x-*` 不含 secrets。
 - 頂層 secret 的來源是 `${SECSCAN_SECRETS_DIR:?…}/<名稱>`（D16）：沒有設定或是空字串時，compose 在解析階段就失敗，不會退回開發的 `./secrets`。以 compose.yaml 執行的開發目標都經由 Makefile 的 `DEV_COMPOSE`（`SECSCAN_SECRETS_DIR=./secrets`）。
 - `db-up`、`test-db-up`（因此 `test`）、`up`、`runs-layout-migrate` 依賴 `secrets`；`build`、`images`、`down`、`db-down` 不需要秘密檔（G0 的 S4）。
+- `make secrets`（`sync-secret-files`）**只讀 `.env`**：shell 中有同名的環境變數（不分大小寫）時拒絕執行（G1 審查的安全 L1）；四個 DB 密碼至少 32 個字元，和 initdb 的 `awk` 一致（安全 L6、程式碼 LOW-3、資料庫 LOW-1）；內容相同、只有權限不對時回報「修正權限」。
 
 **應用程式讀取秘密**：
 - `Settings` 的 `DB_PASSWORD_FILE`、`*_ENCRYPTION_KEYS_FILE`；`MigrationCredentials` 的 `DB_OWNER_PASSWORD_FILE`。`X` 與 `X_FILE` 同時有值（含空字串）時拒絕，訊息只有兩個設定的名稱。
-- 讀檔（`core/secret_files.py`）：`O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`、只接受一般檔案、最多讀 4096+1 bytes、一行可列印的 ASCII（不含空白）、長度 1–4095、容許一個結尾的換行；所有錯誤都是固定訊息的 `SecretFileError`。
+- 讀檔（`core/secret_files.py`）：`O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`、只接受一般檔案、最多讀 4096+1 bytes、一行可列印的 ASCII（不含空白）、長度 1–4095（上限和 initdb 相同；DB 密碼的下限 32 由 `sync-secret-files` 與 initdb 檢查）、容許一個結尾的換行；所有錯誤都是固定訊息的 `SecretFileError`。
 - 不使用 pydantic-settings 的 `secrets_dir`（會 strip、跟隨 symlink、和環境變數同時有值時靜默採用其中一個）。
 
 **設定錯誤的對外輸出**（M5）：`core/settings_errors.py` 的 `safe_summary` 只輸出 `loc` 與 `msg`（`loc` 只保留已知的欄位名稱與整數索引）；`create_app`、alembic 的 `env.py`、`migrate-db-roles` 以 `build_settings` 建立設定，失敗時拋出 `SettingsError`（在 except 之外 raise，`__context__`、`__cause__` 都是 None）；CLI 以 `safe_summary` 回報。`hide_input_in_errors=True` 加在所有設定類別，只是縱深防禦。原始的 `ValidationError` 的 `errors()`、`json()` 仍含輸入（剩餘風險 12）。
@@ -4016,9 +4017,12 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 
 **Live 的完整隔離**（D11、M6、E4、D17、R1）：
 - 每次以 `secscan-admin generate-secret-files` 在 `mktemp -d` 的拋棄式目錄產生新的秘密；compose 以 `COMPOSE_DISABLE_ENV_FILE=1` 執行；alembic 以 `-x dotenv=off` 執行、秘密只以 `*_FILE` 傳入、`PGPASSFILE=/dev/null`。
-- Live 的每一個 docker、compose、uv 與子 make 的呼叫都經由 `LIVE_PROC_ENV`（`env -i` 加上白名單；recipe 設定的值放在最後；`override`）；Live 的目標不依賴 `env`、`secrets`、`docker-check`、`images`、`build`。`SECSCAN_LIVE_PROJECT=secscan-live`、`ENABLE_LIVE_LAB_TESTS=1` 由 recipe 固定設定。
-- `up` 之前以 `tests/live/env_guard.py` 驗證 compose 解析出來的設定（允許清單）；build 之後記錄映像 ID、`up` 之後核對；開始時、`up` 之前、結束時確認同一個 Engine；開始之前拒絕上一次的殘留；`trap` 一律清理，並比對開發環境的前後快照。
-- Live 的 pytest：`pytest_sessionstart` 檢查專案名稱、拋棄式目錄與環境中沒有秘密的名稱；`pytest_sessionfinish` 在 0 個通過或有 skip 時以非零結束。
+- Live 的每一個 docker、compose 與 uv 的呼叫都經由 `LIVE_PROC_ENV`（`env -i` 加上白名單；recipe 設定的值放在最後；`override`）；Live 不呼叫子 make。Live 的目標不依賴 `env`、`secrets`、`docker-check`、`images`、`build`，`test-live-lab` 也不依賴 `lab-images`（靶機映像在 recipe 內經過白名單 pull）。`SECSCAN_LIVE_PROJECT=secscan-live`、`ENABLE_LIVE_LAB_TESTS=1` 由 recipe 固定設定。專案、網路、volume、compose 檔與拋棄式目錄的前綴都是 `override`（命令列、`MAKEFLAGS`、`make -e` 都改不了）。
+- **預覽模式**（G1 審查的安全 H1）：recipe 是一個邏輯行，開頭先檢查 `ENABLE_LIVE_LAB_TESTS` 與 `LIVE_PYTEST_ENV`，而且不含 `$(MAKE)`（直接或經由變數）。GNU make 對含 `$(MAKE)` 的行在 `-n`、`-q`、`-t` 下仍會執行；所以 `make -n`／`-q`／`-t` 這些 Live 目標不執行任何一步。`bench` 以 `$(MAKE)` 遞迴，子 make 繼承預覽的旗標。不以旗標判斷（GNU make 3.81 的 `MAKEFLAGS` 格式不一致）。
+- `up` 之前以 `tests/live/env_guard.py` 驗證 compose 解析出來的設定（允許清單）；build 之後記錄映像 ID、`up` 之後核對；開始時、`up` 之前、結束時確認同一個 Engine；開始之前拒絕上一次的殘留、拋棄式目錄與清理失敗的診斷檔。
+- **所有權與清理**（G1 審查的 M2，使用者提升為 HIGH；程式碼審查 MEDIUM-1、2）：engine、preflight、快照都通過、拋棄式目錄建立之後才安裝 `trap`，接著立刻以這次的識別（拋棄式目錄的名稱，標籤 `secscan.live.run`）建立兩個網路；`network create` 是原子的，網路已存在就停止（另一次 Live 正在執行，或上一次沒有清乾淨），不清理別人的資源。清理由 `env_guard cleanup` 執行，只用自己的常數（專案 `secscan-live`、`compose.yaml`、兩個網路），只處理標記屬於這次執行的網路；網路上屬於其他 compose 專案的容器不刪除；兩個網路都屬於這次執行時才 `compose down -v`，之前核對專案名稱、解析出來的 volume 與網路、既有的 volume 都是 Live 的名稱；拋棄式目錄只在路徑、名稱、擁有者都符合、不是 symlink 時刪除。最後確認沒有殘留；任何一步失敗都回報，並在 `TMPDIR` 留下 `secscan-live-cleanup-failed.*` 診斷檔（0600，只有步驟與名稱），下一次的 preflight 看到它就拒絕執行，直到人工確認。之後比對開發環境的前後快照（Live 的網路不算開發環境）。
+- **Live 的 pytest**（`tests/live_session.py`，由根 conftest 載入；G1 審查的程式碼 HIGH-1、M3）：開關是 1、而且選中 live 標記的測試時，在任何測試執行之前檢查專案名稱、拋棄式目錄與環境中沒有秘密的名稱（不看 `-m` 的文字，不帶 `-m` 與複合的選取也一樣）；通過的 session 中，live 標記的測試保留 `SECSCAN_SECRETS_DIR`、`SECSCAN_LIVE_SECRETS_DIR`、`BENCH_KEY_FILE`（根 conftest 對其他測試一律刪除；AST 交叉核對）；recipe 的環境另存給 Live 的子程序使用；live 的測試 0 個通過或有 skip 時以非零結束。
+- 快照會讀開發的 `.env` 與 `secrets/*` 的內容來計算 sha256（不輸出、不保存內容），用來確認 Live 沒有改變它們；Live 不使用其中的任何秘密（安全審查 L2 的用語更正）。
 
 ### 32.3 G0、G0b、G0c 的結果（摘要）
 
@@ -4066,7 +4070,9 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
     - wrapper 在 initdb 之前建立標記，原本 `initdb` 與 `00-begin.sh` 之間的區間已由 G0c 的 I-B 在受控測試中驗證（I-A、I-B、N4 各一個中斷點）；
     - 仍然存在：b2 之前初始化的 volume（只有開發的 `db_data`）沒有標記，它的完整性由 G5 的檢查確認，不靠 healthcheck；主機或 VM 當機時的落盤順序是推論（不實測）；換 postgres 映像的 digest 時要重做 G0c 的步驟 0；能寫入 volume 的程序可以自行刪除或建立標記（和 C26、b5 同一個邊界）。
 16. **debug 等級的 log 會寫出 superuser 的密碼**（F1，MEDIUM；D20）：第一次初始化時暫時伺服器的 `log_min_messages` 是 debug3 以下（或 `-d 3` 以上）就會把環境寫進 log。只實測了 debug5；debug1–debug5 一律預防性禁止。控制：CSEC-07 的設定來源允許清單、CSEC-L6、README 的警告。**防護邊界**：手動執行（`docker run`、`compose run` 加參數、修改 compose）與映像換版都擋不到；不宣稱 F1 已消除，只宣稱 repo 的設定不會觸發。
-17. **主版本升級與初始化未完成標記**（O1，LOW，未測試）：新的 PGDATA 沒有 `PG_VERSION`，wrapper 會建立標記；PG 18 的官方 entrypoint 會因舊版的資料拒絕啟動，標記留著（fail closed）。**不得假定新版本一定會安全地拒絕啟動**：新版本的 entrypoint 若沒有偵測到舊的資料，可能建立新的叢集並回報 healthy。升級之前必須確認 PGDATA、目錄結構、官方 entrypoint 的行為與升級程序（README）；升級不在 b2 的範圍。
+17. **主版本升級與初始化未完成標記**（O1，LOW，未測試）：新的 PGDATA 沒有 `PG_VERSION`，wrapper 會建立標記；PG 18 的官方 entrypoint 會因舊版的資料拒絕啟動，標記留著（fail closed）。**不得假定新版本一定會安全地拒絕啟動**：新版本的 entrypoint 若沒有偵測到舊的資料，可能建立新的叢集並回報 healthy。升級之前必須確認 PGDATA、目錄結構、官方 entrypoint 的行為與升級程序（README）；升級不在 b2 的範圍。拒絕啟動依賴 PG 18 的官方 entrypoint 對舊資料的檢查；被拒絕的那次啟動已經建立了標記，升級完成之後 db 會一直 unhealthy，直到升級程序在確認資料正確之後處理標記（資料庫審查 LOW-4）。
+18. **Live 的所有權的邊界**（G1 的修正，2026-11-16）：所有權以網路的標籤與原子的 `network create` 判定；能使用 Docker API 的程序（同一個 macOS 使用者的任何程序，C26；b5）可以偽造或刪除標籤。並行的防護只涵蓋這個版本的 recipe：修正之前的 recipe（或手動的 compose 指令）不經過這個機制。診斷檔在 `TMPDIR`，重開機或系統清理可能刪除它；殘留的 Live 資源仍會讓 preflight 拒絕。
+19. **既有測試模組的 assert 改寫**：G1 的修正讓 T23b-b2 處理秘密的 12 個測試模組不改寫 assert（`PYTEST_DONT_REWRITE`），既有的修改過的模組中這次加入的 assert 先算成布林值；T23b-b2 之前的其他模組（例如 T23a 的 canary 測試）仍會在失敗時印出運算元。理由：它們的 canary 是每個測試產生的隨機值，不是真的秘密，也不在這次的範圍；之後的強化。
 
 ### 32.7 新的安全待辦：b5（runner 的 Docker API 權限邊界，HIGH）
 
@@ -4082,7 +4088,7 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 | 關卡 | 狀態 |
 |---|---|
 | G0、G0b、G0c | 完成並驗收（§32.3） |
-| G1：PR-2 的離線實作、三項審查、開 PR（不合併） | 2026-11-16 授權並執行 |
+| G1：PR-2 的離線實作、三項審查、開 PR（不合併） | 2026-11-16 授權並執行；三項審查的 HIGH（make 的預覽模式、根 conftest、清理段，§32.9）依使用者的授權修正並重新審查；**PR 等使用者確認 G1 的最終驗收之後才開** |
 | G2：第一次 `make secrets` 與完整的 `make test` | **未授權**；前置條件：使用者確認 FileVault 已開啟，再以唯讀的指令確認 FDE-A1、A2（E7） |
 | G3：PR-2 的 Live（拋棄式的秘密） | 未授權 |
 | G4：審查與合併 | 未授權 |
@@ -4092,3 +4098,32 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 - **b2 程式實作完成**：PR-2、PR-1、PR-3 都合併，各自的 `make test`、Live 與審查都通過。
 - **b2 部署安全驗收完成**：G5、G6（FDE-A1–A7）都通過，剩餘風險（含 b5）都已登錄並由使用者確認。
 - 兩者都完成，b2 才標完成。**SEC-14 仍不標完成**；T23b-b1 維持完成；§31.15 未處理的 LOW 繼續保留。
+- **PR-2 合併之後、G5 完成之前，不要以新的設定啟動既有的開發 db**（資料庫審查 MEDIUM-1）：`make db-up`、`make up`、`make runs-layout-migrate` 會以 wrapper 與 `*_FILE` 重建 db，直接用在真的 `secscan_db_data`，跳過 G5 的前提——在合併前的設定下做 `secrets/` 與 DB 的一致性預檢（SCRAM 的登入矩陣）、確認 `PG_VERSION` 非空且沒有初始化未完成標記、先備份並驗證、先以安全複本驗證相容性。正確性的影響低（`PG_VERSION` 已存在時 wrapper 不做任何事，G0c 的 L1），但 G5 的證據鏈（切換之前的備份與基準）事後無法補回。`make test`（db-test 在 tmpfs）不受影響。
+
+### 32.9 G1 審查的修正（2026-11-16，使用者授權）
+
+三項獨立審查（code、security、database；opus，唯讀）。使用者核准 HIGH-A、HIGH-B 的修正，並把 M2 提升為 HIGH；以獨立的 `fix(...)` commit 加在原本 10 個 commit 之後（不改寫歷史）。
+
+| 項目 | 處置 |
+|---|---|
+| 安全 H1（HIGH-A）：`make -n`／`-q`／`-t` 會執行 Live | 修正：recipe 不含 `$(MAKE)`、檢查在同一行的開頭；假的 docker／uv／make 驗證 `test-live-runner`、`test-live-secrets`、`bench`、`test-live-lab` 在三種模式下沒有任何呼叫 |
+| 程式碼 HIGH-1＝安全 M1（HIGH-B）：根 conftest 刪掉 Live 需要的變數 | 修正：`tests/live_session.py`；授權的 live 測試保留三個變數；`_compose()` 以 recipe 的環境執行、斷言結束碼與輸出；正向對照；AST 交叉核對（找到既有的 `BENCH_KEY_FILE`，一併保留） |
+| 安全 M2（提升為 HIGH）＋程式碼 MEDIUM-1、2：內層變數可被改寫、清理段可能刪掉開發的 `db_data`、trap 太早、清理失敗被忽略 | 修正：`override`、所有權（網路的標籤）、`env_guard cleanup`、診斷檔與 preflight 的拒絕、快照排除 Live 的網路；破壞性的情境只以假的 docker 重現與驗證 |
+| 程式碼 MEDIUM-3＝安全 M3：R1 只在 markexpr 逐字是 live 時檢查 | 修正：`pytest_collection_finish` 以「開關是 1、選中 live 的測試」判定 |
+| 程式碼 MEDIUM-4：CSEC-L3 只看 stdout | 修正：stdout 與 stderr 都檢查；正向對照讀到 stderr 的伺服器 log |
+| 程式碼 MEDIUM-5＝安全 L5：負向斷言缺少正向對照 | 修正：遷移的「全部給時成功」、compose 的設定與環境清單、socket-proxy、維運指令 |
+| 安全 L4：assert 失敗時可能印出原文 | 修正：處理秘密的 12 個測試模組 `PYTEST_DONT_REWRITE`（靜態測試核對），既有模組這次加入的 assert 先算成布林值；剩餘風險 19 |
+| 安全 L6＝程式碼 LOW-3＝資料庫 LOW-1：長度規則不一致；只有權限改變時誤報「更新」 | 修正：sync 對 DB 密碼要求至少 32（契約測試對 `10-roles.sql`）；「修正權限」 |
+| 安全 L1：`sync-secret-files` 讓環境變數優先 | 修正：只讀 `.env`，同名的環境變數存在時拒絕 |
+| 安全 L2：快照讀 `.env` 的內容與「不讀」的說法不一致 | 修正用語（§32.2；README；Makefile） |
+| 安全 L3：`lab-images` 不經白名單 | 使用者：不直接列為 D17 的例外；`test-live-lab` 由 Live 路徑呼叫它，所以改成在 recipe 內經過白名單 pull |
+| 程式碼 LOW-4：comm 沒有個別確認 | 修正 |
+| 資料庫 MEDIUM-1：文件沒寫 G5 之前不要以新設定啟動開發環境 | 修正：§32.8、README |
+| 資料庫 LOW-4、LOW-5、LOW-6 | 修正：O1 的用語（剩餘風險 17）；dotenv=off 時的提示寫出 `*_FILE`；Settings 這一側的 unit 測試與正向對照 |
+| 程式碼 LOW-1：`DOCKER_HOST` 是任何 unix socket 時略過 context 的檢查 | 剩餘風險：Live 只在本機的 OrbStack 執行，Engine ID 開始、`up` 之前、結束時各核對一次；非 unix socket 一律拒絕。之後的強化（核對 socket 的路徑） |
+| 程式碼 LOW-2：`cli/secret_files.py` 部分的 `OSError` 會變成 traceback | 剩餘風險：traceback 只有路徑與 errno，不含秘密；寫入與讀取的主要路徑都已轉成固定訊息。之後的強化 |
+| 資料庫 LOW-2、LOW-3（凍結檔）、LOW-7、LOW-8 | 剩餘風險：`10-roles.sql` 是 G0b 驗證過、sha256 鎖定的凍結檔，修改需要重新驗證（下次修改時加 `\set ON_ERROR_STOP on`；換映像時以 `postgres --describe-config` 重新盤點）；整合測試中 4 處直接的連線在計畫 §2.6 寫明不在範圍；README 的角色密碼換版是既有文件的擴充 |
+| 安全 R-a～R-d（initdb、wrapper 的觀察） | 已登錄：剩餘風險 4、15，D10、D20 |
+| 程式碼審查的待確認：`Mounts[].Source` 是否以 realpath 回報 | 和 G0 的 S10 (f) 一致（normpath）；G3 確認 |
+
+**驗證的分類**：預覽模式、所有權與清理、Live session 的判定都以假的 docker／uv／make 與 pytester 實際執行（已實際驗證，非 Live）；真的 Docker 上的清理、並行與 CSEC-L 的修正在 G3 驗證（尚待後續關卡）。

@@ -340,7 +340,8 @@ runs-layout-migrate: env secrets docker-check
 # 否則 volume 還在使用中刪不掉；-v 一併刪掉它們的匿名 volume），再刪 compose 的服務、volume 與網路。
 # 會中斷 stack 的測試（停掉 guard、kill runner）放在最後執行。
 # Live 的隔離（T23b-b2；docs/DECISIONS.md §32；計畫 §3.1）：
-# - 不讀、不用開發環境的任何秘密：每次以 generate-secret-files 在新的拋棄式目錄（mktemp）產生秘密；
+# - 不使用開發環境的任何秘密（開發的 .env 與 secrets/ 只在前後的快照中計算 sha256 做比對，不輸出內容）：
+#   每次以 generate-secret-files 在新的拋棄式目錄（mktemp）產生秘密；
 #   compose 不讀專案目錄的 .env（COMPOSE_DISABLE_ENV_FILE=1）；alembic 以 -x dotenv=off 執行、秘密只以
 #   *_FILE 傳入。不依賴 env、secrets、docker-check、images、build：不碰開發的 .env 與 secrets/。
 # - 所有呼叫都經由 LIVE_PROC_ENV（白名單）；Live 專用的 pull、build 與網路也在 recipe 內。

@@ -482,7 +482,7 @@ T23b-b2 的 compose secrets、SCRAM、安全的錯誤輸出與 Live 的隔離（
 | CSEC-01 | compose 的分配矩陣：頂層七個 `file:` secret（`${SECSCAN_SECRETS_DIR:?…}`）；每個服務的 secrets 恰好是矩陣；`*_FILE` 指向掛載的 secret；environment 與 `x-*` 沒有秘密的名稱、值或插值；不分大小寫，api、runner、worker 沒有 owner 與 admin 的秘密；沒有 include、extends.file、configs、env_file | unit：compose_secrets、deployment |
 | CSEC-02 | 真的 `docker compose config`（暫存目錄、用戶端解析）：canary 同時放在 `.env` 與秘密檔，`config`、每個服務、`--format json` 都沒有；正向對照：`--environment` 含 `.env` 的 canary；`SECSCAN_SECRETS_DIR` 沒有設定或是空字串時失敗 | unit：compose_secrets |
 | CSEC-03 | `*_FILE` 的讀取：symlink、FIFO（子程序加時限）、不是一般檔案、超過 4096 bytes、空的、CR、第二行、空白、控制字元、非 ASCII 都拒絕；4095 通過、4096 拒絕；`X` 與 `X_FILE` 同時設定時拒絕；錯誤是固定的訊息、不帶 OSError | unit：core/secret_files、core/config_secret_files |
-| CSEC-04 | `sync-secret-files`：0700／0600、沒有結尾換行、冪等、原子替換、寫入失敗時保留舊檔、`--check`、symlink 與權限過寬的拒絕、終端不顯示值、`.env` 不變、在 `Settings` 之前分派 | unit：secret_files_cli |
+| CSEC-04 | `sync-secret-files`：0700／0600、沒有結尾換行、冪等、原子替換、寫入失敗時保留舊檔、`--check`、symlink 與權限過寬的拒絕、終端不顯示值、`.env` 不變、在 `Settings` 之前分派；只讀 `.env`（同名的環境變數存在時拒絕）、DB 密碼至少 32（契約測試對 initdb）、只有權限改變時回報「修正權限」 | unit：secret_files_cli |
 | CSEC-05 | 在暫存目錄執行真的 `make secrets`（`SECRETS_CHECK=1`）；`db-up`、`test-db-up`、`up`、`runs-layout-migrate` 依賴 secrets；開發的 compose 呼叫都設定 `SECSCAN_SECRETS_DIR` | unit：make_secrets |
 | CSEC-06 | pre-commit 的 `forbid-secret-files`：在暫存的 git repo 中，`git add -f` 的秘密檔被擋下 | unit：precommit_secrets |
 | CSEC-07 | initdb 與 wrapper 的允許清單：meta-command、語句、`SET`／`RESET`（D19）、用戶端的 `awk` 檢查、反引號只引用路徑；初始化未完成標記（D18、D21）；`command`、`environment`、掛載的設定來源（D20：不得有 debug 等級的 log） | unit：db_init |
@@ -491,7 +491,7 @@ T23b-b2 的 compose secrets、SCRAM、安全的錯誤輸出與 Live 的隔離（
 | CSEC-10 | `safe_summary` 只有 `loc` 與 `msg`；`SettingsError` 不帶原本的例外；CLI、`create_app`、`env.py`、`migrate-db-roles`、`sync-secret-files` 的輸出不含 canary 的片段；每個設定類別都有 `hide_input_in_errors`；`errors()`／`json()` 只在允許的模組 | unit：core/settings_errors、test_cli、migration_env、db_roles_cli；api：app_factory |
 | CSEC-11 | `SECRET_FILES` 的對照表和 compose 完全一致 | unit：compose_secrets |
 | CSEC-12 | Live 的 alembic 以 `-x dotenv=off` 不讀 `.env`（含正向對照）；`generate-secret-files` 只寫新建的空目錄 | unit：migration_env、secret_files_cli、live_isolation_make |
-| CSEC-13 | 惡意環境下實際執行 Live 的 recipe（假的 docker／uv 記錄每次呼叫的環境）：每次呼叫都在白名單之內、沒有 canary、拋棄式目錄每次新建並清除、失敗時仍清理、命令列與 MAKEFLAGS 改不了白名單；經過包裝時真的 compose 只解析到拋棄式目錄，不經包裝時 canary 確實載入（正向對照）；靜態與 AST 盤點 | unit：live_isolation_make、live_env_guard、live_conftest |
+| CSEC-13 | 惡意環境下實際執行 Live 的 recipe（假的 docker／uv 記錄每次呼叫的環境）：每次呼叫都在白名單之內、沒有 canary、拋棄式目錄每次新建並清除、失敗時仍清理、命令列與 MAKEFLAGS 改不了白名單；經過包裝時真的 compose 只解析到拋棄式目錄，不經包裝時 canary 確實載入（正向對照）；靜態與 AST 盤點。G1 的修正：`make -n`／`-q`／`-t` 沒有任何呼叫（含 `bench`、`test-live-lab`）；所有權與清理（另一次 Live 正在執行、搶輸網路、其他專案的容器、清理失敗的診斷與下一次的拒絕；命令列、`MAKEFLAGS`、`make -e` 改不了專案與網路）；Live session 的判定與保留的變數（任何選取方式）；靶機映像經過白名單 | unit：live_isolation_make、live_env_guard、live_session |
 | CSEC-L1–L6 | Live（G3）：`docker inspect`、PID 1 的 environ、`/run/secrets` 的內容（正向對照）、db 經由 wrapper 的初始化、compose 的設定、遷移不退回 `.env`、有效的 log 設定 | live：secrets_live（`make test-live-secrets`） |
 | SLOG-01–03、SLOG-L1–L2 | 掃描容器的 `LogConfig: none` 與平台服務的 log 輪替（PR-1，尚未實作） | — |
 | FDE-01 | 主機全碟加密的檢查（PR-3，尚未實作） | — |

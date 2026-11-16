@@ -129,7 +129,7 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
 
 `docs/DECISIONS.md` §32。秘密不再出現在容器的設定（`docker inspect`）、`docker compose config`（不含 `--environment`）與長期執行的服務程序的環境；每個服務只掛載自己需要的那幾個。**這不是完整的容器機密隔離**：能使用 Docker API 的程序（同一個 macOS 使用者的任何程序，包括被入侵的 runner 經由 socket-proxy）仍讀得到容器的 `/run/secrets`，處理在 T23b-b5（§32.7）。
 
-- **`make secrets`**：由 `.env` 寫出 `secrets/`（目錄 0700、七個 0600 的檔案、沒有結尾換行；`.env` 不改）。內容相同就不動，不同時原子替換；終端只顯示名稱與動作。`make secrets SECRETS_CHECK=1` 只檢查，缺少或不一致就失敗。`db-up`、`test-db-up`（因此 `test`）、`up`、`runs-layout-migrate` 會先執行它；這些目標從此需要 uv 與同步好的 venv。
+- **`make secrets`**：由 `.env` 寫出 `secrets/`（目錄 0700、七個 0600 的檔案、沒有結尾換行；`.env` 不改）。內容相同就不動，不同時原子替換；終端只顯示名稱與動作。`make secrets SECRETS_CHECK=1` 只檢查，缺少或不一致就失敗。**只以 `.env` 為來源**：shell 中有同名的環境變數（不分大小寫，例如 `export DB_PASSWORD=…`）時拒絕執行，請先 `unset`；DB 的四個密碼至少 32 個字元（和 db 的初始化檢查一致，`make env` 產生的是 48 個）。`db-up`、`test-db-up`（因此 `test`）、`up`、`runs-layout-migrate` 會先執行它；這些目標從此需要 uv 與同步好的 venv。
 - **容器內**：`/run/secrets/<名稱>`（唯讀），environment 只有 `*_FILE` 的路徑（例如 `DB_PASSWORD_FILE=/run/secrets/db_password`）。設定同時有 `X` 與 `X_FILE` 時程序拒絕啟動。
 - **手動執行 `docker compose`**：compose.yaml 以 `${SECSCAN_SECRETS_DIR:?…}` 引用秘密檔的目錄，沒有設定就失敗（不會退回 `./secrets`）。在 repo 的根目錄執行時加上 `SECSCAN_SECRETS_DIR=./secrets`，例如 `SECSCAN_SECRETS_DIR=./secrets docker compose --profile app exec runner …`。
 - **換版**（密碼或金鑰）：
@@ -140,12 +140,13 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
   - compose 若詢問「Recreate volume」，一律中止。漏了第 2 或第 3 步時容器拿到舊值，認證或解密失敗（fail closed）。
   - DB 角色的密碼不會跟著改（`make secrets` 更新 db 的密碼檔時會印出警告）。
   - **第一次初始化 db 期間不要執行 `make secrets`**：OrbStack 上執行中的容器會立刻看到替換後的檔案。
+- **T23b-b2 的 PR-2 合併之後、開發環境的遷移（G5）完成之前，不要以新的設定啟動既有的開發 db**：`make db-up`、`make up`、`make runs-layout-migrate` 會以新的 entrypoint 與 `*_FILE` 重建 db，直接用在真的 `secscan_db_data`。G5 要先在合併前的設定下確認 `secrets/` 和 DB 的密碼一致、`PG_VERSION` 非空且沒有初始化未完成標記，先備份並驗證，再以安全複本驗證相容性（`docs/DECISIONS.md` §32.8）。`make test`（db-test 在 tmpfs）不受影響。
 - **db 的初始化與初始化未完成標記**：db 的 entrypoint 經過一層 wrapper（`deploy/postgres/db-entrypoint.sh`）。官方 entrypoint 要初始化資料目錄時，wrapper 先建立 `/var/lib/postgresql/secscan-initdb-incomplete`；initdb 的最後一步（`99-end.sh`）才刪除它；healthcheck 要求 readiness 而且這個標記不存在。初始化在任何一步失敗或被中斷時，db 一直是 unhealthy，`make db-up`、`make up` 的 `--wait` 會失敗（fail closed）。
   - **處置只適用於第一次初始化失敗、剛建立的空 volume**：看 `docker logs` 確認原因，修正之後刪除那個 volume 再試。既有的開發 volume（`secscan_db_data`）已經初始化過，不適用，也不要刪除；它沒有這個標記，healthcheck 照常回報 healthy。
   - 不要自行刪除標記來讓 healthcheck 通過：標記存在代表初始化沒有完成（角色或資料庫可能不存在）。
   - 以 `docker compose restart` 驗證健康狀態時，以重啟之後新的 healthcheck 探測為準，不要沿用重啟之前的狀態。
 - **不要以 debug 等級的 log 啟動 db、db-test**：第一次初始化時（db 的新 volume；db-test 每次啟動），暫時的伺服器若以 `log_min_messages=debug3` 以下（或 `-d 3` 以上）執行，會把自己的環境寫進 log，**其中包含 superuser 的密碼**（F1；只實測了 debug5，debug1–debug5 一律不要用）。repo 的設定以測試確保不會觸發；手動加上的 `-c`、`-d`、`POSTGRES_INITDB_ARGS` 或設定檔擋不到。
-- **PostgreSQL 的主版本升級**（不在 b2 的範圍；O1）：新的資料目錄沒有 `PG_VERSION`，wrapper 會建立初始化未完成標記。PG 18 的官方 entrypoint 會因舊版的資料拒絕啟動，標記留著；但**不要假定新版本一定會安全地拒絕啟動**：新版本的 entrypoint 若沒有偵測到舊的資料，可能建立一個新的、空的叢集並回報 healthy。升級之前先確認新映像的 PGDATA、目錄結構、官方 entrypoint 的行為與升級程序（例如 `pg_upgrade` 或 dump／restore），確認舊的資料不會被當成空目錄；標記由升級程序處理，不要直接刪除。
+- **PostgreSQL 的主版本升級**（不在 b2 的範圍；O1）：新的資料目錄沒有 `PG_VERSION`，wrapper 會建立初始化未完成標記。PG 18 的官方 entrypoint 會因舊版的資料拒絕啟動，標記留著；但**不要假定新版本一定會安全地拒絕啟動**：新版本的 entrypoint 若沒有偵測到舊的資料，可能建立一個新的、空的叢集並回報 healthy。升級之前先確認新映像的 PGDATA、目錄結構、官方 entrypoint 的行為與升級程序（例如 `pg_upgrade` 或 dump／restore），確認舊的資料不會被當成空目錄；標記由升級程序處理，不要直接刪除。被拒絕的那次啟動已經建立了標記：升級完成之後 db 會一直 unhealthy，直到升級程序確認資料正確之後處理標記。
 - **Live 不使用開發的秘密**：`test-live-*` 每次在拋棄式目錄產生新的秘密，不讀 `.env` 與 `secrets/`，以白名單的環境執行所有 docker 與 compose 呼叫；結束時刪除拋棄式目錄，並比對開發環境的前後快照。
 - **主機全碟加密**：`.env`、`secrets/` 與 DB 的備份都是主機上的明文；部署要求與檢查見 T23b-b2 的 PR-3（尚未實作）。
 
@@ -315,7 +316,7 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **掃描容器**：每個 run 一個 `secscan-run-<run_id>`：核准的映像（digest 鎖定，runner 不 pull，`make images` 事先 pull）、uid 10001、唯讀、只接 scan_net、只掛該 run 的 volume subpath；有 auth profile 時 secret 是 `/scan/secret/target-auth`（0400，容器刪除後就刪除）。
 - **fake 的腳本**：`RUNNER_FAKE_OUTCOME=fail`、`RUNNER_FAKE_HOLD_SECONDS=30 make up`（容器停留 30 秒，可以試取消：5–6 秒內刪除容器）。
 - **in-process 的 fake-runner** 仍可在宿主使用（不需要 Docker）；它和容器版的 runner 都會認領 fake，擇一執行。
-- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-runner` 在獨立的 compose 專案（自己的 DB、網路與 volume，API 綁 127.0.0.1:8765）中建立、測試、一律拆除；T23b-b2 起每次使用拋棄式的秘密，不讀開發的 `.env` 與 `secrets/`（`ENABLE_LIVE_LAB_TESTS=1 make test-live-secrets` 驗證 compose secrets 與這個隔離）；T11 起在 live 自己的 lab 網路（10.89.10.0/24）上啟動接收端，不啟動 Juice Shop、VAmPI。需要 OrbStack。
+- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-runner` 在獨立的 compose 專案（自己的 DB、網路與 volume，API 綁 127.0.0.1:8765）中建立、測試、一律拆除；T23b-b2 起每次使用拋棄式的秘密，不使用開發的 `.env` 與 `secrets/` 中的秘密（只在前後的快照中計算它們的 sha256 確認沒有改變，不輸出內容；`ENABLE_LIVE_LAB_TESTS=1 make test-live-secrets` 驗證 compose secrets 與這個隔離）。`make -n`／`-q`／`-t` 這些 Live 目標不會執行任何一步。同一時間只能有一次 Live：網路以這次的識別標記建立，已存在就停止；清理只處理這次建立的資源，失敗時在 `$TMPDIR` 留下 `secscan-live-cleanup-failed.*` 診斷檔，確認並處理殘留之後刪除它，下一次才會執行；T11 起在 live 自己的 lab 網路（10.89.10.0/24）上啟動接收端，不啟動 Juice Shop、VAmPI。需要 OrbStack。
 - `secscan_scan_net` 與 T03 spike 的網路同名：執行 spike 前先 `make down`，並刪除這個網路。
 - 完整規則見 `docs/API_CONTRACT.md` §18，設計理由見 `docs/DECISIONS.md` §14。
 
