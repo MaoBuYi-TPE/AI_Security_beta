@@ -93,6 +93,11 @@ override LIVE_ALLOWED_NAMES = PATH HOME TMPDIR LC_ALL DOCKER_HOST DOCKER_CONTEXT
 	SECSCAN_IMAGE_TAG COMPOSE_DISABLE_ENV_FILE SECSCAN_SECRETS_DIR SECSCAN_LIVE_SECRETS_DIR \
 	PGPASSFILE SECSCAN_LIVE_PROJECT ENABLE_LIVE_LAB_TESTS
 # Live 的 alembic 只以 *_FILE 取得拋棄式的秘密（-x dotenv=off：不讀 .env）。
+# test-live-lab 的靶機映像（compose.lab.yaml 以 digest 鎖定）：只 pull、不建立資源；經過白名單。
+LIVE_WITH_LAB_IMAGES :=
+override LIVE_LAB_FILE := compose.lab.yaml
+override LIVE_LAB_PULL = $(LIVE_PROC_ENV) docker compose -p $(LIVE_PROJECT) -f $(LIVE_LAB_FILE) \
+	--profile juice-shop --profile vampi pull --quiet
 override LIVE_SECRET_FILES = DB_PASSWORD_FILE="$$secrets_dir/db_password" \
 	DB_OWNER_PASSWORD_FILE="$$secrets_dir/db_owner_password" \
 	SECRET_ENCRYPTION_KEYS_FILE="$$secrets_dir/secret_encryption_keys" \
@@ -381,6 +386,7 @@ test-live-runner:
 		$(LIVE_PROC_ENV) docker pull --quiet "$$image" >/dev/null || exit 1; \
 	done; \
 	$(LIVE_COMPOSE) pull --quiet socket-proxy || exit 1; \
+	$(if $(LIVE_WITH_LAB_IMAGES),$(LIVE_LAB_PULL) || exit 1;) \
 	$(LIVE_COMPOSE) build api guard || exit 1; \
 	app_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan:dev) || exit 1; \
 	guard_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan-guard:dev) \
@@ -428,10 +434,13 @@ record-fixtures: test-live-runner
 # T16（docs/DECISIONS.md §20）：同一個 live 流程，以真的 ZAP 掃描 Juice Shop 與 VAmPI（弱點版與安全版），
 # 加上 token 失效、工具超時與取消。靶機由測試在 live 自己的 lab 網路上逐一啟動（一次一個：記憶體）。
 # 量測印在輸出（-s），輸出錄製到 recordings/lab/<情境>/（gitignore）。約 27 分鐘。
+# 靶機映像在 Live 的 recipe 內、經過白名單 pull（LIVE_WITH_LAB_IMAGES），不依賴 lab-images：lab-images
+# 以 make 的完整環境執行，compose 會讀專案目錄的 .env（G1 審查：Live 路徑上的呼叫一律經過白名單）。
 test-live-lab: LIVE_TESTS := tests/live/test_lab_zap_live.py
 test-live-lab: LIVE_PYTEST_ENV := SECSCAN_RECORD_DIR=$(CURDIR)/recordings/lab
 test-live-lab: LIVE_PYTEST_ARGS := -s
-test-live-lab: lab-images test-live-runner
+test-live-lab: LIVE_WITH_LAB_IMAGES := 1
+test-live-lab: test-live-runner
 
 # T30（docs/SECURITY_AND_TESTING.md §5）：以真的 ZAP 掃描自製的 fixture app（弱點版與修補版），
 # 量測 ground truth。fixture app 跑在 guard 映像的 python（stdlib），由測試在 live 自己的 lab 網路上

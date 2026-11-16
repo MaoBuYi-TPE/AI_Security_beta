@@ -719,7 +719,9 @@ def _files(root: Path) -> set[str]:
 
 
 @pytest.mark.parametrize("flag", DRY_RUN_FLAGS)
-@pytest.mark.parametrize("target", ["test-live-runner", "test-live-secrets", "bench"])
+@pytest.mark.parametrize(
+    "target", ["test-live-runner", "test-live-secrets", "bench", "test-live-lab"]
+)
 def test_dry_run_flags_execute_nothing(hostile: Hostile, flag: str, target: str) -> None:
     """安全審查 H1（HIGH-A）：make -n／-q／-t 不得執行 Live 的任何一步（以為是預覽，實際卻跑了
     Live）。
@@ -1072,3 +1074,46 @@ def test_the_variables_live_needs_survive_the_root_isolation() -> None:
     assert needed & deleted >= LIVE_PRESERVED_ENV
     # 秘密的名稱不得保留（授權的 live 測試也一樣不帶秘密）。
     assert not LIVE_PRESERVED_ENV & SECRET_NAMES
+
+
+# --- test-live-lab 的靶機映像（G1 審查：lab-images 由 Live 路徑呼叫，必須經過白名單）-------------
+
+
+def test_the_lab_images_are_pulled_through_the_whitelist(hostile: Hostile) -> None:
+    """test-live-lab 不依賴 lab-images（以 make 的完整環境、讀專案目錄 .env 的 compose 執行）；
+    靶機映像在 Live 的 recipe 內、經過白名單 pull。"""
+    assert hostile.make(target="test-live-lab").returncode == 0
+
+    pulls = [
+        call
+        for call in hostile.calls()
+        if call["tool"] == "docker"
+        and "compose.lab.yaml" in call["argv"]
+        and "pull" in call["argv"]
+    ]
+    [pull] = pulls
+    environment = pull["env"]
+    unexpected = set(environment) - ALLOWED - PLUMBING
+    leaked = hostile.leaked(json.dumps(pull))
+    assert pull["argv"][:5] == ["compose", "-p", "secscan-live", "-f", "compose.lab.yaml"]
+    assert environment.get("COMPOSE_DISABLE_ENV_FILE") == "1"
+    assert unexpected == set(), sorted(unexpected)
+    assert leaked == set(), sorted(leaked)
+
+
+def test_other_live_targets_do_not_pull_the_lab_images(hostile: Hostile) -> None:
+    assert hostile.make().returncode == 0
+
+    assert not [argv for argv in hostile.docker_argvs() if "compose.lab.yaml" in argv]
+
+
+def test_the_lab_target_has_no_unwrapped_prerequisite() -> None:
+    line = re.search(r"^test-live-lab: (?!LIVE_)(.*)$", MAKEFILE, flags=re.MULTILINE)
+    assert line is not None
+
+    assert line.group(1).split() == ["test-live-runner"]
+    assert _definition("LIVE_LAB_PULL").startswith(
+        "$(LIVE_PROC_ENV) docker compose -p $(LIVE_PROJECT)"
+    )
+    assert re.search(r"^override LIVE_LAB_PULL = ", MAKEFILE, flags=re.MULTILINE)
+    assert re.search(r"^override LIVE_LAB_FILE := compose.lab.yaml$", MAKEFILE, flags=re.MULTILINE)
