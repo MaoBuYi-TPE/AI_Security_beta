@@ -28,8 +28,10 @@ from typing import Any
 import pytest
 
 from secscan.cli.secret_files import SECRET_FILES
+from tests import conftest as root_conftest
 from tests.isolation import BLOCKED_DOCKER_HOST
 from tests.live import env_guard
+from tests.live_session import LIVE_PRESERVED_ENV
 
 ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE_PATH = ROOT / "Makefile"
@@ -974,6 +976,7 @@ def test_the_live_identity_is_fixed_and_matches_the_guard() -> None:
 LIVE_SOURCES = [
     *sorted((ROOT / "tests" / "live").glob("*.py")),
     ROOT / "tests" / "isolation.py",
+    ROOT / "tests" / "live_session.py",
     *sorted((ROOT / "benchmarks").rglob("*.py")),
 ]
 # 以參數間接讀取的函式：第一個參數是變數名稱。
@@ -1034,3 +1037,23 @@ def test_the_whitelist_covers_every_variable_live_reads() -> None:
 
     assert read >= {"SECSCAN_RECORD_DIR", "SECSCAN_LIVE_PROJECT", "BENCH_KEY_FILE", "BENCH_SPEC"}
     assert read <= ALLOWED, sorted(read - ALLOWED)
+
+
+def test_the_variables_live_needs_survive_the_root_isolation() -> None:
+    """HIGH-1：根 conftest 的 _isolate_app_settings 對每個測試刪除的變數中，Live 會讀的（AST 盤點）
+    與 compose.yaml 必填的（${X:?…}），都必須在授權的 live 測試保留；保留清單也不能有用不到的
+    名稱。"""
+    deleted = {
+        *root_conftest.DB_ENV_KEYS,
+        *root_conftest.SECRET_ENV_KEYS,
+        *root_conftest.RETENTION_ENV_KEYS,
+        *root_conftest.RUNNER_ENV_KEYS,
+    }
+    required = set(re.findall(r"\$\{(\w+):\?", (ROOT / "compose.yaml").read_text(encoding="utf-8")))
+    needed = set().union(*(_environment_reads(path) for path in LIVE_SOURCES)) | required
+
+    assert required == {"SECSCAN_SECRETS_DIR"}
+    assert (needed & deleted) - LIVE_PRESERVED_ENV == set()
+    assert needed & deleted >= LIVE_PRESERVED_ENV
+    # 秘密的名稱不得保留（授權的 live 測試也一樣不帶秘密）。
+    assert not LIVE_PRESERVED_ENV & SECRET_NAMES

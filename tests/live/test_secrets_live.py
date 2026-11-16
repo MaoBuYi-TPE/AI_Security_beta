@@ -12,7 +12,7 @@
 import json
 import os
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -221,9 +221,13 @@ def test_both_roles_log_in_with_scram_using_the_mounted_files() -> None:
 # --- CSEC-L4、L5：compose 的設定與 Live 的隔離 ----------------------------------------
 
 
-def _compose(*args: str) -> subprocess.CompletedProcess[str]:
-    # 固定的 docker compose 與 repo 的 compose.yaml；環境是 recipe 的白名單環境。
-    return subprocess.run(  # noqa: S603
+def _compose(environment: Mapping[str, str], *args: str) -> str:
+    """成功的路徑：結束碼必須是 0、輸出不是空的（G1 審查 HIGH-1）。失敗時只回報結束碼，不印出輸出。
+
+    環境是 recipe 的白名單環境（live_environment），不是每個測試被隔離過的 os.environ。
+    """
+    # 固定的 docker compose 與 repo 的 compose.yaml。
+    result = subprocess.run(  # noqa: S603
         [  # noqa: S607
             "docker",
             "compose",
@@ -241,29 +245,48 @@ def _compose(*args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
         timeout=60,
-        env=dict(os.environ),
+        env=dict(environment),
     )
+    succeeded = result.returncode == 0
+    assert succeeded, f"docker compose config {' '.join(args)} 的結束碼是 {result.returncode}"
+    has_output = bool(result.stdout.strip())
+    assert has_output, f"docker compose config {' '.join(args)} 沒有輸出"
+    return result.stdout
 
 
-def test_the_compose_configuration_holds_no_secret() -> None:
-    result = _compose()
-    resolved = _compose("--format", "json")
+def test_the_compose_configuration_holds_no_secret(live_environment: Mapping[str, str]) -> None:
+    canaries = _canaries()
+    text = _compose(live_environment)
+    resolved = json.loads(_compose(live_environment, "--format", "json"))
+    directory = os.path.normpath(live_environment["SECSCAN_LIVE_SECRETS_DIR"])
 
-    assert result.returncode == 0
-    assert _found(result.stdout, _canaries()) == set()
-    files = {entry["file"] for entry in json.loads(resolved.stdout)["secrets"].values()}
-    directory = os.path.normpath(os.environ["SECSCAN_LIVE_SECRETS_DIR"])
-    assert {os.path.dirname(os.path.normpath(path)) for path in files} == {directory}
+    leaked = _found(text, canaries) | _found(json.dumps(resolved), canaries)
+    assert leaked == set()
+    files = {name: entry["file"] for name, entry in resolved["secrets"].items()}
+    referenced = {
+        str(entry["source"] if isinstance(entry, dict) else entry)
+        for service in resolved["services"].values()
+        for entry in service.get("secrets", [])
+    }
+    # 正向對照：解析出來的 secret 涵蓋服務引用的每一個（db_password 一定在），而且都在拋棄式目錄
+    # 之下。
+    assert "db_password" in referenced
+    assert referenced <= set(files)
+    assert {os.path.dirname(os.path.normpath(path)) for path in files.values()} == {directory}
 
 
-def test_the_compose_environment_has_no_secret_names() -> None:
-    listing = _compose("--environment").stdout
+def test_the_compose_environment_has_no_secret_names(live_environment: Mapping[str, str]) -> None:
+    listing = _compose(live_environment, "--environment")
     names = {line.split("=", 1)[0] for line in listing.splitlines() if "=" in line}
     secret_names = {item.env_name for item in SECRET_FILES}
 
     assert not names & secret_names
     assert "COMPOSE_ENV_FILES" not in names
-    assert os.environ["SECSCAN_LIVE_PROJECT"] == "secscan-live"
+    # 正向對照：清單確實是 recipe 的白名單環境。
+    expected = {"SECSCAN_SECRETS_DIR", "COMPOSE_DISABLE_ENV_FILE", "SECSCAN_LIVE_PROJECT"}
+    assert expected <= names, sorted(expected - names)
+    project = live_environment["SECSCAN_LIVE_PROJECT"]
+    assert project == "secscan-live"
 
 
 @pytest.mark.parametrize("service", SERVICES)
@@ -274,22 +297,23 @@ def test_no_container_records_an_env_file(service: str) -> None:
     assert labels.get("com.docker.compose.project.environment_file", "") == ""
 
 
-@pytest.mark.parametrize("missing", ["DB_PASSWORD_FILE", "DB_OWNER_PASSWORD_FILE"])
-def test_the_migration_does_not_fall_back_to_the_env_file(missing: str) -> None:
-    """修正 17：少給一個 *_FILE 時失敗，不會從開發的 .env 補上（-x dotenv=off）。"""
-    directory = os.environ["SECSCAN_LIVE_SECRETS_DIR"]
+def _alembic(
+    environment: Mapping[str, str], *, missing: str | None
+) -> subprocess.CompletedProcess[str]:
+    """Live 的 alembic（-x dotenv=off、秘密只以 *_FILE 傳入）；missing 給定時少給那一個。"""
+    directory = environment["SECSCAN_LIVE_SECRETS_DIR"]
     child = {
-        **os.environ,
-        "DB_PORT": "55434",
+        **environment,
         "DB_PASSWORD_FILE": f"{directory}/db_password",
         "DB_OWNER_PASSWORD_FILE": f"{directory}/db_owner_password",
         "SECRET_ENCRYPTION_KEYS_FILE": f"{directory}/secret_encryption_keys",
         "EVIDENCE_ENCRYPTION_KEYS_FILE": f"{directory}/evidence_encryption_keys",
         "CONTENT_ENCRYPTION_KEYS_FILE": f"{directory}/content_encryption_keys",
     }
-    del child[missing]
-    # 固定的 alembic 指令；只確認結束碼，輸出不印出。
-    result = subprocess.run(
+    if missing is not None:
+        del child[missing]
+    # 固定的 alembic 指令；只確認結束碼與錯誤訊息中的設定名稱，輸出不印出。
+    return subprocess.run(
         ["uv", "run", "--locked", "alembic", "-x", "dotenv=off", "current"],  # noqa: S607
         cwd=ROOT,
         capture_output=True,
@@ -299,8 +323,38 @@ def test_the_migration_does_not_fall_back_to_the_env_file(missing: str) -> None:
         env=child,
     )
 
-    assert result.returncode != 0
-    assert _found(result.stdout + result.stderr, _canaries()) == set()
+
+def test_the_migration_reads_the_disposable_files_positive_control(
+    live_environment: Mapping[str, str],
+) -> None:
+    """正向對照：*_FILE 都給的時候成功（下面的負向測試因此不是因為其他原因失敗）。"""
+    result = _alembic(live_environment, missing=None)
+
+    succeeded = result.returncode == 0
+    assert succeeded, f"alembic current 的結束碼是 {result.returncode}"
+    leaked = _found(result.stdout + result.stderr, _canaries())
+    assert leaked == set()
+
+
+@pytest.mark.parametrize(
+    ("missing", "setting"),
+    [("DB_PASSWORD_FILE", "DB_PASSWORD"), ("DB_OWNER_PASSWORD_FILE", "DB_OWNER_PASSWORD")],
+)
+def test_the_migration_does_not_fall_back_to_the_env_file(
+    live_environment: Mapping[str, str], missing: str, setting: str
+) -> None:
+    """修正 17：少給一個 *_FILE 時失敗，不會從開發的 .env 補上（-x dotenv=off）。
+
+    明確驗證失敗的原因：錯誤訊息指出缺少的設定（不是連線或其他錯誤造成的失敗）。
+    """
+    result = _alembic(live_environment, missing=missing)
+
+    failed = result.returncode != 0
+    assert failed, f"少了 {missing} 卻成功"
+    names_the_setting = setting in result.stderr
+    assert names_the_setting, f"錯誤訊息沒有指出 {setting}"
+    leaked = _found(result.stdout + result.stderr, _canaries())
+    assert leaked == set()
 
 
 # --- CSEC-L6：有效的 log 設定（D20；F1）----------------------------------------

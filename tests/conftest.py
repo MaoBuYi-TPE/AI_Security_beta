@@ -13,10 +13,12 @@ from secscan.main import create_app
 from secscan.migrations.credentials import MigrationCredentials
 from secscan.runner.config import RunnerSettings
 from secscan.worker.config import WorkerSettings
+from tests.live_session import LIVE_PRESERVED_ENV, authorized_live_item
 from tests.secret_support import content_keys, encryption_keys
 
-# tests.isolation：測試程序連不到 Docker daemon（docs/DECISIONS.md §14.9）。
-pytest_plugins = ("pytester", "tests.isolation")
+# tests.isolation：測試程序連不到 Docker daemon（docs/DECISIONS.md §14.9）。tests.live_session：Live
+# session 的前提（R1、全部 skip 不算通過）與授權的 live 測試保留的變數（G1 審查 HIGH-1、M3）。
+pytest_plugins = ("pytester", "tests.isolation", "tests.live_session")
 
 type ClientFactory = Callable[[AppEnv], TestClient]
 
@@ -92,13 +94,18 @@ class DatabaseAccessBlockedError(RuntimeError):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_app_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Settings、RunnerSettings、WorkerSettings、MigrationCredentials、AdminCredentials 與
     SecretSources（sync-secret-files）不讀
     .env（pytest 在 repo 根目錄執行，那裡有真實的本機密碼與金鑰），也不讀 DB_*、RUNNER_*、金鑰與
     保留期限等環境變數。
 
     要測 .env 讀取行為的測試，自行把 env_file 設回來。
+
+    例外（G1 審查 HIGH-1）：授權的 Live session（tests/live_session.py：開關是 1、選中 live 的測試、
+    R1 的檢查通過）中有 live 標記的測試，保留 LIVE_PRESERVED_ENV（拋棄式目錄、compose 的秘密目錄、
+    bench 的金鑰檔）。其他測試一律刪除；tests/unit/test_live_isolation_make.py 以 AST 交叉核對
+    Live 讀的變數。
     """
     for settings_class in (
         Settings,
@@ -109,8 +116,10 @@ def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         SecretSources,
     ):
         monkeypatch.setitem(settings_class.model_config, "env_file", None)
+    preserved = LIVE_PRESERVED_ENV if authorized_live_item(request.node) else frozenset()
     for key in (*DB_ENV_KEYS, *SECRET_ENV_KEYS, *RETENTION_ENV_KEYS, *RUNNER_ENV_KEYS):
-        monkeypatch.delenv(key, raising=False)
+        if key not in preserved:
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture(autouse=True)
