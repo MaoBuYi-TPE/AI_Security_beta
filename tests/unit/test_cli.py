@@ -57,8 +57,11 @@ def test_invalid_settings_are_reported_without_their_values(
     assert exit_code == EXIT_FAILURE
     assert out == ""
     assert "db_port" in err
-    assert CANARY_PASSWORD not in err
-    assert "not-a-port" not in err
+    # 先算成布林值：assert 改寫失敗時不印出 err（含 canary 時就是洩漏的內容；第二輪 LOW-4）。
+    leaked = CANARY_PASSWORD in err
+    echoed = "not-a-port" in err
+    assert not leaked
+    assert not echoed
 
 
 def test_conflicting_secret_settings_are_reported_without_their_values(
@@ -183,7 +186,8 @@ def test_rotate_reports_invalid_keys_without_their_values(
     assert exit_code == EXIT_FAILURE
     assert out == ""
     assert "SECRET_ENCRYPTION_KEYS" in err
-    assert CANARY_PASSWORD not in err
+    leaked = CANARY_PASSWORD in err
+    assert not leaked
 
 
 # --- fake-runner（docs/DECISIONS.md §13.7）--------------------------------------------------

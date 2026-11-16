@@ -27,6 +27,11 @@ from secscan.migrations.credentials import (
     MissingOwnerPasswordError,
 )
 from tests.conftest import DatabaseAccessBlockedError
+from tests.live.test_secrets_live import (
+    CONNECTION_ERROR,
+    MISSING_APP_PASSWORD,
+    MISSING_OWNER_PASSWORD,
+)
 
 FRAGMENT_LENGTH = 8
 
@@ -217,3 +222,40 @@ def test_the_connection_error_names_both_sources(
     message = str(caught.value)
     assert "DB_OWNER_PASSWORD_FILE" in message
     assert "DB_OWNER_PASSWORD（.env）" in message
+
+
+def test_the_live_negative_test_compares_the_actual_reasons(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """tests/live/test_secrets_live.py 的負向測試比對的文字（第二輪程式碼審查 LOW-3）。
+
+    兩種缺少的設定各自產生那段固定訊息；連線失敗的訊息不含「缺少 DB_OWNER_PASSWORD」，例外名稱是
+    CONNECTION_ERROR：三種原因分辨得出來（Live 的比對不會空轉）。
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("APP_ENV", "prod")
+    with pytest.raises(SettingsError) as app:
+        _upgrade_with("dotenv=off")
+    monkeypatch.setenv("APP_ENV", "test")
+    with pytest.raises(MissingOwnerPasswordError) as owner:
+        _upgrade_with("dotenv=off")
+    secret = tmp_path / "db_owner_password"
+    secret.write_text(secrets.token_hex(24), encoding="ascii")
+    monkeypatch.setenv("DB_OWNER_PASSWORD_FILE", str(secret))
+
+    def refuse(_engine: object) -> None:
+        raise OperationalError("connect", None, ConnectionRefusedError())
+
+    monkeypatch.setattr(Engine, "connect", refuse)
+    with pytest.raises(MigrationConnectionError) as connection:
+        _upgrade_with("dotenv=off")
+
+    rendered = {
+        name: "".join(traceback.format_exception(caught.value))
+        for name, caught in (("app", app), ("owner", owner), ("connection", connection))
+    }
+    assert MISSING_APP_PASSWORD in rendered["app"]
+    assert MISSING_OWNER_PASSWORD in rendered["owner"]
+    assert CONNECTION_ERROR in rendered["connection"]
+    assert MISSING_OWNER_PASSWORD not in rendered["connection"]
+    assert CONNECTION_ERROR not in rendered["owner"] + rendered["app"]

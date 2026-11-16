@@ -40,6 +40,10 @@ PROGRAMS = {
     "worker": "secscan-admin",
     "db": "postgres",
 }
+# Live 的 alembic 缺少設定時的固定訊息（APP_ENV 沒有設定，是 prod），以及連線失敗的例外名稱。
+MISSING_APP_PASSWORD = "prod 環境必須設定 DB_PASSWORD"
+MISSING_OWNER_PASSWORD = "缺少 DB_OWNER_PASSWORD"
+CONNECTION_ERROR = "MigrationConnectionError"
 # PostgreSQL 的伺服器 log 寫到 stderr：讀得到它，才證明 stderr 也被檢查了（程式碼審查 MEDIUM-4）。
 SERVER_READY = "database system is ready to accept connections"
 _SUPERUSER_PSQL = (
@@ -391,22 +395,29 @@ def test_the_migration_reads_the_disposable_files_positive_control(
 
 
 @pytest.mark.parametrize(
-    ("missing", "setting"),
-    [("DB_PASSWORD_FILE", "DB_PASSWORD"), ("DB_OWNER_PASSWORD_FILE", "DB_OWNER_PASSWORD")],
+    ("missing", "reason"),
+    [
+        ("DB_PASSWORD_FILE", MISSING_APP_PASSWORD),
+        ("DB_OWNER_PASSWORD_FILE", MISSING_OWNER_PASSWORD),
+    ],
 )
 def test_the_migration_does_not_fall_back_to_the_env_file(
-    live_environment: Mapping[str, str], missing: str, setting: str
+    live_environment: Mapping[str, str], missing: str, reason: str
 ) -> None:
     """修正 17：少給一個 *_FILE 時失敗，不會從開發的 .env 補上（-x dotenv=off）。
 
-    明確驗證失敗的原因：錯誤訊息指出缺少的設定（不是連線或其他錯誤造成的失敗）。
+    明確驗證失敗的原因（第二輪程式碼審查 LOW-3）：錯誤是「缺少那一個設定」的固定訊息，不是連線
+    失敗（MigrationConnectionError 的訊息也含 DB_OWNER_PASSWORD，只比對名稱分辨不出來）。訊息的
+    文字由 tests/unit/test_migration_env.py 對照實際的例外，避免這裡的比對空轉。
     """
     result = _alembic(live_environment, missing=missing)
 
     failed = result.returncode != 0
     assert failed, f"少了 {missing} 卻成功"
-    names_the_setting = setting in result.stderr
-    assert names_the_setting, f"錯誤訊息沒有指出 {setting}"
+    names_the_reason = reason in result.stderr
+    assert names_the_reason, f"錯誤訊息不是「{reason}」"
+    connection_error = CONNECTION_ERROR in result.stderr
+    assert not connection_error, "失敗的原因是連線，不是缺少設定"
     leaked = _found(result.stdout + result.stderr, _canaries())
     assert leaked == set()
 
