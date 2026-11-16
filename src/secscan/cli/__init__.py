@@ -123,10 +123,10 @@ class KeyOutput:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    # runs-init：沒有任何環境變數與金鑰（docs/DECISIONS.md §30.13），不載入 Settings。
-    initialized = modules.init_layout(args, _report)
-    if initialized is not None:
-        return initialized
+    # runs-init 與 compose secrets 的秘密檔：不需要 DB 與金鑰設定，不載入 Settings（§30.13、§32）。
+    handled_early = modules.without_settings(args, _report)
+    if handled_early is not None:
+        return handled_early
     try:
         settings = Settings()
     except ValidationError as exc:

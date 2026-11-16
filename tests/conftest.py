@@ -7,6 +7,7 @@ from hypothesis import settings as hypothesis_settings
 from pydantic import SecretStr
 
 from secscan.cli.db_roles import AdminCredentials
+from secscan.cli.secret_files import SecretSources
 from secscan.core.config import AppEnv, Settings
 from secscan.main import create_app
 from secscan.migrations.credentials import MigrationCredentials
@@ -44,6 +45,10 @@ DB_ENV_KEYS = (
     # compose secrets 的檔案路徑（T23b-b2）：shell 中殘留的值會讓 X 與 X_FILE 同時設定。
     "DB_PASSWORD_FILE",
     "DB_OWNER_PASSWORD_FILE",
+    # sync-secret-files 讀的另一個秘密，以及 compose 與 Live 的秘密目錄（T23b-b2）。
+    "TEST_DB_PASSWORD",
+    "SECSCAN_SECRETS_DIR",
+    "SECSCAN_LIVE_SECRETS_DIR",
 )
 # 三組加密金鑰也一樣不沿用（shell 或 .env 裡可能是真的金鑰）；需要的 fixture 帶測試用的金鑰。
 SECRET_ENV_KEYS = (
@@ -88,7 +93,8 @@ class DatabaseAccessBlockedError(RuntimeError):
 
 @pytest.fixture(autouse=True)
 def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Settings、RunnerSettings、WorkerSettings、MigrationCredentials 與 AdminCredentials 不讀
+    """Settings、RunnerSettings、WorkerSettings、MigrationCredentials、AdminCredentials 與
+    SecretSources（sync-secret-files）不讀
     .env（pytest 在 repo 根目錄執行，那裡有真實的本機密碼與金鑰），也不讀 DB_*、RUNNER_*、金鑰與
     保留期限等環境變數。
 
@@ -100,6 +106,7 @@ def _isolate_app_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         WorkerSettings,
         MigrationCredentials,
         AdminCredentials,
+        SecretSources,
     ):
         monkeypatch.setitem(settings_class.model_config, "env_file", None)
     for key in (*DB_ENV_KEYS, *SECRET_ENV_KEYS, *RETENTION_ENV_KEYS, *RUNNER_ENV_KEYS):

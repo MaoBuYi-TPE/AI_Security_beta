@@ -73,7 +73,10 @@ def test_the_api_and_the_worker_never_read_the_evidence_keys() -> None:
         if "evidence_encryption_keys" in path.read_text(encoding="utf-8")
     }
     # migrations/keys.py：只有 make migrate（主機上）檢查三組金鑰沒有共用；api 不 import 它。
+    # cli/secret_files.py：sync-secret-files 只把 .env 的值搬到 compose secrets 的檔案
+    # （以 parse_keys 檢查格式），不建立 cipher、不加解密；generate-secret-files 只產生新的值。
     assert readers == {
+        "cli/secret_files.py",
         "core/config.py",
         "cli/services.py",
         "cli/evidence.py",

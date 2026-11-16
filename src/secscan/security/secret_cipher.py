@@ -100,6 +100,15 @@ class SecretCipher:
         return _unwrap(plaintext, context)
 
 
+def new_key() -> str:
+    """一把新的 Fernet 金鑰（url-safe base64，44 個字元；和 make env 產生的格式相同）。
+
+    只有 generate-secret-files（Live 的拋棄式秘密，T23b-b2）使用：cryptography 只在這個模組與
+    blob_cipher 中使用（import-linter）。
+    """
+    return Fernet.generate_key().decode("ascii")
+
+
 def parse_keys(setting: str, setting_name: str = SETTING_NAME) -> tuple[Fernet, ...]:
     """一組金鑰的設定內容；不合規則時拋出 InvalidEncryptionKeysError（只說是哪一組的第幾個）。"""
     return tuple(Fernet(base64.urlsafe_b64encode(raw)) for raw in _raw_keys(setting, setting_name))
