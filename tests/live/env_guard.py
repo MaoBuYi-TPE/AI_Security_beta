@@ -94,9 +94,10 @@ NETWORK_FORMAT = (
 NETWORK_LABEL_FORMAT = f'{{{{index .Labels "{RUN_LABEL}"}}}}'
 PROJECT_LABEL = "com.docker.compose.project"
 PROJECT_FILTER = f"label={PROJECT_LABEL}={LIVE_PROJECT}"
-# 清理的候選容器：完整的 ID、compose 專案、接的網路（只取這三項，不取 Env）。
+# 清理的候選容器：完整的 ID、compose 專案（JSON：沒有標記是 ""，和字面的 "<no value>" 分得開）、
+# 接的網路（只取這三項，不取 Env）。
 CONTAINER_FORMAT = (
-    f'{{{{.Id}}}}|{{{{index .Config.Labels "{PROJECT_LABEL}"}}}}|'
+    f'{{{{.Id}}}}|{{{{json (index .Config.Labels "{PROJECT_LABEL}")}}}}|'
     "{{range $name, $value := .NetworkSettings.Networks}}{{$name}} {{end}}"
 )
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
@@ -309,36 +310,43 @@ def cleanup(
     except GuardError as exc:
         report.failures.append(f"{exc}：沒有清理任何東西")
         return report
-    if _same_engine(report, engine_id):
-        _remove_docker_resources(report, owner, claimed=claimed)
+    if _same_engine(report, engine_id, "清理開始時"):
+        _remove_docker_resources(report, owner, claimed=claimed, engine_id=engine_id)
     _remove_directory(report, Path(secrets_dir))
     if os.path.lexists(secrets_dir):
         report.failures.append("清理之後拋棄式目錄還在")
     return report
 
 
-def _same_engine(report: CleanupReport, engine_id: str) -> bool:
-    """安全 LOW-1：清理之前確認 Engine 和開始時相同；不同或無法確認時不碰任何 Docker 資源。"""
+def _same_engine(report: CleanupReport, engine_id: str, stage: str) -> bool:
+    """安全 LOW-1：確認 Engine 和開始時相同；不同或無法確認時不再碰任何 Docker 資源。"""
     try:
         engine(os.environ, report.run, engine_id)
     except GuardError as exc:
-        report.failures.append(f"{exc}（清理開始時）：沒有清理、也沒有核對任何 Docker 資源")
+        report.failures.append(f"{exc}（{stage}）：沒有清理、也沒有核對任何 Docker 資源")
         return False
     return True
 
 
-def _remove_docker_resources(report: CleanupReport, owner: str, *, claimed: bool) -> None:
+def _remove_docker_resources(
+    report: CleanupReport, owner: str, *, claimed: bool, engine_id: str
+) -> None:
     owned = _owned_networks(report, owner)
     if claimed and owned != LIVE_NETWORKS:
-        # 安全 LOW-1：網路被刪除或換掉（外部變更）；stack 可能還在、也可能是別人的：fail closed。
+        # 安全 LOW-1：網路不見、被換掉或無法確認（外部變更）；stack 可能還在、也可能是別人的：
+        # fail closed，不刪任何 Docker 資源（第二輪程式碼 LOW-1：仍屬於這次的網路上的容器也不刪）。
         report.failures.append(
-            "這次建立的網路不見了或不再屬於這次執行（外部變更）：沒有執行 compose down"
+            "這次建立的網路不見了、不再屬於這次執行或無法確認（外部變更）：沒有刪除任何 Docker 資源"
         )
-    for container in _candidates(report, owned):
-        report.step(f"刪除容器 {container[:12]}", ["rm", "-f", "-v", container])
-    if owned == LIVE_NETWORKS:
-        _compose_down(report)
-    _remove_networks(report, owned)
+    else:
+        for container in _candidates(report, owned):
+            report.step(f"刪除容器 {container[:12]}", ["rm", "-f", "-v", container])
+        # 安全 INFO-1：down 的範圍最大，執行之前再確認一次 Engine（不同就不再碰任何資源）。
+        if owned == LIVE_NETWORKS:
+            if not _same_engine(report, engine_id, "compose down 之前"):
+                return
+            _compose_down(report)
+        _remove_networks(report, owned)
     _check_residue(report, owner, claimed=claimed)
 
 
@@ -378,10 +386,11 @@ def _candidates(report: CleanupReport, owned: frozenset[str]) -> list[str]:
 
 
 def _belongs(report: CleanupReport, container: str, owned: frozenset[str]) -> bool:
-    """容器屬於這次執行：inspect 回報同一個完整 ID、專案是 Live 或沒有、只接 Live 的網路。"""
+    """容器屬於這次執行：inspect 回報同一個完整 ID、專案恰好是 Live 或沒有標記（精確比對）、接的
+    網路全部是這次執行的網路（安全審查第二輪 LOW-2 (c)、INFO-2）。"""
     facts = report.step(
         f"確認容器 {container[:12]} 的專案與網路",
-        ["inspect", "--format", CONTAINER_FORMAT, container],
+        ["inspect", "--type", "container", "--format", CONTAINER_FORMAT, container],
     )
     if facts is None:
         return False
@@ -389,15 +398,23 @@ def _belongs(report: CleanupReport, container: str, owned: frozenset[str]) -> bo
     if len(parts) != len(("id", "project", "networks")) or parts[0] != container:
         report.failures.append(f"無法確認容器 {container[:12]}：沒有刪除")
         return False
-    project, attached = parts[1].strip(), set(parts[2].split())
-    if project not in ("", NO_VALUE, LIVE_PROJECT):
+    project, attached = _label(parts[1]), set(parts[2].split())
+    if project not in ("", LIVE_PROJECT):
         report.failures.append(f"Live 網路上有其他 compose 專案的容器 {container[:12]}：沒有刪除")
         return False
-    elsewhere = {name for name in attached - owned if not name.startswith(f"{LIVE_PROJECT}_")}
-    if not attached & owned or elsewhere:
+    if not attached or not attached <= owned:
         report.failures.append(f"容器 {container[:12]} 接在不屬於這次執行的網路上：沒有刪除")
         return False
     return True
+
+
+def _label(encoded: str) -> str | None:
+    """JSON 編碼的標記值；不是 JSON 字串時是 None（當成其他專案，不刪除）。"""
+    try:
+        value = json.loads(encoded)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, str) else None
 
 
 def _remove_networks(report: CleanupReport, owned: frozenset[str]) -> None:
@@ -440,15 +457,24 @@ def _compose_down(report: CleanupReport) -> None:
 
 
 def _down_problems(config: Mapping[str, Any]) -> list[str]:
+    """down -v 的對象不是 Live 的資源（只有名稱）。形狀不是預期的 mapping 也算問題：不以例外中斷
+    清理（安全審查第二輪 LOW-1）。"""
     problems = [] if config.get("name") == LIVE_PROJECT else ["專案名稱"]
-    for key, volume in (config.get("volumes") or {}).items():
-        name = str(volume.get("name", f"{LIVE_PROJECT}_{key}"))
-        if volume.get("external") or not name.startswith(LIVE_RESOURCE_PREFIXES):
-            problems.append(f"volume {name}")
-    for key, network in (config.get("networks") or {}).items():
-        name = str(network.get("name", f"{LIVE_PROJECT}_{key}"))
-        if name not in LIVE_NETWORKS and not name.startswith(f"{LIVE_PROJECT}_"):
-            problems.append(f"網路 {name}")
+    for kind in ("volumes", "networks"):
+        entries = config.get(kind) or {}
+        if not isinstance(entries, Mapping) or not all(
+            isinstance(entry, Mapping) for entry in entries.values()
+        ):
+            problems.append(f"{kind} 的形狀不正確")
+            continue
+        for key, entry in entries.items():
+            name = str(entry.get("name", f"{LIVE_PROJECT}_{key}"))
+            if kind == "volumes":
+                live = not entry.get("external") and name.startswith(LIVE_RESOURCE_PREFIXES)
+            else:
+                live = name in LIVE_NETWORKS or name.startswith(f"{LIVE_PROJECT}_")
+            if not live:
+                problems.append(f"{'volume' if kind == 'volumes' else '網路'} {name}")
     return problems
 
 
@@ -817,8 +843,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 讀檔、建目錄等失敗：只輸出例外的類別（不輸出 traceback 與路徑以外的內容）。
         sys.stderr.write(f"env_guard {args.command}：無法存取檔案（{type(exc).__name__}）\n")
         return EXIT_FAILURE
+    except KeyboardInterrupt:
+        # 安全 INFO-4：清理被中斷（例如第二次 Ctrl-C）也留下診斷檔，下一次的 preflight 拒絕執行。
+        sys.stderr.write(f"env_guard {args.command}：被中斷\n")
+        if args.command == "cleanup":
+            _record_interruption(args.base, args.secrets_dir)
+        return EXIT_FAILURE
     sys.stdout.write(f"{output}\n")
     return EXIT_OK
+
+
+def _record_interruption(base: Path, secrets_dir: str) -> None:
+    try:
+        where = write_diagnostic(base, secrets_dir, ["清理被中斷：沒有完成，殘留由人工確認"])
+    except OSError as exc:
+        sys.stderr.write(f"無法寫入診斷檔（{type(exc).__name__}）\n")
+        return
+    sys.stderr.write(f"診斷檔：{where}\n")
 
 
 if __name__ == "__main__":

@@ -9,12 +9,15 @@ docstring 宣告關閉改寫的標記（MARKER）：失敗時只顯示原始碼�
 """
 
 import ast
-import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 # pytest 關閉 assertion rewriting 的標記（分成兩段：這個模組自己的原始碼不必含有完整的字）。
 MARKER = "PYTEST_" + "DONT_REWRITE"
+# 正向對照中刻意失敗的 assert 的期待值。
+EXPECTED_BY_THE_CONTROL = 2
 SECRET_HANDLING_MODULES = (
     "tests/live/test_secrets_live.py",
     "tests/integration/test_secret_files_startup.py",
@@ -57,7 +60,13 @@ def test_every_live_module_reading_the_disposable_secrets_is_covered() -> None:
 
 
 def test_this_module_keeps_assertion_rewriting() -> None:
-    """正向對照：這個模組自己的 assert 有被改寫（失敗時看得到運算元；它不處理秘密）。"""
-    rewritten = type(sys.modules[__name__].__loader__).__name__ == "AssertionRewritingHook"
+    """正向對照：這個模組自己的 assert 有被改寫（失敗時看得到運算元；它不處理秘密）。
+
+    以行為確認（第二輪程式碼 LOW-2）：loader 不論有沒有標記都是 AssertionRewritingHook，只有實際
+    失敗的 assert 帶著運算元的訊息，才證明改寫生效。
+    """
+    observed = 1
+    with pytest.raises(AssertionError) as caught:
+        assert observed == EXPECTED_BY_THE_CONTROL
     assert MARKER not in (__doc__ or "")
-    assert rewritten
+    assert "1 == 2" in str(caught.value)

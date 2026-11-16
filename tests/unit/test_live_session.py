@@ -13,7 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from tests import live_session
 from tests.live_session import DEFAULT_TMPDIR, LIVE_PRESERVED_ENV, live_session_problems
+
+MAKEFILE = (Path(__file__).resolve().parents[2] / "Makefile").read_text(encoding="utf-8")
 
 CONFTEST = """
 from tests.conftest import _isolate_app_settings  # noqa: F401（沿用根 conftest 的 autouse fixture）
@@ -76,7 +79,10 @@ def live(
     pytester.makeconftest(CONFTEST)
     monkeypatch.setenv("ENABLE_LIVE_LAB_TESTS", "1")
     monkeypatch.setenv("SECSCAN_LIVE_PROJECT", "secscan-live")
-    directory = str(tmp_path / "secscan-live-secrets.abc123")
+    disposable = tmp_path / "secscan-live-secrets.abc123"
+    disposable.mkdir()
+    disposable.chmod(0o700)
+    directory = str(disposable)
     monkeypatch.setenv("SECSCAN_LIVE_SECRETS_DIR", directory)
     monkeypatch.setenv("SECSCAN_SECRETS_DIR", directory)
     # recipe 的拋棄式目錄直接在 TMPDIR 之下（R1 核對；TMPDIR 以 / 結尾也一樣）。
@@ -248,7 +254,11 @@ DIRECTORY = "secscan-live-secrets.abc123"
 
 
 def _live_environment(tmp_path: Path, **changes: str | None) -> dict[str, str]:
-    directory = str(tmp_path / DIRECTORY)
+    """recipe 的環境：拋棄式目錄實際存在（mktemp -d 建立的 0700 目錄）。"""
+    disposable = tmp_path / DIRECTORY
+    disposable.mkdir(exist_ok=True)
+    disposable.chmod(0o700)
+    directory = str(disposable)
     environ = {
         "SECSCAN_LIVE_PROJECT": "secscan-live",
         "SECSCAN_LIVE_SECRETS_DIR": directory,
@@ -264,22 +274,39 @@ def _live_environment(tmp_path: Path, **changes: str | None) -> dict[str, str]:
     return environ
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {},
-        {
-            "TMPDIR": None,
-            "SECSCAN_LIVE_SECRETS_DIR": f"{DEFAULT_TMPDIR}/{DIRECTORY}",
-            "SECSCAN_SECRETS_DIR": f"{DEFAULT_TMPDIR}/{DIRECTORY}/",
-        },
-    ],
-    ids=["tmpdir-with-trailing-slash", "default-tmpdir"],
-)
-def test_the_live_session_environment_passes(
-    tmp_path: Path, changes: dict[str, str | None]
-) -> None:
+def test_the_live_session_environment_passes(tmp_path: Path) -> None:
+    """TMPDIR 以 / 結尾、SECSCAN_SECRETS_DIR 以 / 結尾也一樣（normpath 之後相同）。"""
+    changes = {"SECSCAN_SECRETS_DIR": f"{tmp_path / DIRECTORY}/"}
+
     assert live_session_problems(_live_environment(tmp_path, **changes)) == []
+
+
+def test_without_tmpdir_the_recipe_default_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TMPDIR 沒有設定時和 recipe 一樣以 /tmp 為準（以暫存目錄代替 /tmp）。"""
+    monkeypatch.setattr(live_session, "DEFAULT_TMPDIR", str(tmp_path))
+
+    assert live_session_problems(_live_environment(tmp_path, TMPDIR=None)) == []
+    assert "$${TMPDIR:-" + DEFAULT_TMPDIR + "}" in MAKEFILE
+
+
+@pytest.mark.parametrize("kind", ["missing", "symlink", "file", "group-readable"])
+def test_the_disposable_directory_must_be_a_private_directory(tmp_path: Path, kind: str) -> None:
+    """第二輪安全 LOW-4：只比對字面時，指向 secrets/ 的 symlink 或不存在的路徑也會通過。"""
+    environ = _live_environment(tmp_path)
+    disposable = tmp_path / DIRECTORY
+    if kind == "group-readable":
+        disposable.chmod(0o750)
+    else:
+        disposable.rmdir()
+    if kind == "symlink":
+        (tmp_path / "secrets").mkdir(mode=0o700)
+        disposable.symlink_to(tmp_path / "secrets")
+    if kind == "file":
+        disposable.write_text("x", encoding="ascii")
+
+    assert "SECSCAN_LIVE_SECRETS_DIR" in live_session_problems(environ)
 
 
 @pytest.mark.parametrize(
@@ -287,6 +314,7 @@ def test_the_live_session_environment_passes(
     [
         ({"SECSCAN_LIVE_PROJECT": "secscan"}, "SECSCAN_LIVE_PROJECT"),
         ({"SECSCAN_LIVE_PROJECT": None}, "SECSCAN_LIVE_PROJECT"),
+        ({"SECSCAN_LIVE_PROJECT": "secscan-live-x"}, "SECSCAN_LIVE_PROJECT"),
         ({"SECSCAN_LIVE_SECRETS_DIR": "/Users/someone/secrets"}, "SECSCAN_LIVE_SECRETS_DIR"),
         ({"SECSCAN_LIVE_SECRETS_DIR": None}, "SECSCAN_LIVE_SECRETS_DIR"),
         (
@@ -306,6 +334,7 @@ def test_the_live_session_environment_passes(
     ids=[
         "dev-project",
         "no-project",
+        "other-live-project",
         "secrets-elsewhere",
         "no-secrets",
         "dot-dot-escape",

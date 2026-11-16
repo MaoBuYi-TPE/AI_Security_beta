@@ -17,13 +17,13 @@
 """
 
 import os
-import re
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
-from tests.live.env_guard import SECRET_ENV_NAMES, GuardError, run_id
+from tests.live.env_guard import LIVE_PROJECT, SECRET_ENV_NAMES, GuardError, run_id
 
 LIVE_SWITCH = "ENABLE_LIVE_LAB_TESTS"
 LIVE_MARKER = "live"
@@ -34,7 +34,8 @@ EXIT_REFUSED = 3
 LIVE_PRESERVED_ENV = frozenset(
     {"SECSCAN_SECRETS_DIR", "SECSCAN_LIVE_SECRETS_DIR", "BENCH_KEY_FILE"}
 )
-PROJECT_PATTERN = re.compile(r"secscan-live[a-z0-9-]*")
+# mktemp -d 建立的拋棄式目錄的權限。
+DISPOSABLE_MODE = 0o700
 # recipe 的 TMPDIR 沒有設定時的預設（和 Makefile 相同）。
 DEFAULT_TMPDIR = "/tmp"  # noqa: S108
 _AUTHORIZED = pytest.StashKey[bool]()
@@ -44,13 +45,15 @@ _ENVIRONMENT = pytest.StashKey[Mapping[str, str]]()
 def live_session_problems(environ: Mapping[str, str]) -> list[str]:
     """Live 的 pytest 開始時的環境有問題的變數名稱（不含值；R1、修正 17、第二輪安全 LOW-3）。
 
-    - SECSCAN_LIVE_PROJECT 是 secscan-live（shell 中殘留的 secscan 會讓測試操作開發的專案）；
+    - SECSCAN_LIVE_PROJECT 恰好是 secscan-live（shell 中殘留的 secscan 會讓測試操作開發的專案）；
     - SECSCAN_LIVE_SECRETS_DIR 是 mktemp 建立的那一個：絕對路徑、沒有 ..、直接在 TMPDIR 之下、
-      名稱符合 mktemp 的格式（和清理時的 run_id 相同）；SECSCAN_SECRETS_DIR 是同一個目錄；
+      名稱符合 mktemp 的格式（和清理時的 run_id 相同），而且是自己擁有、0700、不是 symlink 的目錄
+      （第二輪安全 LOW-4：只比對字面時，指向 secrets/ 的 symlink 也會通過）；SECSCAN_SECRETS_DIR
+      是同一個目錄；
     - 環境中沒有任何秘密的名稱，不分大小寫（pydantic-settings 讀環境變數時不分）。
     """
     problems = []
-    if PROJECT_PATTERN.fullmatch(environ.get("SECSCAN_LIVE_PROJECT", "")) is None:
+    if environ.get("SECSCAN_LIVE_PROJECT") != LIVE_PROJECT:
         problems.append("SECSCAN_LIVE_PROJECT")
     secrets_dir = environ.get("SECSCAN_LIVE_SECRETS_DIR", "")
     if not _disposable_directory(secrets_dir, environ.get("TMPDIR") or DEFAULT_TMPDIR):
@@ -68,9 +71,14 @@ def _disposable_directory(path: str, base: str) -> bool:
         return False
     try:
         run_id(Path(path), Path(base))
-    except GuardError:
+        info = os.lstat(path)
+    except (GuardError, OSError):
         return False
-    return True
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and stat.S_IMODE(info.st_mode) == DISPOSABLE_MODE
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:

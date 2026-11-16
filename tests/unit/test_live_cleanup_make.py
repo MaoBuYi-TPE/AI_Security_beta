@@ -2,7 +2,8 @@
 
 以 repo 的 Makefile 實際執行 make test-live-runner；docker 是 tests/unit/test_live_isolation_make.py
 的有狀態替身：stack 的容器有完整的 ID、接在實際的網路上（guard 同時接 scan_net 與 lab_net），
-docker rm 收到重複的 ID 時失敗（審查者依原始碼推論的行為，未以真的 Docker 驗證）。破壞性的情境只用
+docker rm 收到重複的 ID（同一次呼叫中重複，或之前已經刪除過）時失敗（同一次呼叫的衝突是審查者依
+原始碼推論的行為，未以真的 Docker 驗證；「之前已經刪除過」比真的 rm -f 嚴格）。破壞性的情境只用
 假的 docker，不連 Docker daemon、不建立任何資源。
 
 另外以 compose.yaml 與 Makefile 的靜態對照，確認 Live 的 compose 不會用到開發的具名 volume（資料庫
@@ -91,23 +92,36 @@ def test_each_container_is_removed_exactly_once(hostile: Hostile) -> None:
     assert hostile.diagnostics() == []
 
 
-def test_the_fake_docker_refuses_duplicate_ids_positive_control(hostile: Hostile) -> None:
-    """上一個測試通過，代表去重有效：同一個 ID 交給替身兩次會失敗。"""
-    hostile.set_docker_state(
-        containers=[{"id": GUARD, "project": "secscan-live", "networks": ["secscan_live_scan_net"]}]
-    )
-
+def _fake_rm(hostile: Hostile, *identifiers: str) -> subprocess.CompletedProcess[str]:
     # 固定的假 docker（暫存目錄中的腳本），只更新它自己的 JSON 狀態。
-    result = subprocess.run(  # noqa: S603
-        [str(hostile.bin / "docker"), "rm", "-f", "-v", GUARD, GUARD],
+    return subprocess.run(  # noqa: S603
+        [str(hostile.bin / "docker"), "rm", "-f", "-v", *identifiers],
         capture_output=True,
         text=True,
         check=False,
         timeout=30,
     )
 
-    assert result.returncode != 0
-    assert "already in progress" in result.stderr
+
+def test_the_fake_docker_refuses_duplicate_ids_positive_control(hostile: Hostile) -> None:
+    """上一個測試通過，代表每個容器只刪除一次：同一個 ID 在同一次呼叫中重複，或之前已經刪除過，
+    替身都失敗。"""
+    receiver = _cid("c-receiver")
+    hostile.set_docker_state(
+        containers=[
+            {"id": GUARD, "project": "secscan-live", "networks": ["secscan_live_scan_net"]},
+            {"id": receiver, "project": "", "networks": ["secscan_live_lab_net"]},
+        ]
+    )
+
+    duplicated = _fake_rm(hostile, GUARD, GUARD)
+    first = _fake_rm(hostile, receiver)
+    again = _fake_rm(hostile, receiver)
+
+    assert duplicated.returncode != 0
+    assert "already in progress" in duplicated.stderr
+    assert first.returncode == 0
+    assert again.returncode != 0
 
 
 def test_the_cleanup_gets_the_engine_and_the_claim(hostile: Hostile) -> None:
@@ -117,6 +131,24 @@ def test_the_cleanup_gets_the_engine_and_the_claim(hostile: Hostile) -> None:
 
     assert argv[argv.index("--engine") + 1] == "engine-1"
     assert "--claimed" in argv
+
+
+@pytest.mark.parametrize("where", ["command-line", "environment"])
+def test_the_claim_and_the_engine_cannot_be_injected(hostile: Hostile, where: str) -> None:
+    """安全 INFO-7：命令列或環境的 claimed=1、engine=… 都無效（recipe 一開始就重設，之後才
+    設定）。"""
+    hostile.set_scenario(taken=["secscan_live_scan_net"])
+    injected = {"claimed": "1", "engine": "engine-injected"}
+
+    if where == "command-line":
+        result = hostile.make(*(f"{name}={value}" for name, value in injected.items()))
+    else:
+        result = hostile.make(**injected)
+
+    assert result.returncode != 0
+    argv = _cleanup_call(hostile)
+    assert "--claimed" not in argv
+    assert argv[argv.index("--engine") + 1] == "engine-1"
 
 
 def test_a_failed_claim_is_not_recorded_as_ownership(hostile: Hostile) -> None:

@@ -3,8 +3,10 @@
 docker 以有狀態的替身取代（不連 daemon）：網路與所有權的標記、容器（完整的 ID、專案、接的網路、
 是否停止）、volume（名稱與專案標記）、compose 建立的網路、Engine ID。替身的規則：
 
-- docker rm 收到重複的 ID 時失敗：審查者依 docker CLI 與 daemon 的原始碼推論的行為（第二個刪除請求
-  衝突），沒有以真的 Docker 驗證；替身照最嚴格的推論失敗，去重是否有效才測得出來；
+- docker rm 收到重複的 ID（同一次呼叫中重複，或之前已經刪除過）時失敗：同一次呼叫的衝突是審查者依
+  docker CLI 與 daemon 的原始碼推論的行為，沒有以真的 Docker 驗證；「之前已經刪除過」比真的
+  `rm -f`（忽略不存在的 ID）嚴格，所以同一個容器被刪兩次（不論是否在同一次呼叫）一定測得出來；
+- inspect 以 JSON 回報專案標記（沒有標記是 ""）；
 - 網路上還有容器（含停止的）時 network rm 失敗；ps 不帶 -a 時不列出停止的容器；
 - compose down 刪除 secscan-live 專案的容器、volume 與 compose 建立的網路（不刪 external 的網路）。
 """
@@ -118,6 +120,7 @@ class CleanupDocker:
         self.listings = listings or {}
         self.facts = facts or {}
         self.calls: list[list[str]] = []
+        self.deleted: set[str] = set()
 
     def __call__(self, arguments: Sequence[str]) -> str:
         args = list(arguments)
@@ -175,13 +178,14 @@ class CleanupDocker:
         if not found:
             raise GuardError("No such container")
         [item] = found
-        project = item["project"] or env_guard.NO_VALUE
-        return f"{item['id']}|{project}|{' '.join(item['networks'])} \n"
+        return f"{item['id']}|{json.dumps(item['project'])}|{' '.join(item['networks'])} \n"
 
     def _rm(self, args: list[str]) -> str:
         identifiers = [item for item in args if not item.startswith("-")]
         self.containers = [item for item in self.containers if item["id"] not in identifiers]
-        if len(identifiers) != len(set(identifiers)):
+        repeated = len(identifiers) != len(set(identifiers)) or self.deleted & set(identifiers)
+        self.deleted |= set(identifiers)
+        if repeated:
             raise GuardError("removal of container is already in progress")
         return ""
 
@@ -259,11 +263,15 @@ def test_an_owned_run_is_removed_completely_with_each_container_once(tmp_path: P
 
 
 def test_the_fake_refuses_duplicate_ids_positive_control() -> None:
-    """替身遇到重複的 ID 會失敗：上一個測試通過，代表清理真的去重了。"""
+    """替身在同一次呼叫中重複、或之前已刪除過同一個 ID 時都失敗：上一個測試通過，代表每個容器
+    只刪除一次（不論是否在同一次呼叫中）。"""
     docker = CleanupDocker()
 
     with pytest.raises(GuardError, match="already in progress"):
         docker(["rm", "-f", "-v", GUARD, GUARD])
+    docker(["rm", "-f", "-v", RECEIVER])
+    with pytest.raises(GuardError, match="already in progress"):
+        docker(["rm", "-f", "-v", RECEIVER])
 
 
 def test_the_removal_order_does_not_depend_on_the_listing_order(tmp_path: Path) -> None:
@@ -293,7 +301,7 @@ def test_malformed_and_empty_ids_never_reach_docker_rm(tmp_path: Path) -> None:
     malformed = ("c-short", "Z" * 64)
     listing = f"\n{malformed[0]}\n{RECEIVER}\n{malformed[1]}\n\n"
     # inspect 對格式不正確的 ID 也回報「屬於這次執行」：只有格式檢查擋得住（空轉檢查 55d）。
-    facts = {item: f"{item}||{LAB} \n" for item in malformed}
+    facts = {item: f'{item}|""|{LAB} \n' for item in malformed}
     docker = CleanupDocker(listings={LAB: listing}, facts=facts)
 
     report = _clean(tmp_path, docker)

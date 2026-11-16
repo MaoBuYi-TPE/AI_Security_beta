@@ -105,9 +105,10 @@ ALLOWED = (
 )
 
 # 假的 docker：狀態（網路與所有權的標記、Live stack 的容器與 volume）存在 JSON 檔。容器有完整的
-# ID 與實際接的網路：guard 同時接在兩個 Live 網路上（第二輪 HIGH）。docker rm 收到重複的 ID 時回傳
-# 失敗：這是審查者依 docker CLI 與 daemon 的原始碼推論的行為（第二個刪除請求衝突），沒有以真的
-# Docker 驗證；替身照最嚴格的推論失敗，去重是否有效才測得出來。網路上還有容器時 network rm 失敗。
+# ID 與實際接的網路：guard 同時接在兩個 Live 網路上（第二輪 HIGH）。docker rm 收到重複的 ID（同一次
+# 呼叫中重複，或之前已經刪除過）時回傳失敗：同一次呼叫的衝突是審查者依 docker CLI 與 daemon 的
+# 原始碼推論的行為，沒有以真的 Docker 驗證；「之前已經刪除過」比真的 rm -f 嚴格，同一個容器被刪兩次
+# 一定測得出來。inspect 以 JSON 回報專案標記。網路上還有容器時 network rm 失敗。
 # scenario 讓某一步失敗或預先放入資源（另一次執行的網路、其他專案的容器）。compose config 交給真的
 # docker compose（只在用戶端解析）。
 _FAKE_DOCKER = """#!{python}
@@ -119,6 +120,7 @@ scenario = json.loads(open({scenario!r}).read())
 state = json.loads(open({state!r}).read())
 state.setdefault("volumes", [])
 state.setdefault("compose_networks", [])
+state.setdefault("removed", [])
 def save():
     open({state!r}, "w").write(json.dumps(state))
 def out(text="", code=0):
@@ -150,8 +152,10 @@ if args[:1] == ["info"]:
 if args[:1] == ["rm"]:
     ids = [item for item in args[1:] if not item.startswith("-")]
     state["containers"] = [c for c in state["containers"] if c["id"] not in ids]
+    repeated = len(ids) != len(set(ids)) or set(ids) & set(state["removed"])
+    state["removed"] += ids
     save()
-    if len(ids) != len(set(ids)):
+    if repeated:
         sys.stderr.write("removal of container is already in progress\\n")
         out(code=1)
     out()
@@ -214,7 +218,7 @@ if args[:1] == ["inspect"]:
         out(code=1)
     [container] = found
     if "NetworkSettings" in fmt:
-        project = container.get("project") or "<no value>"
+        project = json.dumps(container.get("project") or "")
         out(container["id"] + "|" + project + "|" + " ".join(nets(container)) + " \\n")
     service = container.get("service", "")
     out(service + (" sha256:guard\\n" if service == "guard" else " sha256:app\\n"))
