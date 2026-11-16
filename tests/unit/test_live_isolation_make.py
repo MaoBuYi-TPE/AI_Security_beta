@@ -29,6 +29,7 @@ import pytest
 
 from secscan.cli.secret_files import SECRET_FILES
 from tests.isolation import BLOCKED_DOCKER_HOST
+from tests.live import env_guard
 
 ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE_PATH = ROOT / "Makefile"
@@ -66,6 +67,7 @@ ALEMBIC_FILES = {
     "CONTENT_ENCRYPTION_KEYS_FILE": "content_encryption_keys",
 }
 PLACEHOLDER = "/nonexistent/secscan-live-secrets.unset"
+LIVE_COMPOSE_ARGUMENTS = ["compose", "-p", "secscan-live", "-f", "compose.yaml", "--profile", "app"]
 # GNU make 對 -n、-q、-t 的處理（安全審查 H1）：含 $(MAKE) 的 recipe 行在這三種模式下仍會執行。
 DRY_RUN_FLAGS = ("-n", "-q", "-t")
 # 程序本身加上的變數（shell）：不是從 shell 帶進來的設定。Live 的 recipe 不呼叫子 make，所以呼叫的
@@ -80,7 +82,7 @@ PLUMBING = {
 
 
 def _live_env_names() -> set[str]:
-    match = re.search(r"^LIVE_ENV := ((?:.*\\\n)*.*)$", MAKEFILE, flags=re.MULTILINE)
+    match = re.search(r"^override LIVE_ENV := ((?:.*\\\n)*.*)$", MAKEFILE, flags=re.MULTILINE)
     assert match is not None
     return {item.split("=", 1)[0] for item in match.group(1).replace("\\\n", " ").split()}
 
@@ -96,23 +98,36 @@ ALLOWED = (
     }
 )
 
+# 假的 docker：狀態（網路與所有權的標記、Live stack 是否啟動、接在網路上的容器）存在 JSON 檔；
+# scenario 讓某一步失敗或預先放入資源（另一次執行的網路、其他專案的容器）。compose config 交給真的
+# docker compose（只在用戶端解析）。
 _FAKE_DOCKER = """#!{python}
 import json, os, subprocess, sys
 args = sys.argv[1:]
 with open({log!r}, "a") as log:
     log.write(json.dumps({{"tool": "docker", "argv": args, "env": dict(os.environ)}}) + "\\n")
 scenario = json.loads(open({scenario!r}).read())
+state = json.loads(open({state!r}).read())
+def save():
+    open({state!r}, "w").write(json.dumps(state))
 def out(text="", code=0):
     sys.stdout.write(text)
     sys.exit(code)
-nets = {{"secscan_live_scan_net": "10.89.9.0/24 10.89.9.0/25",
-        "secscan_live_lab_net": "10.89.10.0/24 10.89.10.0/25"}}
+def option(name):
+    return args[args.index(name) + 1] if name in args else ""
+ranges = {{"secscan_live_scan_net": "10.89.9.0/24 10.89.9.0/25",
+          "secscan_live_lab_net": "10.89.10.0/24 10.89.10.0/25"}}
 if args[:2] == ["context", "show"]:
     out("orbstack\\n")
-if args[:1] in (["version"], ["pull"], ["rm"]):
+if args[:1] in (["version"], ["pull"]):
     out()
 if args[:1] == ["info"]:
     out("engine-1\\n")
+if args[:1] == ["rm"]:
+    ids = [item for item in args[1:] if not item.startswith("-")]
+    state["containers"] = [c for c in state["containers"] if c["id"] not in ids]
+    save()
+    out()
 if args[:1] == ["compose"]:
     if "version" in args:
         out("5.1.2\\n")
@@ -131,36 +146,65 @@ if args[:1] == ["compose"]:
         if scenario.get("up_fails"):
             out(code=1)
         if "db" not in args:
-            open({state!r}, "w").write("up")
+            state["up"] = True
+            state["containers"] += scenario.get("extra_containers", [])
+            save()
         out()
     if "down" in args:
-        if os.path.exists({state!r}):
-            os.remove({state!r})
+        if scenario.get("down_fails"):
+            out(code=1)
+        state["up"] = False
+        state["containers"] = [c for c in state["containers"] if c.get("project") != "secscan-live"]
+        save()
         out()
     out()
 if args[:1] == ["ps"]:
-    live = "label=com.docker.compose.project=secscan-live" in args
-    if live and os.path.exists({state!r}):
-        out("c-api\\nc-runner\\nc-worker\\nc-guard\\n")
+    target = option("--filter")
+    if target == "label=com.docker.compose.project=secscan-live":
+        live = [c["id"] for c in state["containers"] if c.get("project") == "secscan-live"]
+        stack = "c-api\\nc-runner\\nc-worker\\nc-guard\\n" if state["up"] else ""
+        out("".join(f"{{name}}\\n" for name in live) or stack)
+    if target.startswith("network="):
+        on = [c["id"] for c in state["containers"] if c.get("network") == target[8:]]
+        out("".join(f"{{name}}\\n" for name in on))
     out()
 if args[:1] == ["inspect"]:
+    fmt = option("--format")
+    if "com.docker.compose.project" in fmt and "service" not in fmt:
+        found = [c for c in state["containers"] if c["id"] == args[-1]]
+        out((found[0].get("project") or "<no value>") + "\\n" if found else "", 0 if found else 1)
     service = args[-1][2:]
     out(service + (" sha256:guard\\n" if service == "guard" else " sha256:app\\n"))
 if args[:2] == ["image", "inspect"]:
     out("sha256:guard\\n" if args[-1].startswith("secscan-guard") else "sha256:app\\n")
-if args[:2] in (["volume", "ls"], ["network", "ls"], ["network", "rm"], ["network", "create"]):
+if args[:2] == ["volume", "ls"]:
+    out()
+if args[:2] == ["network", "ls"]:
+    out("".join(f"{{name}}\\n" for name in state["networks"]))
+if args[:2] == ["network", "create"]:
+    name = args[-1]
+    if name in state["networks"] or name in scenario.get("taken", []):
+        sys.stderr.write("network with name " + name + " already exists\\n")
+        out(code=1)
+    state["networks"][name] = option("--label").split("=", 1)[1]
+    save()
+    out()
+if args[:2] == ["network", "rm"]:
+    if scenario.get("network_rm_fails"):
+        out(code=1)
+    for name in args[2:]:
+        state["networks"].pop(name, None)
+    save()
     out()
 if args[:2] == ["network", "inspect"]:
-    fmt = args[args.index("--format") + 1] if "--format" in args else ""
+    name = args[-1]
+    if name not in state["networks"]:
+        out(code=1)
+    fmt = option("--format")
+    label = state["networks"][name] or "<no value>"
     if "|" in fmt:
-        out("true|isolated|" + nets[args[-1]] + "\\n")
-    if ".Internal" in fmt:
-        out("true\\n")
-    if "gateway_mode" in fmt:
-        out("isolated\\n")
-    if "IPAM" in fmt:
-        out(nets[args[2]] + "\\n")
-    out("[]")
+        out("true|isolated|" + ranges[name] + "|" + label + "\\n")
+    out(label + "\\n")
 sys.exit(2)
 """
 
@@ -221,7 +265,10 @@ class Hostile:
         self.records.mkdir()
         self.log = root / "calls.log"
         self.log.write_text("", encoding="utf-8")
-        self.state = root / "state"
+        self.state = root / "state.json"
+        self.state.write_text(
+            json.dumps({"up": False, "networks": {}, "containers": []}), encoding="utf-8"
+        )
         self.scenario = root / "scenario.json"
         self.scenario.write_text("{}", encoding="utf-8")
         self.canaries = {name: f"canary-{secrets.token_hex(10)}" for name in sorted(SECRET_NAMES)}
@@ -313,6 +360,22 @@ class Hostile:
     def calls(self) -> list[dict[str, Any]]:
         lines = self.log.read_text(encoding="utf-8").splitlines()
         return [json.loads(line) for line in lines if line]
+
+    def docker_argvs(self) -> list[list[str]]:
+        return [call["argv"] for call in self.calls() if call["tool"] == "docker"]
+
+    def set_scenario(self, **scenario: object) -> None:
+        self.scenario.write_text(json.dumps(scenario), encoding="utf-8")
+
+    def docker_state(self) -> dict[str, Any]:
+        loaded: dict[str, Any] = json.loads(self.state.read_text(encoding="utf-8"))
+        return loaded
+
+    def set_docker_state(self, **changes: object) -> None:
+        self.state.write_text(json.dumps(self.docker_state() | changes), encoding="utf-8")
+
+    def diagnostics(self) -> list[Path]:
+        return sorted(self.tmpdir.glob("secscan-live-cleanup-failed.*"))
 
     def leaked(self, text: str) -> set[str]:
         """只回傳名稱：失敗時 pytest 不會印出 canary 的值。"""
@@ -423,14 +486,179 @@ def test_the_resolved_configuration_uses_only_the_disposable_directory(hostile: 
 
 
 def test_a_failed_step_still_cleans_up(hostile: Hostile) -> None:
-    hostile.scenario.write_text(json.dumps({"up_fails": True}), encoding="utf-8")
+    hostile.set_scenario(up_fails=True)
 
     result = hostile.make()
 
     assert result.returncode != 0
-    argvs = [call["argv"] for call in hostile.calls() if call["tool"] == "docker"]
+    argvs = hostile.docker_argvs()
     assert any(argv[:1] == ["compose"] and "down" in argv for argv in argvs)
     assert not any(call["argv"][2:3] == ["pytest"] for call in hostile.calls())
+    assert _secrets_dirs(hostile) == []
+    assert hostile.docker_state()["networks"] == {}
+
+
+# --- 所有權與清理（G1 審查 M2、MEDIUM-1、2；破壞性的情境只用假的 docker）----------------------
+
+LIVE_NETWORK_NAMES = {"secscan_live_scan_net", "secscan_live_lab_net"}
+
+
+def _destructive(argvs: list[list[str]]) -> list[list[str]]:
+    """會刪除或建立資源的呼叫（down、rm、network create／rm）。"""
+    return [
+        argv
+        for argv in argvs
+        if argv[:1] == ["rm"]
+        or argv[:2] in (["network", "rm"], ["network", "create"])
+        or (argv[:1] == ["compose"] and "down" in argv)
+    ]
+
+
+def test_the_networks_are_claimed_and_cleaned_up_by_this_run_only(hostile: Hostile) -> None:
+    assert hostile.make().returncode == 0
+    argvs = hostile.docker_argvs()
+    [directory] = {
+        call["env"]["SECSCAN_SECRETS_DIR"]
+        for call in hostile.calls()
+        if call["env"].get("SECSCAN_SECRETS_DIR", PLACEHOLDER) != PLACEHOLDER
+    }
+    owner = os.path.basename(directory)
+
+    created = [argv for argv in argvs if argv[:2] == ["network", "create"]]
+    assert {argv[-1] for argv in created} == LIVE_NETWORK_NAMES
+    assert all(argv[2:4] == ["--label", f"secscan.live.run={owner}"] for argv in created)
+    removed = [argv for argv in argvs if argv[:2] == ["network", "rm"]]
+    assert {argv[2] for argv in removed} == LIVE_NETWORK_NAMES
+    [down] = [argv for argv in argvs if argv[:1] == ["compose"] and "down" in argv]
+    assert down == [*LIVE_COMPOSE_ARGUMENTS, "down", "-v", "--remove-orphans"]
+    # 網路在任何建立 stack 的動作（build、up）之前就取得所有權。
+    first_claim = argvs.index(created[0])
+    assert first_claim < min(
+        index for index, argv in enumerate(argvs) if argv[:1] == ["compose"] and "build" in argv
+    )
+    assert hostile.docker_state()["networks"] == {}
+    assert hostile.diagnostics() == []
+
+
+def test_a_running_live_is_left_alone(hostile: Hostile) -> None:
+    """並行：另一次 Live 已經建立了網路與容器，這次在 preflight 就停止，不碰它的任何資源。"""
+    others = dict.fromkeys(LIVE_NETWORK_NAMES, "secscan-live-secrets.Other1")
+    hostile.set_docker_state(
+        networks=others,
+        containers=[
+            {"id": "c-other", "project": "secscan-live", "network": "secscan_live_lab_net"}
+        ],
+    )
+
+    result = hostile.make()
+
+    assert result.returncode != 0
+    assert _destructive(hostile.docker_argvs()) == []
+    assert hostile.docker_state()["networks"] == others
+    assert _secrets_dirs(hostile) == []
+
+
+def test_losing_the_race_for_a_network_removes_only_its_own_directory(hostile: Hostile) -> None:
+    """preflight 之後另一次 Live 先建立了網路：這次取不到所有權，只刪自己的拋棄式目錄。"""
+    hostile.set_scenario(taken=["secscan_live_scan_net"])
+
+    result = hostile.make()
+
+    assert result.returncode != 0
+    destructive = _destructive(hostile.docker_argvs())
+    assert [argv[:2] for argv in destructive] == [["network", "create"]]
+    assert not any(call["argv"][2:3] == ["pytest"] for call in hostile.calls())
+    assert _secrets_dirs(hostile) == []
+    assert hostile.diagnostics() == []
+
+
+def test_a_container_of_another_project_is_never_removed(hostile: Hostile) -> None:
+    """Live 的網路上出現其他 compose 專案（例如開發的 secscan）的容器：不刪除，清理以失敗回報。"""
+    hostile.set_scenario(
+        extra_containers=[
+            {"id": "c-dev", "project": "secscan", "network": "secscan_live_scan_net"},
+            {"id": "c-probe", "project": "", "network": "secscan_live_scan_net"},
+        ]
+    )
+
+    result = hostile.make()
+
+    assert result.returncode != 0
+    removed = [argv for argv in hostile.docker_argvs() if argv[:1] == ["rm"]]
+    assert [argv[-1:] for argv in removed] == [["c-probe"]]
+    assert "c-dev" in {item["id"] for item in hostile.docker_state()["containers"]}
+    [diagnostic] = hostile.diagnostics()
+    assert stat.S_IMODE(diagnostic.stat().st_mode) == 0o600
+    assert "c-dev" in diagnostic.read_text(encoding="utf-8")
+    assert "c-dev" in result.stderr
+
+
+@pytest.mark.parametrize("failure", ["down_fails", "network_rm_fails"])
+def test_a_cleanup_failure_is_reported_and_blocks_the_next_run(
+    hostile: Hostile, failure: str
+) -> None:
+    hostile.set_scenario(**{failure: True})
+
+    result = hostile.make()
+
+    assert result.returncode != 0
+    [diagnostic] = hostile.diagnostics()
+    text = diagnostic.read_text(encoding="utf-8")
+    leaked = hostile.leaked(text + result.stderr)
+    assert leaked == set()
+    assert "清理沒有完成" in result.stderr
+    # 下一次在 preflight 就停止：人工確認、刪除診斷檔之前不再執行。
+    hostile.set_scenario()
+    hostile.log.write_text("", encoding="utf-8")
+    again = hostile.make()
+    assert again.returncode != 0
+    assert "診斷檔" in again.stderr
+    assert _destructive(hostile.docker_argvs()) == []
+
+
+@pytest.mark.parametrize(
+    ("args", "extra"),
+    [
+        (
+            (
+                "LIVE_PROJECT=secscan",
+                "LIVE_SCAN_NET=secscan_scan_net",
+                "LIVE_LAB_NET=secscan_lab_net",
+                "LIVE_COMPOSE_FILE=other.yaml",
+                "DB_FILE=other.yaml",
+                "LIVE_SECRETS_PREFIX=secscan-",
+                "LIVE_ENV=SECSCAN_RUNS_VOLUME=secscan_runs",
+            ),
+            {},
+        ),
+        (
+            (),
+            {
+                "MAKEFLAGS": " -- LIVE_PROJECT=secscan LIVE_SCAN_NET=secscan_scan_net "
+                "LIVE_LAB_NET=secscan_lab_net LIVE_COMPOSE_FILE=other.yaml"
+            },
+        ),
+        (("-e",), {"LIVE_PROJECT": "secscan", "LIVE_SCAN_NET": "secscan_scan_net"}),
+    ],
+    ids=["command-line", "makeflags", "environment-override"],
+)
+def test_the_live_identity_cannot_be_overridden(
+    hostile: Hostile, args: tuple[str, ...], extra: dict[str, str]
+) -> None:
+    """M2（HIGH）：LIVE_PROJECT=secscan 曾讓清理段以 -p secscan 執行 down -v（會刪掉開發的
+    db_data）。"""
+    hostile.set_scenario(up_fails=True)
+
+    hostile.make(*args, **extra)
+
+    argvs = hostile.docker_argvs()
+    assert any(argv[:1] == ["compose"] and "down" in argv for argv in argvs)
+    for argv in argvs:
+        if argv[:1] == ["compose"] and argv[1:2] != ["version"]:
+            assert argv[1:5] == ["-p", "secscan-live", "-f", "compose.yaml"], argv[:6]
+        assert not {"secscan_scan_net", "secscan_lab_net", "other.yaml"} & set(argv), argv[:3]
+    for call in hostile.calls():
+        assert call["env"].get("SECSCAN_RUNS_VOLUME") in (None, "secscan_live_runs")
     assert _secrets_dirs(hostile) == []
 
 
@@ -684,9 +912,61 @@ def test_every_live_call_goes_through_the_whitelist() -> None:
     # up 之前驗證設定。
     assert flattened.index("check-config") < flattened.index("$(LIVE_COMPOSE) up")
     assert "alembic -x dotenv=off upgrade head" in flattened
-    assert "trap 'live_cleanup $$?' EXIT" in flattened
+
+
+def test_the_trap_is_installed_only_after_the_preflight_and_before_the_claim() -> None:
+    """MEDIUM-1：preflight 拒絕（例如另一次 Live 正在執行）時沒有 trap，不會拆掉別人的 stack；
+    拋棄式目錄建立之後才安裝，立刻接著取得網路的所有權。清理只由 env_guard 執行（不直接 rm）。"""
+    flattened = _recipe("test-live-runner").replace("\\\n", " ")
+    trap = flattened.index("trap 'live_cleanup $$?' EXIT")
+
     assert "trap 'live_cleanup 130' INT TERM HUP" in flattened
-    assert '"$$base"/$(LIVE_SECRETS_PREFIX)??????) rm -rf -- "$$secrets_dir"' in flattened
+    for earlier in ("$(LIVE_GUARD) engine)", "$(LIVE_GUARD) preflight", "snapshot=", "mktemp -d"):
+        assert flattened.index(earlier) < trap, earlier
+    claim = flattened.index('$(LIVE_GUARD) networks --secrets-dir "$$secrets_dir"')
+    assert trap < claim
+    assert claim < min(flattened.index(word) for word in ("generate-secret-files", "docker pull"))
+    start = flattened.index("live_cleanup() {")
+    cleanup = flattened[start : flattened.index("}; ", start)]
+    assert '$(LIVE_GUARD) cleanup --base "$$base" --secrets-dir "$$secrets_dir"' in cleanup
+    assert not re.search(r"\brm\b|\bdown\b|network rm", cleanup)
+    assert not re.search(r"\brm -rf\b", flattened)
+
+
+def test_the_live_identity_is_fixed_and_matches_the_guard() -> None:
+    """M2（HIGH）：專案、網路、volume、compose 檔與拋棄式目錄的前綴都用 override，而且和 env_guard
+    清理時使用的常數一致（清理不依賴 make 的變數）。"""
+    for name in (
+        "LIVE_PROJECT",
+        "LIVE_COMPOSE_FILE",
+        "LIVE_SCAN_NET",
+        "LIVE_SCAN_SUBNET",
+        "LIVE_SCAN_IP_RANGE",
+        "LIVE_LAB_NET",
+        "LIVE_LAB_SUBNET",
+        "LIVE_LAB_IP_RANGE",
+        "LIVE_ENV",
+        "LIVE_SECRETS_PREFIX",
+        "LIVE_ALLOWED_NAMES",
+        "LIVE_SECRET_FILES",
+    ):
+        assert re.search(rf"^override {name} :?= ", MAKEFILE, flags=re.MULTILINE), name
+    assert _definition("LIVE_PROJECT") == env_guard.LIVE_PROJECT
+    assert _definition("LIVE_COMPOSE_FILE") == env_guard.COMPOSE_FILE
+    assert {_definition("LIVE_SCAN_NET"), _definition("LIVE_LAB_NET")} == env_guard.LIVE_NETWORKS
+    assert _definition("LIVE_SECRETS_PREFIX") == env_guard.SECRETS_PREFIX
+    assert "-p $(LIVE_PROJECT) -f $(LIVE_COMPOSE_FILE) " in _definition("LIVE_COMPOSE").replace(
+        "\\\n\t", ""
+    )
+    assert list(env_guard.LIVE_COMPOSE) == LIVE_COMPOSE_ARGUMENTS
+    volumes = {
+        value
+        for item in _definition("LIVE_ENV").replace("\\\n", " ").split()
+        for key, value in [item.split("=", 1)]
+        if key.endswith("_VOLUME")
+    }
+    assert volumes
+    assert all(volume.startswith(env_guard.LIVE_RESOURCE_PREFIXES) for volume in volumes)
 
 
 # --- 白名單涵蓋 Live 讀的環境變數（修正 2：以 AST 盤點）---------------------------------------

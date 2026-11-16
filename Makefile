@@ -45,14 +45,18 @@ SCAN_IP_RANGE ?= 10.89.8.0/25
 # tests/unit/test_deployment.py 會核對）。
 SCANNER_IMAGES := busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e projectdiscovery/nuclei:v3.11.1@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb zaproxy/zap-stable:20261016@sha256:5ccfff9a411743ab2615136a2edd7416bec9ce41572fa94e935df38c14adb2b6
 # live 測試用的獨立 stack：自己的 DB volume、網路與 volume 名稱；API 只綁 127.0.0.1:8765。
-LIVE_PROJECT := secscan-live
-LIVE_SCAN_NET := secscan_live_scan_net
-LIVE_SCAN_SUBNET := 10.89.9.0/24
-LIVE_SCAN_IP_RANGE := 10.89.9.0/25
-LIVE_LAB_NET := secscan_live_lab_net
-LIVE_LAB_SUBNET := 10.89.10.0/24
-LIVE_LAB_IP_RANGE := 10.89.10.0/25
-LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_runs \
+# 專案、網路、volume 與 compose 檔都用 override（G1 審查 M2）：命令列、MAKEFLAGS 與 make -e 都改不了，
+# 否則 LIVE_PROJECT=secscan 會讓清理段以 -p secscan 執行 down -v（刪掉開發的 db_data）。清理段本身
+# 也不用這些變數：env_guard 以自己的常數核對所有權（tests/unit/test_live_isolation_make.py 核對一致）。
+override LIVE_PROJECT := secscan-live
+override LIVE_COMPOSE_FILE := compose.yaml
+override LIVE_SCAN_NET := secscan_live_scan_net
+override LIVE_SCAN_SUBNET := 10.89.9.0/24
+override LIVE_SCAN_IP_RANGE := 10.89.9.0/25
+override LIVE_LAB_NET := secscan_live_lab_net
+override LIVE_LAB_SUBNET := 10.89.10.0/24
+override LIVE_LAB_IP_RANGE := 10.89.10.0/25
+override LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_runs \
 	SECSCAN_SECRETS_VOLUME=secscan_live_run_secrets API_PORT=8765 DB_PORT=55434 \
 	RUNNER_FAKE_HOLD_SECONDS=15 SECSCAN_LAB_NET=$(LIVE_LAB_NET) LAB_CIDR=$(LIVE_LAB_SUBNET) \
 	SECSCAN_SCAN_SUBNET=$(LIVE_SCAN_SUBNET) SECSCAN_GUARD_IP=10.89.9.254 \
@@ -65,7 +69,7 @@ LIVE_ENV := SECSCAN_SCAN_NET=$(LIVE_SCAN_NET) SECSCAN_RUNS_VOLUME=secscan_live_r
 # recipe 設定的值（LIVE_FIXED_ENV）放在最後：同名時後面的值勝出。SECSCAN_LIVE_PROJECT 與
 # ENABLE_LIVE_LAB_TESTS 由這裡固定設定，不從 shell 傳入。白名單的變數用 override：命令列、MAKEFLAGS 與
 # 環境變數都改不了。LIVE_PYTEST_ENV 只接受 LIVE_PASS_ENV 的名稱（recipe 檢查）。
-LIVE_SECRETS_PREFIX := secscan-live-secrets.
+override LIVE_SECRETS_PREFIX := secscan-live-secrets.
 LIVE_PYTEST_ENV :=
 LIVE_PYTEST_ARGS :=
 override LIVE_PASS_ENV := SECSCAN_RECORD_DIR SECSCAN_PARTIAL_BUDGET_SECONDS BENCH_SPEC BENCH_NAME \
@@ -80,7 +84,8 @@ override LIVE_FIXED_ENV = $(LIVE_ENV) SECSCAN_IMAGE_TAG=dev COMPOSE_DISABLE_ENV_
 	SECSCAN_LIVE_SECRETS_DIR="$${secrets_dir:-/nonexistent/$(LIVE_SECRETS_PREFIX)unset}" \
 	PGPASSFILE=/dev/null SECSCAN_LIVE_PROJECT=$(LIVE_PROJECT) ENABLE_LIVE_LAB_TESTS=1
 override LIVE_PROC_ENV = $(LIVE_BASE_ENV) $(LIVE_FIXED_ENV)
-override LIVE_COMPOSE = $(LIVE_PROC_ENV) docker compose -p $(LIVE_PROJECT) -f $(DB_FILE) --profile app
+override LIVE_COMPOSE = $(LIVE_PROC_ENV) docker compose -p $(LIVE_PROJECT) -f $(LIVE_COMPOSE_FILE) \
+	--profile app
 override LIVE_GUARD = $(LIVE_PROC_ENV) $(UV_RUN) python -I $(REPO_DIR)tests/live/env_guard.py
 # compose config --environment 允許的名稱（白名單的名稱；compose 自己加上的由 env_guard 允許）。
 override LIVE_ALLOWED_NAMES = PATH HOME TMPDIR LC_ALL DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG \
@@ -338,8 +343,13 @@ runs-layout-migrate: env secrets docker-check
 #   不含 $(MAKE)（直接或經由變數）：GNU make 對含 $(MAKE) 的行在 -n、-q、-t 下仍會執行（安全審查
 #   H1）。所以 make -n／-q／-t 這些 Live 目標不會執行任何一步；網路由 env_guard 建立，不呼叫子 make。
 # - up 之前以 tests/live/env_guard.py 驗證 compose 解析出來的設定（允許清單）；up 之後核對映像 ID；
-#   開始時、up 之前、結束時確認同一個 Engine。開始之前拒絕上一次留下的資源與拋棄式目錄；結束時（含
-#   失敗與中斷）一律清理，並比對開發環境的前後快照，有差異就失敗。
+#   開始時、up 之前、結束時確認同一個 Engine。開始之前拒絕上一次留下的資源、拋棄式目錄與清理失敗的
+#   診斷檔。
+# - 所有權與清理（G1 審查 M2、MEDIUM-1、2）：engine、preflight、快照都通過、拋棄式目錄建立之後才安裝
+#   trap，接著立刻以這次的識別（拋棄式目錄的名稱）標記並建立兩個網路：網路已存在就停止（另一次 Live
+#   正在執行），不清理別人的資源。清理（含失敗與中斷）由 env_guard cleanup 執行，只處理標記屬於這次
+#   執行的資源；down -v 之前核對專案、volume 與網路的名稱；失敗時回報並在 TMPDIR 留下診斷檔（下一次
+#   的 preflight 看到它就拒絕執行）。最後比對開發環境的前後快照，有差異就失敗。
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
 	tests/live/test_budget_live.py tests/live/test_revocation_live.py \
 	tests/live/test_guard_failover_live.py
@@ -354,25 +364,18 @@ test-live-runner:
 	base="$${TMPDIR:-/tmp}"; base="$${base%/}"; secrets_dir=""; snapshot=""; \
 	live_cleanup() { \
 		code=$$1; trap - EXIT INT TERM HUP; \
-		for net in $(LIVE_SCAN_NET) $(LIVE_LAB_NET); do \
-			ids=$$($(LIVE_PROC_ENV) docker ps -aq --filter "network=$$net"); \
-			[ -z "$$ids" ] || $(LIVE_PROC_ENV) docker rm -f -v $$ids >/dev/null || code=1; \
-		done; \
-		$(LIVE_COMPOSE) down -v --remove-orphans || code=1; \
-		$(LIVE_PROC_ENV) docker network rm $(LIVE_SCAN_NET) $(LIVE_LAB_NET) >/dev/null 2>&1; \
-		case "$$secrets_dir" in \
-			"$$base"/$(LIVE_SECRETS_PREFIX)??????) rm -rf -- "$$secrets_dir" ;; \
-		esac; \
-		if [ -n "$$snapshot" ]; then \
-			printf '%s' "$$snapshot" | $(LIVE_GUARD) compare --root "$(CURDIR)" || code=1; \
-		fi; \
+		$(LIVE_GUARD) cleanup --base "$$base" --secrets-dir "$$secrets_dir" || code=1; \
+		printf '%s' "$$snapshot" | $(LIVE_GUARD) compare --root "$(CURDIR)" || code=1; \
 		exit $$code; \
 	}; \
-	trap 'live_cleanup $$?' EXIT; trap 'live_cleanup 130' INT TERM HUP; \
 	engine=$$($(LIVE_GUARD) engine) || exit 1; \
 	$(LIVE_GUARD) preflight --base "$$base" || exit 1; \
 	snapshot=$$($(LIVE_GUARD) snapshot --root "$(CURDIR)") || exit 1; \
 	secrets_dir=$$(mktemp -d "$$base/$(LIVE_SECRETS_PREFIX)XXXXXX") || exit 1; \
+	trap 'live_cleanup $$?' EXIT; trap 'live_cleanup 130' INT TERM HUP; \
+	$(LIVE_GUARD) networks --secrets-dir "$$secrets_dir" \
+		--network $(LIVE_SCAN_NET) $(LIVE_SCAN_SUBNET) $(LIVE_SCAN_IP_RANGE) \
+		--network $(LIVE_LAB_NET) $(LIVE_LAB_SUBNET) $(LIVE_LAB_IP_RANGE) || exit 1; \
 	$(LIVE_PROC_ENV) $(UV_RUN) secscan-admin generate-secret-files "$$secrets_dir" || exit 1; \
 	for image in $(SCANNER_IMAGES); do \
 		$(LIVE_PROC_ENV) docker pull --quiet "$$image" >/dev/null || exit 1; \
@@ -382,9 +385,6 @@ test-live-runner:
 	app_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan:dev) || exit 1; \
 	guard_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan-guard:dev) \
 		|| exit 1; \
-	$(LIVE_GUARD) networks \
-		--network $(LIVE_SCAN_NET) $(LIVE_SCAN_SUBNET) $(LIVE_SCAN_IP_RANGE) \
-		--network $(LIVE_LAB_NET) $(LIVE_LAB_SUBNET) $(LIVE_LAB_IP_RANGE) || exit 1; \
 	$(LIVE_COMPOSE) config --format json \
 		| $(LIVE_GUARD) check-config --secrets-dir "$$secrets_dir" --root "$(CURDIR)" || exit 1; \
 	$(LIVE_COMPOSE) config --no-env-resolution --format json \

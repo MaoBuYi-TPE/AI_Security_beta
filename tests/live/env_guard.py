@@ -7,7 +7,8 @@ make test-live-runner 在白名單的環境（LIVE_PROC_ENV：env -i 加上允�
 子命令：
 - engine [--expect ID]：DOCKER_HOST 只能是本機的 unix socket；context 是 orbstack；compose 是
   驗證過的主版本；印出 Engine ID，給定 --expect 時必須相同（開始時、up 之前、結束時各確認一次）。
-- preflight --base DIR：拒絕已存在的 secscan-live 資源與舊的拋棄式目錄（上一次沒有清乾淨）。
+- preflight --base DIR：拒絕已存在的 secscan-live 資源、舊的拋棄式目錄（上一次沒有清乾淨）與上一次
+  清理失敗的診斷檔（人工確認之前不再執行）。
 - snapshot --root DIR／compare --root DIR：開發環境的快照（容器的名稱、ID、StartedAt；volume 的
   名稱、CreatedAt；網路；.env 與 secrets/* 的 mode、size、inode、sha256），compare 從 stdin 讀開始
   時的快照。
@@ -19,9 +20,16 @@ make test-live-runner 在白名單的環境（LIVE_PROC_ENV：env -i 加上允�
 - check-environment --allow NAME...：stdin 是 `config --environment`：變數名稱是精確的允許清單
   （recipe 傳入的名稱，加上 compose 自己加上的幾個），秘密的名稱與 COMPOSE_ENV_FILES 一律拒絕。
 - check-images --app-image ID --guard-image ID：Live 容器的映像等於 build 之後記錄的映像 ID。
-- networks --network NAME SUBNET IP_RANGE（兩次）：建立並檢查 Live 的兩個網路（internal、gateway
-  isolated、固定的網段）。取代子 make 的 ensure-net：Live 的 recipe 不呼叫 $(MAKE)（安全審查 H1：
+- networks --secrets-dir DIR --network NAME SUBNET IP_RANGE（兩次）：建立並檢查 Live 的兩個網路
+  （internal、gateway isolated、固定的網段），以這次執行的識別（拋棄式目錄的名稱）標記所有權。
+  網路已存在就失敗（另一次 Live 正在執行，或上一次沒有清乾淨）：建立是原子的，所以同時執行的兩次
+  Live 只有一次取得所有權。取代子 make 的 ensure-net：Live 的 recipe 不呼叫 $(MAKE)（安全審查 H1：
   含 $(MAKE) 的行在 make -n、-q、-t 下仍會執行）。
+- cleanup --base DIR --secrets-dir DIR：只清理確認屬於這次執行的資源（G1 審查 M2、MEDIUM-1、2）。
+  專案、檔案與網路名稱都是這裡的常數，不用 make 的變數。標記不是這次執行的網路不碰；兩個網路都屬於
+  這次執行時才 compose down -v，而且之前核對專案名稱、解析出來的 volume 與網路、既有的 volume 都是
+  Live 的名稱；網路上的容器屬於其他 compose 專案時不刪除。拋棄式目錄只在路徑、名稱與擁有者都符合時
+  刪除。最後確認沒有殘留。任何一步失敗都回報，並在 --base 寫入診斷檔（只有步驟與名稱）。
 
 只用標準函式庫、yaml 與 secscan.cli.secret_files（以 -I 執行，不 import tests 與工作目錄的模組）。
 """
@@ -31,11 +39,14 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -88,10 +99,25 @@ ALLOWED_BINDS = {
 FILE_MODE = 0o600
 IMAGE_FORMAT = '{{index .Config.Labels "com.docker.compose.service"}} {{.Image}}'
 GATEWAY_OPTION = "com.docker.network.bridge.gateway_mode_ipv4"
+# 這次執行的所有權：網路以拋棄式目錄的名稱標記（mktemp 建立，同一個 TMPDIR 之下唯一）。
+RUN_LABEL = "secscan.live.run"
+RUN_ID_PATTERN = re.compile(r"secscan-live-secrets\.[A-Za-z0-9]{6}")
 NETWORK_FORMAT = (
     f'{{{{.Internal}}}}|{{{{index .Options "{GATEWAY_OPTION}"}}}}|'
-    "{{range .IPAM.Config}}{{.Subnet}} {{.IPRange}}{{end}}"
+    "{{range .IPAM.Config}}{{.Subnet}} {{.IPRange}}{{end}}|"
+    f'{{{{index .Labels "{RUN_LABEL}"}}}}'
 )
+NETWORK_LABEL_FORMAT = f'{{{{index .Labels "{RUN_LABEL}"}}}}'
+PROJECT_LABEL = "com.docker.compose.project"
+PROJECT_LABEL_FORMAT = f'{{{{index .Config.Labels "{PROJECT_LABEL}"}}}}'
+# docker 的 index 取不到標籤時印出的文字。
+NO_VALUE = "<no value>"
+# 清理只用這裡的常數（make 的變數可能被覆寫）。
+COMPOSE_FILE = "compose.yaml"
+LIVE_COMPOSE = ("compose", "-p", LIVE_PROJECT, "-f", COMPOSE_FILE, "--profile", "app")
+# down -v 會刪除的 volume 與網路：只能是 Live 的名稱（專案前綴或 LIVE_ENV 的 secscan_live_*）。
+LIVE_RESOURCE_PREFIXES = (f"{LIVE_PROJECT}_", "secscan_live_")
+DIAGNOSTIC_PREFIX = "secscan-live-cleanup-failed."
 PROJECT_PATTERN = re.compile(r"secscan-live[a-z0-9-]*")
 EXIT_OK = 0
 EXIT_FAILURE = 1
@@ -143,6 +169,12 @@ def preflight(base: Path, run: Runner) -> None:
     leftovers = sorted(path.name for path in base.glob(f"{SECRETS_PREFIX}*"))
     if leftovers:
         raise GuardError(f"上一次的拋棄式目錄還在（{len(leftovers)} 個）：確認之後刪除再執行")
+    diagnostics = sorted(path.name for path in base.glob(f"{DIAGNOSTIC_PREFIX}*"))
+    if diagnostics:
+        raise GuardError(
+            f"上一次的清理失敗（{base} 中有 {len(diagnostics)} 個診斷檔）：確認並處理之後刪除"
+            "診斷檔再執行"
+        )
     label = f"label=com.docker.compose.project={LIVE_PROJECT}"
     found = {
         "容器": run(["ps", "-aq", "--filter", label]).split(),
@@ -168,17 +200,32 @@ class NetworkSpec:
     ip_range: str
 
 
-def ensure_networks(run: Runner, specs: Sequence[NetworkSpec]) -> None:
-    """Live 的兩個網路（取代子 make 的 ensure-net；名稱只能是 Live 的兩個）。"""
+def run_id(secrets_dir: Path, base: Path | None = None) -> str:
+    """這次執行的識別：拋棄式目錄的名稱。給定 base 時，目錄必須直接在 base 之下。"""
+    path = os.path.normpath(secrets_dir)
+    name = os.path.basename(path)
+    if RUN_ID_PATTERN.fullmatch(name) is None:
+        raise GuardError("拋棄式目錄的名稱不正確：無法確認這次執行的資源")
+    if base is not None and os.path.dirname(path) != os.path.normpath(base):
+        raise GuardError("拋棄式目錄不在這次的暫存目錄之下：無法確認這次執行的資源")
+    return name
+
+
+def claim_networks(run: Runner, specs: Sequence[NetworkSpec], owner: str) -> None:
+    """建立 Live 的兩個網路並標記所有權（取代子 make 的 ensure-net；名稱只能是 Live 的兩個）。
+
+    已存在就失敗：可能是另一次 Live 正在執行，不能共用、也不能在清理時刪除它的資源。
+    """
     if sorted(spec.name for spec in specs) != sorted(LIVE_NETWORKS):
         raise GuardError("只能建立 Live 的兩個網路")
-    existing = set(run(["network", "ls", "--format", "{{.Name}}"]).split())
     for spec in specs:
-        if spec.name not in existing:
+        try:
             run(
                 [
                     "network",
                     "create",
+                    "--label",
+                    f"{RUN_LABEL}={owner}",
                     "--internal",
                     "--opt",
                     f"{GATEWAY_OPTION}=isolated",
@@ -189,18 +236,191 @@ def ensure_networks(run: Runner, specs: Sequence[NetworkSpec]) -> None:
                     spec.name,
                 ]
             )
-        _check_network(run, spec)
+        except GuardError:
+            raise GuardError(
+                f"無法建立網路 {spec.name}（已存在時：另一次 Live 正在執行，或上一次沒有清乾淨）"
+            ) from None
+        _check_network(run, spec, owner)
 
 
-def _check_network(run: Runner, spec: NetworkSpec) -> None:
+def _check_network(run: Runner, spec: NetworkSpec, owner: str) -> None:
     facts = run(["network", "inspect", "--format", NETWORK_FORMAT, spec.name]).strip().split("|")
-    if len(facts) != len(("internal", "gateway", "ranges")):
+    if len(facts) != len(("internal", "gateway", "ranges", "owner")):
         raise GuardError(f"無法確認網路 {spec.name} 的設定")
-    internal, gateway, ranges = facts
+    internal, gateway, ranges, label = facts
     if internal != "true" or gateway != "isolated":
         raise GuardError(f"{spec.name} 不是 internal、gateway isolated 的網路")
     if ranges != f"{spec.subnet} {spec.ip_range}":
         raise GuardError(f"{spec.name} 的網段或 ip-range 不正確")
+    if label != owner:
+        raise GuardError(f"{spec.name} 不是這次執行建立的網路")
+
+
+# --------------------------------------------------------------------------- cleanup
+
+
+@dataclass
+class CleanupReport:
+    """清理的結果：失敗的步驟（只有步驟與名稱），以及沒有處理的、不屬於這次執行的資源。"""
+
+    run: Runner
+    failures: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+
+    def step(self, description: str, arguments: Sequence[str]) -> str | None:
+        try:
+            return self.run(arguments)
+        except GuardError:
+            self.failures.append(description)
+            return None
+
+
+def cleanup(run: Runner, base: Path, secrets_dir: str) -> CleanupReport:
+    """只清理確認屬於這次執行的資源；不屬於的不碰（M2：清理段不得使用未經驗證的外部變數）。"""
+    report = CleanupReport(run)
+    if not secrets_dir:
+        return report
+    try:
+        owner = run_id(Path(secrets_dir), base)
+    except GuardError as exc:
+        report.failures.append(f"{exc}：沒有清理任何東西")
+        return report
+    owned = _owned_networks(report, owner)
+    _remove_network_containers(report, owned)
+    if owned == LIVE_NETWORKS:
+        _compose_down(report)
+    for name in sorted(owned):
+        report.step(f"刪除網路 {name}", ["network", "rm", name])
+    _remove_directory(report, Path(secrets_dir))
+    _check_residue(report, owned, Path(secrets_dir))
+    return report
+
+
+def _owned_networks(report: CleanupReport, owner: str) -> frozenset[str]:
+    listing = report.step("列出網路", ["network", "ls", "--format", "{{.Name}}"])
+    owned = set()
+    for name in sorted(LIVE_NETWORKS & set((listing or "").split())):
+        label = report.step(
+            f"確認網路 {name} 的所有權",
+            ["network", "inspect", "--format", NETWORK_LABEL_FORMAT, name],
+        )
+        if label is not None and label.strip() == owner:
+            owned.add(name)
+        elif label is not None:
+            report.skipped.append(f"網路 {name}（不是這次執行建立的）")
+    return frozenset(owned)
+
+
+def _remove_network_containers(report: CleanupReport, owned: frozenset[str]) -> None:
+    """這次執行的網路上的容器（測試的接收端、探針與孤兒的掃描容器）；其他 compose 專案的不刪除。"""
+    removable = []
+    for name in sorted(owned):
+        listing = report.step(
+            f"列出網路 {name} 上的容器", ["ps", "-aq", "--filter", f"network={name}"]
+        )
+        for container in (listing or "").split():
+            project = report.step(
+                f"確認容器 {container[:12]} 的專案",
+                ["inspect", "--format", PROJECT_LABEL_FORMAT, container],
+            )
+            if project is None:
+                continue
+            if project.strip() in ("", NO_VALUE, LIVE_PROJECT):
+                removable.append(container)
+            else:
+                report.failures.append(
+                    f"網路 {name} 上有其他 compose 專案的容器 {container[:12]}：沒有刪除"
+                )
+    if removable:
+        report.step("刪除 Live 網路上的容器", ["rm", "-f", "-v", *removable])
+
+
+def _compose_down(report: CleanupReport) -> None:
+    """down -v 之前核對：專案名稱、解析出來的 volume 與網路、既有的 volume 都是 Live 的名稱。"""
+    resolved = report.step(
+        "解析 Live 的 compose 設定", [*LIVE_COMPOSE, "config", "--format", "json"]
+    )
+    existing = report.step(
+        "列出 Live 專案的 volume",
+        ["volume", "ls", "-q", "--filter", f"label={PROJECT_LABEL}={LIVE_PROJECT}"],
+    )
+    if resolved is None or existing is None:
+        report.failures.append("無法核對 down -v 的對象：沒有執行 compose down")
+        return
+    try:
+        problems = _down_problems(_json(resolved))
+    except GuardError:
+        problems = ["設定不是 JSON"]
+    problems += [
+        f"volume {name}" for name in existing.split() if not name.startswith(LIVE_RESOURCE_PREFIXES)
+    ]
+    if problems:
+        report.failures.append(f"down -v 的對象不只 Live 的資源（{'、'.join(problems)}）：沒有執行")
+        return
+    report.step("compose down -v", [*LIVE_COMPOSE, "down", "-v", "--remove-orphans"])
+
+
+def _down_problems(config: Mapping[str, Any]) -> list[str]:
+    problems = [] if config.get("name") == LIVE_PROJECT else ["專案名稱"]
+    for key, volume in (config.get("volumes") or {}).items():
+        name = str(volume.get("name", f"{LIVE_PROJECT}_{key}"))
+        if volume.get("external") or not name.startswith(LIVE_RESOURCE_PREFIXES):
+            problems.append(f"volume {name}")
+    for key, network in (config.get("networks") or {}).items():
+        name = str(network.get("name", f"{LIVE_PROJECT}_{key}"))
+        if name not in LIVE_NETWORKS and not name.startswith(f"{LIVE_PROJECT}_"):
+            problems.append(f"網路 {name}")
+    return problems
+
+
+def _remove_directory(report: CleanupReport, path: Path) -> None:
+    """拋棄式目錄：自己擁有的目錄（不是 symlink）才刪除。"""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        report.failures.append("拋棄式目錄不是自己擁有的目錄：沒有刪除")
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        report.failures.append(f"無法刪除拋棄式目錄（{exc.strerror or type(exc).__name__}）")
+
+
+def _check_residue(report: CleanupReport, owned: frozenset[str], path: Path) -> None:
+    if os.path.lexists(path):
+        report.failures.append("清理之後拋棄式目錄還在")
+    if not owned:
+        return
+    networks = report.step("確認沒有殘留的網路", ["network", "ls", "--format", "{{.Name}}"])
+    remaining = sorted(owned & set((networks or "").split()))
+    if remaining:
+        report.failures.append(f"清理之後還有網路：{'、'.join(remaining)}")
+    if owned != LIVE_NETWORKS:
+        return
+    label = f"label={PROJECT_LABEL}={LIVE_PROJECT}"
+    containers = report.step("確認沒有殘留的容器", ["ps", "-aq", "--filter", label])
+    volumes = report.step("確認沒有殘留的 volume", ["volume", "ls", "-q", "--filter", label])
+    for kind, listing in (("容器", containers), ("volume", volumes)):
+        if listing and listing.split():
+            report.failures.append(
+                f"清理之後還有 {LIVE_PROJECT} 的{kind}（{len(listing.split())} 個）"
+            )
+
+
+def write_diagnostic(base: Path, secrets_dir: str, failures: Sequence[str]) -> Path:
+    """清理失敗的診斷檔（0600，只有步驟與名稱）：下一次的 preflight 看到它就拒絕執行。"""
+    descriptor, name = tempfile.mkstemp(prefix=DIAGNOSTIC_PREFIX, suffix=".txt", dir=base)
+    lines = [
+        f"時間：{datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        f"拋棄式目錄：{os.path.basename(os.path.normpath(secrets_dir)) or '（沒有）'}",
+        "失敗的步驟：",
+        *(f"- {failure}" for failure in failures),
+    ]
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write("\n".join(lines) + "\n")
+    return Path(name)
 
 
 # --------------------------------------------------------------------------- snapshot
@@ -223,12 +443,15 @@ def snapshot(root: Path, run: Runner) -> dict[str, Any]:
             volumes.append(
                 run(["volume", "inspect", "--format", "{{.Name}} {{.CreatedAt}}", name]).strip()
             )
+    # Live 的網路（secscan_live_*）不是開發環境：殘留由 cleanup 的殘留檢查回報
+    # （程式碼審查 MEDIUM-2）。
     networks = sorted(
         line
         for line in run(
             ["network", "ls", "--no-trunc", "--format", "{{.Name}} {{.ID}}"]
         ).splitlines()
-        if line.split(" ", 1)[0] in DEV_NETWORKS or line.startswith(f"{DEV_PROJECT}_")
+        if line.split(" ", 1)[0] in DEV_NETWORKS
+        or (line.startswith(f"{DEV_PROJECT}_") and not line.startswith(LIVE_RESOURCE_PREFIXES))
     )
     return {
         "containers": sorted(containers),
@@ -432,9 +655,14 @@ def _parser() -> argparse.ArgumentParser:
     images = commands.add_parser("check-images")
     images.add_argument("--app-image", required=True)
     images.add_argument("--guard-image", required=True)
-    commands.add_parser("networks").add_argument(
+    networks = commands.add_parser("networks")
+    networks.add_argument("--secrets-dir", type=Path, required=True)
+    networks.add_argument(
         "--network", nargs=3, action="append", required=True, metavar=("NAME", "SUBNET", "RANGE")
     )
+    cleanup_parser = commands.add_parser("cleanup")
+    cleanup_parser.add_argument("--base", type=Path, required=True)
+    cleanup_parser.add_argument("--secrets-dir", required=True)
     return parser
 
 
@@ -470,10 +698,27 @@ def run_command(args: argparse.Namespace, stdin: str, run: Runner) -> str:
     elif command == "check-environment":
         check_environment(stdin, args.allow)
     elif command == "networks":
-        ensure_networks(run, [NetworkSpec(*item) for item in args.network])
+        specs = [NetworkSpec(*item) for item in args.network]
+        claim_networks(run, specs, run_id(args.secrets_dir))
+    elif command == "cleanup":
+        return _cleanup_command(args.base, args.secrets_dir, run)
     else:
         check_images(run, args.app_image, args.guard_image)
     return f"{command} ok"
+
+
+def _cleanup_command(base: Path, secrets_dir: str, run: Runner) -> str:
+    report = cleanup(run, base, secrets_dir)
+    skipped = f"；沒有處理（不屬於這次執行）：{'、'.join(report.skipped)}" if report.skipped else ""
+    if not report.failures:
+        return f"cleanup ok{skipped}"
+    try:
+        where = f"診斷檔：{write_diagnostic(base, secrets_dir, report.failures)}"
+    except OSError as exc:
+        where = f"無法寫入診斷檔（{exc.strerror or type(exc).__name__}）"
+    raise GuardError(
+        f"清理沒有完成（{len(report.failures)} 項：{'；'.join(report.failures)}）{skipped}；{where}"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

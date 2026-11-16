@@ -283,7 +283,9 @@ def _default(value: object) -> str:
 
 
 def _make(name: str) -> str:
-    [line] = [line for line in MAKEFILE.splitlines() if re.match(rf"{name}\s*\??:?=", line)]
+    [line] = [
+        line for line in MAKEFILE.splitlines() if re.match(rf"(?:override )?{name}\s*\??:?=", line)
+    ]
     return line.split("=", 1)[1].strip()
 
 
