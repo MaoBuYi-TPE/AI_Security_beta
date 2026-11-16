@@ -4073,11 +4073,13 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 17. **主版本升級與初始化未完成標記**（O1，LOW，未測試）：新的 PGDATA 沒有 `PG_VERSION`，wrapper 會建立標記；新映像的官方 entrypoint 偵測到舊版的資料時拒絕啟動（PG 18 的 entrypoint 有這個檢查；新版本未驗證），標記留著（fail closed）。**不得假定新版本一定會安全地拒絕啟動**：新版本的 entrypoint 若沒有偵測到舊的資料，可能建立新的叢集並回報 healthy。升級之前必須確認 PGDATA、目錄結構、官方 entrypoint 的行為與升級程序（README）；升級不在 b2 的範圍。拒絕啟動依賴新映像的官方 entrypoint 對舊資料的檢查（第二輪資料庫 LOW-2）；被拒絕的那次啟動已經建立了標記，升級完成之後 db 會一直 unhealthy，直到升級程序在確認資料正確之後處理標記（資料庫審查 LOW-4）。
 18. **Live 的所有權的邊界**（G1 的修正，2026-11-16）：所有權以網路的標籤與原子的 `network create` 判定；能使用 Docker API 的程序（同一個 macOS 使用者的任何程序，C26；b5）可以偽造或刪除標籤。並行的防護只涵蓋這個版本的 recipe：修正之前的 recipe（或手動的 compose 指令）不經過這個機制。診斷檔在 `TMPDIR`，重開機或系統清理可能刪除它；殘留的 Live 資源仍會讓 preflight 拒絕。
 19. **既有測試模組的 assert 改寫**：G1 的修正讓 T23b-b2 處理秘密的 12 個測試模組不改寫 assert（`PYTEST_DONT_REWRITE`），既有的修改過的模組中這次加入的 assert 先算成布林值；T23b-b2 之前的其他模組（例如 T23a 的 canary 測試）仍會在失敗時印出運算元。理由：它們的 canary 是每個測試產生的隨機值，不是真的秘密，也不在這次的範圍；之後的強化。
-20. **Live 的 make 變數 `UV_RUN`、`REPO_DIR`、`CURDIR` 沒有用 `override`**（第二輪安全 INFO；2026-11-16 登錄）：只有在命令列、`MAKEFLAGS` 或 `make -e` 刻意覆寫時才生效（Makefile 自己的定義優先於一般的環境變數）。重新評估：不能繞過 Live 的授權（`ENABLE_LIVE_LAB_TESTS=1` 的檢查是 recipe 的第一個指令，不經由這些變數），清理的對象由 `env_guard` 的常數決定。但覆寫 `UV_RUN`、`REPO_DIR` 等於換掉執行 `env_guard`（preflight、設定驗證、清理）、alembic 與 pytest 的程式，覆寫 `CURDIR` 會讓快照與設定驗證核對另一個目錄：這是操作者刻意執行自己選的指令，和直接在 shell 執行同樣的指令權限相同，沒有跨越權限邊界。之後的強化：Live 專用、`override` 的 `UV_RUN` 與路徑（現在的 `UV_RUN=` 是 CSEC-05 等測試在暫存目錄執行 make 的介面）。
+20. **Live 的 make 變數 `UV_RUN`、`REPO_DIR`、`CURDIR` 沒有用 `override`**（第二輪安全 INFO；2026-11-16 登錄）：只有在命令列、`MAKEFLAGS` 或 `make -e` 刻意覆寫時才生效（Makefile 自己的定義優先於一般的環境變數）。重新評估：不能繞過 Live 的授權（`ENABLE_LIVE_LAB_TESTS=1` 的檢查是 recipe 的第一個指令，不經由這些變數），清理的對象由 `env_guard` 的常數決定。但覆寫 `UV_RUN`、`REPO_DIR` 等於換掉執行 `env_guard`（preflight、設定驗證、清理）、alembic 與 pytest 的程式，覆寫 `CURDIR` 會讓快照與設定驗證核對另一個目錄：這是操作者刻意執行自己選的指令，和直接在 shell 執行同樣的指令權限相同，沒有跨越權限邊界。安全審查的重新審查（同日）確認結論，並補充三點，都屬於同一類操作者刻意的設定：環境中的 `MAKEFLAGS='--eval=override UV_RUN:=…'` 不需要 `-e` 就能改掉 `UV_RUN`；非 `override` 的命令列變數（`LIVE_PYTEST_ARGS`、`LIVE_TESTS`、`LIVE_PYTEST_ENV`、`LIVE_WITH_LAB_IMAGES`）中的 `$(shell …)` 在 `make -n` 展開時就會執行；`uv run` 以工作目錄尋找專案（從其他目錄以 `make -f` 執行時，`env_guard` 會 import 另一個環境的 `secscan`）。之後的強化：Live 專用、`override` 的 `UV_RUN` 與路徑（現在的 `UV_RUN=` 是 CSEC-05 等測試在暫存目錄執行 make 的介面）。
 21. **主機上的 Settings 仍以環境變數優先**（第二輪資料庫 INFO-3）：`make migrate`、`make dev`、`make db-roles-migrate` 等主機流程照 pydantic-settings 的預設，環境變數優先於 `.env`。shell 中殘留的 `DB_PASSWORD` 等和 `.env` 不同時，以 SCRAM 登入失敗（fail closed），不會洩漏、也不會改變 DB 的密碼；`sync-secret-files` 只讀 `.env`，所以容器與 `secrets/` 不會和 `.env` 分歧。
-22. **`tests/live/env_guard.py` 超過 800 行**（第二輪修正之後 825 行；CLAUDE.md §5 的上限）：它以 `uv run --locked python -I` 執行（計畫 §12.8 修正 4：不 import `tests` 與工作目錄的模組），拆成互相 import 的模組需要改變這個已核准的執行方式。依使用者對程式碼 MEDIUM-2 的決定（本輪不為行數做大規模重構），暫緩；只把 R1 的檢查移到只有 pytest 使用的 `tests/live_session.py`。`tests/unit/test_live_isolation_make.py`（1168 行）同樣暫緩；`test_live_env_guard.py` 因為清理的測試移到新的模組，降到 600 行。
-23. **測試以 `--network none` 建立的一次性容器**不在清理與殘留檢查的範圍：它們都是 `docker run --rm`（結束時自行刪除），沒有 compose 的專案標記，也不接 Live 的網路。仍在執行而掛載 Live 的 volume 時，`compose down -v` 刪不掉那個 volume，殘留檢查會以失敗回報。
-24. **`docker rm` 對重複 ID 的衝突、`ps -a --filter network=` 涵蓋停止的容器、`network create` 的原子性**：審查者依 docker 的原始碼推論，或以假的 docker 模擬，沒有以真的 Docker 驗證。去重與所有權的修正不依賴前兩項推論成立；G3 以真的 Docker 確認清理完成、殘留為零。
+22. **`tests/live/env_guard.py` 超過 800 行**（第二輪修正與重新審查的補強之後 866 行；CLAUDE.md §5 的上限）：它以 `uv run --locked python -I` 執行（計畫 §12.8 修正 4：不 import `tests` 與工作目錄的模組），拆成互相 import 的模組需要改變這個已核准的執行方式（程式碼審查評估為合理；不改執行方式的替代：把 compose 設定的純函式移到第二個獨立的腳本，recipe 與測試都要跟著改）。依使用者對程式碼 MEDIUM-2 的決定（本輪不為行數做大規模重構），暫緩；只把 R1 的檢查移到只有 pytest 使用的 `tests/live_session.py`。`tests/unit/test_live_isolation_make.py`（1168 行）同樣暫緩；`test_live_env_guard.py` 因為清理的測試移到新的模組，降到 600 行。
+23. **測試建立的一次性容器**不在清理與殘留檢查的範圍：以 `--network none` 建立的，以及 `test_guard_failover_live.py` 以 `run --rm` 在預設的 bridge 上執行的 guard 映像（安全 INFO-6）。它們都是 `docker run --rm`（結束時自行刪除），沒有 compose 的專案標記，也不接 Live 的網路；CLI 逾時之後如果容器還在，殘留檢查看不到它。仍在執行而掛載 Live 的 volume 時，`compose down -v` 刪不掉那個 volume，殘留檢查會以失敗回報。
+24. **未以真的 Docker 驗證的推論**（審查者依 docker 的原始碼推論，或以假的 docker 模擬）：`docker rm` 對重複 ID 的衝突；`ps -a --filter network=` 列出停止的容器（含網路被刪除之後仍以名稱引用它的容器）；仍被停止的容器引用的網路能否 `network rm`；`network create` 的原子性與同名時 `network inspect` 的 ambiguous 錯誤；`inspect` 的 JSON 標記、`--type container` 與 64 碼的 ID。去重不依賴第一項（每個容器只送一次刪除請求）；但**無標記的停止容器**（孤兒的掃描容器、接收端）的刪除與殘留偵測依賴第二項——`live_resources` 只以專案標記找容器，它們要靠網路還在、而且 `ps` 列得到才看得到（第二輪程式碼 LOW-1、安全 LOW-3）。G3 刻意在 Live 網路上留一個停止、無標記的容器驗證，並以真的 Docker 確認清理完成、殘留為零。
+25. **所有權的識別（需要使用者決定的設計調整；安全審查第二輪 LOW-2、LOW-3）**：所有權綁在「網路名稱＋標籤（拋棄式目錄的名稱）」，在這個版本的 recipe、沒有人刻意操作 Docker API 時足以防止意外的干擾，但不足以**可靠地**識別這次執行的資源：(a) 同名、同標籤的網路被替換時分辨不出（需要刻意的 Docker API 操作，和剩餘風險 18 同一個邊界）；(b) 拋棄式目錄的名稱只在同一個 `TMPDIR` 之下唯一，兩次不同 `TMPDIR` 的並行 Live 取得相同的後綴（每一對約 1.8e-11）時，輸的一方會對另一方的 stack 執行 compose down——唯一不需要外部操作的路徑；(c) preflight 看不到停止、無標記、以名稱引用 Live 網路的舊容器，重建同名的網路之後會被當成這次的候選（被刪的只是 Live 的殘留）。依使用者的指示（標記不足時停止並回報設計調整，不自行擴大清理範圍），**沒有實作**；審查者建議的調整：`networks` 記錄 `network create` 回傳的 network ID（拋棄式目錄中的 0600 檔），所有權改成名稱＋標籤＋ID，`_belongs` 以 `NetworkSettings.Networks[*].NetworkID` 比對；或改成高熵的標籤；更強的替代是每次執行使用自己的 compose 專案與 volume 名稱。這次只做了不改變設計的收緊：接的網路必須全部屬於這次執行（不再接受任意的 `secscan-live_*`）、專案標記以 JSON 精確比對。
+26. **清理的順序可能造成誤報的失敗**（安全 INFO-5）：先刪除 Live 網路上的容器（含 guard），之後才 compose down；這段期間 runner 還在執行，可能再啟動掃描容器，網路因此刪不掉而 fail closed（不是安全問題）。G3 觀察；必要時改成先停止 runner。
 
 ### 32.7 新的安全待辦：b5（runner 的 Docker API 權限邊界，HIGH）
 
@@ -4149,3 +4151,24 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 | 程式碼 MEDIUM-2：測試檔超過 800 行 | 使用者：暫緩大規模拆檔；本輪新增的測試放在獨立的模組（清理的 unit 測試整組移到 `test_live_env_guard_cleanup.py`，因為介面改變、必須改寫）；剩餘風險 22 |
 | 安全 INFO、資料庫 INFO-3 | 剩餘風險 20、21（理由與邊界；重新評估沒有發現能繞過 Live 授權或改變清理對象的路徑） |
 | 資料庫的待確認：G5 備份的密碼來源 | G5 的方案核准之前訂正（計畫 §5 步驟 3）：合併前的設定沒有 `/run/secrets`，不得沿用；不在這個 PR |
+
+**第二輪的重新審查**（同日；code APPROVE、security APPROVE、database 補充審查 APPROVE，都沒有 CRITICAL／HIGH／MEDIUM）。空轉檢查 55d 第一次 FAIL（測試缺口：格式檢查被第二層的確認蓋過），補強測試之後通過。
+
+| 項目 | 處置 |
+|---|---|
+| 程式碼 LOW-1：只有一個網路消失時仍刪除另一個網路上的容器，和文件不符；剩餘風險 24 寫得太強 | 修正：記錄了所有權、網路卻不齊全時不刪任何 Docker 資源（外部變更就 fail closed）；剩餘風險 24 改寫 |
+| 程式碼 LOW-2：hygiene 的正向對照以 loader 判斷，量不到改寫 | 修正：實際觸發一次 assert，確認訊息含運算元 |
+| 程式碼 LOW-3：「重複的 ID 失敗」的替身觸發不到 | 修正：兩個替身對同一次呼叫中重複、或之前已刪除過的 ID 都失敗（比真的 `rm -f` 嚴格） |
+| 安全 LOW-1：compose JSON 的形狀不符、第二次 Ctrl-C 會中斷清理、不留診斷檔 | 修正：`_down_problems` 先驗證形狀（記為問題，不 down，清理繼續）；`KeyboardInterrupt` 寫入診斷檔。不加萬用的 `except Exception`（BLE 規則）：程式本身的錯誤仍以 traceback 結束（不含秘密、不會回報 ok） |
+| 安全 LOW-2：所有權只綁名稱＋標籤 | (c) 修正：接的網路必須全部屬於這次執行。(a)(b) 需要設計調整，**沒有實作、等使用者決定**（剩餘風險 25） |
+| 安全 LOW-3：preflight 看不到停止、無標記的舊容器；殘留的完整性依賴推論 | 剩餘風險 24、25；G3 驗證；network ID 的綁定一併解決（等使用者決定） |
+| 安全 LOW-4：R1 只比對字面（symlink、不存在的目錄都通過）；專案的樣式比文件寬 | 修正：`lstat` 確認是自己擁有、0700、不是 symlink 的目錄；專案完全等於 `secscan-live` |
+| 安全 INFO-1：Engine 只在清理開始時確認 | 修正：compose down 之前再確認一次，不同就不再碰任何資源 |
+| 安全 INFO-2：專案標記 strip、接受字面的 `<no value>` | 修正：JSON 精確比對、`inspect --type container` |
+| 安全 INFO-3 | 剩餘風險 20 補充 |
+| 安全 INFO-4：清理可以被中斷 | 修正：中斷時寫入診斷檔（下一次的 preflight 拒絕）；清理期間不忽略訊號（清理卡住時仍可以中斷） |
+| 安全 INFO-5：清理順序的誤報 | 剩餘風險 26（G3 觀察） |
+| 安全 INFO-6：剩餘風險 23 漏了一種一次性容器 | 修正文件 |
+| 安全 INFO-7：`claimed`、`engine` 不能被注入沒有測試 | 修正：命令列與環境的注入測試 |
+| 資料庫：G5 訂正的 LOW-A～C、INFO-D、E | 寫進計畫 §5 步驟 3，待 G5 方案核准時確認（G5 未授權） |
+| 資料庫：O1 的語氣（選擇性 INFO） | 不改：後一句「不要假定」已涵蓋 |
