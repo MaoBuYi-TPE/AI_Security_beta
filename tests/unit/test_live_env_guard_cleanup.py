@@ -290,11 +290,16 @@ def test_stopped_containers_are_listed_and_removed(tmp_path: Path) -> None:
 
 
 def test_malformed_and_empty_ids_never_reach_docker_rm(tmp_path: Path) -> None:
-    listing = f"\nc-short\n{RECEIVER}\n{'Z' * 64}\n\n"
-    docker = CleanupDocker(listings={LAB: listing})
+    malformed = ("c-short", "Z" * 64)
+    listing = f"\n{malformed[0]}\n{RECEIVER}\n{malformed[1]}\n\n"
+    # inspect 對格式不正確的 ID 也回報「屬於這次執行」：只有格式檢查擋得住（空轉檢查 55d）。
+    facts = {item: f"{item}||{LAB} \n" for item in malformed}
+    docker = CleanupDocker(listings={LAB: listing}, facts=facts)
 
     report = _clean(tmp_path, docker)
 
+    inspected = {call[-1] for call in docker.calls if call[:1] == ["inspect"]}
+    assert not inspected & set(malformed)
     assert all(env_guard.CONTAINER_ID.fullmatch(identifier) for identifier in docker.removed())
     assert sorted(docker.removed()) == sorted([GUARD, RECEIVER, ORPHAN])
     assert _has(report, "格式不正確的容器 ID（2 個）")
