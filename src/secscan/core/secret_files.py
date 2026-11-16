@@ -7,8 +7,8 @@ compose secrets 把每個秘密掛載成 `/run/secrets/<名稱>` 的唯讀檔案
   開檔（O_NONBLOCK），之後由 fstat 拒絕。只接受一般檔案。
 - 大小：不信任 `st_size`，最多讀 4096 + 1 bytes，超過就拒絕。
 - 內容：只接受可列印的 ASCII（0x21 到 0x7E，不含空白），長度 1 到 4095（上限和 initdb 的 awk
-  相同；DB 密碼的下限 32 由 sync-secret-files 與 initdb 檢查，這裡不檢查），最多容許一個結尾的
-  換行。CR、第二行、控制字元與非 ASCII 一律拒絕。
+  相同；DB 密碼的下限 32 由 sync-secret-files（四個 DB 密碼）與 initdb（只有 owner 與應用程式角色
+  的密碼）檢查，這裡不檢查），最多容許一個結尾的換行。CR、第二行、控制字元與非 ASCII 一律拒絕。
 - 所有錯誤都轉成固定訊息的 SecretFileError（ValueError 的子類別：在 validator 中會變成
   ValidationError）。訊息只有設定的名稱與原因，不含檔案內容；例外不帶原本的 OSError（`__context__`
   是 None），也不會產生帶著 bytes 的 UnicodeDecodeError。
