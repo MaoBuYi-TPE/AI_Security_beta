@@ -8,6 +8,7 @@ PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定�
 
 import hashlib
 import os
+import re
 import secrets
 import stat
 from collections.abc import Callable
@@ -27,8 +28,10 @@ from secscan.cli.secret_files import (
     generate_values,
 )
 from secscan.core.config import ENV_FILE
+from secscan.core.secret_files import MAX_SECRET_LENGTH, MIN_DB_PASSWORD_LENGTH
 from secscan.security.secret_cipher import parse_keys
 
+ROOT = Path(__file__).resolve().parents[2]
 FRAGMENT_LENGTH = 8
 ENV_NAMES = tuple(item.env_name for item in SECRET_FILES)
 FILE_NAMES = tuple(item.file_name for item in SECRET_FILES)
@@ -171,18 +174,86 @@ def test_sync_rewrites_a_file_with_a_wider_mode(
 
     assert code == EXIT_OK
     assert stat.S_IMODE(workspace.file("db_password").stat().st_mode) == 0o600
-    assert "db_password：更新" in err
+    # 內容沒有變：回報「修正權限」，不印出 DB 角色密碼的警告（程式碼審查 LOW-3：原本誤報「更新」）。
+    assert "db_password：修正權限" in err
+    assert "db_password：更新" not in err
+    assert DB_ROLE_WARNING not in err
 
 
-def test_environment_variables_take_precedence_over_dotenv(
-    workspace: Workspace, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "name", ["DB_OWNER_PASSWORD", "db_owner_password", "CONTENT_ENCRYPTION_KEYS"]
+)
+def test_a_same_named_environment_variable_is_refused(
+    workspace: Workspace,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
 ) -> None:
-    override = secrets.token_hex(24)
-    monkeypatch.setenv("DB_OWNER_PASSWORD", override)
+    """安全審查 L1：shell 中殘留的同名變數（不分大小寫）會讓容器與主機工具的值分歧。sync 只以
+    .env 為來源：同名的環境變數存在就拒絕，不寫任何檔案、不印出值。"""
+    canary = secrets.token_hex(24)
+    monkeypatch.setenv(name, canary)
+
+    code, err = _run(capsys)
+
+    leaked = canary[:FRAGMENT_LENGTH] in err
+    # 明確的原因（不是值的格式不對之類的其他原因）。
+    refused_for_shadowing = "同名" in err and name.upper() in err
+    assert code == EXIT_FAILURE
+    assert refused_for_shadowing
+    assert not leaked
+    assert not workspace.secrets.exists()
+
+
+def test_the_sources_are_the_dotenv_file_only(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """設定類別本身也不採用環境變數（即使指令的檢查被繞過，值仍然來自 .env）。"""
+    monkeypatch.setenv("DB_OWNER_PASSWORD", secrets.token_hex(24))
+
+    value = SecretSources().values()["db_owner_password"]
+
+    from_dotenv = (
+        value is not None and value.get_secret_value() == workspace.values["DB_OWNER_PASSWORD"]
+    )
+    assert from_dotenv
+
+
+@pytest.mark.parametrize(
+    "name", [item.env_name for item in SECRET_FILES if item.kind == "password"]
+)
+def test_db_passwords_shorter_than_initdb_accepts_are_refused(
+    workspace: Workspace, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    """安全審查 L6、程式碼審查 LOW-3、資料庫審查 LOW-1：sync 和 initdb 的長度規則一致（至少
+    32）。"""
+    workspace.write_env(**{name: "a" * (MIN_DB_PASSWORD_LENGTH - 1)})
+
+    code, err = _run(capsys)
+
+    assert code == EXIT_FAILURE
+    assert name in err
+    assert f"{MIN_DB_PASSWORD_LENGTH}" in err
+    assert not workspace.secrets.exists()
+
+
+def test_the_shortest_db_password_initdb_accepts_is_accepted(
+    workspace: Workspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace.write_env(DB_PASSWORD="a" * MIN_DB_PASSWORD_LENGTH)
 
     assert _run(capsys)[0] == EXIT_OK
 
-    assert workspace.file("db_owner_password").read_bytes() == override.encode()
+
+def test_the_length_rule_is_the_same_as_initdb() -> None:
+    """契約：initdb（10-roles.sql 的 awk）對 owner 與應用程式角色的密碼要求的長度，等於 sync 的
+    規則。"""
+    text = (ROOT / "deploy" / "postgres" / "initdb" / "10-roles.sql").read_text(encoding="utf-8")
+
+    rules = re.findall(r"length\(\$0\) >= (\d+) && length\(\$0\) <= (\d+)", text)
+
+    assert len(rules) == 2
+    assert set(rules) == {(str(MIN_DB_PASSWORD_LENGTH), str(MAX_SECRET_LENGTH))}
 
 
 @pytest.mark.parametrize(

@@ -8,9 +8,11 @@ sync-secret-files 與 generate-secret-files：
 - SECRET_FILES 是唯一的對照表：.env 的名稱、secrets/ 的檔名、容器內的路徑。compose.yaml 的頂層
   secrets 與每個 `*_FILE` 都和它一致（tests/unit/test_compose_secrets.py）。
 - 兩個指令都在載入 Settings 之前分派，不需要 DB；終端只顯示名稱與動作，一律不顯示值。
-- sync-secret-files：.env 仍是唯一由人編輯的來源（.env 不改）。值以只有七個欄位的設定類別讀取
-  （同樣的 .env 解析與優先順序），檢查之後寫進 secrets/：目錄 0700、檔案 0600、沒有結尾換行；
-  內容相同就不動，不同時以暫存檔原子替換（O_EXCL → fchmod → 寫入 → fsync → rename → fsync 目錄）。
+- sync-secret-files：.env 仍是唯一由人編輯的來源（.env 不改）。值以只有七個欄位的設定類別讀取，
+  **只讀 .env**：shell 中殘留的同名環境變數（不分大小寫）會讓容器與主機工具的值分歧，所以存在時
+  拒絕執行（安全審查 L1）。檢查之後寫進 secrets/：目錄 0700、檔案 0600、沒有結尾換行；DB 密碼至少
+  32 個字元（和 initdb 一致）。內容相同就不動，不同時以暫存檔原子替換（O_EXCL → fchmod → 寫入 →
+  fsync → rename → fsync 目錄）；內容相同、只有權限不對時同樣替換，回報「修正權限」。
   所有操作都經由目錄的 fd（O_DIRECTORY | O_NOFOLLOW）。symlink 與權限過寬、別人擁有的目錄一律拒絕；
   不認得的檔案不刪除，只列出名稱。`--check` 不寫入，缺少或不一致就 exit 1。
 - DB 角色的密碼在第一次初始化之後不會跟著 secrets/ 改變：更新 db 的三個密碼檔時印出固定的警告。
@@ -29,12 +31,12 @@ from enum import StrEnum
 from pathlib import Path
 
 from pydantic import SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from secscan.cli.keys import Subparsers
 from secscan.cli.services import Report
 from secscan.core.config import ENV_FILE
-from secscan.core.secret_files import MAX_SECRET_LENGTH
+from secscan.core.secret_files import MAX_SECRET_LENGTH, MIN_DB_PASSWORD_LENGTH
 from secscan.core.settings_errors import SettingsError, build_settings
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, new_key, parse_keys
 
@@ -97,13 +99,17 @@ class SecretFilesError(Exception):
 class Action(StrEnum):
     ADDED = "新增"
     UPDATED = "更新"
+    PERMISSIONS = "修正權限"
     UNCHANGED = "不變"
     MISSING = "缺少"
     DIFFERENT = "不一致"
 
 
 class SecretSources(BaseSettings):
-    """sync-secret-files 讀的七個值：和其他設定類別相同的 .env 解析與優先順序（環境變數優先）。"""
+    """sync-secret-files 讀的七個值：只讀 .env（和其他設定類別相同的 .env 解析）。
+
+    環境變數不是來源（安全審查 L1）：同名的環境變數存在時，指令在讀取之前就拒絕執行。
+    """
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,
@@ -120,6 +126,17 @@ class SecretSources(BaseSettings):
     secret_encryption_keys: SecretStr | None = None
     evidence_encryption_keys: SecretStr | None = None
     content_encryption_keys: SecretStr | None = None
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings, dotenv_settings)
 
     def values(self) -> dict[str, SecretStr | None]:
         return {item.file_name: getattr(self, item.file_name) for item in SECRET_FILES}
@@ -156,15 +173,32 @@ def run(args: argparse.Namespace, report: Report) -> int | None:
 # --------------------------------------------------------------------------- sync
 
 
+def shadowing_variables(environ: Mapping[str, str]) -> list[str]:
+    """環境中和七個秘密同名的變數（不分大小寫，和 pydantic-settings 的比對相同）；只回傳名稱。"""
+    present = {name.upper() for name in environ}
+    return [item.env_name for item in SECRET_FILES if item.env_name in present]
+
+
 def _sync_command(directory: Path, *, check: bool, report: Report) -> int:
+    shadowing = shadowing_variables(os.environ)
+    if shadowing:
+        report(
+            f"環境變數中有和 .env 同名的秘密設定：{'、'.join(shadowing)}。sync-secret-files "
+            "只以 .env 為來源；請在 unset 這些變數之後再執行。沒有寫入任何檔案。"
+        )
+        return EXIT_FAILURE
     try:
         sources = build_settings(SecretSources)
     except SettingsError as exc:
-        report(f"{exc}（.env 或環境變數）。沒有寫入任何檔案。")
+        report(f"{exc}（.env）。沒有寫入任何檔案。")
         return EXIT_FAILURE
     values, problems = _checked_values(sources.values())
     if problems:
-        report(f"這些秘密的值不正確：{'、'.join(problems)}。沒有寫入任何檔案。")
+        report(
+            f"這些秘密的值不正確：{'、'.join(problems)}（可列印的 ASCII、不含空白與引號；DB 密碼 "
+            f"{MIN_DB_PASSWORD_LENGTH} 到 {MAX_SECRET_LENGTH} 個字元；金鑰是 Fernet 格式）。"
+            "沒有寫入任何檔案。"
+        )
         return EXIT_FAILURE
     try:
         if check:
@@ -190,7 +224,8 @@ def _checked_values(raw: Mapping[str, SecretStr | None]) -> tuple[dict[str, byte
 
 def _valid(item: SecretFile, value: str) -> bool:
     encoded = value.encode("utf-8")
-    if not 1 <= len(encoded) <= MAX_SECRET_LENGTH:
+    shortest = MIN_DB_PASSWORD_LENGTH if item.kind is Kind.PASSWORD else 1
+    if not shortest <= len(encoded) <= MAX_SECRET_LENGTH:
         return False
     if any(not _FIRST_PRINTABLE <= byte <= _LAST_PRINTABLE or byte in _QUOTES for byte in encoded):
         return False
@@ -238,7 +273,10 @@ def _write_if_changed(descriptor: int, item: SecretFile, values: Mapping[str, by
     if current is not None and current == (value, FILE_MODE):
         return Action.UNCHANGED
     _replace(descriptor, item.file_name, value)
-    return Action.ADDED if current is None else Action.UPDATED
+    if current is None:
+        return Action.ADDED
+    # 內容相同、只有權限不對：DB 中的密碼不受影響，不印出角色密碼的警告（程式碼審查 LOW-3）。
+    return Action.PERMISSIONS if current[0] == value else Action.UPDATED
 
 
 def _compare(descriptor: int, item: SecretFile, values: Mapping[str, bytes]) -> Action:

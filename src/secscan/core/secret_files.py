@@ -6,8 +6,9 @@ compose secrets 把每個秘密掛載成 `/run/secrets/<名稱>` 的唯讀檔案
 - 開檔：`O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK`。最後一段是 symlink 就拒絕；FIFO 不會卡在
   開檔（O_NONBLOCK），之後由 fstat 拒絕。只接受一般檔案。
 - 大小：不信任 `st_size`，最多讀 4096 + 1 bytes，超過就拒絕。
-- 內容：只接受可列印的 ASCII（0x21 到 0x7E，不含空白），長度 1 到 4095（和 initdb 的 awk 檢查
-  一致），最多容許一個結尾的換行。CR、第二行、控制字元與非 ASCII 一律拒絕。
+- 內容：只接受可列印的 ASCII（0x21 到 0x7E，不含空白），長度 1 到 4095（上限和 initdb 的 awk
+  相同；DB 密碼的下限 32 由 sync-secret-files 與 initdb 檢查，這裡不檢查），最多容許一個結尾的
+  換行。CR、第二行、控制字元與非 ASCII 一律拒絕。
 - 所有錯誤都轉成固定訊息的 SecretFileError（ValueError 的子類別：在 validator 中會變成
   ValidationError）。訊息只有設定的名稱與原因，不含檔案內容；例外不帶原本的 OSError（`__context__`
   是 None），也不會產生帶著 bytes 的 UnicodeDecodeError。
@@ -22,6 +23,10 @@ import stat
 from collections.abc import Iterable, Mapping
 
 MAX_SECRET_LENGTH = 4095
+# DB 角色的密碼至少 32 個字元：initdb（deploy/postgres/initdb/10-roles.sql 的 awk）在第一次初始化時
+# 檢查 owner 與應用程式角色的密碼，sync-secret-files 對四個 DB 密碼套用同樣的規則（G1 審查 L6、
+# LOW-3、資料庫 LOW-1）。讀取（read_secret_file）不檢查下限：金鑰等其他秘密也經過這裡。
+MIN_DB_PASSWORD_LENGTH = 32
 # 值加上一個結尾的換行；多讀 1 byte 才分辨得出「剛好」與「超過」。
 MAX_SECRET_FILE_BYTES = MAX_SECRET_LENGTH + 1
 _READ_LIMIT = MAX_SECRET_FILE_BYTES + 1
