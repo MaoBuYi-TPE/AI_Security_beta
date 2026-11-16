@@ -1,11 +1,14 @@
+import secrets
+import traceback
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
 from secscan.core.config import Settings
+from secscan.core.settings_errors import SettingsError
 from secscan.main import create_app
 from secscan.security.blob_cipher import BlobCipher
 from secscan.security.secret_cipher import InvalidEncryptionKeysError, SecretCipher
@@ -52,8 +55,34 @@ def test_create_app_fails_fast_in_prod_without_db_password(
     monkeypatch.delenv("APP_ENV", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ValidationError, match="DB_PASSWORD"):
+    with pytest.raises(SettingsError, match="DB_PASSWORD") as caught:
         create_app()
+
+    # uvicorn 會印出完整的 traceback：只能有 safe_summary，不帶原本的 ValidationError。
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+
+
+def test_create_app_reports_conflicting_secret_settings_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DB_PASSWORD 與 DB_PASSWORD_FILE 同時設定時，原始的輸入就是秘密（CSEC-10）。"""
+    canary = secrets.token_hex(24)
+    secret_file = tmp_path / "db_password"
+    secret_file.write_text(secrets.token_hex(24), encoding="ascii")
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("DB_PASSWORD", canary)
+    monkeypatch.setenv("DB_PASSWORD_FILE", str(secret_file))
+
+    with pytest.raises(SettingsError) as caught:
+        create_app()
+
+    error = caught.value
+    assert "DB_PASSWORD 與 DB_PASSWORD_FILE 只能設定其中一個" in str(error)
+    assert "errors.pydantic.dev" not in str(error)
+    rendered = "".join(traceback.format_exception(error))
+    for text in (str(error), repr(error), rendered):
+        assert not any(canary[i : i + 8] in text for i in range(len(canary) - 7))
 
 
 # --- 目標 secret 的加密金鑰（docs/DECISIONS.md §12.1）---------------------------------------

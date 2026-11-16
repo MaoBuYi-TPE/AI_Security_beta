@@ -3,9 +3,11 @@
 原始的 ValidationError（errors()、json()）可能含輸入，這裡不對它做保證；只驗證對外的輸出。
 """
 
+import ast
 import logging
 import secrets
 import traceback
+from pathlib import Path
 from typing import Literal, Self
 
 import pytest
@@ -164,3 +166,29 @@ def test_build_settings_raises_without_the_original_error(caplog: pytest.LogCapt
     rendered = "".join(traceback.format_exception(error))
     for text in (str(error), repr(error), rendered, caplog.text):
         assert not _leaks(text, canary)
+
+
+# --- 靜態檢查：原始錯誤的結構化表示只在允許的地方使用 ---------------------------------------
+
+SRC = Path(__file__).resolve().parents[3] / "src" / "secscan"
+# errors()、json() 含 input 與 ctx：只有這裡（只取 loc、msg）與 API 的請求驗證錯誤（只取 loc）。
+RAW_ERROR_READERS = frozenset({"core/settings_errors.py", "core/errors.py"})
+
+
+def _raw_error_readers() -> set[str]:
+    found: set[str] = set()
+    for path in SRC.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"errors", "json"}
+                and not node.args
+            ):
+                found.add(path.relative_to(SRC).as_posix())
+    return found
+
+
+def test_only_the_allowed_modules_read_raw_validation_errors() -> None:
+    assert _raw_error_readers() <= RAW_ERROR_READERS

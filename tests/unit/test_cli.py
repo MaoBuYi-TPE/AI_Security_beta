@@ -1,5 +1,6 @@
 """secscan-admin 的參數與設定檢查（不連 DB；實際建立 key 見 tests/integration/test_cli.py）。"""
 
+import secrets
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,45 @@ def test_invalid_settings_are_reported_without_their_values(
     assert "db_port" in err
     assert CANARY_PASSWORD not in err
     assert "not-a-port" not in err
+
+
+def test_conflicting_secret_settings_are_reported_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """X 與 X_FILE 同時設定時，原始的輸入就是秘密：stderr 只有 safe_summary（CSEC-10）。"""
+    canary = secrets.token_hex(24)
+    secret_file = tmp_path / "content_encryption_keys"
+    secret_file.write_text(secrets.token_hex(24), encoding="ascii")
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", canary)
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS_FILE", str(secret_file))
+
+    exit_code = main(["create-admin-key", "--name", "admin"])
+
+    out, err = capsys.readouterr()
+    assert exit_code == EXIT_FAILURE
+    assert out == ""
+    assert "CONTENT_ENCRYPTION_KEYS 與 CONTENT_ENCRYPTION_KEYS_FILE 只能設定其中一個" in err
+    assert "errors.pydantic.dev" not in err
+    assert "type=" not in err
+    assert not any(canary[i : i + 8] in err for i in range(len(canary) - 7))
+
+
+def test_invalid_runner_settings_are_reported_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = secrets.token_hex(24)
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("RUNNER_POLL_SECONDS", canary)
+
+    exit_code = main(["runner", "--once"])
+
+    out, err = capsys.readouterr()
+    assert exit_code == EXIT_FAILURE
+    assert out == ""
+    assert "poll_seconds：" in err
+    assert "errors.pydantic.dev" not in err
+    assert not any(canary[i : i + 8] in err for i in range(len(canary) - 7))
 
 
 def test_missing_database_password_is_reported(

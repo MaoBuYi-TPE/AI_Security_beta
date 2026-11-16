@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import psycopg
 from psycopg import sql
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, Connection, Engine, create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -43,6 +43,7 @@ from secscan.cli.keys import Subparsers
 from secscan.cli.scram import scram_verifier
 from secscan.cli.services import Report
 from secscan.core.config import ENV_FILE, Settings
+from secscan.core.settings_errors import SettingsError, build_settings
 from secscan.migrations.credentials import (
     MigrationCredentials,
     MissingOwnerPasswordError,
@@ -126,16 +127,17 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
         return None
     try:
         target = target_from(settings)
-    except (ValidationError, ValueError, MissingOwnerPasswordError, OwnerIsAppRoleError) as exc:
+    except (SettingsError, ValueError, MissingOwnerPasswordError, OwnerIsAppRoleError) as exc:
         report(f"設定不正確：{_reason(exc)}（沒有做任何改變）")
         return EXIT_FAILURE
     return migrate_db_roles(target, dry_run=args.dry_run, report=report)
 
 
 def target_from(settings: Settings) -> Target:
-    owner = MigrationCredentials()
+    # 設定不正確時是 SettingsError：訊息只有 safe_summary（core/settings_errors.py）。
+    owner = build_settings(MigrationCredentials)
     owner_password = owner.required_password(settings)
-    admin = AdminCredentials()
+    admin = build_settings(AdminCredentials)
     if admin.password is None or not admin.password.get_secret_value().strip():
         raise ValueError("缺少 DB_ADMIN_PASSWORD（make env 產生；superuser 的密碼）")
     if settings.db_host not in LOOPBACK_HOSTS:
@@ -431,9 +433,5 @@ def _engine(target: Target, user: str, password: SecretStr) -> Engine:
 
 
 def _reason(exc: Exception) -> str:
-    if isinstance(exc, ValidationError):
-        return "；".join(
-            f"{'.'.join(str(part) for part in error['loc'])}：{error['msg']}"
-            for error in exc.errors()
-        )
-    return str(exc)
+    """SettingsError 的訊息已經是 safe_summary；其他例外的訊息都是固定的文字（不含密碼）。"""
+    return str(exc).removeprefix("設定不正確：")

@@ -9,6 +9,8 @@
   （v0025 之前的版本不需要；升級到 v0025 以後一定要有）。
 - CONTENT_ENCRYPTION_KEYS（v0022 加密既有的報告與摘錄）一樣由 Settings 放進
   config.attributes["content_encryption_keys"]；呼叫端已經放了就不覆寫。migration 不讀 os.environ。
+- 設定不正確時拋出 SettingsError：alembic 會印出完整的 traceback，只能有欄位名稱與固定的原因，
+  不帶原本的 ValidationError（可能含密碼；core/settings_errors.py）。
 - 離線模式（alembic upgrade --sql）：只需要方言，不連線、也不讀取密碼；v0025 的應用程式角色以
   `-x app_role=…` 指定。
 """
@@ -19,6 +21,7 @@ from sqlalchemy.exc import OperationalError
 
 from secscan.core.config import Settings
 from secscan.core.db import create_db_engine
+from secscan.core.settings_errors import build_settings
 from secscan.migrations import APP_ROLE_ATTRIBUTE, CONTENT_KEYS_ATTRIBUTE, render_item
 from secscan.migrations.credentials import MigrationConnectionError, MigrationCredentials
 from secscan.migrations.keys import migration_content_keys
@@ -59,8 +62,8 @@ def run_migrations_online() -> None:
     if isinstance(shared, Connection):
         _run_with(shared, attributes.get(APP_ROLE_ATTRIBUTE))
         return
-    settings = Settings()
-    owner = MigrationCredentials().owner_settings(settings)
+    settings = build_settings(Settings)
+    owner = build_settings(MigrationCredentials).owner_settings(settings)
     attributes.setdefault(CONTENT_KEYS_ATTRIBUTE, migration_content_keys(settings))
     app_role = attributes.setdefault(APP_ROLE_ATTRIBUTE, settings.db_user)
     engine = create_db_engine(
