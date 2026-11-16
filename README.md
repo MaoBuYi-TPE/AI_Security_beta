@@ -68,7 +68,7 @@ P0 先完成 ZAP + Nuclei。兩引擎通過 P0 Gate 後，M6 再接第三引擎 
 brew install uv   # 依賴管理工具
 make bootstrap    # 依 uv.lock 安裝依賴，並啟用 pre-commit hook
 orb start         # 啟動 OrbStack（PostgreSQL 與 lab 都跑在容器裡）
-make db-up        # 啟動開發用 PostgreSQL（第一次會自動產生 .env 裡的本機密碼）
+make db-up        # 啟動開發用 PostgreSQL（第一次會自動產生 .env 裡的本機密碼，並以 make secrets 寫出 secrets/）
 make migrate      # 把開發資料庫升級到最新 schema，最後印出目前版本
 make test         # 先啟動 db-test，再跑 unit/contract/integration 測試與 coverage 門檻 80%
 make lint         # ruff 與 import-linter
@@ -92,7 +92,7 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
 | `db` | 55432 | 開發（`make dev`、`make migrate`） | 保存在 volume `secscan_db_data` |
 | `db-test` | 55433 | 整合測試 | tmpfs，停掉就清空 |
 
-- **密碼**：都在 `.env`（權限 600，不進 git）。`make env` 只會補上缺少的隨機值，不會覆寫既有的值；`dev`、`db-up`、`test-db-up`、`test` 會自動呼叫它。
+- **密碼**：都在 `.env`（權限 600，不進 git）。`make env` 只會補上缺少的隨機值，不會覆寫既有的值；`dev`、`db-up`、`test-db-up`、`test` 會自動呼叫它。容器不再從環境變數取得密碼與金鑰，改由 compose secrets 掛載（T23b-b2，見下方「compose secrets 與 db 的初始化」）。
 - **加密金鑰**：`make env` 也會在 `.env` 產生三組平台金鑰，各自只交給需要的容器：`SECRET_ENCRYPTION_KEYS`（認證設定的 secret；api、runner）、`EVIDENCE_ENCRYPTION_KEYS`（runs volume 的原始證據；只有 runner）、`CONTENT_ENCRYPTION_KEYS`（報告內容與人工複測摘錄；api、worker）。缺少自己的那一組時程序不會啟動。`make env` 只補上缺少的那一行，不改、不重設、不輪替既有的值，也不在終端顯示金鑰（T23a 之前建立的 `.env` 要再執行一次 `make env` 補上兩組新金鑰）。**請備份這三行**：遺失之後，已保存的 secret、尚未清除的原始證據、報告與摘錄都解不開。換版的做法見下方「認證設定」與「資料保護」。
 - **連線角色**（T23b-b1，`docs/DECISIONS.md` §31）：兩個非 superuser 的角色。
   - `secscan_owner`（`DB_OWNER_USER`）擁有資料庫與所有物件，只有 `make migrate` 以它連線，密碼 `DB_OWNER_PASSWORD` 只交給 db 的 initdb；
@@ -122,8 +122,32 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
   - 權限：以 owner 執行 `uv run alembic downgrade 0024 && uv run alembic upgrade head` 重新授權（§31.9 的剩餘風險 2）。
 - **整合測試**：每次 session 都在 db-test 建立專屬的 owner 與應用程式角色和全新資料庫，結束時刪除。只接受 `cluster_name=secscan-test` 的伺服器，不會碰到開發資料庫。
 - **停止**：`make db-down` 停止兩者，但保留開發資料。
-- **不要分享的輸出**：`docker-compose config` 與 `docker inspect` 會顯示 `.env` 裡的明文密碼，不要貼到 issue、報告或聊天中。pre-commit 會擋下 `.env` 檔（即使用 `git add -f`）。
-- **改了 `.env` 的 `DB_PASSWORD` 之後**：要讓新密碼生效，得重建開發資料庫。這會**刪除所有開發資料**：`make db-down && docker volume rm secscan_db_data && make db-up && make migrate`。
+- **不要分享的輸出**：`docker compose config --environment` 會輸出 `.env` 裡的明文密碼與金鑰（任何載入 `.env` 的工具也一樣），不要貼到 issue、報告或聊天中。T23b-b2 之後 `docker compose config`（不加 `--environment`）與 `docker inspect` 只顯示秘密檔的路徑。pre-commit 會擋下 `.env` 檔與 `secrets/` 中的檔案（即使用 `git add -f`）。
+- **改了 `.env` 的 `DB_PASSWORD` 之後**：DB 中的角色密碼只在第一次初始化時建立，`make secrets` 不會改變它。要讓新密碼生效，得重建開發資料庫。這會**刪除所有開發資料**：`make db-down && docker volume rm secscan_db_data && make db-up && make migrate`（`db-up` 會先以 `make secrets` 寫出新的秘密檔）。
+
+#### compose secrets 與 db 的初始化（T23b-b2）
+
+`docs/DECISIONS.md` §32。秘密不再出現在容器的設定（`docker inspect`）、`docker compose config`（不含 `--environment`）與長期執行的服務程序的環境；每個服務只掛載自己需要的那幾個。**這不是完整的容器機密隔離**：能使用 Docker API 的程序（同一個 macOS 使用者的任何程序，包括被入侵的 runner 經由 socket-proxy）仍讀得到容器的 `/run/secrets`，處理在 T23b-b5（§32.7）。
+
+- **`make secrets`**：由 `.env` 寫出 `secrets/`（目錄 0700、七個 0600 的檔案、沒有結尾換行；`.env` 不改）。內容相同就不動，不同時原子替換；終端只顯示名稱與動作。`make secrets SECRETS_CHECK=1` 只檢查，缺少或不一致就失敗。`db-up`、`test-db-up`（因此 `test`）、`up`、`runs-layout-migrate` 會先執行它；這些目標從此需要 uv 與同步好的 venv。
+- **容器內**：`/run/secrets/<名稱>`（唯讀），environment 只有 `*_FILE` 的路徑（例如 `DB_PASSWORD_FILE=/run/secrets/db_password`）。設定同時有 `X` 與 `X_FILE` 時程序拒絕啟動。
+- **手動執行 `docker compose`**：compose.yaml 以 `${SECSCAN_SECRETS_DIR:?…}` 引用秘密檔的目錄，沒有設定就失敗（不會退回 `./secrets`）。在 repo 的根目錄執行時加上 `SECSCAN_SECRETS_DIR=./secrets`，例如 `SECSCAN_SECRETS_DIR=./secrets docker compose --profile app exec runner …`。
+- **換版**（密碼或金鑰）：
+  1. 編輯 `.env`（步驟照舊）；
+  2. `make secrets`；
+  3. **一律** `SECSCAN_SECRETS_DIR=./secrets docker compose -f compose.yaml --profile app up -d --force-recreate <持有它的服務>`（含 db-test）：單純的 `make up` 不會因為檔案的內容改變而重建，程序也只在啟動時讀取；
+  4. 執行既有的換版指令。
+  - compose 若詢問「Recreate volume」，一律中止。漏了第 2 或第 3 步時容器拿到舊值，認證或解密失敗（fail closed）。
+  - DB 角色的密碼不會跟著改（`make secrets` 更新 db 的密碼檔時會印出警告）。
+  - **第一次初始化 db 期間不要執行 `make secrets`**：OrbStack 上執行中的容器會立刻看到替換後的檔案。
+- **db 的初始化與初始化未完成標記**：db 的 entrypoint 經過一層 wrapper（`deploy/postgres/db-entrypoint.sh`）。官方 entrypoint 要初始化資料目錄時，wrapper 先建立 `/var/lib/postgresql/secscan-initdb-incomplete`；initdb 的最後一步（`99-end.sh`）才刪除它；healthcheck 要求 readiness 而且這個標記不存在。初始化在任何一步失敗或被中斷時，db 一直是 unhealthy，`make db-up`、`make up` 的 `--wait` 會失敗（fail closed）。
+  - **處置只適用於第一次初始化失敗、剛建立的空 volume**：看 `docker logs` 確認原因，修正之後刪除那個 volume 再試。既有的開發 volume（`secscan_db_data`）已經初始化過，不適用，也不要刪除；它沒有這個標記，healthcheck 照常回報 healthy。
+  - 不要自行刪除標記來讓 healthcheck 通過：標記存在代表初始化沒有完成（角色或資料庫可能不存在）。
+  - 以 `docker compose restart` 驗證健康狀態時，以重啟之後新的 healthcheck 探測為準，不要沿用重啟之前的狀態。
+- **不要以 debug 等級的 log 啟動 db、db-test**：第一次初始化時（db 的新 volume；db-test 每次啟動），暫時的伺服器若以 `log_min_messages=debug3` 以下（或 `-d 3` 以上）執行，會把自己的環境寫進 log，**其中包含 superuser 的密碼**（F1；只實測了 debug5，debug1–debug5 一律不要用）。repo 的設定以測試確保不會觸發；手動加上的 `-c`、`-d`、`POSTGRES_INITDB_ARGS` 或設定檔擋不到。
+- **PostgreSQL 的主版本升級**（不在 b2 的範圍；O1）：新的資料目錄沒有 `PG_VERSION`，wrapper 會建立初始化未完成標記。PG 18 的官方 entrypoint 會因舊版的資料拒絕啟動，標記留著；但**不要假定新版本一定會安全地拒絕啟動**：新版本的 entrypoint 若沒有偵測到舊的資料，可能建立一個新的、空的叢集並回報 healthy。升級之前先確認新映像的 PGDATA、目錄結構、官方 entrypoint 的行為與升級程序（例如 `pg_upgrade` 或 dump／restore），確認舊的資料不會被當成空目錄；標記由升級程序處理，不要直接刪除。
+- **Live 不使用開發的秘密**：`test-live-*` 每次在拋棄式目錄產生新的秘密，不讀 `.env` 與 `secrets/`，以白名單的環境執行所有 docker 與 compose 呼叫；結束時刪除拋棄式目錄，並比對開發環境的前後快照。
+- **主機全碟加密**：`.env`、`secrets/` 與 DB 的備份都是主機上的明文；部署要求與檢查見 T23b-b2 的 PR-3（尚未實作）。
 
 新增 schema 變更時：先寫會失敗的測試，再改 model，最後產生 migration。例如：`uv run alembic revision --autogenerate --rev-id 0002 -m "<說明>"`。產生後補上升降級說明並檢查內容；`tests/integration/test_migrations.py` 會檢查 model 與 migration 沒有漂移。
 
@@ -235,9 +259,9 @@ rm profile.json new-token.json
 - **preflight**：只有 GET、path 不可有佔位、status 200–299；`expected_json` 至少要比對一項回應內容（key 是 JSON Pointer，例如 `/data/username`），只看狀態碼分不出登入頁。
 - **版本**：PATCH 沒給的欄位沿用目前的版本；換 `type` 或 `header_name` 時要附上新的 secret。歷史見 `GET /api/v1/auth-profiles/<profile_id>/versions`（只有目前的版本還有 secret）。每個 target 最多 10 個認證設定、每個 100 個版本。
 - **加密金鑰換版**：
-  1. 以 `openssl rand -base64 32 | tr '+/' '-_'` 產生新金鑰，放在 `.env` 的 `SECRET_ENCRYPTION_KEYS` 最前面（逗號分隔，例如 `新,舊`），重啟 API。
+  1. 以 `openssl rand -base64 32 | tr '+/' '-_'` 產生新金鑰，放在 `.env` 的 `SECRET_ENCRYPTION_KEYS` 最前面（逗號分隔，例如 `新,舊`），執行 `make secrets`，再以 `--force-recreate` 重建 api 與 runner（容器版；`make dev` 直接重啟）。
   2. 執行 `uv run secscan-admin rotate-secret-keys`：以新金鑰重新加密所有的 secret；有任何一份解不開就全部回滾。
-  3. 移除舊金鑰、重啟 API，再執行一次 `rotate-secret-keys`，確認全部解得開。
+  3. 移除舊金鑰、`make secrets`、重建 api 與 runner（或重啟 `make dev`），再執行一次 `rotate-secret-keys`，確認全部解得開。
 
   第 3 步確認之前，另外保留舊金鑰的備份：萬一有一份沒換到，還能放回舊金鑰再做一次。
 - **清除只是邏輯上的**：被取代版本的密文從資料表中清除，但 DB 的舊資料列、WAL 與備份中仍有（受金鑰保護）。secret 外洩時，要到目標系統讓它失效（lab 重新登入換 token）。
@@ -291,7 +315,7 @@ make down                          # 停止 app stack 與 db（資料保留在 v
 - **掃描容器**：每個 run 一個 `secscan-run-<run_id>`：核准的映像（digest 鎖定，runner 不 pull，`make images` 事先 pull）、uid 10001、唯讀、只接 scan_net、只掛該 run 的 volume subpath；有 auth profile 時 secret 是 `/scan/secret/target-auth`（0400，容器刪除後就刪除）。
 - **fake 的腳本**：`RUNNER_FAKE_OUTCOME=fail`、`RUNNER_FAKE_HOLD_SECONDS=30 make up`（容器停留 30 秒，可以試取消：5–6 秒內刪除容器）。
 - **in-process 的 fake-runner** 仍可在宿主使用（不需要 Docker）；它和容器版的 runner 都會認領 fake，擇一執行。
-- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-runner` 在獨立的 compose 專案（自己的 DB、網路與 volume，API 綁 127.0.0.1:8765）中建立、測試、一律拆除；T11 起在 live 自己的 lab 網路（10.89.10.0/24）上啟動接收端，不啟動 Juice Shop、VAmPI。需要 OrbStack。
+- **live 測試**：`ENABLE_LIVE_LAB_TESTS=1 make test-live-runner` 在獨立的 compose 專案（自己的 DB、網路與 volume，API 綁 127.0.0.1:8765）中建立、測試、一律拆除；T23b-b2 起每次使用拋棄式的秘密，不讀開發的 `.env` 與 `secrets/`（`ENABLE_LIVE_LAB_TESTS=1 make test-live-secrets` 驗證 compose secrets 與這個隔離）；T11 起在 live 自己的 lab 網路（10.89.10.0/24）上啟動接收端，不啟動 Juice Shop、VAmPI。需要 OrbStack。
 - `secscan_scan_net` 與 T03 spike 的網路同名：執行 spike 前先 `make down`，並刪除這個網路。
 - 完整規則見 `docs/API_CONTRACT.md` §18，設計理由見 `docs/DECISIONS.md` §14。
 
@@ -422,10 +446,10 @@ T23a 已完成（2026-11-12）：兩項 Live 與 worker 的掛載檢查都通過
   - `uv run secscan-admin check-encryption-keys`：檢查三組金鑰合法、互不共用，只顯示數量。
   - `uv run secscan-admin retention-status`：各狀態的數量；隔離的各階段，隔離未完成（明文仍在 `active/`）超過 15 分鐘的列為需要緊急處理（主動告警是 T35）；以及需要人工處理的目錄（數量、錯誤代碼、最早的 10 個目錄名稱；唯讀）。
   - `uv run secscan-admin rotate-content-keys`：報告與摘錄的換版。
-  - `docker compose --profile app exec runner secscan-admin rotate-evidence-keys`：原始證據的換版（只有 runner 容器有這組金鑰）。
-  - `docker compose --profile app exec runner secscan-admin export-evidence --run <id> [--path <路徑>]`：break-glass，列出加密檔，或先寫 audit 再把一個檔案的明文寫到 stdout。
-  - `docker compose --profile app exec runner secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> [--max-depth N] [--max-entries N] [--max-path-chars N]`：人工處理 `retention-status` 列出的「需要人工處理」目錄（超過深度、條目數或路徑總長度的上限、連續 3 次加密失敗而被隔離，明文保留）；keeper 先把隔離的目錄搬到 `held/`；這個指令先寫 audit，在 `held/` 以指定的上限（最多深度 64、條目 50,000、路徑總長度 16M 字元）加密並逐一驗證，再搬回 `active/`、再驗證，才解除隔離。中斷之後再執行一次就從正確的步驟繼續。沒有不加密就解除或刪除目錄的指令（`docs/DECISIONS.md` §30.12、§30.13）。
-- **換版**：新金鑰放在那一組的最前面（逗號分隔）→ 重啟持有它的容器 → 執行換版 → 移除舊金鑰、重啟 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。
+  - `SECSCAN_SECRETS_DIR=./secrets docker compose --profile app exec runner secscan-admin rotate-evidence-keys`：原始證據的換版（只有 runner 容器有這組金鑰）。
+  - `SECSCAN_SECRETS_DIR=./secrets docker compose --profile app exec runner secscan-admin export-evidence --run <id> [--path <路徑>]`：break-glass，列出加密檔，或先寫 audit 再把一個檔案的明文寫到 stdout。
+  - `SECSCAN_SECRETS_DIR=./secrets docker compose --profile app exec runner secscan-admin retry-evidence --directory <目錄名稱> --reason <理由> [--max-depth N] [--max-entries N] [--max-path-chars N]`：人工處理 `retention-status` 列出的「需要人工處理」目錄（超過深度、條目數或路徑總長度的上限、連續 3 次加密失敗而被隔離，明文保留）；keeper 先把隔離的目錄搬到 `held/`；這個指令先寫 audit，在 `held/` 以指定的上限（最多深度 64、條目 50,000、路徑總長度 16M 字元）加密並逐一驗證，再搬回 `active/`、再驗證，才解除隔離。中斷之後再執行一次就從正確的步驟繼續。沒有不加密就解除或刪除目錄的指令（`docs/DECISIONS.md` §30.12、§30.13）。
+- **換版**：新金鑰放在那一組的最前面（逗號分隔）→ `make secrets` → 以 `--force-recreate` 重建持有它的容器（見「compose secrets 與 db 的初始化」）→ 執行換版 → 移除舊金鑰、`make secrets`、重建 → 再換版一次確認全部解得開；確認之前保留舊金鑰的備份。
 - **bench 結果**：`make bench-key` 建立本機的金鑰檔（預設 `~/.config/secscan/bench-keys`，可用 `BENCH_KEY_FILE` 指定；不可放在 repo 中；已經存在就失敗、不覆寫）。之後 `make bench` 寫出的每個檔案都是 `<名稱>.sealed`，`bench-evaluate` 先核對 `SHA256SUMS`、解密、再核對明文的 sha256 才評估。T23a 之前的明文結果目錄以 `make bench-seal BENCH_SOURCE=<原目錄> BENCH_NAME=<新名稱>` 轉成新的加密目錄，原目錄不修改也不刪除。**金鑰檔遺失之後結果無法復原，請另外備份。**
 
 #### 隔離 lab 靶場（T03）

@@ -3393,6 +3393,7 @@ runs volume 的根目錄
   - 報告；
   - 未授權的證據存取路徑。
 - **剩餘風險**：所有剩餘風險都要明確記錄、界定適用範圍，並經使用者確認接受。
+- **b5（runner 的 Docker API 權限邊界，HIGH；2026-11-16 由 T23b-b2 加入）**：(a) 實作並通過 Live 的負向測試，或 (b) 使用者在 P0 驗收時明確接受並寫明影響（§32.7）。b2 完成不代表 b5 已處理。
 - **範圍**：Schemathesis 的安全驗收延到 M6。SEC-14 的 P0 通過，不代表全部範圍都已完成。
 
 **T23b-b1 的範圍**（使用者，2026-11-12）：只做 DDL／DML 分權。服務級的 DB 角色是 b3 之後的另一個子項目。要求如下：
@@ -3966,3 +3967,128 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 - 既有的 owner 與密碼不重建、不換版；
 - 這次沒有操作開發 DB，也沒有執行 Live。
 - **T23b-b1 維持完成**（這是補正）；**SEC-14 仍不標完成**。
+
+## 32. T23b-b2：compose secrets、Live 的完整隔離與 db 初始化的強化（PR-2；2026-11-16 G1）
+
+### 32.1 決定的來源與範圍
+
+- **計畫**：T23b-b2 計畫（第四版），經使用者多次審查與核准：
+  - 設計方向：D1–D15（第一、二版的審查）、E1–E7（第三版的確認，2026-11-15）；
+  - §12.8 的核准（2026-11-15）：D16–D19 APPROVE，R1、R2 必須修正，修正 1–23；
+  - G0b 的驗收與 D20、D21 的決定（2026-11-16）；G0c 的驗收與 G1 的授權（2026-11-16）。
+- **b2 拆成 PR**：PR-0（b1 的補正，PR #42 已合併）→ **PR-2（本節）** → PR-1（掃描容器的 log driver）→ PR-3（主機全碟加密的檢查）→ PR-4（驗收文件）。
+- **本 PR（PR-2）的範圍**：compose secrets 與 `*_FILE`、應用程式連線一律 SCRAM、設定錯誤的安全輸出、db 初始化的強化（初始化未完成標記、entrypoint wrapper、log 的抑制）、Live 的完整隔離、pre-commit。
+- **不在本 PR**：掃描容器的 `LogConfig: none`（PR-1）、FileVault 的檢查（PR-3）、開發環境的遷移（G5）、b3、b5 的實作。
+
+### 32.2 設計
+
+**方案 A（D1）**：`.env` 仍是唯一由人編輯的來源，`.env` 不改；`make secrets` 由 `.env` 寫出 `secrets/`（目錄 0700、檔案 0600、沒有結尾換行），compose 以 `file:` 來源的 secret 掛載。
+
+**分配矩陣**（每個服務拿到的集合和 b2 之前相同，只改傳遞的方式；對照表只定義在 `cli/secret_files.py` 的 `SECRET_FILES`）：
+
+| 秘密（`secrets/` 的檔名） | db | db-test | api | runner | worker |
+|---|:-:|:-:|:-:|:-:|:-:|
+| `db_admin_password`（`POSTGRES_PASSWORD_FILE`） | ✓ | | | | |
+| `test_db_password`（`POSTGRES_PASSWORD_FILE`） | | ✓ | | | |
+| `db_owner_password`（`SECSCAN_OWNER_DB_PASSWORD_FILE`） | ✓ | | | | |
+| `db_password`（db 的 `SECSCAN_APP_DB_PASSWORD_FILE`；服務的 `DB_PASSWORD_FILE`） | ✓ | | ✓ | ✓ | ✓ |
+| `secret_encryption_keys` | | | ✓ | ✓ | |
+| `evidence_encryption_keys` | | | | ✓ | |
+| `content_encryption_keys` | | | ✓ | | ✓ |
+
+- 容器內是 `/run/secrets/<名稱>`（唯讀的 bind mount），`environment` 只有 `*_FILE` 的路徑，沒有任何秘密的值或插值；`x-*` 不含 secrets。
+- 頂層 secret 的來源是 `${SECSCAN_SECRETS_DIR:?…}/<名稱>`（D16）：沒有設定或是空字串時，compose 在解析階段就失敗，不會退回開發的 `./secrets`。以 compose.yaml 執行的開發目標都經由 Makefile 的 `DEV_COMPOSE`（`SECSCAN_SECRETS_DIR=./secrets`）。
+- `db-up`、`test-db-up`（因此 `test`）、`up`、`runs-layout-migrate` 依賴 `secrets`；`build`、`images`、`down`、`db-down` 不需要秘密檔（G0 的 S4）。
+
+**應用程式讀取秘密**：
+- `Settings` 的 `DB_PASSWORD_FILE`、`*_ENCRYPTION_KEYS_FILE`；`MigrationCredentials` 的 `DB_OWNER_PASSWORD_FILE`。`X` 與 `X_FILE` 同時有值（含空字串）時拒絕，訊息只有兩個設定的名稱。
+- 讀檔（`core/secret_files.py`）：`O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`、只接受一般檔案、最多讀 4096+1 bytes、一行可列印的 ASCII（不含空白）、長度 1–4095、容許一個結尾的換行；所有錯誤都是固定訊息的 `SecretFileError`。
+- 不使用 pydantic-settings 的 `secrets_dir`（會 strip、跟隨 symlink、和環境變數同時有值時靜默採用其中一個）。
+
+**設定錯誤的對外輸出**（M5）：`core/settings_errors.py` 的 `safe_summary` 只輸出 `loc` 與 `msg`（`loc` 只保留已知的欄位名稱與整數索引）；`create_app`、alembic 的 `env.py`、`migrate-db-roles` 以 `build_settings` 建立設定，失敗時拋出 `SettingsError`（在 except 之外 raise，`__context__`、`__cause__` 都是 None）；CLI 以 `safe_summary` 回報。`hide_input_in_errors=True` 加在所有設定類別，只是縱深防禦。原始的 `ValidationError` 的 `errors()`、`json()` 仍含輸入（剩餘風險 12）。
+
+**SCRAM**：`create_db_engine` 移除 `require_scram` 參數，每個連線都帶 `require_auth=scram-sha-256`（`core/db.py` 的 `REQUIRE_AUTH` 是唯一的常數）；Dockerfile 在建立映像時以執行期的使用者斷言 libpq ≥ 16。
+
+**db 的初始化**（D18–D21）：
+- `10-roles.sql`（G0b 驗證過的版本）以 `\getenv` 取得 `*_FILE` 的路徑，在用戶端以 `awk` 檢查檔案（一般檔案、不是 symlink、恰好一行、32–4095 個可列印的 ASCII），以反引號 `cat` 讀進 psql 的變數並檢查 `SHELL_ERROR`；反引號只引用路徑變數。CREATE ROLE 之前明確關閉所有會記錄語句內容的設定（D19），之後 RESET。
+- **初始化未完成標記**（`/var/lib/postgresql/secscan-initdb-incomplete`）：db 的 entrypoint wrapper（`deploy/postgres/db-entrypoint.sh`，G0c 驗證過的版本）在官方 entrypoint 要初始化時（`PG_VERSION` 不存在或是空的）先建立它並 `sync`，再 `exec` 官方的 entrypoint；`00-begin.sh`（G0c）只檢查它，不存在時建立並失敗（fail closed）；只有 `99-end.sh`（G0b）刪除它；healthcheck 要求 readiness 而且標記不存在。db-test 不使用 wrapper，也沒有 initdb 檔。
+- **設定來源**（D20；F1）：db、db-test 的 `command`、`environment`、掛載都是允許清單；不得以任何來源讓 `log_min_messages`、`client_min_messages` 成為 debug1–debug5，也不得用 `-d`。
+
+**Live 的完整隔離**（D11、M6、E4、D17、R1）：
+- 每次以 `secscan-admin generate-secret-files` 在 `mktemp -d` 的拋棄式目錄產生新的秘密；compose 以 `COMPOSE_DISABLE_ENV_FILE=1` 執行；alembic 以 `-x dotenv=off` 執行、秘密只以 `*_FILE` 傳入、`PGPASSFILE=/dev/null`。
+- Live 的每一個 docker、compose、uv 與子 make 的呼叫都經由 `LIVE_PROC_ENV`（`env -i` 加上白名單；recipe 設定的值放在最後；`override`）；Live 的目標不依賴 `env`、`secrets`、`docker-check`、`images`、`build`。`SECSCAN_LIVE_PROJECT=secscan-live`、`ENABLE_LIVE_LAB_TESTS=1` 由 recipe 固定設定。
+- `up` 之前以 `tests/live/env_guard.py` 驗證 compose 解析出來的設定（允許清單）；build 之後記錄映像 ID、`up` 之後核對；開始時、`up` 之前、結束時確認同一個 Engine；開始之前拒絕上一次的殘留；`trap` 一律清理，並比對開發環境的前後快照。
+- Live 的 pytest：`pytest_sessionstart` 檢查專案名稱、拋棄式目錄與環境中沒有秘密的名稱；`pytest_sessionfinish` 在 0 個通過或有 skip 時以非零結束。
+
+### 32.3 G0、G0b、G0c 的結果（摘要）
+
+- **G0**（2026-11-15，Docker 驗證 S1–S10）：沒有會改變設計方向的結果；PR-2 的 11 項調整（例如 `TMPDIR` 結尾的 `/`、`COMPOSE_DISABLE_ENV_FILE=1` 擋不到 `COMPOSE_ENV_FILES`，所以白名單是必要的控制）都已落實。S2：OrbStack 的 virtiofs 把擁有者顯示成讀取者的 uid，主機上的 0600 在容器之間沒有分離的效果。S9：以主機的 CLI 建立 `o=bind` 的 local volume，可以讀寫 macOS 家目錄之下的路徑（Engine 層；經由 socket-proxy 的路徑屬於 b5）。
+- **G0b**（2026-11-15；2026-11-16 驗收）：正常初始化與 SCRAM、初始化失敗之後重啟不誤判 healthy、清理與證據都 PASS；log 的抑制判定為「**正式設定 PASS，擴展設定發現 F1**」。
+- **G0c**（2026-11-16；同日驗收 APPROVED）：預檢、步驟 0 與 G-1、I-A、I-B、N4、L1、W1–W3 都 PASS；CR-15 重現原本的剩餘風險 15，和 I-B 是有效的正反對照。**只把 G0c 涵蓋的受控情境判定為已驗證**，不擴大到 VM 當機、其他映像版本或未測試的中斷點。
+  - **O2**（接受為既有問題的實測補充）：L1 的階段 A 以 b2 之前的設計（環境變數傳密碼）初始化，舊容器的 `Config.Env` 與 PID 1 的 environ 都含有 canary（C1 的實測）；階段 B 改成新的設計（`*_FILE`），兩者都是 0。
+  - **O3**（接受為觀察）：以 `docker compose restart` 驗證健康狀態時，以重啟之後新的 healthcheck 探測為準，不依賴重啟之前的狀態。
+  - **O1**：見剩餘風險 17。
+- 證據：gitignore 的 `recordings/t23b-b2-g0/`（G0、G0b、G0c 各自的 MANIFEST 節，以追加的方式保存）。
+
+### 32.4 b2 改善什麼、不改善什麼（E6）
+
+- **改善**：秘密不再出現在容器的設定（`docker inspect`）、`docker compose config` 的輸出（不含 `--environment`）與長期執行的服務程序的環境；設定錯誤的輸出不帶秘密；應用程式的連線只接受 SCRAM；Live 不再使用開發的秘密。
+- **不改善**（以下都仍然成立）：
+  - **Docker API 的權限繞過（b5，HIGH）**：compose secrets 擋不住被入侵的 runner 經由 socket-proxy 建立特權容器，或以 `o=bind` 掛載主機路徑。**b5 驗收之前，不宣稱平台已具備完整的容器機密隔離**（§32.7）。
+  - 能使用 Docker API 的程序（同一個 macOS 使用者的任何程序）讀得到容器的 `/run/secrets`、`db_data` 與 runs volume。
+  - `docker compose config --environment` 與任何載入 `.env` 的工具仍會輸出秘密；主機上有兩份明文（`.env` 與 `secrets/`）。
+  - 短暫的初始化與維運程序在執行期間持有秘密。
+
+### 32.5 G1 的驗證範圍（計畫 §12.11 的「驗證範圍的分類」）
+
+- **已實際驗證**：unit 與 contract 測試；db-test 上的整合測試（CSEC-09：api 的 app factory、runner、worker 只以 `*_FILE` 讀取秘密，以 SCRAM 連線，`system_user` 是 `scram-sha-256`）；在暫存目錄實際執行的 `make secrets`、Live 的 recipe（假的 docker／uv，CSEC-13）與用戶端的 `docker compose config`（不連 daemon、不建立資源）。
+- **只完成靜態檢查**：compose、Makefile、initdb、wrapper、Dockerfile 的結構與允許清單（CSEC-01、05、07、08 的部分）。
+- **待後續關卡驗證**：repo 中的 `make secrets` 與完整的 `make test`（G2）；Dockerfile 的 libpq 斷言實際執行、CSEC-L1–L6 與 `test-live-*`（G3）；正式 compose 下 db 的 wrapper 與 initdb 的實際啟動（G3 的 CSEC-L3；G5）。
+- **CSEC-09 不是正式 Docker 容器部署的驗收**：秘密檔是 pytest 暫存目錄中的拋棄式資料，不是 compose secrets 的實際掛載。
+
+### 32.6 剩餘風險（SEC-14 的 P0 驗收時由使用者確認）
+
+1. **Docker API 的權限繞過**（b5，HIGH）：見 §32.7。
+2. **主機上的明文**：`.env`、`secrets/`、DB 的備份；同一個 macOS 使用者的任何程序都讀得到，也都能使用 Docker API。FileVault 只保護離線的情況；FileVault 開啟之前連離線的保護都沒有（PR-3、G6）。
+3. **`docker compose config --environment`** 與任何載入 `.env` 的工具仍會輸出秘密。
+4. **短暫的初始化與維運程序持有秘密**：entrypoint 每次啟動都讀 superuser 的密碼直到 exec；第一次初始化期間暫時的伺服器與子程序持有密碼。
+5. **b2 之前的秘密值仍然有效**（D12：不換版）：它們寫在 VM 磁碟上舊容器的設定中，重建只是 unlink；不宣稱舊的秘密已經清除。
+6. **容器內的程序讀得到自己的秘密**（例如 api 被入侵，就拿到 `DB_PASSWORD` 與兩組金鑰）。
+7. **db 在初始化之後仍掛載三個密碼檔**。
+8. **bind mount 的 secret 不能以 uid 分離**（G0 的 S2）：b3 的 uid 分離只對 named volume 與 tmpfs 有效；Linux 上要改成每個服務一份檔案，或共用的 group 搭配 0640。
+9. **Live 與開發環境在同一個 Docker engine 上**（Live 不再共用開發的秘密）。
+10. **洩漏檢查的限制**：依形狀的檢查抓不到其他形狀與部分的洩漏；精確值由 canary 的測試負責。
+11. **原始的 `ValidationError` 含有輸入**：控制是邊界（原始的錯誤不離開建立設定的地方，對外一律經過 `safe_summary`）；程序內的除錯工具仍看得到原始的物件。
+12. **b1 的歷史紀錄**：G5（2026-11-13）以明文的 CREATE ROLE 建立 owner（log 已抑制），不因 PR-0 改變。
+13. **db 的角色密碼不會跟著 `secrets/` 改變**：`sync-secret-files` 更新 db 的密碼檔時印出警告；不一致時服務無法登入（fail closed）。
+14. **第一次初始化期間執行 `make secrets`**：OrbStack 上執行中的容器會立刻看到替換後的檔案。
+15. **初始化未完成標記的邊界**。**狀態（2026-11-16 驗收）：已在 G0c 受控情境下驗證修正，仍有未驗證邊界**；不標記為全面消除。
+    - wrapper 在 initdb 之前建立標記，原本 `initdb` 與 `00-begin.sh` 之間的區間已由 G0c 的 I-B 在受控測試中驗證（I-A、I-B、N4 各一個中斷點）；
+    - 仍然存在：b2 之前初始化的 volume（只有開發的 `db_data`）沒有標記，它的完整性由 G5 的檢查確認，不靠 healthcheck；主機或 VM 當機時的落盤順序是推論（不實測）；換 postgres 映像的 digest 時要重做 G0c 的步驟 0；能寫入 volume 的程序可以自行刪除或建立標記（和 C26、b5 同一個邊界）。
+16. **debug 等級的 log 會寫出 superuser 的密碼**（F1，MEDIUM；D20）：第一次初始化時暫時伺服器的 `log_min_messages` 是 debug3 以下（或 `-d 3` 以上）就會把環境寫進 log。只實測了 debug5；debug1–debug5 一律預防性禁止。控制：CSEC-07 的設定來源允許清單、CSEC-L6、README 的警告。**防護邊界**：手動執行（`docker run`、`compose run` 加參數、修改 compose）與映像換版都擋不到；不宣稱 F1 已消除，只宣稱 repo 的設定不會觸發。
+17. **主版本升級與初始化未完成標記**（O1，LOW，未測試）：新的 PGDATA 沒有 `PG_VERSION`，wrapper 會建立標記；PG 18 的官方 entrypoint 會因舊版的資料拒絕啟動，標記留著（fail closed）。**不得假定新版本一定會安全地拒絕啟動**：新版本的 entrypoint 若沒有偵測到舊的資料，可能建立新的叢集並回報 healthy。升級之前必須確認 PGDATA、目錄結構、官方 entrypoint 的行為與升級程序（README）；升級不在 b2 的範圍。
+
+### 32.7 新的安全待辦：b5（runner 的 Docker API 權限邊界，HIGH）
+
+- **問題**：socket-proxy 不檢查 create 的 body，也不檢查 local volume 的 `o=bind`；被入侵的 runner 可以建立特權容器或掛載主機路徑，影響 VM 與使用者的 macOS 帳號（可讀可寫：`.env`、`secrets/`、DB 的備份、`~/.ssh`；也能改寫 `Makefile`、`.git/hooks`）。FileVault 與 0600 對這條路徑都沒有作用。G0 的 S9 以主機的 CLI 在 Engine 層實測 `o=bind` 成立；經由 socket-proxy 的路徑沒有測。
+- **處理階段**：b2 之後、b3 之前（D15）。
+- **處置**（二選一）：(a) 在 runner 與 Docker 之間加上檢查 create body 的授權層；(b) 使用者在 SEC-14 的 P0 驗收時明確接受（限定 lab、單一操作者，寫明影響）。
+- **選 (a) 時的驗收**：允許清單的等值比對；Live 的負向測試一律經由 proxy、以 runner 的身分送出，都被拒絕：privileged；host 或 `container:` 形式的 `PidMode`、`IpcMode`、`NetworkMode`，`UsernsMode: host`，`NetworkMode: bridge` 與 `NetworkingConfig`；`VolumesFrom`；`Binds` 與 bind 型的 `Mounts`；`Mounts[].VolumeOptions.DriverConfig`（含 `o=bind`）；未核准的 named volume；`CapAdd`、unconfined 的 `SecurityOpt`、缺少 `no-new-privileges`、`Devices`、`DeviceRequests`、`DeviceCgroupRules`、`Sysctls`、`Runtime`；清空的 `MaskedPaths`、`ReadonlyPaths`，`ReadonlyRootfs: false`；`User`、`GroupAdd`、`CgroupnsMode`、資源上限的變更；未核准的 log driver 與映像。`o=bind` 的 device 也可以是 VM 內的路徑（推論，未實測）。
+- **待查**：socket-proxy 最新版的 README 宣稱涵蓋 local volume 的 `o=bind`；升級可能是部分的緩解，在 b5 驗證。
+- **和 SEC-14 的關係**：列入 §30.14 的 P0 清單；b2 完成不代表 b5 已處理。
+
+### 32.8 關卡與狀態
+
+| 關卡 | 狀態 |
+|---|---|
+| G0、G0b、G0c | 完成並驗收（§32.3） |
+| G1：PR-2 的離線實作、三項審查、開 PR（不合併） | 2026-11-16 授權並執行 |
+| G2：第一次 `make secrets` 與完整的 `make test` | **未授權**；前置條件：使用者確認 FileVault 已開啟，再以唯讀的指令確認 FDE-A1、A2（E7） |
+| G3：PR-2 的 Live（拋棄式的秘密） | 未授權 |
+| G4：審查與合併 | 未授權 |
+| G5：開發環境的遷移（含備份、安全複本的相容性驗證） | 未授權 |
+| G6：FileVault 的驗收 | 由使用者操作 |
+
+- **b2 程式實作完成**：PR-2、PR-1、PR-3 都合併，各自的 `make test`、Live 與審查都通過。
+- **b2 部署安全驗收完成**：G5、G6（FDE-A1–A7）都通過，剩餘風險（含 b5）都已登錄並由使用者確認。
+- 兩者都完成，b2 才標完成。**SEC-14 仍不標完成**；T23b-b1 維持完成；§31.15 未處理的 LOW 繼續保留。

@@ -107,6 +107,9 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | secscan-admin retry-evidence --directory D --reason R [--max-depth N] [--max-entries N] [--max-path-chars N] | M5（T23a 方案 B 已建立） | 在 runner 容器內執行：人工處理一個已搬到 `held/` 的隔離目錄；先寫 audit，在 `held/` 以較高的上限加密並驗證，搬回 `active/` 再驗證，才解除隔離（`API_CONTRACT.md` §20） |
 | make db-roles-migrate [DRY_RUN=1] | M5（T23b-b1 已建立） | T23b-b1 之前建立的開發 DB：以 superuser 把擁有權由應用程式角色移轉給 owner，範圍不符就拒絕；同一個 transaction，可以重跑（`DECISIONS.md` §31.5）；由使用者執行 |
 | make test-live-db-roles | M5（T23b-b1 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在 test-live-runner 的同一個隔離 stack 上確認兩個角色、owner 執行的 migration、服務以應用程式角色連線、DDL 被拒、服務沒有 owner 的帳密 |
+| make secrets [SECRETS_CHECK=1] | M5（T23b-b2 PR-2 已建立） | 由 `.env` 寫出 compose secrets 的 `secrets/`（目錄 0700、檔案 0600、沒有結尾換行；`.env` 不改；終端只顯示名稱）；`SECRETS_CHECK=1` 只檢查。`db-up`、`test-db-up`、`up`、`runs-layout-migrate` 會先執行它（`DECISIONS.md` §32） |
+| secscan-admin sync-secret-files／generate-secret-files | M5（T23b-b2 PR-2 已建立） | 前者是 `make secrets` 的實作；後者只給 Live 的 recipe：在新建的空目錄產生拋棄式的秘密，不讀 `.env` |
+| make test-live-secrets | M5（T23b-b2 PR-2 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在 test-live-runner 的同一個隔離 stack（拋棄式的秘密）上驗證 compose secrets、服務程序的環境、db 經由 wrapper 的初始化與 Live 的隔離（CSEC-L1–L6）；**尚未執行（G3 另外授權）** |
 | make runs-layout-migrate [DRY_RUN=1] | M5（T23a 機密性隔離已建立） | 既有的 runs volume 搬到 `active/`／`held/` 的 layout：以和 `make up` 相同的設定解析實際的 volume、確認標籤與沒有任何容器使用它，再在 runner 容器內搬移（`DECISIONS.md` §30.13）；由使用者執行 |
 | secscan-admin init-runs-layout | M5（T23a 機密性隔離已建立） | compose 的一次性服務 `runs-init` 執行：建立或檢查 layout，不通過時 runner 與 worker 不啟動；不需要 DB 與金鑰 |
 | uv run secscan-admin retention-status | M5（T23a 已建立） | 唯讀：原始證據、需要人工處理的目錄、報告與摘錄各保留狀態的數量 |

@@ -70,6 +70,8 @@ HTTP client / 內建 API 文件（僅開發環境）/ 未來 CI
 
 每個程序啟動時檢查自己持有的金鑰（缺少或格式不合就停止）與互不共用；`secscan-admin check-encryption-keys` 在主機上一次檢查三組。bench 的金鑰檔在開發機的家目錄，平台的任何容器都拿不到。
 
+**T23b-b2 的 compose secrets**（`DECISIONS.md` §32；PR-2）：金鑰與 DB 密碼不再以環境變數傳進容器。`make secrets` 由 `.env` 寫出 `secrets/`，compose 以 `file:` 來源的 secret 掛載成 `/run/secrets/<名稱>`（唯讀），environment 只有 `*_FILE` 的路徑；分配矩陣和上表相同，另外 db 有 superuser、owner 與應用程式角色的三個密碼檔（只在第一次初始化時使用），db-test 有自己的 superuser 密碼檔。db 的 entrypoint 經過一層 wrapper，在初始化開始之前建立「初始化未完成標記」，healthcheck 要求它不存在。應用程式的連線一律帶 `require_auth=scram-sha-256`。**邊界**：能使用 Docker API 的程序仍讀得到 `/run/secrets`；socket-proxy 不檢查 create 的 body，被入侵的 runner 可以繞過這些控制（T23b-b5，HIGH）。b5 驗收之前不宣稱完整的容器機密隔離。
+
 **T11 已實作**（`DECISIONS.md` §15.6）：lab_net 與 scan_net 都由 Makefile 建立（`make lab-net`、`make scan-net`：internal、gateway isolated、固定網段、`--ip-range` 只配發下半段），compose 只以 external 引用。guard 固定在兩個網段的最後一個主機位址：guard 停機時，掃描容器也拿不到它的 IP。LAB_CIDR 的最後一個主機位址保留給 guard，target 與 grant 都不能用。runner 另外掛 guard_policies（讀寫）與 guard_status（唯讀）。
 
 ### 掃描容器

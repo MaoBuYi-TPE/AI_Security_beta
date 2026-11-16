@@ -1654,10 +1654,29 @@
       3. 分權之後重新測試 T23a 的安全不變條件：`active/`／`held/` 隔離所依賴的 trigger 與 DB 約束。
       4. 記錄剩餘風險：三個服務仍共用 `secscan_app`，DDL／DML 分權不是服務級的隔離。
       - PostgreSQL 的物件擁有者有特殊權限，不能只靠 `REVOKE`：T23b-b1 之前 `secscan_app` 擁有資料庫與所有物件，所以擁有權要移轉給 `secscan_owner`（`DECISIONS.md` §31.5）。
-    - [ ] b2（提議）：compose secrets、掃描容器的 log driver、主機全碟加密的部署要求。
+    - [ ] **b2：compose secrets、掃描容器的 log driver、主機全碟加密的部署要求**（計畫第四版；`DECISIONS.md` §32）。兩種完成分開記錄，兩者都完成 b2 才標完成：
+      - [ ] **b2 程式實作完成**：PR-2、PR-1、PR-3 都合併，各自的 `make test`、Live（拋棄式的秘密）與審查都通過。
+        - [ ] PR-2（`feat/t23b-b2-compose-secrets`）：compose secrets 與 `*_FILE`、SCRAM、`safe_summary`、db 初始化的強化（初始化未完成標記、entrypoint wrapper、log 的抑制）、Live 的完整隔離、pre-commit。
+          - [x] G0、G0b、G0c 的 Docker 驗證（2026-11-15、16；使用者驗收，`DECISIONS.md` §32.3）
+          - [ ] G1 離線實作、三項審查、開 PR（2026-11-16 授權並執行；不合併）
+          - [ ] G2 使用者確認 FileVault 之後：第一次 `make secrets`、完整的 `make test`（未授權）
+          - [ ] G3 Live：`test-live-secrets`、`test-live-db-roles`、`test-live-runner`、`test-live-fixture-findings`（未授權）
+          - [ ] G4 審查與合併（未授權）
+        - [ ] PR-1（`feat/t23b-b2-scan-log-driver`，PR-2 合併之後）：掃描容器的 `LogConfig: none`、平台服務的 log 輪替。
+        - [ ] PR-3（`feat/t23b-b2-host-encryption`）：`make host-encryption-check` 與 `make up` 的警告。
+      - [ ] **b2 部署安全驗收完成**：
+        - [ ] G5 開發環境的遷移（備份、安全複本的相容性驗證、只啟動 db 驗證、`make up`；未授權）；
+        - [ ] G6 FileVault（FDE-A1–A7；開啟與復原金鑰的保管只由使用者操作）；
+        - [ ] 剩餘風險（含 b5）都已登錄，並由使用者確認（`DECISIONS.md` §32.6）。
+      - b2 的文件只寫實際達成的部分：秘密不再出現在容器的設定、`docker compose config`（不含 `--environment`）與長期執行的服務程序的環境。**b5 驗收之前不宣稱平台已具備完整的容器機密隔離。**
+    - [ ] **T23b-b5（新增，HIGH；2026-11-16）：runner 的 Docker API 權限邊界**（`DECISIONS.md` §32.7）。順序：b2 → **b5** → b3（D15）。
+      - 問題：socket-proxy 不檢查 create 的 body 與 local volume 的 `o=bind`，被入侵的 runner 可以建立特權容器或掛載主機路徑（影響 VM 與使用者的 macOS 帳號）。compose secrets、`*_FILE` 與 FileVault 都擋不住。
+      - 處置二選一：(a) 在 runner 與 Docker 之間加上檢查 create body 的授權層，Live 的負向測試以允許清單的等值比對（清單見 §32.7）；(b) 使用者在 SEC-14 的 P0 驗收時明確接受並寫明影響。
+      - 列入 SEC-14 的 P0 清單（`DECISIONS.md` §30.14）。
     - [ ] b3（分組是提議）：uid 分離與完整的 FD 撤銷（下方兩項）。
       - 這兩項**不可省略**：它們是 SEC-14 P0 的必要條件，不能以接受剩餘風險取代。
       - 依據：使用者 2026-11-12 審查 PR #37 的意見，`DECISIONS.md` §30.14。
+      - uid 分離只對 named volume 與 tmpfs 有效：OrbStack 以 virtiofs 的 bind mount 掛載的 compose secrets，容器內的擁有者顯示成讀取者的 uid（T23b-b2 G0 的 S2；`DECISIONS.md` §32.6 的剩餘風險 8）。
     - [ ] b4（提議）：API 的安全 header、以每個 key 計的速率限制與並行上限。
     - [ ] 服務級的 DB 角色（b3 之後的另一個子項目）：api、worker、runner 各自的角色。
     - [ ] uid 分離：runner、worker、api 與掃描容器不再共用 uid 10001（`DECISIONS.md` §30.13 的剩餘風險 2）。

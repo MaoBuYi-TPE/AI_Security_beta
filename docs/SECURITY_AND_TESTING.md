@@ -475,6 +475,29 @@ T23b-b1 的 DDL／DML 分權（`DECISIONS.md` §31；預期矩陣在 `tests/db_p
 | ROLE-08 | 分權之後的 T23a：<ul><li>應用程式角色不能停用 `evidence_holds_guard`、`run_evidence_hold_check`、`run_evidence_guard`；</li><li>不能刪除 9 個 CHECK、不能以 `session_replication_role` 繞過；</li><li>不能 DELETE 或 TRUNCATE `evidence_holds`、`run_evidence`。</li></ul>EVID 與隔離的既有測試以應用程式角色執行；「關閉 trigger 也擋得下」的 CHECK 測試由 owner 執行。 | integration：db_privileges、evidence_hold_isolation、evidence_holds |
 | ROLE-09 | `migrate-db-roles` 以 SCRAM verifier 建立 owner（2026-11-15 的補正，`DECISIONS.md` §31.15）：<ul><li>送出的 CREATE ROLE 只有本機產生的 verifier，沒有明文的密碼；</li><li>保存的 `rolpassword` **逐字等於**那個 verifier：明文的作法會得到伺服器自己的 salt，不會相等；</li><li>之後以 `require_auth=scram-sha-256` 登入；</li><li>verifier 格式不符或屬於別的密碼：事後檢查拒絕、rollback，輸出不含密碼與 verifier；</li><li>非 ASCII 的密碼在連線之前就拒絕。</li></ul> | unit、integration：db_roles_cli |
 
+T23b-b2 的 compose secrets、SCRAM、安全的錯誤輸出與 Live 的隔離（`DECISIONS.md` §32；PR-2）。結果分成「已實際驗證」「只完成靜態檢查」「待後續關卡驗證」三類（§32.5）；CSEC-09 只驗證主機端的設定讀取與連線，不是容器部署的驗收：
+
+| 編號 | 內容 | 位置 |
+|---|---|---|
+| CSEC-01 | compose 的分配矩陣：頂層七個 `file:` secret（`${SECSCAN_SECRETS_DIR:?…}`）；每個服務的 secrets 恰好是矩陣；`*_FILE` 指向掛載的 secret；environment 與 `x-*` 沒有秘密的名稱、值或插值；不分大小寫，api、runner、worker 沒有 owner 與 admin 的秘密；沒有 include、extends.file、configs、env_file | unit：compose_secrets、deployment |
+| CSEC-02 | 真的 `docker compose config`（暫存目錄、用戶端解析）：canary 同時放在 `.env` 與秘密檔，`config`、每個服務、`--format json` 都沒有；正向對照：`--environment` 含 `.env` 的 canary；`SECSCAN_SECRETS_DIR` 沒有設定或是空字串時失敗 | unit：compose_secrets |
+| CSEC-03 | `*_FILE` 的讀取：symlink、FIFO（子程序加時限）、不是一般檔案、超過 4096 bytes、空的、CR、第二行、空白、控制字元、非 ASCII 都拒絕；4095 通過、4096 拒絕；`X` 與 `X_FILE` 同時設定時拒絕；錯誤是固定的訊息、不帶 OSError | unit：core/secret_files、core/config_secret_files |
+| CSEC-04 | `sync-secret-files`：0700／0600、沒有結尾換行、冪等、原子替換、寫入失敗時保留舊檔、`--check`、symlink 與權限過寬的拒絕、終端不顯示值、`.env` 不變、在 `Settings` 之前分派 | unit：secret_files_cli |
+| CSEC-05 | 在暫存目錄執行真的 `make secrets`（`SECRETS_CHECK=1`）；`db-up`、`test-db-up`、`up`、`runs-layout-migrate` 依賴 secrets；開發的 compose 呼叫都設定 `SECSCAN_SECRETS_DIR` | unit：make_secrets |
+| CSEC-06 | pre-commit 的 `forbid-secret-files`：在暫存的 git repo 中，`git add -f` 的秘密檔被擋下 | unit：precommit_secrets |
+| CSEC-07 | initdb 與 wrapper 的允許清單：meta-command、語句、`SET`／`RESET`（D19）、用戶端的 `awk` 檢查、反引號只引用路徑；初始化未完成標記（D18、D21）；`command`、`environment`、掛載的設定來源（D20：不得有 debug 等級的 log） | unit：db_init |
+| CSEC-08 | 每個連線都帶 `require_auth=scram-sha-256`；`REQUIRE_AUTH` 只有一份；`src/` 只有兩個模組建立連線；Dockerfile 的 libpq 斷言（靜態；實際執行在 G3） | unit：core/db、scram_required |
+| CSEC-09 | api 的 app factory、runner、worker 只以 `*_FILE` 讀取秘密，在 db-test 上以 SCRAM 連線（`system_user`） | integration：secret_files_startup |
+| CSEC-10 | `safe_summary` 只有 `loc` 與 `msg`；`SettingsError` 不帶原本的例外；CLI、`create_app`、`env.py`、`migrate-db-roles`、`sync-secret-files` 的輸出不含 canary 的片段；每個設定類別都有 `hide_input_in_errors`；`errors()`／`json()` 只在允許的模組 | unit：core/settings_errors、test_cli、migration_env、db_roles_cli；api：app_factory |
+| CSEC-11 | `SECRET_FILES` 的對照表和 compose 完全一致 | unit：compose_secrets |
+| CSEC-12 | Live 的 alembic 以 `-x dotenv=off` 不讀 `.env`（含正向對照）；`generate-secret-files` 只寫新建的空目錄 | unit：migration_env、secret_files_cli、live_isolation_make |
+| CSEC-13 | 惡意環境下實際執行 Live 的 recipe（假的 docker／uv 記錄每次呼叫的環境）：每次呼叫都在白名單之內、沒有 canary、拋棄式目錄每次新建並清除、失敗時仍清理、命令列與 MAKEFLAGS 改不了白名單；經過包裝時真的 compose 只解析到拋棄式目錄，不經包裝時 canary 確實載入（正向對照）；靜態與 AST 盤點 | unit：live_isolation_make、live_env_guard、live_conftest |
+| CSEC-L1–L6 | Live（G3）：`docker inspect`、PID 1 的 environ、`/run/secrets` 的內容（正向對照）、db 經由 wrapper 的初始化、compose 的設定、遷移不退回 `.env`、有效的 log 設定 | live：secrets_live（`make test-live-secrets`） |
+| SLOG-01–03、SLOG-L1–L2 | 掃描容器的 `LogConfig: none` 與平台服務的 log 輪替（PR-1，尚未實作） | — |
+| FDE-01 | 主機全碟加密的檢查（PR-3，尚未實作） | — |
+
+空轉檢查：計畫 §4.4 的 1–10、14、15、17–47（11–13 屬於 PR-1、PR-3；16 在 PR-0），G1 的紀錄在 gitignore 的 `recordings/t23b-b2-g1/mutation-checks.md`。
+
 ### 4.4 Live E2E
 
 完整 API → scope → auth → queue → Runner → 工具 → Parser → Finding → report。工具只在隔離靶場跑。每個 Adapter 的 live success 與其 unit test 成功分開標示。
@@ -768,6 +791,8 @@ T31 的 manifest（`DECISIONS.md` §29.3）記錄規格的 sha256、種子與實
 剩餘風險：
 - **open FD（LOW，增量）**：被攻陷的 worker 在隔離之前開啟並保留的檔案 FD 或目錄 FD 無法自動撤銷，rename 之後仍讀得到明文。目錄 FD 也看得到隔離之後新增的檔案（目前只有加密檔）。同一個 worker 容器內同 uid 的程序，可以經由 `/proc/<pid>/fd` 借用。`..` 的逃逸被核心擋下。目前只能重啟 worker；完整的 FD 撤銷與驗收標準見 T23b-b3（不可省略，`DECISIONS.md` §30.14）。
 - 其他：所有服務共用 uid 10001（uid 分離也在 T23b-b3，不可省略）；隔離之前約 1 分鐘、以及搬移持續失敗時，明文在 `active/`、worker 讀得到（看得見，15 分鐘後升級為緊急狀態，主動告警留待 T35；搬移持續失敗的處置程序與接受標準是提議，在 T23c 驗證，見 §30.14）；`held/` 不被覆寫依賴只有 runner 寫入；主機的容器檢查與搬移之間不是原子的，volume 的身分依賴 compose 的標籤。
+
+**T23b-b2 之後的剩餘風險**（`DECISIONS.md` §32.6）：Docker API 的權限繞過（b5，HIGH，§32.7；b5 驗收之前不宣稱完整的容器機密隔離）、主機上的兩份明文（`.env` 與 `secrets/`）、`docker compose config --environment`、短暫的初始化與維運程序持有秘密、b2 之前的秘密值仍然有效、bind mount 的 secret 不能以 uid 分離、初始化未完成標記的邊界（已在 G0c 受控情境下驗證修正，仍有未驗證邊界）、debug 等級的 log 會寫出 superuser 的密碼（F1：只宣稱 repo 的設定不會觸發）、主版本升級與初始化未完成標記（O1，LOW）。§30.9 第 3、4 點的「金鑰以環境變數傳入」由 PR-2 處理、「掃描容器的 json-file log」由 PR-1 處理。以 `docker compose restart` 驗證健康狀態時，以重啟之後新的 healthcheck 探測為準（O3）。
 
 **SEC-14 的剩餘風險（T23a 之後；`DECISIONS.md` §30.9）**：
 1. **不是全程靜態加密**：run 執行、收集、等待解析期間是明文；runner 停機或 Docker 無法確認容器已刪除時持續到恢復為止。原因是 ZAP 與 Nuclei 只能寫一般檔案，runner 要在容器結束之後讀取並遮罩、worker 再讀取解析。改善方向：主機全碟加密（FileVault／LUKS，T23b 的部署要求）；未來以每個 run 的 tmpfs `out/` 加輔助容器加密、加密的 sidecar，或讓 worker 讀加密檔（和目前的最小權限分配衝突）。
