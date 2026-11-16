@@ -355,3 +355,22 @@ def test_a_live_session_with_the_wrong_environment_is_refused(
     """R1、修正 17、第二輪安全 LOW-3：路徑以 run_id 的規則核對（..、相對路徑、TMPDIR 之外都拒絕），
     compose 的秘密目錄必須是同一個，秘密的名稱不分大小寫。"""
     assert problem in live_session_problems(_live_environment(tmp_path, **changes))
+
+
+@pytest.mark.parametrize("kind", ["dot-dot-inside", "outside-tmpdir"])
+def test_a_real_private_directory_reached_by_another_path_is_refused(
+    tmp_path: Path, kind: str
+) -> None:
+    """路徑規則本身（不靠 lstat；空轉檢查 58a、58d）：目錄真的存在、是自己擁有的 0700 目錄，經由 ..
+    到達，或不在 TMPDIR 之下，都拒絕。"""
+    if kind == "dot-dot-inside":
+        (tmp_path / "x").mkdir()
+        path = f"{tmp_path}/x/../{DIRECTORY}"
+    else:
+        elsewhere = tmp_path / "elsewhere" / DIRECTORY
+        elsewhere.mkdir(parents=True)
+        elsewhere.chmod(0o700)
+        path = str(elsewhere)
+    environ = _live_environment(tmp_path, SECSCAN_LIVE_SECRETS_DIR=path, SECSCAN_SECRETS_DIR=path)
+
+    assert "SECSCAN_LIVE_SECRETS_DIR" in live_session_problems(environ)
