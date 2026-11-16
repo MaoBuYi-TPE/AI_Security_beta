@@ -43,6 +43,7 @@ from secscan.cli.keys import Subparsers
 from secscan.cli.scram import scram_verifier
 from secscan.cli.services import Report
 from secscan.core.config import ENV_FILE, Settings
+from secscan.core.db import REQUIRE_AUTH
 from secscan.core.settings_errors import SettingsError, build_settings
 from secscan.migrations.credentials import (
     MigrationCredentials,
@@ -62,7 +63,6 @@ EXIT_FAILURE = 1
 TOOL_LOCK_KEY = 0x73656373_63616E52
 LOCK_TIMEOUT = "5s"
 LOCK_NOT_AVAILABLE = "55P03"
-REQUIRE_AUTH = "scram-sha-256"
 _STATES = {
     State.LEGACY: "S0（應用程式角色擁有資料庫與物件）",
     State.TRANSFERRED: "S1（已移轉，v0025 還沒套用）",

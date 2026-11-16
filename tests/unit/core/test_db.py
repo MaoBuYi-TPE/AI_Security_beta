@@ -1,5 +1,6 @@
 """DB 連線設定與型別的單元測試（不連線；實際連線與約束見 tests/integration）。"""
 
+import inspect
 from datetime import UTC, datetime, timedelta, timezone
 from typing import cast
 
@@ -12,6 +13,7 @@ from sqlalchemy.pool import NullPool, QueuePool
 
 from secscan.core.config import Settings
 from secscan.core.db import (
+    REQUIRE_AUTH,
     ConstraintViolationError,
     UtcDateTime,
     create_db_engine,
@@ -77,7 +79,20 @@ def test_engine_sets_timeouts_application_name_and_utc() -> None:
             "-c timezone=UTC -c statement_timeout=20000 -c lock_timeout=2000 "
             "-c idle_in_transaction_session_timeout=40000"
         ),
+        "require_auth": "scram-sha-256",
     }
+
+
+@pytest.mark.parametrize("pooled", [True, False])
+def test_every_engine_requires_scram(pooled: bool) -> None:
+    """CSEC-08：應用程式角色的連線也只接受 SCRAM（libpq 16 起的 require_auth；§31.11 的 L4）。
+
+    port 被別的服務占用時，對方不能要求明文密碼或 md5；不再有關閉它的參數。
+    """
+    engine = create_db_engine(_settings(), pooled=pooled)
+
+    assert engine.url.query["require_auth"] == REQUIRE_AUTH == "scram-sha-256"
+    assert "require_scram" not in inspect.signature(create_db_engine).parameters
 
 
 def test_engine_is_pooled_by_default_and_can_disable_pooling() -> None:

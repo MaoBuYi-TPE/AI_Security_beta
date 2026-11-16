@@ -66,9 +66,7 @@ def run_migrations_online() -> None:
     owner = build_settings(MigrationCredentials).owner_settings(settings)
     attributes.setdefault(CONTENT_KEYS_ATTRIBUTE, migration_content_keys(settings))
     app_role = attributes.setdefault(APP_ROLE_ATTRIBUTE, settings.db_user)
-    engine = create_db_engine(
-        owner, application_name=MIGRATION_APPLICATION_NAME, pooled=False, require_scram=True
-    )
+    engine = create_db_engine(owner, application_name=MIGRATION_APPLICATION_NAME, pooled=False)
     try:
         try:
             connection = engine.connect()

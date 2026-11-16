@@ -29,6 +29,7 @@ from sqlalchemy import URL, Connection, create_engine, text
 from sqlalchemy.pool import NullPool
 
 from secscan.core.config import Settings
+from secscan.core.db import REQUIRE_AUTH
 from tests.secret_support import content_keys, encryption_keys
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -72,7 +73,8 @@ class IntegrationDbSettings(BaseSettings):
             host=self.host,
             port=self.port,
             database="postgres",
-            query={"connect_timeout": "5"},
+            # 測試的 superuser 也只接受 SCRAM（CSEC-08）。
+            query={"connect_timeout": "5", "require_auth": REQUIRE_AUTH},
         )
 
 

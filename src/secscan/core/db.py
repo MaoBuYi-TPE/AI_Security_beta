@@ -39,7 +39,10 @@ NAMING_CONVENTION = {
 
 DRIVER = "postgresql+psycopg"
 DEFAULT_APPLICATION_NAME = "secscan-api"
-REQUIRE_SCRAM = "scram-sha-256"
+# 連線只接受 SCRAM（libpq 16 起的 require_auth）：port 被別的服務占用時，
+# 對方不能要求明文密碼或 md5。
+# 應用程式、migration 與 migrate-db-roles 的連線都使用它（T23b-b2；docs/DECISIONS.md §32）。
+REQUIRE_AUTH = "scram-sha-256"
 MILLISECONDS_PER_SECOND = 1_000
 
 
@@ -126,21 +129,19 @@ def create_db_engine(
     *,
     application_name: str = DEFAULT_APPLICATION_NAME,
     pooled: bool = True,
-    require_scram: bool = False,
 ) -> Engine:
     """建立 engine（不會立即連線）。pooled=False 給一次性的程序，例如 migration。
 
     hide_parameters：SQL 參數（key hash、稽核內容、日後的密文）不出現在例外訊息與日誌中。
-    require_scram：只接受 SCRAM 認證（libpq 16 起的 require_auth），port 被別的服務占用時對方不能
-    要求明文密碼。migration 的 owner 連線使用（T23b-b1）；應用程式的連線留給 b2。
+    require_auth：一律只接受 SCRAM（REQUIRE_AUTH）；T23b-b1 只用於 migration 的 owner 連線，
+    T23b-b2 起應用程式角色的連線也一樣（§31.11 的 L4），不再提供關閉它的參數。
     """
     query = {
         "application_name": application_name,
         "connect_timeout": str(settings.db_connect_timeout_seconds),
         "options": session_options(settings),
+        "require_auth": REQUIRE_AUTH,
     }
-    if require_scram:
-        query["require_auth"] = REQUIRE_SCRAM
     url = database_url(settings).update_query_dict(query)
     if pooled:
         return create_engine(url, pool_pre_ping=True, hide_parameters=True)

@@ -548,7 +548,6 @@ def test_the_owner_is_created_with_the_local_verifier(small_legacy: Legacy) -> N
         small_legacy.database.owner_settings(),
         application_name="secscan-role09",
         pooled=False,
-        require_scram=True,
     )
     try:
         with engine.connect() as connection:
