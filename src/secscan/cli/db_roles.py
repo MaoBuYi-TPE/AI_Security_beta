@@ -78,6 +78,7 @@ class AdminCredentials(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        hide_input_in_errors=True,
     )
 
     user: str = Field(default="postgres", min_length=1)

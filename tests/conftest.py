@@ -41,12 +41,18 @@ DB_ENV_KEYS = (
     "DB_OWNER_PASSWORD",
     "DB_ADMIN_USER",
     "DB_ADMIN_PASSWORD",
+    # compose secrets 的檔案路徑（T23b-b2）：shell 中殘留的值會讓 X 與 X_FILE 同時設定。
+    "DB_PASSWORD_FILE",
+    "DB_OWNER_PASSWORD_FILE",
 )
 # 三組加密金鑰也一樣不沿用（shell 或 .env 裡可能是真的金鑰）；需要的 fixture 帶測試用的金鑰。
 SECRET_ENV_KEYS = (
     "SECRET_ENCRYPTION_KEYS",
     "EVIDENCE_ENCRYPTION_KEYS",
     "CONTENT_ENCRYPTION_KEYS",
+    "SECRET_ENCRYPTION_KEYS_FILE",
+    "EVIDENCE_ENCRYPTION_KEYS_FILE",
+    "CONTENT_ENCRYPTION_KEYS_FILE",
 )
 # 保留期限、明文期限與 bench 的金鑰檔（docs/DECISIONS.md §30）：測試以預設值或自己指定的值執行。
 RETENTION_ENV_KEYS = (

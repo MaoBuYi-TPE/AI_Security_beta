@@ -7,6 +7,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from secscan.core.network import lab_cidr_problem
+from secscan.core.secret_files import resolve_secret_files
 
 AppEnv = Literal["dev", "test", "prod"]
 
@@ -44,6 +45,16 @@ MAX_EVIDENCE_PLAINTEXT_MAX_MINUTES = 1_440
 # egress guard 也用同一個函式檢查。
 DEFAULT_LAB_CIDR = IPv4Network("10.89.7.0/24")
 
+# 可以改由檔案提供的秘密（T23b-b2；docs/DECISIONS.md §32）：compose secrets 掛載成
+# /run/secrets/<名稱>，容器的環境變數只有 `X_FILE` 的路徑。主機上的流程照舊讀 .env 的 `X`；
+# 兩者同時有值時拒絕。
+SECRET_FILE_FIELDS = (
+    "db_password",
+    "secret_encryption_keys",
+    "evidence_encryption_keys",
+    "content_encryption_keys",
+)
+
 
 class Settings(BaseSettings):
     """執行期設定。未設定 APP_ENV 時採 prod，預設關閉 API 文件（fail-safe）。"""
@@ -53,6 +64,8 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        # str(ValidationError) 不含輸入（縱深防禦）；對外的輸出一律經過 core/settings_errors.py。
+        hide_input_in_errors=True,
     )
 
     app_env: AppEnv = "prod"
@@ -88,6 +101,11 @@ class Settings(BaseSettings):
     # 各程序在啟動時檢查自己持有的那幾組。
     evidence_encryption_keys: SecretStr | None = None
     content_encryption_keys: SecretStr | None = None
+    # 上面四個秘密的檔案路徑（DB_PASSWORD_FILE…）。讀檔之後設成 None，值放進對應的欄位。
+    db_password_file: str | None = None
+    secret_encryption_keys_file: str | None = None
+    evidence_encryption_keys_file: str | None = None
+    content_encryption_keys_file: str | None = None
 
     # 保留期限（天）與已收集明文的期限（分鐘）。
     evidence_retention_days: int = Field(
@@ -113,6 +131,12 @@ class Settings(BaseSettings):
     def docs_enabled(self) -> bool:
         """API 文件端點只在開發環境開啟（docs/API_CONTRACT.md §2）。"""
         return self.app_env == "dev"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_secret_files(cls, data: object) -> object:
+        """`X_FILE` 有值時讀檔放進 `X`（core/secret_files.py）；`X` 與 `X_FILE` 不能同時設定。"""
+        return resolve_secret_files(data, SECRET_FILE_FIELDS)
 
     @field_validator("lab_cidr")
     @classmethod

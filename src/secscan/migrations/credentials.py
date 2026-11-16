@@ -2,17 +2,19 @@
 
 - schema 由 owner 角色（DB_OWNER_USER，預設 secscan_owner）擁有，只有 migration 以它連線；
   api、worker、runner 只有應用程式角色（DB_USER）的逐表 DML 權限。
-- 從環境變數或 .env 讀取；密碼必填，沒有時停止，**不退回**應用程式角色的帳密。
+- 從環境變數或 .env 讀取；密碼必填，沒有時停止，**不退回**應用程式角色的帳密。密碼也可以改由
+  檔案提供（DB_OWNER_PASSWORD_FILE；Live 的拋棄式秘密，T23b-b2），規則和 Settings 的 `*_FILE` 相同。
 - 只有 env.py（make migrate、Live 的 recipe）與主機上的 migrate-db-roles 使用；compose 只把密碼交給
   db（initdb 建立角色），不交給 api、worker、runner。
 """
 
 import re
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from secscan.core.config import ENV_FILE, Settings
+from secscan.core.secret_files import resolve_secret_files
 
 DEFAULT_OWNER_USER = "secscan_owner"
 MAX_ROLE_NAME_LENGTH = 63
@@ -45,10 +47,17 @@ class MigrationCredentials(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        hide_input_in_errors=True,
     )
 
     user: str = Field(default=DEFAULT_OWNER_USER, min_length=1, max_length=MAX_ROLE_NAME_LENGTH)
     password: SecretStr | None = None
+    password_file: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_password_file(cls, data: object) -> object:
+        return resolve_secret_files(data, ("password",), env_prefix="DB_OWNER_")
 
     @field_validator("user")
     @classmethod

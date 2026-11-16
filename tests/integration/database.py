@@ -49,6 +49,7 @@ class IntegrationDbSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        hide_input_in_errors=True,
     )
 
     host: str = "127.0.0.1"
