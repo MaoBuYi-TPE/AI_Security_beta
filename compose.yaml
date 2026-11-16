@@ -1,5 +1,9 @@
 # 控制平面的本機資源。只綁 127.0.0.1，不對外；映像以 tag@digest 鎖定（secscan 由 Dockerfile 建立）。
-# 密碼與金鑰來自 .env（make env 產生，不進 git）。
+# 密碼與金鑰以 compose secrets 掛載（T23b-b2；docs/DECISIONS.md §32）：make secrets 由 .env（make env
+# 產生，不進 git）寫出 secrets/，每個服務只掛載自己需要的那幾個（/run/secrets/<名稱>，唯讀），
+# environment 只有 *_FILE 的路徑。來源目錄是 SECSCAN_SECRETS_DIR（必填，由 Makefile 設定；Live 使用
+# 拋棄式的目錄）。
+#   make secrets      由 .env 產生 secrets/（db-up、test-db-up、up、runs-layout-migrate 會先執行）
 #   make db-up        啟動開發用 db（持久 volume）
 #   make test-db-up   啟動整合測試用 db-test（tmpfs，停掉即清空）
 #   make db-down      停止兩者（保留開發資料 volume）
@@ -35,9 +39,10 @@ x-app: &app
   pids_limit: 128
   restart: unless-stopped
 
-# 只放不含秘密的共用設定。密碼與金鑰一律寫在各服務自己的 environment，不放在任何頂層的 x-*：
-# docker compose config 即使只查詢一個服務（例如 make runs-layout-migrate 的 config runs-init），
-# 也會輸出全部頂層的 x-*，而且是替換變數之後的值（docs/DECISIONS.md §30.13 的 Docker 驗證 F1）。
+# 只放不含秘密的共用設定。秘密一律以各服務自己的 secrets 掛載，不放在任何頂層的 x-*（x-* 也不加
+# secrets）：docker compose config 即使只查詢一個服務（例如 make runs-layout-migrate 的
+# config runs-init），也會輸出全部頂層的 x-*，而且是替換變數之後的值（docs/DECISIONS.md §30.13 的
+# Docker 驗證 F1）。
 x-app-env: &app-env
   APP_ENV: ${APP_ENV:-prod}
   DB_HOST: db
@@ -60,8 +65,11 @@ x-postgres: &postgres
     # 只在資料目錄第一次初始化時生效。
     POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
   # 用 TCP 檢查：初始化期間的暫時 server 只聽 Unix socket，避免 healthcheck 太早成功。
+  # 而且初始化未完成標記不存在（D18、D21；G0b 驗證過的指令）：db 的 wrapper 在初始化開始之前建立它，
+  # 只有 initdb 的最後一步（99-end.sh）刪除；初始化失敗或被中斷時一直是 unhealthy（fail closed）。
+  # db-test 沒有 wrapper 與 initdb 檔，標記永遠不存在，只有 readiness 有作用。
   healthcheck:
-    test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+    test: ["CMD", "sh", "-c", "pg_isready -h 127.0.0.1 -p 5432 -U postgres && test ! -e /var/lib/postgresql/secscan-initdb-incomplete"]
     interval: 2s
     timeout: 3s
     retries: 30
@@ -69,27 +77,39 @@ x-postgres: &postgres
 services:
   db:
     <<: *postgres
+    # entrypoint wrapper（D21；G0c 驗證過的版本）：官方 entrypoint 要初始化時（PG_VERSION 不存在或是
+    # 空的），先建立初始化未完成標記並寫入磁碟，再 exec 官方的 entrypoint（參數原樣傳遞，PID 1 仍是
+    # postmaster）。以 /bin/sh 明確執行，不依賴檔案的執行權限；不切換使用者、不讀秘密。
+    entrypoint: ["/bin/sh", "/usr/local/lib/secscan/db-entrypoint.sh"]
     # cluster_name 用來辨識伺服器：整合測試只接受 secscan-test，不會誤用開發資料庫。
     # log_error_verbosity=terse：伺服器日誌不記錄 DETAIL（例如重複鍵的值）。
+    # 不得把 log_min_messages 設成 debug 等級，也不得用 -d（D20；F1）：第一次初始化時，暫時伺服器會把
+    # 自己的環境（含 superuser 的密碼）寫進 log。覆寫 entrypoint 之後映像的 Cmd 不再生效，所以 command
+    # 必須以 postgres 開頭。
     command: ["postgres", "-c", "cluster_name=secscan-dev", "-c", "log_error_verbosity=terse"]
     environment:
       <<: *postgres-env
-      # superuser 只給初始化與手動維運使用，應用程式一律用下面的非 superuser 角色。
-      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?請先執行 make env 產生 .env}
+      # superuser 只給初始化與手動維運使用，應用程式一律用下面的非 superuser 角色。官方 entrypoint
+      # 每次啟動都讀這個檔案，exec 伺服器之前 unset（postmaster 的環境沒有密碼）。
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
       # owner 角色（T23b-b1；docs/DECISIONS.md §31）：擁有 schema，只用於 migration（主機上的
-      # make migrate）。密碼只交給 db 的 initdb，不交給 api、runner、worker。
+      # make migrate）。密碼只交給 db 的 initdb（10-roles.sql 讀檔），不交給 api、runner、worker。
       SECSCAN_OWNER_DB_USER: ${DB_OWNER_USER:-secscan_owner}
-      SECSCAN_OWNER_DB_PASSWORD: ${DB_OWNER_PASSWORD:?請先執行 make env 產生 .env}
+      SECSCAN_OWNER_DB_PASSWORD_FILE: /run/secrets/db_owner_password
       SECSCAN_APP_DB_USER: ${DB_USER:-secscan_app}
-      SECSCAN_APP_DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
+      SECSCAN_APP_DB_PASSWORD_FILE: /run/secrets/db_password
       SECSCAN_APP_DB_NAME: ${DB_NAME:-secscan}
+    # 三個密碼檔在初始化之後仍掛載（compose 不能只在初始化時掛載；剩餘風險 7）。
+    secrets: [db_admin_password, db_owner_password, db_password]
     ports:
       - "127.0.0.1:${DB_PORT:-55432}:5432"
     networks: [default, control_net]
     volumes:
+      # 初始化未完成標記（/var/lib/postgresql/secscan-initdb-incomplete）和 PGDATA 在同一個 volume。
       - db_data:/var/lib/postgresql
       # 只在第一次初始化資料目錄時執行；之後改 .env 的密碼不會自動同步（見 README）。
       - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - ./deploy/postgres/db-entrypoint.sh:/usr/local/lib/secscan/db-entrypoint.sh:ro
     tmpfs:
       - /var/run/postgresql:mode=1777
       - /tmp:mode=1777
@@ -114,7 +134,9 @@ services:
     environment:
       <<: *postgres-env
       # 測試 fixture 以 superuser 為每個 session 建立專屬的非 superuser 角色與全新資料庫。
-      POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:?請先執行 make env 產生 .env}
+      POSTGRES_PASSWORD_FILE: /run/secrets/test_db_password
+    # 沒有 wrapper 與 initdb 檔：PGDATA 在 tmpfs，每次啟動都重新初始化，不會留下半初始化的狀態。
+    secrets: [test_db_password]
     ports:
       - "127.0.0.1:${TEST_DB_PORT:-55433}:5432"
     tmpfs:
@@ -129,14 +151,15 @@ services:
       context: .
     command:
       ["uvicorn", "--factory", "secscan.main:create_app", "--host", "0.0.0.0", "--port", "8000"]
-    # 金鑰只傳各程序需要的那幾組（docs/DECISIONS.md §30.2）：api 持有目標 secret 的金鑰（只加密）與
+    # 金鑰只給各程序需要的那幾組（docs/DECISIONS.md §30.2）：api 持有目標 secret 的金鑰（只加密）與
     # 報告／人工複測摘錄的內容金鑰，沒有原始證據的金鑰。
     environment:
       <<: *app-env
-      DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
-      SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
-      CONTENT_ENCRYPTION_KEYS: ${CONTENT_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      SECRET_ENCRYPTION_KEYS_FILE: /run/secrets/secret_encryption_keys
+      CONTENT_ENCRYPTION_KEYS_FILE: /run/secrets/content_encryption_keys
       EXCERPT_RETENTION_DAYS: ${EXCERPT_RETENTION_DAYS:-30}
+    secrets: [db_password, secret_encryption_keys, content_encryption_keys]
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     networks: [default, control_net]
@@ -182,9 +205,9 @@ services:
     # 沒有報告內容的金鑰（docs/DECISIONS.md §30.2）。
     environment:
       <<: *app-env
-      DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
-      SECRET_ENCRYPTION_KEYS: ${SECRET_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
-      EVIDENCE_ENCRYPTION_KEYS: ${EVIDENCE_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      SECRET_ENCRYPTION_KEYS_FILE: /run/secrets/secret_encryption_keys
+      EVIDENCE_ENCRYPTION_KEYS_FILE: /run/secrets/evidence_encryption_keys
       EVIDENCE_RETENTION_DAYS: ${EVIDENCE_RETENTION_DAYS:-7}
       EVIDENCE_PLAINTEXT_MAX_MINUTES: ${EVIDENCE_PLAINTEXT_MAX_MINUTES:-60}
       RUNNER_DOCKER_URL: tcp://socket-proxy:2375
@@ -194,6 +217,7 @@ services:
       RUNNER_FAKE_OUTCOME: ${RUNNER_FAKE_OUTCOME:-succeed}
       RUNNER_FAKE_HOLD_SECONDS: ${RUNNER_FAKE_HOLD_SECONDS:-0}
       RUNNER_GUARD_PROXY: ${SECSCAN_GUARD_IP:-10.89.8.254}:8080
+    secrets: [db_password, secret_encryption_keys, evidence_encryption_keys]
     volumes:
       - runs:/runs
       - run_secrets:/run-secrets
@@ -219,9 +243,10 @@ services:
     # 原始證據的金鑰（docs/DECISIONS.md §30.2）。
     environment:
       <<: *app-env
-      DB_PASSWORD: ${DB_PASSWORD:?請先執行 make env 產生 .env}
-      CONTENT_ENCRYPTION_KEYS: ${CONTENT_ENCRYPTION_KEYS:?請先執行 make env 產生 .env}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      CONTENT_ENCRYPTION_KEYS_FILE: /run/secrets/content_encryption_keys
       REPORT_RETENTION_DAYS: ${REPORT_RETENTION_DAYS:-30}
+    secrets: [db_password, content_encryption_keys]
     # runner 收集好的輸出（preflight 的回應；docs/DECISIONS.md §16.5）與 guard 的 telemetry
     # （coverage；§16.6）：都唯讀。runs volume 只掛載 subpath active（§30.13）：held/ 中隔離的目錄
     # 不在 worker 的檔案系統裡。active 不存在時，容器可能成功建立，但無法啟動（Docker 驗證：exit
@@ -376,3 +401,22 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: size=64m,uid=10001,gid=10001,mode=0700,noexec,nosuid,nodev
+
+# compose secrets（T23b-b2；docs/DECISIONS.md §32）：make secrets 由 .env 產生的檔案（目錄 0700、
+# 檔案 0600、沒有結尾換行）。file 來源的 secret 會忽略 uid、gid、mode（以 bind mount 掛載）；
+# 名稱與 .env、容器內路徑的對照只定義在 secscan.cli.secret_files.SECRET_FILES。
+secrets:
+  db_admin_password:
+    file: ${SECSCAN_SECRETS_DIR:?請以 make 執行（Makefile 設定 SECSCAN_SECRETS_DIR）}/db_admin_password
+  test_db_password:
+    file: ${SECSCAN_SECRETS_DIR:?請以 make 執行（Makefile 設定 SECSCAN_SECRETS_DIR）}/test_db_password
+  db_owner_password:
+    file: ${SECSCAN_SECRETS_DIR:?請以 make 執行（Makefile 設定 SECSCAN_SECRETS_DIR）}/db_owner_password
+  db_password:
+    file: ${SECSCAN_SECRETS_DIR:?請以 make 執行（Makefile 設定 SECSCAN_SECRETS_DIR）}/db_password
+  secret_encryption_keys:
+    file: ${SECSCAN_SECRETS_DIR:?請以 make 執行（Makefile 設定 SECSCAN_SECRETS_DIR）}/secret_encryption_keys
+  evidence_encryption_keys:
+    file: ${SECSCAN_SECRETS_DIR:?請以 make 執行（Makefile 設定 SECSCAN_SECRETS_DIR）}/evidence_encryption_keys
+  content_encryption_keys:
+    file: ${SECSCAN_SECRETS_DIR:?請以 make 執行（Makefile 設定 SECSCAN_SECRETS_DIR）}/content_encryption_keys

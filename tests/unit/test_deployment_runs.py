@@ -117,7 +117,7 @@ def test_the_volume_name_and_the_runner_setting_use_the_same_expression() -> Non
 
 
 def test_up_down_and_the_migration_share_the_app_compose() -> None:
-    assert "\nAPP_COMPOSE = $(COMPOSE) -f $(DB_FILE) --profile app\n" in MAKEFILE
+    assert "\nAPP_COMPOSE = $(DEV_COMPOSE) --profile app\n" in MAKEFILE
     assert _recipe("up") == "\t$(APP_COMPOSE) up -d --wait"
     assert _recipe("down") == "\t$(APP_COMPOSE) down"
     migrate = _recipe("runs-layout-migrate")

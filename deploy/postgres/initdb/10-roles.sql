@@ -1,29 +1,94 @@
--- 開發用 db 的初始化（docker-entrypoint-initdb.d，只在第一次建立資料目錄時執行）。
--- 兩個非 superuser 的角色（T23b-b1；docs/DECISIONS.md §31）：
--- - owner：擁有資料庫與所有物件，只用於 migration（make migrate；api、worker、runner 沒有它的密碼）。
--- - 應用程式角色：api、worker、runner 與主機的 admin CLI 共用；只有 v0025 授予的逐表 DML。
--- 都不是 superuser，避免一旦遭 SQL 注入就能用 COPY ... PROGRAM、讀取伺服器檔案或建立角色。
--- 秘密從容器環境變數讀取（psql \getenv），不會出現在命令列或這個檔案裡。
--- 已經存在的資料目錄不會重跑這個檔案：既有的開發 DB 以 make db-roles-migrate 移轉（README）。
+-- T23b-b2 G0b candidate (plan §2.5, D18, D19): the two role passwords are read from files mounted
+-- by compose secrets. Only the *_FILE paths come from the environment; the passwords never do.
+-- psql errors are terse and show no statement text or context.
+\set VERBOSITY terse
+\set SHOW_CONTEXT never
 \getenv owner_user SECSCAN_OWNER_DB_USER
-\getenv owner_password SECSCAN_OWNER_DB_PASSWORD
 \getenv app_user SECSCAN_APP_DB_USER
-\getenv app_password SECSCAN_APP_DB_PASSWORD
 \getenv app_db SECSCAN_APP_DB_NAME
+\getenv owner_file SECSCAN_OWNER_DB_PASSWORD_FILE
+\getenv app_file SECSCAN_APP_DB_PASSWORD_FILE
 
--- CREATE ROLE 失敗時（例如角色已存在），預設會把整句（含密碼）寫進伺服器日誌；只對這個 session 關閉。
+\if :{?owner_user}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: SECSCAN_OWNER_DB_USER is not set'; END $$;
+\endif
+\if :{?app_user}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: SECSCAN_APP_DB_USER is not set'; END $$;
+\endif
+\if :{?app_db}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: SECSCAN_APP_DB_NAME is not set'; END $$;
+\endif
+\if :{?owner_file}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: SECSCAN_OWNER_DB_PASSWORD_FILE is not set'; END $$;
+\endif
+\if :{?app_file}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: SECSCAN_APP_DB_PASSWORD_FILE is not set'; END $$;
+\endif
+
+-- Client-side check before reading: a regular file (not a symlink) holding exactly one line of
+-- 32-4095 printable ASCII characters (no CR, no second line). The shell command only ever sees
+-- the path variables, never a password variable.
+\set owner_file_ok `if [ -f :'owner_file' ] && [ ! -L :'owner_file' ]; then LC_ALL=C awk 'NR == 1 && length($0) >= 32 && length($0) <= 4095 && $0 ~ /^[!-~]+$/ { ok = 1 } END { if (NR == 1 && ok) print "true"; else print "false" }' :'owner_file'; else echo false; fi`
+-- SHELL_ERROR exists only in psql 16 and later; without it a failed cat would go unnoticed.
+\if :{?SHELL_ERROR}
+\else
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: psql 16 or later is required'; END $$;
+\endif
+\if :owner_file_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: the owner password file must be one line of 32-4095 printable ASCII characters'; END $$;
+\endif
+\set app_file_ok `if [ -f :'app_file' ] && [ ! -L :'app_file' ]; then LC_ALL=C awk 'NR == 1 && length($0) >= 32 && length($0) <= 4095 && $0 ~ /^[!-~]+$/ { ok = 1 } END { if (NR == 1 && ok) print "true"; else print "false" }' :'app_file'; else echo false; fi`
+\if :app_file_ok
+\else
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: the app password file must be one line of 32-4095 printable ASCII characters'; END $$;
+\endif
+
+-- A failed cat only yields an empty string, which ON_ERROR_STOP cannot catch: check SHELL_ERROR.
+\set owner_password `cat :'owner_file'`
+\if :SHELL_ERROR
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: cannot read the owner password file'; END $$;
+\endif
+\set app_password `cat :'app_file'`
+\if :SHELL_ERROR
+DO $$ BEGIN RAISE EXCEPTION 'secscan initdb: cannot read the app password file'; END $$;
+\endif
+
+-- The two CREATE ROLE statements carry the passwords. Nothing in this session may log statement
+-- text or parse trees while they run, whatever the server configuration says (D19). Error
+-- messages themselves are still logged; only the statement text is not.
+SET log_statement = 'none';
+SET log_min_duration_statement = -1;
+SET log_min_duration_sample = -1;
+SET log_transaction_sample_rate = 0;
 SET log_min_error_statement = panic;
+SET debug_print_parse = off;
+SET debug_print_rewritten = off;
+SET debug_print_plan = off;
+SET password_encryption = 'scram-sha-256';
 CREATE ROLE :"owner_user" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
     PASSWORD :'owner_password';
 CREATE ROLE :"app_user" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
     PASSWORD :'app_password';
+RESET password_encryption;
+RESET debug_print_plan;
+RESET debug_print_rewritten;
+RESET debug_print_parse;
 RESET log_min_error_statement;
+RESET log_transaction_sample_rate;
+RESET log_min_duration_sample;
+RESET log_min_duration_statement;
+RESET log_statement;
+\unset owner_password
+\unset app_password
 CREATE DATABASE :"app_db" OWNER :"owner_user";
 
--- 新資料庫預設允許 PUBLIC 連線與建立暫存表；只留給擁有者。應用程式角色只能連線（migration 之前
--- readiness 才能回報「schema 不是目前版本」）；資料表的權限由 v0025 授予。
 REVOKE ALL ON DATABASE :"app_db" FROM PUBLIC;
 GRANT CONNECT ON DATABASE :"app_db" TO :"app_user";
--- 兩個角色都不需要連到維運用的資料庫（superuser 不受影響）。
 REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
 REVOKE CONNECT ON DATABASE template1 FROM PUBLIC;

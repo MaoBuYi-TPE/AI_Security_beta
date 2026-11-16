@@ -6,9 +6,15 @@ UV_RUN := uv run --locked
 # 用遞延指派（=）：只有 lab 目標才會求值，避免每次 make test/lint 都 fork docker。
 COMPOSE = $(shell if docker compose version >/dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi)
 DB_FILE := compose.yaml
+# compose secrets 的來源目錄（T23b-b2；docs/DECISIONS.md §32）：compose.yaml 以 ${SECSCAN_SECRETS_DIR:?…}
+# 引用，沒有設定或是空字串就在解析階段失敗，不會退回開發的 ./secrets。以 compose.yaml 執行的開發目標
+# 一律經由 DEV_COMPOSE 明確設定（不受 shell 中同名變數的影響）；相對路徑由 compose 以專案目錄解析。
+# Live 使用自己的拋棄式目錄（test-live-runner）。
+DEV_SECRETS_ENV := SECSCAN_SECRETS_DIR=./secrets
+DEV_COMPOSE = $(DEV_SECRETS_ENV) $(COMPOSE) -f $(DB_FILE)
 # app stack 的 compose 設定：make up、make down 與 make runs-layout-migrate 共用（docs/DECISIONS.md
 # §30.13：搬移時解析出來的 runs volume 必須和 make up 實際使用的相同，所以不覆寫環境變數、不加 -p）。
-APP_COMPOSE = $(COMPOSE) -f $(DB_FILE) --profile app
+APP_COMPOSE = $(DEV_COMPOSE) --profile app
 LAB_FILE := compose.lab.yaml
 LAB_PROJECT := secscan-lab
 # lab_net 與 scan_net 由這裡建立（docs/DECISIONS.md §15.6）：internal＋gateway isolated＋固定網段，
@@ -58,7 +64,8 @@ LIVE_COMPOSE = $(LIVE_ENV) $(COMPOSE) -p $(LIVE_PROJECT) -f $(DB_FILE) --profile
 	test-live-runner test-live-zap record-fixtures test-contract test-live-lab \
 	test-live-fixture test-live-fixture-nuclei nuclei-templates nuclei-templates-check \
 	owasp-top10 owasp-top10-check test-live-fixture-findings test-live-fixture-rescan \
-	bench-check bench-live-check bench bench-evaluate bench-key bench-seal runs-layout-migrate
+	bench-check bench-live-check bench bench-evaluate bench-key bench-seal runs-layout-migrate \
+	secrets
 
 # 安裝鎖定的依賴（含開發工具）並啟用 pre-commit hook。
 bootstrap:
@@ -122,17 +129,25 @@ env:
 docker-check:
 	@docker version >/dev/null 2>&1 || { echo "Docker daemon 未執行，請先啟動 OrbStack（orb start）"; exit 1; }
 
+# compose secrets 的秘密檔（T23b-b2；docs/DECISIONS.md §32）：由 .env 寫出 secrets/（目錄 0700、
+# 檔案 0600、沒有結尾換行）；內容相同就不動，不同時原子替換。.env 不改；終端只顯示名稱。
+# SECRETS_CHECK=1 只檢查、不寫入（缺少或不一致就失敗）。換版之後要 --force-recreate 持有它的服務；
+# db 的角色密碼不會跟著改（README）。第一次初始化 db 期間不要執行（OrbStack 上執行中的容器會立刻
+# 看到替換後的檔案）。需要 uv 與同步好的 venv。
+secrets: env
+	$(UV_RUN) secscan-admin sync-secret-files --dir secrets $(if $(SECRETS_CHECK),--check,)
+
 # 開發用 PostgreSQL（只綁 127.0.0.1，預設 port 55432）。
-db-up: env docker-check
-	$(COMPOSE) -f $(DB_FILE) up -d --wait db
+db-up: env secrets docker-check
+	$(DEV_COMPOSE) up -d --wait db
 
 # 整合測試用 PostgreSQL（tmpfs，只綁 127.0.0.1，預設 port 55433）。
-test-db-up: env docker-check
-	$(COMPOSE) -f $(DB_FILE) --profile test up -d --wait db-test
+test-db-up: env secrets docker-check
+	$(DEV_COMPOSE) --profile test up -d --wait db-test
 
 # 停止 db 與 db-test；開發資料保存在 volume，不會刪除。
 db-down:
-	$(COMPOSE) -f $(DB_FILE) --profile test down
+	$(DEV_COMPOSE) --profile test down
 
 # 把開發資料庫升級到最新 schema（Alembic upgrade head）；不做任何破壞性重置。以 owner 角色
 # （DB_OWNER_*）執行，每次先檢查角色（docs/DECISIONS.md §31.4）；沒有 DB_OWNER_PASSWORD 就停止，
@@ -180,12 +195,12 @@ lab-images: docker-check
 
 # 建立 secscan 的應用程式映像（api、runner、worker 共用）與 egress guard 的映像。
 build: docker-check
-	$(COMPOSE) -f $(DB_FILE) --profile app build api guard
+	$(APP_COMPOSE) build api guard
 
 # 以 digest pull 核准的掃描器映像與 socket-proxy（runner 本身不 pull）。
 images: docker-check
 	@for image in $(SCANNER_IMAGES); do docker pull --quiet "$$image" >/dev/null || exit 1; done
-	$(COMPOSE) -f $(DB_FILE) --profile app pull --quiet socket-proxy
+	$(APP_COMPOSE) pull --quiet socket-proxy
 
 # 產生 T17 凍結的 Nuclei 模板清單（docs/DECISIONS.md §23）：驗證鎖定 archive 的 sha256、乾淨解壓、
 # 在鎖定映像裡離線跑 nuclei -tl，寫出 src/secscan/scanners/domain/nuclei/templates.lock.txt。
@@ -228,7 +243,7 @@ lab-net:
 # 啟動 app stack（db、api、runner、worker、socket-proxy、guard，以及一次性的 runs-init）。API 只綁
 # 127.0.0.1:$${API_PORT:-8000}。第一次使用先執行 make migrate（db 的 schema）與 create-admin-key。
 # runs volume 是舊的 layout 時 runs-init 失敗，runner 與 worker 不啟動：先執行 make runs-layout-migrate。
-up: env docker-check scan-net lab-net images build
+up: env secrets docker-check scan-net lab-net images build
 	$(APP_COMPOSE) up -d --wait
 
 # 停止 app stack 與 db（資料保留在 volume）。
@@ -242,7 +257,7 @@ down:
 # 2. volume 不存在就不需要搬移。存在時：compose 的標籤必須是這個 project 的 runs；api、worker、
 #    runner 都沒有在執行；沒有任何容器（含已停止的）使用它。docker 指令失敗視為無法確認，拒絕。
 # 3. 在 runner 容器內執行（--no-deps：不啟動 runs-init），容器內再比對一次 volume 的名稱與掛載。
-runs-layout-migrate: env docker-check
+runs-layout-migrate: env secrets docker-check
 	@config=$$($(APP_COMPOSE) config runs-init --format json) \
 		|| { echo "無法解析 compose 的設定：拒絕搬移"; exit 1; }; \
 	parsed=$$(printf '%s' "$$config" | $(UV_RUN) python -m secscan.cli.runs_volume) \
