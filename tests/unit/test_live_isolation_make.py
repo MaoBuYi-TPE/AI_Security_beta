@@ -11,6 +11,9 @@
 (d) 靜態：Live 的每一個呼叫都經過白名單。
 
 這些都不連 Docker daemon、不建立任何容器；實際的 Live 隔離在 G3 驗證（CSEC-L5）。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 import ast
@@ -379,6 +382,16 @@ class Hostile:
     def diagnostics(self) -> list[Path]:
         return sorted(self.tmpdir.glob("secscan-live-cleanup-failed.*"))
 
+    def redact(self, text: str) -> str:
+        """訊息中的 canary 換成名稱：assert 的訊息不輸出原始值。"""
+        for name, value in self.canaries.items():
+            text = text.replace(value, f"<{name}>")
+        return text.replace(str(self.canary_dir), "<SECSCAN_SECRETS_DIR>")
+
+    def label(self, call: dict[str, Any]) -> str:
+        """呼叫的前三個參數（遮罩之後），作為 assert 的訊息。"""
+        return self.redact(json.dumps(call["argv"][:3]))
+
     def leaked(self, text: str) -> set[str]:
         """只回傳名稱：失敗時 pytest 不會印出 canary 的值。"""
         found = {name for name, value in self.canaries.items() if value in text}
@@ -400,7 +413,8 @@ def test_every_call_runs_in_the_whitelisted_environment(hostile: Hostile) -> Non
     result = hostile.make()
 
     assert result.returncode == 0, (
-        hostile.leaked(result.stdout + result.stderr) or result.stderr[-2000:]
+        sorted(hostile.leaked(result.stdout + result.stderr))
+        or hostile.redact(result.stderr)[-2000:]
     )
     calls = hostile.calls()
     assert calls
@@ -413,19 +427,19 @@ def test_every_call_runs_in_the_whitelisted_environment(hostile: Hostile) -> Non
     for call in calls:
         environment = call["env"]
         leaked = hostile.leaked(json.dumps(call))
-        assert leaked == set(), call["argv"][:3]
+        assert leaked == set(), hostile.label(call)
         unexpected = set(environment) - ALLOWED - set(ALEMBIC_FILES) - PLUMBING
-        assert unexpected == set(), (call["argv"][:3], sorted(unexpected))
+        assert unexpected == set(), (hostile.label(call), sorted(unexpected))
         for key, value in FIXED.items():
-            assert environment.get(key) == value, (call["argv"][:3], key)
+            assert environment.get(key) == value, (hostile.label(call), key)
         directory = environment["SECSCAN_SECRETS_DIR"]
         # mktemp 之前（engine、preflight、snapshot）是不存在的佔位路徑（D16：一律非空）。
-        assert directory == PLACEHOLDER or pattern.fullmatch(directory), call["argv"][:3]
+        assert directory == PLACEHOLDER or pattern.fullmatch(directory), hostile.label(call)
         assert environment["SECSCAN_LIVE_SECRETS_DIR"] == directory
         if directory != PLACEHOLDER:
             directories.add(directory)
         if call["argv"][:1] == ["compose"] and "version" not in call["argv"]:
-            assert directory != PLACEHOLDER, call["argv"][:3]
+            assert directory != PLACEHOLDER, hostile.label(call)
     # 每次都是新的拋棄式目錄；結束時已刪除。
     assert len(directories) == 1
     assert _secrets_dirs(hostile) == []
@@ -442,7 +456,7 @@ def test_build_pull_network_and_cleanup_calls_are_wrapped_too(hostile: Hostile) 
     assert any(argv[:1] == ["compose"] and "down" in argv for argv in argvs)
     for argv in argvs:
         if argv[:1] == ["compose"] and argv[1:2] != ["version"]:
-            assert argv[1:5] == ["-p", "secscan-live", "-f", "compose.yaml"], argv
+            assert argv[1:5] == ["-p", "secscan-live", "-f", "compose.yaml"], argv[:6]
             assert "--env-file" not in argv
 
 
@@ -679,7 +693,8 @@ def test_overriding_the_whitelist_has_no_effect(
     assert hostile.make(*args, **extra).returncode == 0
 
     for call in hostile.calls():
-        assert hostile.leaked(json.dumps(call)) == set(), call["argv"][:3]
+        leaked = hostile.leaked(json.dumps(call))
+        assert leaked == set(), hostile.label(call)
         assert call["env"].get("COMPOSE_DISABLE_ENV_FILE") == "1"
 
 

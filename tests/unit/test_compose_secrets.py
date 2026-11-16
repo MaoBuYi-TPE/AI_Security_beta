@@ -14,6 +14,9 @@
   沒有安裝 docker compose 時 skip，靜態檢查仍然執行。
 
 這些都不是容器部署的驗收：實際的掛載與容器內的讀取在 G3 的 Live（CSEC-L1、L2）驗證。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 import json

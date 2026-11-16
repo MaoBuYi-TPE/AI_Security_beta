@@ -2,6 +2,9 @@
 
 compose secrets 之後，api、runner、worker 的秘密從 `/run/secrets/<名稱>` 讀取（`X_FILE`），
 環境變數不再有值。主機上的流程照舊讀 .env 的 `X`。兩者同時有值時拒絕，不靜默採用其中一個。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 import importlib

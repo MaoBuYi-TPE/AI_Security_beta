@@ -5,8 +5,10 @@
 它們就是 canary。開發的 .env 與 secrets/ 一律不讀。
 
 - 洩漏偵測：canary 的完整值，以及每一段長度 10 的子字串（hex 不分大小寫；修正 13）。
-- 正向對照：同一個偵測器在每個容器的 /run/secrets 偵測到的，恰好是分配矩陣的那幾個 canary。
-- 失敗時不印出秘密：先算成名稱或數量再 assert（pytest 會印出 assert 的運算元）。
+- 正向對照：同一個偵測器在每個容器的 /run/secrets 偵測到的，恰好是分配矩陣的那幾個 canary；每個
+  負向的斷言都有證明輸入真的被讀到的對照（G1 審查 MEDIUM-5、L5）。
+- 失敗時不印出秘密（G1 審查 L4）：PYTEST_DONT_REWRITE（這個模組不改寫 assert，失敗時只顯示原始碼與
+  訊息，不顯示運算元的值）；先算成名稱、數量或布林值再 assert，訊息只有名稱。
 """
 
 import json
@@ -31,13 +33,15 @@ APP_SERVICES = ("api", "runner", "worker")
 MARKER = "/var/lib/postgresql/secscan-initdb-incomplete"
 WINDOW = 10
 DEBUG_LEVELS = {f"debug{level}" for level in range(1, 6)}
-# 服務程序的名稱（/proc/1/comm）。
+# 服務程序的名稱（/proc/1/comm；程式碼審查 LOW-4：個別確認）。
 PROGRAMS = {
     "api": "uvicorn",
     "runner": "secscan-admin",
     "worker": "secscan-admin",
     "db": "postgres",
 }
+# PostgreSQL 的伺服器 log 寫到 stderr：讀得到它，才證明 stderr 也被檢查了（程式碼審查 MEDIUM-4）。
+SERVER_READY = "database system is ready to accept connections"
 _SUPERUSER_PSQL = (
     'PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" psql -h 127.0.0.1 -U postgres -d postgres '
     '-At -F "|" -q -v ON_ERROR_STOP=1'
@@ -91,11 +95,14 @@ def test_the_container_configuration_holds_no_secret(service: str) -> None:
 
     leaked = _found(json.dumps(details), canaries)
     unexpected = _env_names(environment) - allowed
-    assert leaked == set()
-    assert unexpected == set()
-    for key, value in COMPOSE["services"][service].get("environment", {}).items():
-        if key.endswith("_FILE"):
-            assert f"{key}={value}" in environment, key
+    missing = [
+        key
+        for key, value in COMPOSE["services"][service].get("environment", {}).items()
+        if key.endswith("_FILE") and f"{key}={value}" not in environment
+    ]
+    assert leaked == set(), sorted(leaked)
+    assert unexpected == set(), sorted(unexpected)
+    assert missing == [], missing
 
 
 @pytest.mark.parametrize("service", SERVICES)
@@ -108,10 +115,15 @@ def test_secret_mounts_are_exactly_the_matrix_from_the_disposable_directory(serv
     ]
 
     names = {mount["Destination"].removeprefix("/run/secrets/") for mount in mounts}
-    assert names == _expected_secrets(service)
-    for mount in mounts:
-        assert mount["RW"] is False
-        assert os.path.dirname(os.path.normpath(mount["Source"])) == directory
+    writable = sorted(mount["Destination"] for mount in mounts if mount["RW"] is not False)
+    elsewhere = sorted(
+        mount["Destination"]
+        for mount in mounts
+        if os.path.dirname(os.path.normpath(mount["Source"])) != directory
+    )
+    assert names == _expected_secrets(service), sorted(names ^ _expected_secrets(service))
+    assert writable == [], writable
+    assert elsewhere == [], elsewhere
 
 
 # --- CSEC-L2：長期執行的服務程序 -----------------------------------------------------------------
@@ -130,28 +142,42 @@ def _exec(service: str, script: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.parametrize("service", ["api", "runner", "worker", "db"])
 def test_the_service_process_environment_holds_no_secret(service: str) -> None:
-    """只以 PID 1 為證據：子程序的 environ 會被程序標題覆寫（G0 的調整 9）。"""
+    """只以 PID 1 為證據：子程序的 environ 會被程序標題覆寫（G0 的調整 9）。
+
+    安全審查 L4：先算出洩漏與檢查的結果，才 assert（洩漏的檢查在最前面）。程式碼審查 LOW-4：
+    /proc/1/comm 個別確認是服務程序（不和 cmdline 合併比對）。
+    """
     canaries = _canaries()
     environ = _exec(service, "tr '\\0' '\\n' < /proc/1/environ")
-    command = _exec(service, "tr '\\0' ' ' < /proc/1/cmdline; echo; cat /proc/1/comm")
+    cmdline = _exec(service, "tr '\\0' ' ' < /proc/1/cmdline")
+    comm = _exec(service, "cat /proc/1/comm")
 
+    leaked = (
+        _found(environ.stdout, canaries)
+        | _found(cmdline.stdout, canaries)
+        | _found(comm.stdout, canaries)
+    )
+    readable = all(result.returncode == 0 for result in (environ, cmdline, comm))
     names = {line.split("=", 1)[0] for line in environ.stdout.splitlines() if "=" in line}
-    leaked = _found(environ.stdout, canaries)
-    assert environ.returncode == 0
-    assert len(environ.stdout) > 0
-    assert leaked == set()
     expected = {"PGDATA"} if service == "db" else {"DB_PASSWORD_FILE"}
-    assert expected <= names
-    assert command.returncode == 0
-    assert PROGRAMS[service] in command.stdout
-    assert _found(command.stdout, canaries) == set()
+    is_the_service = comm.stdout.strip() == PROGRAMS[service]
+    runs_the_service = PROGRAMS[service] in cmdline.stdout
+    assert leaked == set(), sorted(leaked)
+    assert readable, f"{service} 的 /proc/1 讀取失敗"
+    assert bool(environ.stdout), f"{service} 的 /proc/1/environ 是空的"
+    assert expected <= names, sorted(expected - names)
+    assert is_the_service, f"{service} 的 PID 1（comm）不是 {PROGRAMS[service]}"
+    assert runs_the_service, f"{service} 的 PID 1（cmdline）不是 {PROGRAMS[service]}"
 
 
 def test_the_socket_proxy_environment_holds_no_secret() -> None:
     """socket-proxy 的映像沒有 shell：以 Config.Env 為證據。"""
     environment = _inspect("socket-proxy")["Config"]["Env"] or []
 
-    assert _found("\n".join(environment), _canaries()) == set()
+    leaked = _found("\n".join(environment), _canaries())
+    assert leaked == set(), sorted(leaked)
+    # 正向對照：確實讀到了環境（映像的 PATH 一定在）。
+    assert "PATH" in _env_names(environment)
 
 
 @pytest.mark.parametrize("service", APP_SERVICES)
@@ -164,7 +190,9 @@ def test_a_maintenance_command_sees_only_file_settings(service: str) -> None:
         "import os; print('\\n'.join(sorted(os.environ)))",
     ).split()
 
-    assert not [name for name in names if name.endswith(("_PASSWORD", "_ENCRYPTION_KEYS"))]
+    secret_like = [name for name in names if name.endswith(("_PASSWORD", "_ENCRYPTION_KEYS"))]
+    assert secret_like == [], secret_like
+    # 正向對照：讀到的是服務的環境（*_FILE 的設定在）。
     assert "DB_PASSWORD_FILE" in names
 
 
@@ -176,29 +204,55 @@ def test_the_mounted_secrets_are_the_disposable_values_positive_control(service:
     names = set(listing.stdout.split())
     contents = {name: _exec(service, f"cat /run/secrets/{name}").stdout for name in names}
 
-    assert names == _expected_secrets(service)
-    matches = {name for name, value in contents.items() if value == canaries[name]}
-    assert matches == names
-    assert _found("\n".join(contents.values()), canaries) == names
+    listed = listing.returncode == 0
+    matches = {name for name, value in contents.items() if value == canaries.get(name)}
+    detected = _found("\n".join(contents.values()), canaries)
+    assert listed, f"{service} 的 /run/secrets 列不出來"
+    assert names == _expected_secrets(service), sorted(names ^ _expected_secrets(service))
+    assert matches == names, sorted(names - matches)
+    assert detected == names, sorted(names ^ detected)
 
 
 # --- CSEC-L3：db 的初始化 ------------------------------------------------------------------------
 
 
+def _logs(service: str) -> tuple[str, str]:
+    """docker logs 的 stdout 與 stderr（程式碼審查 MEDIUM-4：PostgreSQL 的 log 在 stderr）。"""
+    # 固定的 docker 指令；輸出只在測試程序中計算，不印出。
+    result = subprocess.run(  # noqa: S603
+        ["docker", "logs", container(service)],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    succeeded = result.returncode == 0
+    assert succeeded, f"docker logs {service} 的結束碼是 {result.returncode}"
+    return result.stdout, result.stderr
+
+
 def test_the_database_was_initialised_through_the_wrapper() -> None:
-    """D21：wrapper 建立標記、00-begin.sh 確認、99-end.sh 刪除；healthy 之後標記不存在。"""
-    logs = docker("logs", container("db"))
+    """D21：wrapper 建立標記、00-begin.sh 確認、99-end.sh 刪除；healthy 之後標記不存在。
+
+    三行訊息都寫到 stdout（依序）；洩漏的檢查涵蓋 stdout 與 stderr。
+    """
+    stdout, stderr = _logs("db")
     steps = [
         "secscan db-entrypoint: first initialisation, marker created",
         "secscan initdb: started (marker present)",
         "secscan initdb: completed (marker removed)",
     ]
-    positions = [logs.find(step) for step in steps]
+    positions = [stdout.find(step) for step in steps]
 
-    assert all(position >= 0 for position in positions)
-    assert positions == sorted(positions)
-    assert _found(logs, _canaries()) == set()
-    assert _exec("db", f"test ! -e {MARKER}").returncode == 0
+    leaked = _found(stdout, _canaries()) | _found(stderr, _canaries())
+    marker_gone = _exec("db", f"test ! -e {MARKER}").returncode == 0
+    reads_stderr = SERVER_READY in stderr
+    assert leaked == set(), sorted(leaked)
+    assert all(position >= 0 for position in positions), positions
+    assert positions == sorted(positions), positions
+    assert marker_gone, "healthy 之後初始化未完成標記還在"
+    # 正向對照：伺服器寫到 stderr 的 log 讀得到。
+    assert reads_stderr, "docker logs 的 stderr 沒有伺服器的 log"
 
 
 def test_both_roles_log_in_with_scram_using_the_mounted_files() -> None:

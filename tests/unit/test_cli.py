@@ -77,10 +77,13 @@ def test_conflicting_secret_settings_are_reported_without_their_values(
     out, err = capsys.readouterr()
     assert exit_code == EXIT_FAILURE
     assert out == ""
-    assert "CONTENT_ENCRYPTION_KEYS 與 CONTENT_ENCRYPTION_KEYS_FILE 只能設定其中一個" in err
-    assert "errors.pydantic.dev" not in err
-    assert "type=" not in err
-    assert not any(canary[i : i + 8] in err for i in range(len(canary) - 7))
+    # 先算成布林值：失敗時 pytest 不會印出 err（G1 審查：assert 不輸出原始值）。
+    explains = "CONTENT_ENCRYPTION_KEYS 與 CONTENT_ENCRYPTION_KEYS_FILE 只能設定其中一個" in err
+    raw_error = "errors.pydantic.dev" in err or "type=" in err
+    leaked = any(canary[i : i + 8] in err for i in range(len(canary) - 7))
+    assert explains
+    assert not raw_error
+    assert not leaked
 
 
 def test_invalid_runner_settings_are_reported_without_their_values(
@@ -95,9 +98,12 @@ def test_invalid_runner_settings_are_reported_without_their_values(
     out, err = capsys.readouterr()
     assert exit_code == EXIT_FAILURE
     assert out == ""
-    assert "poll_seconds：" in err
-    assert "errors.pydantic.dev" not in err
-    assert not any(canary[i : i + 8] in err for i in range(len(canary) - 7))
+    explains = "poll_seconds：" in err
+    raw_error = "errors.pydantic.dev" in err
+    leaked = any(canary[i : i + 8] in err for i in range(len(canary) - 7))
+    assert explains
+    assert not raw_error
+    assert not leaked
 
 
 def test_missing_database_password_is_reported(

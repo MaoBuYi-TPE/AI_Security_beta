@@ -1,6 +1,9 @@
 """tests/live/env_guard.py 的 unit 測試（計畫 §3.1.1；§12.8 修正 3、4、15、16、17）。
 
 每個檢查都有會被拒絕的正向對照。docker 以記錄參數、依情境回應的替身取代（不連 daemon）。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 import io

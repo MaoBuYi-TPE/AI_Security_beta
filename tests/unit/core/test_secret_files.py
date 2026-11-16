@@ -1,4 +1,8 @@
-"""`*_FILE` 秘密檔的讀取（CSEC-03 的讀檔部分；docs/SECURITY_AND_TESTING.md §4.3）。"""
+"""`*_FILE` 秘密檔的讀取（CSEC-03 的讀檔部分；docs/SECURITY_AND_TESTING.md §4.3）。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
+"""
 
 import os
 import secrets

@@ -1,6 +1,9 @@
 """設定錯誤的安全表示（CSEC-10 的 safe_summary 與 SettingsError）。
 
 原始的 ValidationError（errors()、json()）可能含輸入，這裡不對它做保證；只驗證對外的輸出。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 import ast

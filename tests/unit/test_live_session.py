@@ -4,6 +4,9 @@ HIGH-1、M3）。
 以 pytester 在暫存目錄執行小的 pytest session：conftest 載入 tests.live_session，並沿用
 tests/conftest.py 的 _isolate_app_settings（autouse）。判定的條件是「開關是 1，而且選中了 live 標記
 的測試」，不看 -m 的文字。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 from pathlib import Path

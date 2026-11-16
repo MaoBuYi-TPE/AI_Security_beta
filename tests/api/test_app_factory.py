@@ -78,11 +78,18 @@ def test_create_app_reports_conflicting_secret_settings_without_their_values(
         create_app()
 
     error = caught.value
-    assert "DB_PASSWORD 與 DB_PASSWORD_FILE 只能設定其中一個" in str(error)
-    assert "errors.pydantic.dev" not in str(error)
+    # 先算成布林值：失敗時 pytest 不會印出錯誤的文字（G1 審查：assert 不輸出原始值）。
+    explains = "DB_PASSWORD 與 DB_PASSWORD_FILE 只能設定其中一個" in str(error)
+    raw_error = "errors.pydantic.dev" in str(error)
     rendered = "".join(traceback.format_exception(error))
-    for text in (str(error), repr(error), rendered):
-        assert not any(canary[i : i + 8] in text for i in range(len(canary) - 7))
+    leaked = [
+        index
+        for index, text in enumerate((str(error), repr(error), rendered))
+        if any(canary[i : i + 8] in text for i in range(len(canary) - 7))
+    ]
+    assert explains
+    assert not raw_error
+    assert leaked == []
 
 
 # --- 目標 secret 的加密金鑰（docs/DECISIONS.md §12.1）---------------------------------------

@@ -1,6 +1,9 @@
 """secscan-admin sync-secret-files 與 generate-secret-files（CSEC-04、CSEC-12 的 generate 部分）。
 
 每個測試在自己的暫存目錄執行：.env 與秘密都是這次產生的 canary，不碰 repo 的 .env 與 secrets/。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 import hashlib

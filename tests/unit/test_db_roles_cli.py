@@ -309,11 +309,15 @@ def test_conflicting_owner_password_settings_are_described_without_their_values(
 
     assert db_roles.run(args, _settings(), messages.append) == EXIT_FAILURE
 
-    assert "DB_OWNER_PASSWORD 與 DB_OWNER_PASSWORD_FILE 只能設定其中一個" in messages[0]
+    # 先算成布林值：失敗時 pytest 不會印出訊息（G1 審查：assert 不輸出原始值）。
+    message = messages[0]
+    explains = "DB_OWNER_PASSWORD 與 DB_OWNER_PASSWORD_FILE 只能設定其中一個" in message
     # 只有 safe_summary，不是 str(ValidationError)：不依賴縱深防禦的 hide_input_in_errors。
-    assert "errors.pydantic.dev" not in messages[0]
-    assert "type=" not in messages[0]
-    assert not any(OWNER_PASSWORD[i : i + 8] in messages[0] for i in range(len(OWNER_PASSWORD) - 7))
+    raw_error = "errors.pydantic.dev" in message or "type=" in message
+    leaked = any(OWNER_PASSWORD[i : i + 8] in message for i in range(len(OWNER_PASSWORD) - 7))
+    assert explains
+    assert not raw_error
+    assert not leaked
 
 
 def test_the_command_is_registered_with_a_dry_run_flag() -> None:

@@ -3,6 +3,9 @@
 設定錯誤時 env.py 拋出 SettingsError：只有欄位名稱與固定的原因，不帶原本的 ValidationError
 （alembic 會印出完整的 traceback，原始的錯誤可能含輸入，例如密碼）。這些測試在連線之前就失敗，
 不連任何資料庫。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 import argparse

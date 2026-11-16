@@ -4,6 +4,9 @@
 SCRAM 與這三個程序的資料庫連線。秘密檔放在 pytest 的暫存目錄（拋棄式的值），不是 compose secrets 的
 實際掛載；容器的部署（Docker build、`/run/secrets`、entrypoint）留給 G3 的 Live。
 Docker 以記憶體中的假 runtime 取代（測試程序連不到 daemon）。
+
+PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定錯誤；不改寫 assert，失敗時只顯示
+原始碼與（只有名稱的）訊息，不顯示運算元的值（G1 審查）。
 """
 
 from pathlib import Path
