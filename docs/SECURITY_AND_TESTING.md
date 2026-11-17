@@ -496,7 +496,7 @@ T23b-b2 的 compose secrets、SCRAM、安全的錯誤輸出與 Live 的隔離（
 | SLOG-01–03、SLOG-L1–L2 | 掃描容器的 `LogConfig: none` 與平台服務的 log 輪替（PR-1，尚未實作） | — |
 | FDE-01 | 主機全碟加密的檢查（PR-3，尚未實作） | — |
 
-空轉檢查：計畫 §4.4 的 1–10、14、15、17–47（11–13 屬於 PR-1、PR-3；16 在 PR-0），G1 的紀錄在 gitignore 的 `recordings/t23b-b2-g1/mutation-checks.md`。
+空轉檢查：計畫 §4.4 的 1–10、14、15、17–47（11–13 屬於 PR-1、PR-3；16 在 PR-0），G1 的紀錄在 gitignore 的 `recordings/t23b-b2-g1/mutation-checks.md`（第二輪在 `fix2/`；G1c 的 65a–65w 在 `fix3/mutation-checks.md`）。
 
 ### 4.4 Live E2E
 
