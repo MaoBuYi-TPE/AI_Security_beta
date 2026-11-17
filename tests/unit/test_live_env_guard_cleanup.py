@@ -262,18 +262,6 @@ def test_an_owned_run_is_removed_completely_with_each_container_once(tmp_path: P
     assert len(inspected) == 1
 
 
-def test_the_fake_refuses_duplicate_ids_positive_control() -> None:
-    """替身在同一次呼叫中重複、或之前已刪除過同一個 ID 時都失敗：上一個測試通過，代表每個容器
-    只刪除一次（不論是否在同一次呼叫中）。"""
-    docker = CleanupDocker()
-
-    with pytest.raises(GuardError, match="already in progress"):
-        docker(["rm", "-f", "-v", GUARD, GUARD])
-    docker(["rm", "-f", "-v", RECEIVER])
-    with pytest.raises(GuardError, match="already in progress"):
-        docker(["rm", "-f", "-v", RECEIVER])
-
-
 def test_the_removal_order_does_not_depend_on_the_listing_order(tmp_path: Path) -> None:
     forward = CleanupDocker()
     backward = CleanupDocker(containers=reversed([*stack(), *probes()]))
@@ -417,19 +405,17 @@ def test_nothing_created_and_nothing_left_is_clean(tmp_path: Path) -> None:
     assert (report.failures, report.skipped) == ([], [])
 
 
-def test_a_partial_claim_removes_only_its_own_network(tmp_path: Path) -> None:
-    """scan_net 建立了、lab_net 已經是另一次執行的：只刪自己的網路與上面的容器。"""
-    probe = container("probe", SCAN, project="")
+def test_a_partial_claim_removes_only_its_own_empty_network(tmp_path: Path) -> None:
+    """scan_net 建立了、lab_net 已經是另一次執行的（沒有取得所有權）：只刪自己的、空的網路。"""
     docker = CleanupDocker(
-        networks={SCAN: OWNER, LAB: OTHER}, containers=[probe], volumes={}, compose_networks=()
+        networks={SCAN: OWNER, LAB: OTHER}, containers=[], volumes={}, compose_networks=()
     )
 
     report = _clean(tmp_path, docker, claimed=False)
 
     assert report.failures == []
-    assert docker.removed() == [probe["id"]]
     assert docker.networks == {LAB: OTHER}
-    assert not [call for call in docker.calls if "down" in call]
+    assert not [call for call in docker.calls if call[:1] == ["rm"] or "down" in call]
 
 
 def test_an_unlabelled_live_network_left_behind_is_reported(tmp_path: Path) -> None:

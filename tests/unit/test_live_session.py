@@ -374,3 +374,17 @@ def test_a_real_private_directory_reached_by_another_path_is_refused(
     environ = _live_environment(tmp_path, SECSCAN_LIVE_SECRETS_DIR=path, SECSCAN_SECRETS_DIR=path)
 
     assert "SECSCAN_LIVE_SECRETS_DIR" in live_session_problems(environ)
+
+
+@pytest.mark.parametrize("suffix", ["/", "/.", "//"])
+def test_a_symlink_is_refused_whatever_the_trailing_characters(tmp_path: Path, suffix: str) -> None:
+    """程式碼審查第三次的 LOW-1：結尾的 /、/.、// 讓 lstat 跟著最後的 symlink（指向 secrets/）。"""
+    environ = _live_environment(tmp_path)
+    disposable = tmp_path / DIRECTORY
+    disposable.rmdir()
+    (tmp_path / "secrets").mkdir(mode=0o700)
+    disposable.symlink_to(tmp_path / "secrets")
+    path = f"{disposable}{suffix}"
+    environ.update(SECSCAN_LIVE_SECRETS_DIR=path, SECSCAN_SECRETS_DIR=path)
+
+    assert "SECSCAN_LIVE_SECRETS_DIR" in live_session_problems(environ)

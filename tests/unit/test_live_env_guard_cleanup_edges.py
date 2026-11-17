@@ -11,11 +11,15 @@ from typing import Any
 import pytest
 
 from tests.live import env_guard
+from tests.live.env_guard import GuardError
 from tests.unit.test_live_env_guard_cleanup import (
     ENGINE,
+    GUARD,
     LAB,
     LIVE_CONFIG,
+    OTHER,
     OWNER,
+    RECEIVER,
     SCAN,
     CleanupDocker,
     _clean,
@@ -24,6 +28,18 @@ from tests.unit.test_live_env_guard_cleanup import (
     container,
     stack,
 )
+
+
+def test_the_fake_refuses_duplicate_ids_positive_control() -> None:
+    """替身在同一次呼叫中重複、或之前已刪除過同一個 ID 時都失敗：上一個測試通過，代表每個容器
+    只刪除一次（不論是否在同一次呼叫中）。"""
+    docker = CleanupDocker()
+
+    with pytest.raises(GuardError, match="already in progress"):
+        docker(["rm", "-f", "-v", GUARD, GUARD])
+    docker(["rm", "-f", "-v", RECEIVER])
+    with pytest.raises(GuardError, match="already in progress"):
+        docker(["rm", "-f", "-v", RECEIVER])
 
 
 def test_a_partly_vanished_claim_deletes_nothing(tmp_path: Path) -> None:
@@ -37,6 +53,32 @@ def test_a_partly_vanished_claim_deletes_nothing(tmp_path: Path) -> None:
     assert _has(report, "清理之後還有 Live 的資源")
     assert docker.destructive() == []
     assert docker.networks == {SCAN: OWNER}
+
+
+def test_without_a_claim_containers_on_its_own_network_are_not_removed(tmp_path: Path) -> None:
+    """安全審查第三次的 LOW-1：沒有取得所有權的執行沒有啟動任何容器，網路上的容器都不是它的：
+    不刪容器、不 down，網路也留著（fail closed）。"""
+    probe = container("probe", SCAN, project="")
+    docker = CleanupDocker(
+        networks={SCAN: OWNER, LAB: OTHER}, containers=[probe], volumes={}, compose_networks=()
+    )
+
+    report = _clean(tmp_path, docker, claimed=False)
+
+    assert docker.destructive() == []
+    assert docker.networks == {SCAN: OWNER, LAB: OTHER}
+    assert _has(report, f"網路 {SCAN} 上還有容器")
+
+
+def test_without_a_claim_even_both_own_networks_are_not_brought_down(tmp_path: Path) -> None:
+    """兩個網路都標記這次的識別、卻沒有記錄所有權（例如 networks 與 claimed=1 之間被中斷，或
+    剩餘風險 25 的識別碰撞）：stack 不是這次啟動的，不刪容器、不 down。"""
+    docker = CleanupDocker()
+
+    report = _clean(tmp_path, docker, claimed=False)
+
+    assert docker.destructive() == []
+    assert _has(report, "上還有容器")
 
 
 def test_a_container_also_on_an_unrelated_live_style_network_is_not_removed(
@@ -64,6 +106,17 @@ def test_project_labels_are_compared_exactly(tmp_path: Path, project: str) -> No
 
     assert odd["id"] not in docker.removed()
     assert _has(report, f"其他 compose 專案的容器 {odd['id'][:12]}")
+
+
+def test_a_null_project_label_means_no_label(tmp_path: Path) -> None:
+    """安全審查第三次的 MEDIUM-1：沒有 Labels 的容器，json 可能輸出 null（推論；實測缺少 key 時是
+    ""）。標記的值一定是字串，null 只可能是沒有標記：接收端照常刪除。"""
+    docker = CleanupDocker(facts={RECEIVER: f"{RECEIVER}|null|{LAB} \n"})
+
+    report = _clean(tmp_path, docker)
+
+    assert RECEIVER in docker.removed()
+    assert report.failures == []
 
 
 def test_containers_are_inspected_as_containers(tmp_path: Path) -> None:
@@ -94,7 +147,7 @@ def test_the_engine_is_confirmed_again_before_compose_down(tmp_path: Path) -> No
 
     report = _clean(tmp_path, docker)
 
-    assert _has(report, "compose down 之前")
+    assert _has(report, "compose down 之前：已刪除 Live 網路上確認過的容器，之後停止")
     assert not [call for call in docker.calls if "down" in call]
     assert not [call for call in docker.calls if call[:2] == ["network", "rm"]]
     last_info = max(index for index, call in enumerate(docker.calls) if call[:1] == ["info"])
@@ -151,3 +204,29 @@ def test_an_interrupted_cleanup_leaves_a_diagnostic(
     assert "被中斷" in err
     assert "Traceback" not in err
     assert "清理被中斷" in diagnostic.read_text(encoding="utf-8")
+
+
+def test_an_unexpected_error_in_cleanup_leaves_a_diagnostic_and_is_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """安全審查第三次的 INFO-2：程式本身的錯誤照樣以 traceback 結束（不吞掉），但先留下診斷檔。"""
+    directory = _run_dir(tmp_path)
+    docker = CleanupDocker()
+
+    def broken(arguments: Sequence[str]) -> str:
+        if "config" in arguments:
+            raise TypeError("程式本身的錯誤")
+        return docker(arguments)
+
+    monkeypatch.setattr(env_guard, "docker", broken)
+
+    with pytest.raises(TypeError):
+        env_guard.main(
+            [
+                *("cleanup", "--base", str(tmp_path), "--secrets-dir", str(directory)),
+                *("--engine", ENGINE, "--claimed"),
+            ]
+        )
+
+    [diagnostic] = tmp_path.glob(f"{env_guard.DIAGNOSTIC_PREFIX}*")
+    assert "未預期的錯誤（TypeError）" in diagnostic.read_text(encoding="utf-8")

@@ -103,7 +103,8 @@ CONTAINER_FORMAT = (
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 # 接在某個網路上的容器（含停止的）：完整的 ID。
 _ON_NETWORK = ("ps", "-aq", "--no-trunc", "--filter")
-# docker 的 index 取不到標籤時印出的文字。
+# docker 的 index 在原始 JSON 上取不到值時印出的文字（網路的標記沒有值時；這裡只當成「不是這次的
+# 識別」，測試的替身也使用）。
 NO_VALUE = "<no value>"
 DOCKER_TIMEOUT_SECONDS = 120
 # 清理只用這裡的常數（make 的變數可能被覆寫）。
@@ -112,6 +113,11 @@ LIVE_COMPOSE = ("compose", "-p", LIVE_PROJECT, "-f", COMPOSE_FILE, "--profile", 
 # down -v 會刪除的 volume 與網路：只能是 Live 的名稱（專案前綴或 LIVE_ENV 的 secscan_live_*）。
 LIVE_RESOURCE_PREFIXES = (f"{LIVE_PROJECT}_", "secscan_live_")
 DIAGNOSTIC_PREFIX = "secscan-live-cleanup-failed."
+ENGINE_AT_START = "清理開始時：沒有清理、也沒有核對任何 Docker 資源"
+ENGINE_BEFORE_DOWN = (
+    "compose down 之前：已刪除 Live 網路上確認過的容器，之後停止（沒有 down、沒有刪除網路、"
+    "沒有核對殘留）"
+)
 EXIT_OK = 0
 EXIT_FAILURE = 1
 
@@ -310,7 +316,7 @@ def cleanup(
     except GuardError as exc:
         report.failures.append(f"{exc}：沒有清理任何東西")
         return report
-    if _same_engine(report, engine_id, "清理開始時"):
+    if _same_engine(report, engine_id, ENGINE_AT_START):
         _remove_docker_resources(report, owner, claimed=claimed, engine_id=engine_id)
     _remove_directory(report, Path(secrets_dir))
     if os.path.lexists(secrets_dir):
@@ -319,11 +325,14 @@ def cleanup(
 
 
 def _same_engine(report: CleanupReport, engine_id: str, stage: str) -> bool:
-    """安全 LOW-1：確認 Engine 和開始時相同；不同或無法確認時不再碰任何 Docker 資源。"""
+    """安全 LOW-1：確認 Engine 和開始時相同；不同或無法確認時不再碰任何 Docker 資源。
+
+    stage 說明到這個時間點為止做了什麼（安全審查第三次的 INFO-1：人工清理時判斷用）。
+    """
     try:
         engine(os.environ, report.run, engine_id)
     except GuardError as exc:
-        report.failures.append(f"{exc}（{stage}）：沒有清理、也沒有核對任何 Docker 資源")
+        report.failures.append(f"{exc}（{stage}）")
         return False
     return True
 
@@ -338,14 +347,17 @@ def _remove_docker_resources(
         report.failures.append(
             "這次建立的網路不見了、不再屬於這次執行或無法確認（外部變更）：沒有刪除任何 Docker 資源"
         )
-    else:
+    elif claimed:
         for container in _candidates(report, owned):
             report.step(f"刪除容器 {container[:12]}", ["rm", "-f", "-v", container])
         # 安全 INFO-1：down 的範圍最大，執行之前再確認一次 Engine（不同就不再碰任何資源）。
-        if owned == LIVE_NETWORKS:
-            if not _same_engine(report, engine_id, "compose down 之前"):
-                return
-            _compose_down(report)
+        if not _same_engine(report, engine_id, ENGINE_BEFORE_DOWN):
+            return
+        _compose_down(report)
+        _remove_networks(report, owned)
+    else:
+        # 安全審查第三次的 LOW-1：沒有取得所有權的執行（networks 沒有成功）沒有啟動任何容器；
+        # 網路上的容器都不是它的：不刪容器、不 down，只刪沒有任何容器的自己的網路。
         _remove_networks(report, owned)
     _check_residue(report, owner, claimed=claimed)
 
@@ -409,11 +421,17 @@ def _belongs(report: CleanupReport, container: str, owned: frozenset[str]) -> bo
 
 
 def _label(encoded: str) -> str | None:
-    """JSON 編碼的標記值；不是 JSON 字串時是 None（當成其他專案，不刪除）。"""
+    """JSON 編碼的標記值；沒有標記是 ""（實測，docker 29.4）或 null（沒有 Labels 時的推論）。
+
+    標記的值一定是字串，所以 null 只可能是沒有標記（安全審查第三次的 MEDIUM-1）。其他不是 JSON
+    字串的值是 None：當成其他專案，不刪除。
+    """
     try:
         value = json.loads(encoded)
     except json.JSONDecodeError:
         return None
+    if value is None:
+        return ""
     return value if isinstance(value, str) else None
 
 
@@ -847,15 +865,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 安全 INFO-4：清理被中斷（例如第二次 Ctrl-C）也留下診斷檔，下一次的 preflight 拒絕執行。
         sys.stderr.write(f"env_guard {args.command}：被中斷\n")
         if args.command == "cleanup":
-            _record_interruption(args.base, args.secrets_dir)
+            _record_interruption(args.base, args.secrets_dir, "清理被中斷")
         return EXIT_FAILURE
+    except Exception as exc:
+        # 安全審查第三次的 INFO-2：程式本身的錯誤照樣以 traceback 結束（重新 raise），但清理先留下
+        # 診斷檔（不吞掉錯誤：BLE 只允許重新 raise 的 handler）。
+        if args.command == "cleanup":
+            reason = f"清理發生未預期的錯誤（{type(exc).__name__}）"
+            _record_interruption(args.base, args.secrets_dir, reason)
+        raise
     sys.stdout.write(f"{output}\n")
     return EXIT_OK
 
 
-def _record_interruption(base: Path, secrets_dir: str) -> None:
+def _record_interruption(base: Path, secrets_dir: str, reason: str) -> None:
     try:
-        where = write_diagnostic(base, secrets_dir, ["清理被中斷：沒有完成，殘留由人工確認"])
+        where = write_diagnostic(base, secrets_dir, [f"{reason}：沒有完成，殘留由人工確認"])
     except OSError as exc:
         sys.stderr.write(f"無法寫入診斷檔（{type(exc).__name__}）\n")
         return

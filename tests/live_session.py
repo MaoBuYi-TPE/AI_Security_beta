@@ -71,7 +71,8 @@ def _disposable_directory(path: str, base: str) -> bool:
         return False
     try:
         run_id(Path(path), Path(base))
-        info = os.lstat(path)
+        # 程式碼審查第三次的 LOW-1：結尾的 /、/.、// 會讓 lstat 跟著最後的 symlink；先正規化。
+        info = os.lstat(os.path.normpath(path))
     except (GuardError, OSError):
         return False
     return (
