@@ -1,245 +1,44 @@
 """tests/live/env_guard.py 的清理（G1 審查 M2、MEDIUM-1、2；第二輪的 HIGH、MEDIUM-1、安全 LOW-1）。
 
-docker 以有狀態的替身取代（不連 daemon）：網路與所有權的標記、容器（完整的 ID、專案、接的網路、
-是否停止）、volume（名稱與專案標記）、compose 建立的網路、Engine ID。替身的規則：
-
-- docker rm 收到重複的 ID（同一次呼叫中重複，或之前已經刪除過）時失敗：同一次呼叫的衝突是審查者依
-  docker CLI 與 daemon 的原始碼推論的行為，沒有以真的 Docker 驗證；「之前已經刪除過」比真的
-  `rm -f`（忽略不存在的 ID）嚴格，所以同一個容器被刪兩次（不論是否在同一次呼叫）一定測得出來；
-- inspect 以 JSON 回報專案標記（沒有標記是 ""）；
-- 網路上還有容器（含停止的）時 network rm 失敗；ps 不帶 -a 時不列出停止的容器；
-- compose down 刪除 secscan-live 專案的容器、volume 與 compose 建立的網路（不刪 external 的網路）。
+docker 以有狀態的替身取代（不連 daemon；替身與規則見 tests/unit/live_cleanup_fake.py：網路與所有權的
+標記、Network ID、容器、volume、compose 建立的網路、Engine ID）。所有權紀錄的 Network ID（G1c）的
+正反案例在 tests/unit/test_live_env_guard_ownership.py。
 """
 
-import hashlib
-import json
 import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from tests.live import env_guard
-from tests.live.env_guard import CleanupReport, GuardError, cleanup, write_diagnostic
+from tests.live.env_guard import GuardError, cleanup, write_diagnostic
+from tests.unit.live_cleanup_fake import (
+    ENGINE,
+    GUARD,
+    LAB,
+    LIVE,
+    LIVE_CONFIG,
+    ORPHAN,
+    OTHER,
+    OURS,
+    OWNER,
+    RECEIVER,
+    SCAN,
+    CleanupDocker,
+    _clean,
+    _has,
+    _run_dir,
+    cid,
+    container,
+    probes,
+    stack,
+)
 
-OWNER = "secscan-live-secrets.Abc123"
-OTHER = "secscan-live-secrets.Other1"
-ENGINE = "engine-1"
 USAGE_ERROR = 2  # argparse 的用法錯誤
-LIVE = "secscan-live"
-SCAN = "secscan_live_scan_net"
-LAB = "secscan_live_lab_net"
-COMPOSE_NETWORKS = ("secscan-live_default", "secscan-live_control_net", "secscan-live_docker_net")
-LIVE_CONFIG = {
-    "name": LIVE,
-    "volumes": {
-        "db_data": {"name": "secscan-live_db_data"},
-        "runs": {"name": "secscan_live_runs"},
-    },
-    "networks": {
-        "scan_net": {"name": SCAN, "external": True},
-        "default": {"name": "secscan-live_default"},
-    },
-}
-
-
-def cid(name: str) -> str:
-    """完整的容器 ID（64 個十六進位字元）。"""
-    return hashlib.sha256(name.encode()).hexdigest()
-
-
-GUARD = cid("guard")
-RECEIVER = cid("receiver")
-ORPHAN = cid("orphan-scan")
-
-
-def container(
-    name: str, *networks: str, project: str = LIVE, stopped: bool = False
-) -> dict[str, Any]:
-    return {"id": cid(name), "project": project, "networks": list(networks), "stopped": stopped}
-
-
-def stack() -> list[dict[str, Any]]:
-    """Live 的 stack：guard 同時接在兩個 Live 網路上，其他服務只接 compose 建立的網路。"""
-    return [
-        container("api", "secscan-live_default", "secscan-live_control_net"),
-        container("db", "secscan-live_default", "secscan-live_control_net"),
-        container("runner", "secscan-live_control_net", "secscan-live_docker_net"),
-        container("worker", "secscan-live_control_net"),
-        container("socket-proxy", "secscan-live_docker_net"),
-        container("guard", SCAN, LAB),
-    ]
-
-
-def probes() -> list[dict[str, Any]]:
-    """測試在 Live 網路上建立的容器：接收端（lab_net）與停止的孤兒掃描容器（scan_net）。"""
-    return [
-        container("receiver", LAB, project=""),
-        container("orphan-scan", SCAN, project="", stopped=True),
-    ]
-
-
-class CleanupDocker:
-    """有狀態的 docker 替身（規則見模組的 docstring）。
-
-    fail 列出的動作回傳失敗：例如 "compose down"、"compose config"、"network rm"、"volume ls"、
-    "ps"、"inspect"、"info"，或 "rm <ID>"。
-    """
-
-    def __init__(
-        self,
-        *,
-        networks: dict[str, str] | None = None,
-        containers: Iterable[dict[str, Any]] | None = None,
-        volumes: dict[str, str] | None = None,
-        compose_networks: Iterable[str] = COMPOSE_NETWORKS,
-        config: object = None,
-        fail: Iterable[str] = (),
-        engine_id: str = ENGINE,
-        listings: dict[str, str] | None = None,
-        facts: dict[str, str] | None = None,
-    ) -> None:
-        self.networks = (
-            dict.fromkeys(env_guard.LIVE_NETWORKS, OWNER) if networks is None else dict(networks)
-        )
-        chosen = [*stack(), *probes()] if containers is None else containers
-        self.containers = [dict(item) for item in chosen]
-        self.volumes = (
-            {"secscan-live_db_data": LIVE, "secscan_live_runs": LIVE}
-            if volumes is None
-            else dict(volumes)
-        )
-        self.compose_networks = list(compose_networks)
-        self.config = LIVE_CONFIG if config is None else config
-        self.fail = set(fail)
-        self.engine_id = engine_id
-        self.listings = listings or {}
-        self.facts = facts or {}
-        self.calls: list[list[str]] = []
-        self.deleted: set[str] = set()
-
-    def __call__(self, arguments: Sequence[str]) -> str:
-        args = list(arguments)
-        self.calls.append(args)
-        if self._actions(args) & self.fail:
-            raise GuardError("docker 失敗")
-        if args[0] == "compose":
-            return self._compose(args)
-        handlers: dict[str, Callable[[], str]] = {
-            "context": lambda: "orbstack\n",
-            "info": lambda: f"{self.engine_id}\n",
-            "ps": lambda: self._ps(args),
-            "inspect": lambda: self._inspect(args[-1]),
-            "rm": lambda: self._rm(args[1:]),
-            "network": lambda: self._network(args[1], args[-1]),
-            "volume": lambda: self._volumes(args),
-        }
-        return handlers[args[0]]()
-
-    @staticmethod
-    def _actions(args: list[str]) -> set[str]:
-        if args[0] == "compose":
-            verb = next((word for word in ("down", "config", "version") if word in args), "")
-            return {f"compose {verb}"}
-        return {args[0], " ".join(args[:2]), f"{args[0]} {args[-1]}"}
-
-    def _compose(self, args: list[str]) -> str:
-        if "version" in args:
-            return "5.1.2\n"
-        if "config" in args:
-            return self.config if isinstance(self.config, str) else json.dumps(self.config)
-        assert "down" in args, args
-        self.containers = [item for item in self.containers if item["project"] != LIVE]
-        self.volumes = {name: project for name, project in self.volumes.items() if project != LIVE}
-        self.compose_networks = []
-        return ""
-
-    def _ps(self, args: list[str]) -> str:
-        selector = args[-1]
-        if selector.startswith("network="):
-            name = selector.removeprefix("network=")
-            if name in self.listings:
-                return self.listings[name]
-            chosen = [item for item in self.containers if name in item["networks"]]
-        else:
-            assert selector == env_guard.PROJECT_FILTER, selector
-            chosen = [item for item in self.containers if item["project"] == LIVE]
-        everything = "-aq" in args
-        return "".join(f"{item['id']}\n" for item in chosen if everything or not item["stopped"])
-
-    def _inspect(self, identifier: str) -> str:
-        if identifier in self.facts:
-            return self.facts[identifier]
-        found = [item for item in self.containers if item["id"] == identifier]
-        if not found:
-            raise GuardError("No such container")
-        [item] = found
-        return f"{item['id']}|{json.dumps(item['project'])}|{' '.join(item['networks'])} \n"
-
-    def _rm(self, args: list[str]) -> str:
-        identifiers = [item for item in args if not item.startswith("-")]
-        self.containers = [item for item in self.containers if item["id"] not in identifiers]
-        repeated = len(identifiers) != len(set(identifiers)) or self.deleted & set(identifiers)
-        self.deleted |= set(identifiers)
-        if repeated:
-            raise GuardError("removal of container is already in progress")
-        return ""
-
-    def _network(self, verb: str, name: str) -> str:
-        if verb == "ls":
-            return "".join(f"{item}\n" for item in [*self.networks, *self.compose_networks])
-        if name not in self.networks:
-            raise GuardError("No such network")
-        if verb == "inspect":
-            return f"{self.networks[name] or env_guard.NO_VALUE}\n"
-        assert verb == "rm", verb
-        if any(name in item["networks"] for item in self.containers):
-            raise GuardError("network has active endpoints")
-        del self.networks[name]
-        return ""
-
-    def _volumes(self, args: list[str]) -> str:
-        labelled = env_guard.PROJECT_FILTER in args
-        return "".join(
-            f"{name}\n" for name, project in self.volumes.items() if not labelled or project == LIVE
-        )
-
-    def removed(self) -> list[str]:
-        return [call[-1] for call in self.calls if call[:1] == ["rm"]]
-
-    def destructive(self) -> list[list[str]]:
-        return [
-            call
-            for call in self.calls
-            if call[:1] == ["rm"] or call[:2] == ["network", "rm"] or "down" in call
-        ]
-
-    def ids(self) -> set[str]:
-        return {item["id"] for item in self.containers}
-
-
-def _run_dir(tmp_path: Path) -> Path:
-    directory = tmp_path / OWNER
-    directory.mkdir(mode=0o700)
-    (directory / "db_password").write_text("disposable", encoding="ascii")
-    return directory
-
-
-def _clean(
-    tmp_path: Path, docker: CleanupDocker, *, claimed: bool = True, engine_id: str = ENGINE
-) -> CleanupReport:
-    directory = _run_dir(tmp_path)
-    report = cleanup(docker, tmp_path, str(directory), engine_id=engine_id, claimed=claimed)
-    assert not directory.exists()
-    return report
-
-
-def _has(report: CleanupReport, message: str) -> bool:
-    return any(message in failure for failure in report.failures)
 
 
 # --------------------------------------------------------------------------- 去重與所有權（HIGH）
@@ -289,7 +88,7 @@ def test_malformed_and_empty_ids_never_reach_docker_rm(tmp_path: Path) -> None:
     malformed = ("c-short", "Z" * 64)
     listing = f"\n{malformed[0]}\n{RECEIVER}\n{malformed[1]}\n\n"
     # inspect 對格式不正確的 ID 也回報「屬於這次執行」：只有格式檢查擋得住（空轉檢查 55d）。
-    facts = {item: f'{item}|""|{LAB} \n' for item in malformed}
+    facts = {item: f'{item}|""|{LAB}={OURS[LAB]} \n' for item in malformed}
     docker = CleanupDocker(listings={LAB: listing}, facts=facts)
 
     report = _clean(tmp_path, docker)
@@ -353,7 +152,7 @@ def test_networks_of_another_run_are_left_alone(tmp_path: Path) -> None:
     others = dict.fromkeys(env_guard.LIVE_NETWORKS, OTHER)
     docker = CleanupDocker(networks=others)
 
-    report = _clean(tmp_path, docker, claimed=False)
+    report = _clean(tmp_path, docker, claimed=False, networks={})
 
     assert report.failures == []
     assert [item for item in report.skipped if OTHER in item]
@@ -390,7 +189,7 @@ def test_networks_missing_without_a_claim_still_checks_containers_and_volumes(
 ) -> None:
     docker = CleanupDocker(networks={}, containers=[container("db", "secscan-live_default")])
 
-    report = _clean(tmp_path, docker, claimed=False)
+    report = _clean(tmp_path, docker, claimed=False, networks={})
 
     assert _has(report, "清理之後還有 Live 的資源")
     assert docker.destructive() == []
@@ -400,7 +199,7 @@ def test_nothing_created_and_nothing_left_is_clean(tmp_path: Path) -> None:
     """沒有取得所有權、也沒有任何 Live 的資源（例如網段衝突，network create 失敗）：清理完成。"""
     docker = CleanupDocker(networks={}, containers=[], volumes={}, compose_networks=())
 
-    report = _clean(tmp_path, docker, claimed=False)
+    report = _clean(tmp_path, docker, claimed=False, networks=None)
 
     assert (report.failures, report.skipped) == ([], [])
 
@@ -411,7 +210,7 @@ def test_a_partial_claim_removes_only_its_own_empty_network(tmp_path: Path) -> N
         networks={SCAN: OWNER, LAB: OTHER}, containers=[], volumes={}, compose_networks=()
     )
 
-    report = _clean(tmp_path, docker, claimed=False)
+    report = _clean(tmp_path, docker, claimed=False, networks={SCAN: OURS[SCAN]})
 
     assert report.failures == []
     assert docker.networks == {LAB: OTHER}
@@ -424,7 +223,7 @@ def test_an_unlabelled_live_network_left_behind_is_reported(tmp_path: Path) -> N
         networks={SCAN: OWNER, LAB: ""}, containers=[], volumes={}, compose_networks=()
     )
 
-    report = _clean(tmp_path, docker, claimed=False)
+    report = _clean(tmp_path, docker, claimed=False, networks={SCAN: OURS[SCAN]})
 
     assert docker.networks == {LAB: ""}
     assert _has(report, "清理之後還有 Live 的資源")
@@ -473,7 +272,7 @@ def test_an_engine_that_cannot_be_confirmed_leaves_every_docker_resource_alone(
         (CleanupDocker(fail=["network rm"]), "刪除網路"),
         (CleanupDocker(fail=[f"rm {GUARD}"]), f"刪除容器 {GUARD[:12]}"),
         (CleanupDocker(fail=["ps"]), "列出網路"),
-        (CleanupDocker(fail=["network ls"]), "列出網路"),
+        (CleanupDocker(fail=["network ls"]), "無法確認清理之後沒有殘留"),
         (CleanupDocker(fail=["network inspect"]), "所有權"),
         (CleanupDocker(fail=["inspect"]), "確認容器"),
     ],
@@ -632,9 +431,11 @@ def test_a_directory_that_cannot_be_inspected_is_reported(
 
 
 def test_an_already_removed_directory_is_fine(tmp_path: Path) -> None:
-    docker = CleanupDocker()
+    """沒有取得所有權、也沒有任何 Live 的資源：已經不在的拋棄式目錄不算失敗（G1c：記錄了所有權
+    卻沒有紀錄時 fail closed，見 test_live_env_guard_ownership.py）。"""
+    docker = CleanupDocker(networks={}, containers=[], volumes={}, compose_networks=())
 
-    report = cleanup(docker, tmp_path, str(tmp_path / OWNER), engine_id=ENGINE, claimed=True)
+    report = cleanup(docker, tmp_path, str(tmp_path / OWNER), engine_id=ENGINE, claimed=False)
 
     assert report.failures == []
 
@@ -737,7 +538,7 @@ def _cleanup_argv(base: Path, directory: Path, *extra: str) -> list[str]:
 def test_the_cleanup_cli_reports_success_and_what_it_left_alone(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    directory = _run_dir(tmp_path)
+    directory = _run_dir(tmp_path, {SCAN: OURS[SCAN]}, claimed=False)
     docker = CleanupDocker(
         networks={SCAN: OWNER, LAB: OTHER}, containers=[], volumes={}, compose_networks=()
     )

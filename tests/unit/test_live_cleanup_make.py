@@ -182,6 +182,40 @@ def test_networks_that_vanish_after_the_claim_fail_closed(hostile: Hostile) -> N
     assert _disposable_dirs(hostile) == []
 
 
+def test_a_same_name_same_label_replacement_is_never_touched(hostile: Hostile) -> None:
+    """G1c：stack 啟動之後，兩個網路被換成同名、同標記、不同 ID 的網路（上面有外部的容器）：所有權
+    紀錄的 Network ID 對不上，不刪任何 Docker 資源、不宣稱完成。"""
+    hostile.set_scenario(networks_replaced=True)
+
+    result = hostile.make()
+
+    assert result.returncode != 0
+    assert _destructive_after_up(hostile) == []
+    state = hostile.docker_state()
+    assert _cid("external") in {item["id"] for item in state["containers"]}
+    assert set(state["networks"]) == {"secscan_live_scan_net", "secscan_live_lab_net"}
+    assert not set(state["network_ids"].values()) & set(state["created"].values())
+    [diagnostic] = hostile.diagnostics()
+    assert "外部變更" in diagnostic.read_text(encoding="utf-8")
+    assert _disposable_dirs(hostile) == []
+
+
+def test_a_partial_claim_removes_only_its_own_network_by_id(hostile: Hostile) -> None:
+    """G1c：scan_net 建立了、lab_net 被搶先（部分建立失敗）：只以紀錄的 ID 刪除自己的 scan_net。"""
+    hostile.set_scenario(taken=["secscan_live_lab_net"])
+
+    result = hostile.make()
+
+    assert result.returncode != 0
+    argvs = hostile.docker_argvs()
+    removed = [argv[2:] for argv in argvs if argv[:2] == ["network", "rm"]]
+    assert removed == [[hostile.docker_state()["created"]["secscan_live_scan_net"]]]
+    assert not [argv for argv in argvs if argv[:1] == ["rm"] or "down" in argv]
+    assert "--claimed" not in _cleanup_call(hostile)
+    assert hostile.docker_state()["networks"] == {}
+    assert hostile.diagnostics() == []
+
+
 def test_an_engine_change_leaves_every_docker_resource_alone(hostile: Hostile) -> None:
     """安全 LOW-1：結束之前 Engine 換了（例如切換 context）：清理不碰任何 Docker 資源。"""
     hostile.set_scenario(engine_changes=True)

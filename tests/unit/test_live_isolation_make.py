@@ -108,7 +108,9 @@ ALLOWED = (
 # ID 與實際接的網路：guard 同時接在兩個 Live 網路上（第二輪 HIGH）。docker rm 收到重複的 ID（同一次
 # 呼叫中重複，或之前已經刪除過）時回傳失敗：同一次呼叫的衝突是審查者依 docker CLI 與 daemon 的
 # 原始碼推論的行為，沒有以真的 Docker 驗證；「之前已經刪除過」比真的 rm -f 嚴格，同一個容器被刪兩次
-# 一定測得出來。inspect 以 JSON 回報專案標記。網路上還有容器時 network rm 失敗。
+# 一定測得出來。inspect 以 JSON 回報專案標記與「網路名稱=Network ID」。network create 回傳完整的
+# Network ID；network inspect／rm 以 ID 優先、再以名稱解析，標記以 JSON 回報；ps 的 network= 比對
+# 名稱或 ID 的前綴（G1c）。網路上還有容器時 network rm 失敗。
 # scenario 讓某一步失敗或預先放入資源（另一次執行的網路、其他專案的容器）。compose config 交給真的
 # docker compose（只在用戶端解析）。
 _FAKE_DOCKER = """#!{python}
@@ -121,6 +123,9 @@ state = json.loads(open({state!r}).read())
 state.setdefault("volumes", [])
 state.setdefault("compose_networks", [])
 state.setdefault("removed", [])
+state.setdefault("network_ids", {{}})
+state.setdefault("created", {{}})
+state.setdefault("generation", 0)
 def save():
     open({state!r}, "w").write(json.dumps(state))
 def out(text="", code=0):
@@ -132,6 +137,25 @@ def cid(name):
     return hashlib.sha256(name.encode()).hexdigest()
 def nets(container):
     return container.get("networks") or [container["network"]]
+def digest(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+def nid(name):
+    if name not in state["networks"]:
+        return digest("other:" + name)
+    return state["network_ids"].get(name) or digest("preset:" + name)
+def attached(container):
+    return container.get("attached") or {{name: nid(name) for name in nets(container)}}
+def resolve(reference):
+    for name in state["networks"]:
+        if nid(name) == reference:
+            return name
+    return reference if reference in state["networks"] else None
+def new_network(name, label):
+    state["generation"] += 1
+    network = digest("network:" + name + ":" + label + ":" + str(state["generation"]))
+    state["networks"][name] = label
+    state["network_ids"][name] = network
+    return network
 def lines(items):
     return "".join(f"{{item}}\\n" for item in items)
 ranges = {{"secscan_live_scan_net": "10.89.9.0/24 10.89.9.0/25",
@@ -139,9 +163,10 @@ ranges = {{"secscan_live_scan_net": "10.89.9.0/24 10.89.9.0/25",
 LIVE = "secscan-live"
 COMPOSE_NETS = ["secscan-live_default", "secscan-live_control_net", "secscan-live_docker_net"]
 def start(services):
-    for service, attached in services:
+    for service, names in services:
         state["containers"].append(
-            {{"id": cid(service), "service": service, "project": LIVE, "networks": attached}})
+            {{"id": cid(service), "service": service, "project": LIVE, "networks": names,
+              "attached": {{name: nid(name) for name in names}}}})
     state["compose_networks"] = COMPOSE_NETS
 if args[:2] == ["context", "show"]:
     out("orbstack\\n")
@@ -187,9 +212,17 @@ if args[:1] == ["compose"]:
                    ("socket-proxy", ["secscan-live_docker_net"]),
                    ("guard", ["secscan_live_scan_net", "secscan_live_lab_net"])])
             state["volumes"].append({{"name": "secscan_live_runs", "project": LIVE}})
-            state["containers"] += scenario.get("extra_containers", [])
+            for extra in scenario.get("extra_containers", []):
+                state["containers"].append({{**extra, "attached": attached(extra)}})
             if scenario.get("networks_vanish"):
                 state["networks"] = {{}}
+                state["network_ids"] = {{}}
+            if scenario.get("networks_replaced"):
+                for name, label in sorted(state["networks"].items()):
+                    new_network(name, label)
+                state["containers"].append({{"id": cid("external"), "project": "",
+                    "networks": sorted(state["networks"]),
+                    "attached": {{name: nid(name) for name in state["networks"]}}}})
             if scenario.get("engine_changes"):
                 state["engine"] = "engine-2"
         save()
@@ -209,7 +242,9 @@ if args[:1] == ["ps"]:
     if target == "label=com.docker.compose.project=secscan-live":
         out(lines(c["id"] for c in state["containers"] if c.get("project") == LIVE))
     if target.startswith("network="):
-        out(lines(c["id"] for c in state["containers"] if target[8:] in nets(c)))
+        value = target[8:]
+        out(lines(c["id"] for c in state["containers"] if value in attached(c)
+                  or any(network.startswith(value) for network in attached(c).values())))
     out()
 if args[:1] == ["inspect"]:
     fmt = option("--format")
@@ -219,7 +254,8 @@ if args[:1] == ["inspect"]:
     [container] = found
     if "NetworkSettings" in fmt:
         project = json.dumps(container.get("project") or "")
-        out(container["id"] + "|" + project + "|" + " ".join(nets(container)) + " \\n")
+        pairs = " ".join(name + "=" + network for name, network in attached(container).items())
+        out(container["id"] + "|" + project + "|" + pairs + " \\n")
     service = container.get("service", "")
     out(service + (" sha256:guard\\n" if service == "guard" else " sha256:app\\n"))
 if args[:2] == ["image", "inspect"]:
@@ -234,28 +270,32 @@ if args[:2] == ["network", "create"]:
     if name in state["networks"] or name in scenario.get("taken", []):
         sys.stderr.write("network with name " + name + " already exists\\n")
         out(code=1)
-    state["networks"][name] = option("--label").split("=", 1)[1]
+    state["created"][name] = new_network(name, option("--label").split("=", 1)[1])
     save()
-    out()
+    out(state["created"][name] + "\\n")
 if args[:2] == ["network", "rm"]:
     if scenario.get("network_rm_fails"):
         out(code=1)
-    for name in args[2:]:
-        if any(name in nets(c) for c in state["containers"]):
+    for reference in args[2:]:
+        name = resolve(reference)
+        if name is None:
+            out(code=1)
+        if any(nid(name) in attached(c).values() for c in state["containers"]):
             sys.stderr.write("error while removing network: network has active endpoints\\n")
             out(code=1)
-        state["networks"].pop(name, None)
+        state["networks"].pop(name)
+        state["network_ids"].pop(name, None)
     save()
     out()
 if args[:2] == ["network", "inspect"]:
-    name = args[-1]
-    if name not in state["networks"]:
+    name = resolve(args[-1])
+    if name is None:
         out(code=1)
-    fmt = option("--format")
-    label = state["networks"][name] or "<no value>"
-    if "|" in fmt:
-        out("true|isolated|" + ranges[name] + "|" + label + "\\n")
-    out(label + "\\n")
+    label = state["networks"][name]
+    labels = json.dumps({{"secscan.live.run": label}} if label else {{}})
+    if ".Internal" in option("--format"):
+        out(nid(name) + "|" + name + "|true|isolated|" + ranges[name] + "|" + labels + "\\n")
+    out(nid(name) + "|" + name + "|" + labels + "\\n")
 sys.exit(2)
 """
 
@@ -589,8 +629,11 @@ def test_the_networks_are_claimed_and_cleaned_up_by_this_run_only(hostile: Hosti
     created = [argv for argv in argvs if argv[:2] == ["network", "create"]]
     assert {argv[-1] for argv in created} == LIVE_NETWORK_NAMES
     assert all(argv[2:4] == ["--label", f"secscan.live.run={owner}"] for argv in created)
+    # G1c：以 network create 回傳的 Network ID 刪除（不是以名稱）。
     removed = [argv for argv in argvs if argv[:2] == ["network", "rm"]]
-    assert {argv[2] for argv in removed} == LIVE_NETWORK_NAMES
+    created_ids = hostile.docker_state()["created"]
+    assert set(created_ids) == LIVE_NETWORK_NAMES
+    assert sorted(argv[2] for argv in removed) == sorted(created_ids.values())
     [down] = [argv for argv in argvs if argv[:1] == ["compose"] and "down" in argv]
     assert down == [*LIVE_COMPOSE_ARGUMENTS, "down", "-v", "--remove-orphans"]
     # 網路在任何建立 stack 的動作（build、up）之前就取得所有權。
@@ -988,16 +1031,20 @@ def test_every_live_call_goes_through_the_whitelist() -> None:
 
 def test_the_trap_is_installed_only_after_the_preflight_and_before_the_claim() -> None:
     """MEDIUM-1：preflight 拒絕（例如另一次 Live 正在執行）時沒有 trap，不會拆掉別人的 stack；
-    拋棄式目錄建立之後才安裝，立刻接著取得網路的所有權。清理只由 env_guard 執行（不直接 rm）。"""
+    拋棄式目錄建立之後才安裝，拋棄式的秘密寫進目錄之後（generate-secret-files 只寫進空的目錄；
+    G1c：所有權紀錄也在這個目錄），接著取得網路的所有權，之後才 pull、build。清理只由 env_guard
+    執行（不直接 rm）。"""
     flattened = _recipe("test-live-runner").replace("\\\n", " ")
     trap = flattened.index("trap 'live_cleanup $$?' EXIT")
 
     assert "trap 'live_cleanup 130' INT TERM HUP" in flattened
     for earlier in ("$(LIVE_GUARD) engine)", "$(LIVE_GUARD) preflight", "snapshot=", "mktemp -d"):
         assert flattened.index(earlier) < trap, earlier
-    claim = flattened.index('$(LIVE_GUARD) networks --secrets-dir "$$secrets_dir"')
-    assert trap < claim
-    assert claim < min(flattened.index(word) for word in ("generate-secret-files", "docker pull"))
+    claim = flattened.index(
+        '$(LIVE_GUARD) networks --secrets-dir "$$secrets_dir" --engine "$$engine"'
+    )
+    assert trap < flattened.index("generate-secret-files") < claim
+    assert claim < min(flattened.index(word) for word in ("docker pull", "build api guard"))
     start = flattened.index("live_cleanup() {")
     cleanup = flattened[start : flattened.index("}; ", start)]
     assert '$(LIVE_GUARD) cleanup --base "$$base" --secrets-dir "$$secrets_dir"' in cleanup

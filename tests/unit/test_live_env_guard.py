@@ -422,21 +422,48 @@ LIVE_SPECS = [
     NetworkSpec("secscan_live_scan_net", "10.89.9.0/24", "10.89.9.0/25"),
     NetworkSpec("secscan_live_lab_net", "10.89.10.0/24", "10.89.10.0/25"),
 ]
+# network create 回傳的完整 Network ID（G1c：所有權以它為準）。
+NETWORK_IDS = {spec.name: f"{index + 1:x}" * 64 for index, spec in enumerate(LIVE_SPECS)}
 
 
-def _network_docker(**facts: str) -> FakeDocker:
-    docker = FakeDocker()
+def _run_directory(tmp_path: Path, owner: str = OWNER) -> Path:
+    directory = tmp_path / owner
+    directory.mkdir(mode=0o700)
+    return directory
+
+
+def _network_facts(spec: NetworkSpec, owner: str = OWNER, **changes: str) -> str:
+    fields = {
+        "id": NETWORK_IDS[spec.name],
+        "name": spec.name,
+        "internal": "true",
+        "gateway": "isolated",
+        "ranges": f"{spec.subnet} {spec.ip_range}",
+        "labels": json.dumps({env_guard.RUN_LABEL: owner}),
+    } | changes
+    return "|".join(fields.values()) + "\n"
+
+
+def _network_docker(owner: str = OWNER, **facts: str) -> FakeDocker:
+    """兩個網路各自的 network create（以網段區分）回傳 ID；以 ID inspect 回傳 facts。"""
+    docker = _engine_docker()
     for spec in LIVE_SPECS:
-        reply = facts.get(spec.name, f"true|isolated|{spec.subnet} {spec.ip_range}|{OWNER}\n")
-        key = ("network", "inspect", "--format", env_guard.NETWORK_FORMAT, spec.name)
-        docker.replies[key] = reply
+        label = f"{env_guard.RUN_LABEL}={owner}"
+        create = ("network", "create", "--label", label, "--internal", "--opt")
+        option = f"{env_guard.GATEWAY_OPTION}=isolated"
+        docker.replies[(*create, option, "--subnet", spec.subnet)] = f"{NETWORK_IDS[spec.name]}\n"
+        inspect = ("network", "inspect", "--format", env_guard.NETWORK_FORMAT)
+        reply = facts.get(spec.name, _network_facts(spec, owner))
+        docker.replies[(*inspect, NETWORK_IDS[spec.name])] = reply
     return docker
 
 
-def test_the_networks_are_created_internal_isolated_and_labelled_with_the_run() -> None:
+def test_the_networks_are_created_internal_isolated_and_labelled_with_the_run(
+    tmp_path: Path,
+) -> None:
     docker = _network_docker()
 
-    claim_networks(docker, LIVE_SPECS, OWNER)
+    claim_networks(docker, LIVE_SPECS, _run_directory(tmp_path), "engine-1")
 
     created = [call for call in docker.calls if call[:2] == ["network", "create"]]
     assert [call[-1] for call in created] == [spec.name for spec in LIVE_SPECS]
@@ -452,36 +479,58 @@ def test_the_networks_are_created_internal_isolated_and_labelled_with_the_run() 
             "--ip-range",
             spec.ip_range,
         ]
+    # 以 network create 回傳的 ID inspect（不是以名稱）。
+    inspected = [call[-1] for call in docker.calls if call[:2] == ["network", "inspect"]]
+    assert inspected == [NETWORK_IDS[spec.name] for spec in LIVE_SPECS]
 
 
-def test_an_existing_network_is_never_shared() -> None:
+def test_an_existing_network_is_never_shared(tmp_path: Path) -> None:
     """並行：network create 是原子的；已存在（另一次 Live 的）就停止，不檢查、不沿用。"""
     docker = _network_docker()
-    docker.replies[("network", "create")] = "<fail>"
+    docker.replies = {("network", "create"): "<fail>", **docker.replies}
 
     with pytest.raises(GuardError, match="另一次 Live"):
-        claim_networks(docker, LIVE_SPECS, OWNER)
+        claim_networks(docker, LIVE_SPECS, _run_directory(tmp_path), "engine-1")
 
-    assert [call[:2] for call in docker.calls] == [["network", "create"]]
+    assert [call[:2] for call in docker.calls if call[0] == "network"] == [["network", "create"]]
 
 
 @pytest.mark.parametrize(
-    ("facts", "message"),
+    ("network", "changes", "message"),
     [
-        (
-            {"secscan_live_lab_net": f"false|isolated|10.89.10.0/24 10.89.10.0/25|{OWNER}\n"},
-            "internal",
-        ),
-        ({"secscan_live_scan_net": f"true|nat|10.89.9.0/24 10.89.9.0/25|{OWNER}\n"}, "isolated"),
-        ({"secscan_live_scan_net": f"true|isolated|10.89.9.0/24 |{OWNER}\n"}, "ip-range"),
-        ({"secscan_live_scan_net": "true|isolated|10.89.9.0/24 10.89.9.0/25|other\n"}, "這次執行"),
-        ({"secscan_live_lab_net": "true\n"}, "無法確認"),
+        ("secscan_live_lab_net", {"internal": "false"}, "internal"),
+        ("secscan_live_scan_net", {"gateway": "nat"}, "isolated"),
+        ("secscan_live_scan_net", {"ranges": "10.89.9.0/24 "}, "ip-range"),
+        ("secscan_live_scan_net", {"labels": json.dumps({env_guard.RUN_LABEL: "x"})}, "這次執行"),
+        ("secscan_live_scan_net", {"labels": "{}"}, "這次執行"),
+        ("secscan_live_scan_net", {"id": "f" * 64}, "ID 或名稱"),
+        ("secscan_live_lab_net", {"name": "secscan_live_scan_net"}, "ID 或名稱"),
     ],
-    ids=["not-internal", "gateway", "no-ip-range", "other-owner", "unparsable"],
+    ids=[
+        "not-internal",
+        "gateway",
+        "no-ip-range",
+        "other-owner",
+        "no-labels",
+        "other-id",
+        "other-name",
+    ],
 )
-def test_networks_with_the_wrong_settings_are_refused(facts: dict[str, str], message: str) -> None:
+def test_networks_with_the_wrong_settings_are_refused(
+    tmp_path: Path, network: str, changes: dict[str, str], message: str
+) -> None:
+    [spec] = [spec for spec in LIVE_SPECS if spec.name == network]
+    docker = _network_docker(**{network: _network_facts(spec, **changes)})
+
     with pytest.raises(GuardError, match=message):
-        claim_networks(_network_docker(**facts), LIVE_SPECS, OWNER)
+        claim_networks(docker, LIVE_SPECS, _run_directory(tmp_path), "engine-1")
+
+
+def test_unparsable_network_facts_are_refused(tmp_path: Path) -> None:
+    docker = _network_docker(secscan_live_lab_net="true\n")
+
+    with pytest.raises(GuardError, match="無法確認"):
+        claim_networks(docker, LIVE_SPECS, _run_directory(tmp_path), "engine-1")
 
 
 @pytest.mark.parametrize(
@@ -493,13 +542,12 @@ def test_networks_with_the_wrong_settings_are_refused(facts: dict[str, str], mes
     ],
     ids=["dev-network", "only-one", "extra"],
 )
-def test_only_the_two_live_networks_can_be_created(names: tuple[str, ...]) -> None:
+def test_only_the_two_live_networks_can_be_created(tmp_path: Path, names: tuple[str, ...]) -> None:
     docker = _network_docker()
+    specs = [NetworkSpec(name, "10.0.0.0/24", "10.0.0.0/25") for name in names]
 
     with pytest.raises(GuardError, match="Live 的兩個網路"):
-        claim_networks(
-            docker, [NetworkSpec(name, "10.0.0.0/24", "10.0.0.0/25") for name in names], OWNER
-        )
+        claim_networks(docker, specs, _run_directory(tmp_path), "engine-1")
 
     assert docker.calls == []
 
@@ -542,6 +590,9 @@ def test_the_cli_runs_each_subcommand(
     docker = _engine_docker()
     monkeypatch.setattr(env_guard, "docker", docker)
     secrets_dir = _secrets_dir(tmp_path)
+    for name in ("base", "runs"):
+        (tmp_path / name).mkdir()
+    run_directory = _run_directory(tmp_path / "runs")
     runs = [
         (["engine"], ""),
         (["preflight", "--base", str(tmp_path / "base")], ""),
@@ -555,7 +606,7 @@ def test_the_cli_runs_each_subcommand(
         (
             [
                 "networks",
-                *("--secrets-dir", f"/srv/{OWNER}"),
+                *("--secrets-dir", str(run_directory), "--engine", "engine-1"),
                 *("--network", "secscan_live_scan_net", "10.89.9.0/24", "10.89.9.0/25"),
                 *("--network", "secscan_live_lab_net", "10.89.10.0/24", "10.89.10.0/25"),
             ],
@@ -563,7 +614,6 @@ def test_the_cli_runs_each_subcommand(
         ),
     ]
     docker.replies.update(_network_docker().replies)
-    (tmp_path / "base").mkdir()
     for argv, stdin in runs:
         monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
         assert env_guard.main(argv) == env_guard.EXIT_OK, argv

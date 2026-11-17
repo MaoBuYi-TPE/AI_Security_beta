@@ -1,7 +1,7 @@
 """tests/live/env_guard.py 的清理：第二輪之後各次重新審查的補強（程式碼 LOW-1；安全 LOW-1、
 LOW-2 (c)、INFO-1、INFO-2、INFO-4；第三次與最後一次的項目）。
 
-替身（CleanupDocker）與 helper 沿用 tests/unit/test_live_env_guard_cleanup.py：不連 daemon。
+替身（CleanupDocker）與 helper 在 tests/unit/live_cleanup_fake.py：不連 daemon。
 """
 
 from collections.abc import Sequence
@@ -12,12 +12,13 @@ import pytest
 
 from tests.live import env_guard
 from tests.live.env_guard import GuardError
-from tests.unit.test_live_env_guard_cleanup import (
+from tests.unit.live_cleanup_fake import (
     ENGINE,
     GUARD,
     LAB,
     LIVE_CONFIG,
     OTHER,
+    OURS,
     OWNER,
     RECEIVER,
     SCAN,
@@ -64,7 +65,7 @@ def test_without_a_claim_containers_on_its_own_network_are_not_removed(tmp_path:
         networks={SCAN: OWNER, LAB: OTHER}, containers=[probe], volumes={}, compose_networks=()
     )
 
-    report = _clean(tmp_path, docker, claimed=False)
+    report = _clean(tmp_path, docker, claimed=False, networks={SCAN: OURS[SCAN]})
 
     assert docker.destructive() == []
     assert docker.networks == {SCAN: OWNER, LAB: OTHER}
@@ -112,7 +113,7 @@ def test_project_labels_are_compared_exactly(tmp_path: Path, project: str) -> No
 def test_a_null_project_label_means_no_label(tmp_path: Path) -> None:
     """安全審查第三次的 MEDIUM-1：沒有 Labels 的容器，json 可能輸出 null（推論；實測缺少 key 時是
     ""）。標記的值一定是字串，null 只可能是沒有標記：接收端照常刪除。"""
-    docker = CleanupDocker(facts={RECEIVER: f"{RECEIVER}|null|{LAB} \n"})
+    docker = CleanupDocker(facts={RECEIVER: f"{RECEIVER}|null|{LAB}={OURS[LAB]} \n"})
 
     report = _clean(tmp_path, docker)
 

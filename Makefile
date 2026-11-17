@@ -351,14 +351,16 @@ runs-layout-migrate: env secrets docker-check
 # - up 之前以 tests/live/env_guard.py 驗證 compose 解析出來的設定（允許清單）；up 之後核對映像 ID；
 #   開始時、up 之前、結束時確認同一個 Engine。開始之前拒絕上一次留下的資源、拋棄式目錄與清理失敗的
 #   診斷檔。
-# - 所有權與清理（G1 審查 M2、MEDIUM-1、2）：engine、preflight、快照都通過、拋棄式目錄建立之後才安裝
-#   trap，接著立刻以這次的識別（拋棄式目錄的名稱）標記並建立兩個網路：網路已存在就停止（另一次 Live
-#   正在執行），不清理別人的資源。兩個網路都建立並確認之後才記錄所有權（claimed）。清理（含失敗與
-#   中斷）由 env_guard cleanup 執行：先確認 Engine 和開始時相同；只處理標記屬於這次執行的資源，容器以
-#   完整的 ID 去重、各刪除一次；記錄了所有權卻找不到這次的網路就 fail closed；down -v 之前核對專案、
-#   volume 與網路的名稱；最後以和 preflight 相同的條件確認沒有殘留（第二輪的 HIGH、安全 LOW-1）。失敗
-#   時回報並在 TMPDIR 留下診斷檔（下一次的 preflight 看到它就拒絕執行）。最後比對開發環境的前後快照，
-#   有差異就失敗。
+# - 所有權與清理（G1 審查 M2、MEDIUM-1、2；G1c）：engine、preflight、快照都通過、拋棄式目錄建立之後
+#   才安裝 trap；拋棄式的秘密寫進目錄之後，接著以這次的識別（拋棄式目錄的名稱）標記並建立兩個網路：
+#   網路已存在就停止（另一次 Live 正在執行），不清理別人的資源。env_guard networks 把 Engine、預期的
+#   標記與 network create 回傳的 Network ID 寫進拋棄式目錄的所有權紀錄（generate-secret-files 只寫進
+#   空的目錄，所以在它之後）；兩個網路都建立並以 ID 確認之後才記錄所有權（claimed）。清理（含失敗與
+#   中斷）由 env_guard cleanup 執行：先確認 Engine 和開始時相同；只處理以紀錄的 Network ID 確認屬於這次
+#   執行的資源（名稱與標記是輔助的核對），容器以完整的 ID 去重、各刪除一次；記錄了所有權卻找不到、或
+#   網路被換掉就 fail closed；down -v 之前核對專案、volume 與網路的名稱；最後以和 preflight 相同的條件
+#   確認沒有殘留（第二輪的 HIGH、安全 LOW-1）。失敗時回報並在 TMPDIR 留下診斷檔（下一次的 preflight
+#   看到它就拒絕執行）。最後比對開發環境的前後快照，有差異就失敗。
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
 	tests/live/test_budget_live.py tests/live/test_revocation_live.py \
 	tests/live/test_guard_failover_live.py
@@ -383,11 +385,11 @@ test-live-runner:
 	snapshot=$$($(LIVE_GUARD) snapshot --root "$(CURDIR)") || exit 1; \
 	secrets_dir=$$(mktemp -d "$$base/$(LIVE_SECRETS_PREFIX)XXXXXX") || exit 1; \
 	trap 'live_cleanup $$?' EXIT; trap 'live_cleanup 130' INT TERM HUP; \
-	$(LIVE_GUARD) networks --secrets-dir "$$secrets_dir" \
+	$(LIVE_PROC_ENV) $(UV_RUN) secscan-admin generate-secret-files "$$secrets_dir" || exit 1; \
+	$(LIVE_GUARD) networks --secrets-dir "$$secrets_dir" --engine "$$engine" \
 		--network $(LIVE_SCAN_NET) $(LIVE_SCAN_SUBNET) $(LIVE_SCAN_IP_RANGE) \
 		--network $(LIVE_LAB_NET) $(LIVE_LAB_SUBNET) $(LIVE_LAB_IP_RANGE) || exit 1; \
 	claimed=1; \
-	$(LIVE_PROC_ENV) $(UV_RUN) secscan-admin generate-secret-files "$$secrets_dir" || exit 1; \
 	for image in $(SCANNER_IMAGES); do \
 		$(LIVE_PROC_ENV) docker pull --quiet "$$image" >/dev/null || exit 1; \
 	done; \
