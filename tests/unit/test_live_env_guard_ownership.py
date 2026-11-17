@@ -443,6 +443,10 @@ def test_a_container_on_an_older_network_with_the_same_name_is_not_removed(
     assert mixed["id"] not in docker.removed()
     assert _has(report, f"容器 {mixed['id'][:12]} 接在不屬於這次執行的網路上")
     assert _has(report, "清理之後還有 Live 的資源")
+    # 候選以 Network ID 列出：只以名稱引用舊網路的容器根本不是候選（不 inspect；空轉檢查 65e）。
+    inspected = {call[-1] for call in docker.calls if call[:1] == ["inspect"]}
+    assert stale["id"] not in inspected
+    assert mixed["id"] in inspected
 
 
 @pytest.mark.parametrize(
