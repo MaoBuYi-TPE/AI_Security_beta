@@ -204,8 +204,8 @@ def live_resources(run: Runner) -> dict[str, list[str]]:
 
     不只看網路：容器與 volume 以 compose 的專案標記找，volume 另外以 Live 的名稱前綴找（LIVE_ENV 的
     secscan_live_*；不是 compose 建立的也算），網路是 Live 的兩個與 secscan-live_ 開頭的。容器另外以
-    Live 網路的名稱找（G1c：已停止、沒有標記的也算；網路已經不存在時，容器的設定仍以名稱引用它，重建
-    同名的網路之後啟動就會接上）。
+    Live 網路的名稱找（G1c：已停止、沒有標記的也算；網路已經不存在時，容器的設定仍以名稱引用它——
+    推論，剩餘風險 24；歸屬由人工確認）。
     """
     volumes = set(run(["volume", "ls", "-q", "--filter", PROJECT_FILTER]).split())
     volumes |= {
@@ -404,10 +404,11 @@ def read_claim(directory: Path) -> Claim | None:
             handle = os.open(CLAIM_FILE, flags, dir_fd=descriptor)
         except FileNotFoundError:
             return None
+        info = os.fstat(handle)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            os.close(handle)
+            raise GuardError("所有權紀錄不是自己擁有的一般檔案")
         with os.fdopen(handle, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-                raise GuardError("所有權紀錄不是自己擁有的一般檔案")
             data = stream.read(CLAIM_MAX_BYTES + 1)
     finally:
         os.close(descriptor)

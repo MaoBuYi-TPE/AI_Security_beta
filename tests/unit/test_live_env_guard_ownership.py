@@ -351,7 +351,15 @@ def test_a_record_that_cannot_be_trusted_deletes_nothing(tmp_path: Path, case: s
     assert not directory.exists()
 
 
-@pytest.mark.parametrize("kind", ["not-json", "too-large", "symlink"])
+UNREADABLE = {
+    "not-json": "不是 JSON",
+    "too-large": "過大",
+    "symlink": "無法讀取所有權紀錄",
+    "directory": "不是自己擁有的一般檔案",
+}
+
+
+@pytest.mark.parametrize("kind", sorted(UNREADABLE))
 def test_an_unreadable_record_deletes_nothing(tmp_path: Path, kind: str) -> None:
     directory = _run_dir(tmp_path, None)
     record = directory / env_guard.CLAIM_FILE
@@ -361,6 +369,8 @@ def test_an_unreadable_record_deletes_nothing(tmp_path: Path, kind: str) -> None
         elsewhere.mkdir()
         write_record(elsewhere, OURS, claimed=True)
         record.symlink_to(elsewhere / env_guard.CLAIM_FILE)
+    elif kind == "directory":
+        record.mkdir()
     else:
         size = 1 if kind == "not-json" else env_guard.CLAIM_MAX_BYTES + 1
         record.write_text("{" * size, encoding="utf-8")
@@ -370,6 +380,7 @@ def test_an_unreadable_record_deletes_nothing(tmp_path: Path, kind: str) -> None
 
     assert docker.destructive() == []
     assert _has(report, "無法確認所有權")
+    assert _has(report, UNREADABLE[kind])
 
 
 def test_a_fifo_record_does_not_hang_the_cleanup(tmp_path: Path) -> None:
@@ -423,6 +434,44 @@ def test_a_network_reported_with_another_id_is_not_trusted(tmp_path: Path) -> No
     assert docker.network_ids == _replaced()
 
 
+class OddLabels(CleanupDocker):
+    """network inspect 回報的標記不是 JSON（例如 docker 的輸出格式改變）。"""
+
+    def _network(self, verb: str, reference: str) -> str:
+        reply = super()._network(verb, reference)
+        if verb != "inspect":
+            return reply
+        network, name, _labels = reply.strip().split("|", 2)
+        return f"{network}|{name}|not-json\n"
+
+
+def test_labels_that_are_not_json_are_never_trusted(tmp_path: Path) -> None:
+    docker = OddLabels()
+
+    report = _clean(tmp_path, docker, claimed=True)
+
+    assert docker.destructive() == []
+    assert _has(report, "ID、名稱或標記和所有權紀錄不同")
+
+
+@pytest.mark.parametrize("kind", ["labels-not-json", "inspect-fails"])
+def test_residue_that_cannot_be_attributed_is_a_failure(tmp_path: Path, kind: str) -> None:
+    """沒有取得所有權：剩下的網路無法確認是另一次執行的（標記不是 JSON、inspect 失敗）時算失敗，
+    也不刪除。"""
+    others = dict.fromkeys((SCAN, LAB), OTHER)
+    empty: dict[str, Any] = {"containers": [], "volumes": {}, "compose_networks": ()}
+    if kind == "labels-not-json":
+        docker: CleanupDocker = OddLabels(networks=others, **empty)
+    else:
+        docker = CleanupDocker(networks=others, fail=["network inspect"], **empty)
+
+    report = _clean(tmp_path, docker, claimed=False, networks={})
+
+    assert docker.destructive() == []
+    assert _has(report, "清理之後還有 Live 的資源")
+    assert report.skipped == []
+
+
 # --------------------------------------------------------------------------- 容器的 Network ID
 
 
@@ -472,7 +521,8 @@ def test_a_container_whose_network_ids_cannot_be_confirmed_is_not_removed(
 def test_preflight_refuses_a_stopped_unlabelled_container_on_a_removed_live_network(
     tmp_path: Path,
 ) -> None:
-    """網路已經刪掉，容器仍以名稱引用它（重建同名的網路之後啟動就會接上）：拒絕執行，不自動清理。"""
+    """網路已經刪掉，容器的設定仍以名稱引用它（以名稱 filter 列得到是推論，剩餘風險 24）：拒絕
+    執行，不自動清理。"""
     stale = container("stale", LAB, project="", stopped=True, attached={LAB: nid(LAB, OTHER, 2)})
     docker = CleanupDocker(networks={}, containers=[stale], volumes={}, compose_networks=())
 
@@ -494,3 +544,13 @@ def test_preflight_ignores_stopped_containers_on_development_networks_positive_c
     env_guard.preflight(tmp_path, docker)
 
     assert docker.destructive() == []
+
+
+def test_a_project_label_that_is_not_json_is_another_project(tmp_path: Path) -> None:
+    receiver = cid("receiver")
+    docker = CleanupDocker(facts={receiver: f"{receiver}|not-json|{LAB}={OURS[LAB]} \n"})
+
+    report = _clean(tmp_path, docker)
+
+    assert receiver not in docker.removed()
+    assert _has(report, f"其他 compose 專案的容器 {receiver[:12]}")

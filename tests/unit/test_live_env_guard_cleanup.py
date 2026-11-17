@@ -105,7 +105,11 @@ def test_malformed_and_empty_ids_never_reach_docker_rm(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "facts",
-    [f"{cid('someone-else')}||{LAB} \n", "garbage\n", f"{RECEIVER}|x|{LAB}|extra\n"],
+    [
+        f'{cid("someone-else")}|""|{LAB}={OURS[LAB]} \n',
+        "garbage\n",
+        f"{RECEIVER}|x|{LAB}|extra\n",
+    ],
     ids=["other-id", "garbage", "extra-field"],
 )
 def test_a_container_that_cannot_be_confirmed_is_not_removed(tmp_path: Path, facts: str) -> None:

@@ -28,6 +28,7 @@ from tests.live.env_guard import (
     compare,
     engine,
     preflight,
+    read_claim,
     run_id,
     snapshot,
     write_diagnostic,
@@ -521,9 +522,17 @@ def test_networks_with_the_wrong_settings_are_refused(
 ) -> None:
     [spec] = [spec for spec in LIVE_SPECS if spec.name == network]
     docker = _network_docker(**{network: _network_facts(spec, **changes)})
+    directory = _run_directory(tmp_path)
 
     with pytest.raises(GuardError, match=message):
-        claim_networks(docker, LIVE_SPECS, _run_directory(tmp_path), "engine-1")
+        claim_networks(docker, LIVE_SPECS, directory, "engine-1")
+
+    # 核對失敗的網路已經建立：它的 ID 在紀錄中（清理只刪紀錄中的 ID），但紀錄不是 claimed。
+    claim = read_claim(directory)
+    assert claim is not None
+    assert claim.claimed is False
+    created = LIVE_SPECS[: LIVE_SPECS.index(spec) + 1]
+    assert claim.networks == {item.name: NETWORK_IDS[item.name] for item in created}
 
 
 def test_unparsable_network_facts_are_refused(tmp_path: Path) -> None:
