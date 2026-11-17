@@ -103,8 +103,8 @@ CONTAINER_FORMAT = (
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 # 接在某個網路上的容器（含停止的）：完整的 ID。
 _ON_NETWORK = ("ps", "-aq", "--no-trunc", "--filter")
-# docker 的 index 在原始 JSON 上取不到值時印出的文字（網路的標記沒有值時；這裡只當成「不是這次的
-# 識別」，測試的替身也使用）。
+# docker 的 index 在原始 JSON 上取不到值時印出的文字（未實測：有型別的 map 取不到時印出 ""）；
+# 網路的標記一律嚴格比對，這兩種都當成「不是這次的識別」。測試的替身也使用。
 NO_VALUE = "<no value>"
 DOCKER_TIMEOUT_SECONDS = 120
 # 清理只用這裡的常數（make 的變數可能被覆寫）。
@@ -115,7 +115,7 @@ LIVE_RESOURCE_PREFIXES = (f"{LIVE_PROJECT}_", "secscan_live_")
 DIAGNOSTIC_PREFIX = "secscan-live-cleanup-failed."
 ENGINE_AT_START = "清理開始時：沒有清理、也沒有核對任何 Docker 資源"
 ENGINE_BEFORE_DOWN = (
-    "compose down 之前：已刪除 Live 網路上確認過的容器，之後停止（沒有 down、沒有刪除網路、"
+    "compose down 之前：已嘗試刪除 Live 網路上確認過的容器，之後停止（沒有 down、沒有刪除網路、"
     "沒有核對殘留）"
 )
 EXIT_OK = 0
@@ -421,10 +421,10 @@ def _belongs(report: CleanupReport, container: str, owned: frozenset[str]) -> bo
 
 
 def _label(encoded: str) -> str | None:
-    """JSON 編碼的標記值；沒有標記是 ""（實測，docker 29.4）或 null（沒有 Labels 時的推論）。
+    """JSON 編碼的標記值；沒有標記是 ""（實測，docker 29.4；沒有 Labels 時推論也是 ""）。
 
-    標記的值一定是字串，所以 null 只可能是沒有標記（安全審查第三次的 MEDIUM-1）。其他不是 JSON
-    字串的值是 None：當成其他專案，不刪除。
+    null 只可能在 docker 退回原始 JSON 時出現（推論）；標記的值一定是字串，所以 null 只可能是沒有
+    標記（安全審查第三次的 MEDIUM-1 的保險）。其他不是 JSON 字串的值是 None：當成其他專案，不刪除。
     """
     try:
         value = json.loads(encoded)
@@ -858,8 +858,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"env_guard {args.command}：{exc}\n")
         return EXIT_FAILURE
     except OSError as exc:
-        # 讀檔、建目錄等失敗：只輸出例外的類別（不輸出 traceback 與路徑以外的內容）。
+        # 讀檔、建目錄等失敗：只輸出例外的類別（不輸出 traceback 與路徑以外的內容）。清理途中的
+        # 也留下診斷檔（最後一次的安全審查 INFO-4）。
         sys.stderr.write(f"env_guard {args.command}：無法存取檔案（{type(exc).__name__}）\n")
+        if args.command == "cleanup":
+            reason = f"清理無法存取檔案（{type(exc).__name__}）"
+            _record_interruption(args.base, args.secrets_dir, reason)
         return EXIT_FAILURE
     except KeyboardInterrupt:
         # 安全 INFO-4：清理被中斷（例如第二次 Ctrl-C）也留下診斷檔，下一次的 preflight 拒絕執行。

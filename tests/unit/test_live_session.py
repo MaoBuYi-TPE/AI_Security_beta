@@ -388,3 +388,16 @@ def test_a_symlink_is_refused_whatever_the_trailing_characters(tmp_path: Path, s
     environ.update(SECSCAN_LIVE_SECRETS_DIR=path, SECSCAN_SECRETS_DIR=path)
 
     assert "SECSCAN_LIVE_SECRETS_DIR" in live_session_problems(environ)
+
+
+def test_the_compose_secrets_directory_cannot_reach_secrets_through_dot_dot(
+    tmp_path: Path,
+) -> None:
+    """最後一次的安全審查 INFO-1：`<拋棄式目錄>/x/..`（x 指向 secrets/ 之下）在字面上正規化成拋棄式
+    目錄，作業系統卻解析到 secrets/：SECSCAN_SECRETS_DIR 有 .. 就拒絕。"""
+    environ = _live_environment(tmp_path)
+    (tmp_path / "secrets" / "sub").mkdir(parents=True)
+    (tmp_path / DIRECTORY / "x").symlink_to(tmp_path / "secrets" / "sub")
+    environ["SECSCAN_SECRETS_DIR"] = f"{tmp_path / DIRECTORY}/x/.."
+
+    assert live_session_problems(environ) == ["SECSCAN_SECRETS_DIR"]

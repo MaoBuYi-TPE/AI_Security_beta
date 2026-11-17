@@ -58,12 +58,19 @@ def live_session_problems(environ: Mapping[str, str]) -> list[str]:
     secrets_dir = environ.get("SECSCAN_LIVE_SECRETS_DIR", "")
     if not _disposable_directory(secrets_dir, environ.get("TMPDIR") or DEFAULT_TMPDIR):
         problems.append("SECSCAN_LIVE_SECRETS_DIR")
-    elif os.path.normpath(environ.get("SECSCAN_SECRETS_DIR") or ".") != os.path.normpath(
-        secrets_dir
-    ):
+    elif not _same_directory(environ.get("SECSCAN_SECRETS_DIR") or ".", secrets_dir):
         problems.append("SECSCAN_SECRETS_DIR")
     problems.extend(sorted(name for name in environ if name.upper() in SECRET_ENV_NAMES))
     return problems
+
+
+def _same_directory(compose_dir: str, secrets_dir: str) -> bool:
+    """compose 用的目錄就是拋棄式目錄：沒有 ..（normpath 只在字面上消掉 ..，作業系統依實體路徑
+    解析：`<拋棄式目錄>/<指向 secrets/ 之下的 symlink>/..` 會到 secrets/；最後一次的安全審查
+    INFO-1），而且正規化之後相同。"""
+    return ".." not in Path(compose_dir).parts and os.path.normpath(
+        compose_dir
+    ) == os.path.normpath(secrets_dir)
 
 
 def _disposable_directory(path: str, base: str) -> bool:

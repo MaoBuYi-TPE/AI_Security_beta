@@ -1,5 +1,5 @@
-"""tests/live/env_guard.py 的清理：第二輪重新審查的補強（程式碼 LOW-1；安全 LOW-1、LOW-2 (c)、
-INFO-1、INFO-2、INFO-4）。
+"""tests/live/env_guard.py 的清理：第二輪之後各次重新審查的補強（程式碼 LOW-1；安全 LOW-1、
+LOW-2 (c)、INFO-1、INFO-2、INFO-4；第三次與最後一次的項目）。
 
 替身（CleanupDocker）與 helper 沿用 tests/unit/test_live_env_guard_cleanup.py：不連 daemon。
 """
@@ -31,8 +31,9 @@ from tests.unit.test_live_env_guard_cleanup import (
 
 
 def test_the_fake_refuses_duplicate_ids_positive_control() -> None:
-    """替身在同一次呼叫中重複、或之前已刪除過同一個 ID 時都失敗：上一個測試通過，代表每個容器
-    只刪除一次（不論是否在同一次呼叫中）。"""
+    """替身在同一次呼叫中重複、或之前已刪除過同一個 ID 時都失敗：test_live_env_guard_cleanup.py 的
+    test_an_owned_run_is_removed_completely_with_each_container_once 通過，代表每個容器只刪除
+    一次（不論是否在同一次呼叫中）。"""
     docker = CleanupDocker()
 
     with pytest.raises(GuardError, match="already in progress"):
@@ -147,7 +148,7 @@ def test_the_engine_is_confirmed_again_before_compose_down(tmp_path: Path) -> No
 
     report = _clean(tmp_path, docker)
 
-    assert _has(report, "compose down 之前：已刪除 Live 網路上確認過的容器，之後停止")
+    assert _has(report, "compose down 之前：已嘗試刪除 Live 網路上確認過的容器，之後停止")
     assert not [call for call in docker.calls if "down" in call]
     assert not [call for call in docker.calls if call[:2] == ["network", "rm"]]
     last_info = max(index for index, call in enumerate(docker.calls) if call[:1] == ["info"])
@@ -230,3 +231,28 @@ def test_an_unexpected_error_in_cleanup_leaves_a_diagnostic_and_is_raised(
 
     [diagnostic] = tmp_path.glob(f"{env_guard.DIAGNOSTIC_PREFIX}*")
     assert "未預期的錯誤（TypeError）" in diagnostic.read_text(encoding="utf-8")
+
+
+def test_a_file_error_in_cleanup_leaves_a_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """最後一次的安全審查 INFO-4：清理途中的 OSError 也留下診斷檔，以失敗結束、沒有 traceback。"""
+    directory = _run_dir(tmp_path)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(env_guard, "cleanup", refuse)
+
+    code = env_guard.main(
+        [
+            *("cleanup", "--base", str(tmp_path), "--secrets-dir", str(directory)),
+            *("--engine", ENGINE, "--claimed"),
+        ]
+    )
+
+    err = capsys.readouterr().err
+    [diagnostic] = tmp_path.glob(f"{env_guard.DIAGNOSTIC_PREFIX}*")
+    assert code == env_guard.EXIT_FAILURE
+    assert "Traceback" not in err
+    assert "無法存取檔案（PermissionError）" in diagnostic.read_text(encoding="utf-8")
