@@ -340,8 +340,10 @@ runs-layout-migrate: env secrets docker-check
 # 只處理以 Engine 與所有權紀錄的 Network ID 確認屬於這次執行的資源（名稱與標記是輔助的核對）。取得
 # 所有權之後，先刪掉接在這兩個網路上的容器（測試的接收端、探針與孤兒的掃描容器，否則 volume 還在
 # 使用中刪不掉；-v 一併刪掉它們的匿名 volume），再以 down -v 刪 compose 的服務、volume 與 compose
-# 自己的網路，最後以 ID 刪除這兩個（external 的）網路。無法確認所有權或核對不通過時 fail closed：
-# 保留資源並留下診斷檔，由人工確認之後處理。
+# 自己的網路，最後以 ID 刪除這兩個（external 的）網路；沒有取得所有權時只以 ID 刪除紀錄中自己的
+# 空網路。每一步都可能失敗，不保證每一項都刪除成功。無法確認所有權或核對不通過時 fail closed：不刪除
+# 無法證明屬於這次執行的 Docker 資源，由人工確認之後處理（清理失敗、診斷檔與中斷見下面的「所有權與
+# 清理」）。
 # 會中斷 stack 的測試（停掉 guard、kill runner）放在最後執行。
 # Live 的隔離（T23b-b2；docs/DECISIONS.md §32；計畫 §3.1）：
 # - 不使用開發環境的任何秘密（開發的 .env 與 secrets/ 只在前後的快照中計算 sha256 做比對，不輸出內容）：
@@ -363,8 +365,16 @@ runs-layout-migrate: env secrets docker-check
 #   中斷）由 env_guard cleanup 執行：先確認 Engine 和開始時相同；只處理以紀錄的 Network ID 確認屬於這次
 #   執行的資源（名稱與標記是輔助的核對），容器以完整的 ID 去重、各刪除一次；記錄了所有權卻找不到、或
 #   網路被換掉就 fail closed；down -v 之前核對專案、volume 與網路的名稱；最後以和 preflight 相同的條件
-#   確認沒有殘留（第二輪的 HIGH、安全 LOW-1）。失敗時回報並在 TMPDIR 留下診斷檔（下一次的 preflight
-#   看到它就拒絕執行）。最後比對開發環境的前後快照，有差異就失敗。
+#   確認沒有殘留（第二輪的 HIGH、安全 LOW-1）。每一步都可能失敗，不保證每一項都刪除成功。失敗時（含
+#   fail closed 與殘留）回報，並嘗試在 TMPDIR 寫入診斷檔（寫不進去時只在輸出中回報），下一次的
+#   preflight 在同一個 TMPDIR 中看到它就拒絕執行。trap 安裝之後、清理開始之前，recipe 的 shell 收到
+#   SIGINT、SIGTERM、SIGHUP 時由 trap 執行同樣的清理（shell 等前景的指令結束才執行 trap；trap 安裝
+#   之前，或 shell 被 SIGKILL 終止時不清理）；清理開始時解除 trap，之後 env_guard cleanup 在執行清理的
+#   步驟時收到 SIGINT，停止其餘的步驟並嘗試寫入診斷檔（uv 或 Python 啟動期間收到時不保證），被
+#   SIGTERM、SIGHUP 或 SIGKILL 終止時不寫。沒有診斷檔（含換了 TMPDIR）時，preflight 只能以殘留的
+#   Live 資源或同一個 TMPDIR 中上一次的拋棄式目錄拒絕執行，兩者都不存在時不保證擋下。最後比對開發環境
+#   的前後快照，有差異就失敗。以上是設計與 unit 測試（替身的 docker）的結果：真的 Docker 上的行為尚待
+#   G3 實測；訊號實際的傳遞與 trap 的時間點尚未實測。
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
 	tests/live/test_budget_live.py tests/live/test_revocation_live.py \
 	tests/live/test_guard_failover_live.py
