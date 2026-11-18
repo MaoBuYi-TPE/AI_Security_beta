@@ -336,8 +336,12 @@ runs-layout-migrate: env secrets docker-check
 
 # live 測試：真的 Docker、socket-proxy、egress guard 與 fake 容器；guard 的測試在 live 自己的 lab 網路
 # 上啟動接收端（不啟動 Juice Shop、VAmPI）。需要自己設定 ENABLE_LIVE_LAB_TESTS=1；在獨立的 compose
-# 專案建立、測試、一律拆除：先刪掉接在這兩個網路上的容器（測試的接收端、探針與孤兒的掃描容器，
-# 否則 volume 還在使用中刪不掉；-v 一併刪掉它們的匿名 volume），再刪 compose 的服務、volume 與網路。
+# 專案建立、測試，結束時（含失敗與中斷）清理，但不是一律拆除（G1c，見下面的「所有權與清理」）：
+# 只處理以 Engine 與所有權紀錄的 Network ID 確認屬於這次執行的資源（名稱與標記是輔助的核對）。取得
+# 所有權之後，先刪掉接在這兩個網路上的容器（測試的接收端、探針與孤兒的掃描容器，否則 volume 還在
+# 使用中刪不掉；-v 一併刪掉它們的匿名 volume），再以 down -v 刪 compose 的服務、volume 與 compose
+# 自己的網路，最後以 ID 刪除這兩個（external 的）網路。無法確認所有權或核對不通過時 fail closed：
+# 保留資源並留下診斷檔，由人工確認之後處理。
 # 會中斷 stack 的測試（停掉 guard、kill runner）放在最後執行。
 # Live 的隔離（T23b-b2；docs/DECISIONS.md §32；計畫 §3.1）：
 # - 不使用開發環境的任何秘密（開發的 .env 與 secrets/ 只在前後的快照中計算 sha256 做比對，不輸出內容）：

@@ -118,7 +118,7 @@ M0 的 `bootstrap`、`dev`、`test`、`lint`、`typecheck` 已在 T02 建立；`
 | uv run secscan-admin worker [--once] | M2（T10 已建立） | 對帳過期的解析，再處理 collected 的 run（fake、preflight，T15 加上 zap；`API_CONTRACT.md` §18.2） |
 | make build／make images | M2（T10 已建立） | 建立 secscan 與 egress guard（T11）的映像／以 digest pull 核准的掃描器映像與 socket-proxy（runner 不 pull） |
 | make up／make down | M2（T10 已建立） | 啟動／停止 app stack（db、api、runner、worker、socket-proxy；T11 加上 guard），並建立 internal＋isolated 的 scan_net 與 lab_net；API 只綁 127.0.0.1:`API_PORT`（預設 8000） |
-| make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，一律拆除；T11 起在 live 自己的 lab 網路上啟動接收端與探針（SEC-02～SEC-10、取消與故障），T12 加上預算與 preflight，T13 加上 runner 中斷後的對帳與撤銷 grant；不啟動 Juice Shop、VAmPI |
+| make test-live-runner | M2（T10 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：在獨立的 compose 專案中以真的 Docker 跑 `tests/live/`，結束時（含失敗與中斷）清理，但不是一律拆除（T23b-b2 G1c）：取得所有權（兩個網路都建立並以 Network ID 確認）之後，不論測試成敗都拆除這次的容器、volume 與網路；沒有取得所有權時只刪除紀錄中自己的空網路；無法確認所有權、核對不通過或清理失敗時 fail closed，保留無法確認或刪不掉的資源，並在 `TMPDIR` 留下診斷檔，由人工處理之後下一次才會執行（README 的「live 測試」、`DECISIONS.md` §32.9）；T11 起在 live 自己的 lab 網路上啟動接收端與探針（SEC-02～SEC-10、取消與故障），T12 加上預算與 preflight，T13 加上 runner 中斷後的對帳與撤銷 grant；不啟動 Juice Shop、VAmPI |
 | make test-live-zap | M3（T14 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，以真的 ZAP 掃描 live lab 網路上的小型網站，走完 API → ZAP → worker → 查詢的閉環（T15）；約 13 分鐘 |
 | make test-contract | M3（T15 已建立） | 對固定 fixture 測 Parser 契約與 fixture 的完整性（不連網、不碰 Docker 與 DB） |
 | make test-live-lab | M3（T16 已建立） | 需要 `ENABLE_LIVE_LAB_TESTS=1`：同一個獨立的 live 專案，測試在 live 自己的 lab 網路上逐一啟動 Juice Shop、VAmPI（弱點版、安全版、短 token），以真的 ZAP 經平台掃描（正例／負例、token 失效、工具超時、取消）；量測印在輸出、錄製到 `recordings/lab/`（gitignore）；約 27 分鐘 |

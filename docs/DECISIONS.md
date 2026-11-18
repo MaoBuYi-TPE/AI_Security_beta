@@ -4095,7 +4095,7 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 | 關卡 | 狀態 |
 |---|---|
 | G0、G0b、G0c | 完成並驗收（§32.3） |
-| G1：PR-2 的離線實作、三項審查、開 PR（不合併） | 2026-11-16 授權並執行；三項審查的 HIGH（make 的預覽模式、根 conftest、清理段，§32.9）依使用者的授權修正並重新審查；**PR 等使用者確認 G1 的最終驗收之後才開** |
+| G1：PR-2 的離線實作、三項審查、開 PR（不合併） | 2026-11-16 授權並執行；三項審查的 HIGH（make 的預覽模式、根 conftest、清理段，§32.9）依使用者的授權修正並重新審查；G1c（Network ID 的所有權，§32.9）完成。**使用者 2026-11-18 正式 APPROVE G1**；PR #43 已建立並維持 Draft、**尚未合併**（合併是 G4，另外授權）；同日依授權加上合併前的文件修正（只改文件與 Makefile 的註解）。G2、G3、G5 都尚未執行 |
 | G2：第一次 `make secrets` 與完整的 `make test` | **未授權**；前置條件：使用者確認 FileVault 已開啟，再以唯讀的指令確認 FDE-A1、A2（E7） |
 | G3：PR-2 的 Live（拋棄式的秘密） | 未授權 |
 | G4：審查與合併 | 未授權 |
@@ -4206,7 +4206,7 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 | 1. 建立網路時記錄 Engine、Network ID、名稱與預期的標記 | `networks --engine`：先確認 Engine、所有權紀錄寫得進去才建立；每建立一個就把 `network create` 回傳的完整 ID 原子地寫進紀錄（0600，拒絕既有的紀錄） |
 | 2. 兩個網路都建立並確認身分之後才取得所有權 | 以 ID inspect 核對 ID、名稱、標記、internal、gateway、網段之後才記錄 claimed；recipe 的 `claimed=1` 也在 `networks` 成功之後；清理兩者都要 |
 | 3. 清理前重新驗證 Engine、Network ID、名稱與標記 | 清理開始與 down 之前確認 Engine；以紀錄的 ID inspect，ID、名稱、標記都相同才接受 |
-| 4. 不一致、被換掉、消失、無法確認時 fail closed | 紀錄讀不到（symlink、FIFO、目錄、過大、格式）、識別或 Engine 不同：不刪任何 Docker 資源；取得所有權時紀錄不完整或網路的 ID 對不上：不刪任何 Docker 資源；沒有取得所有權時，對不上的網路不刪，只刪紀錄中以 ID 核對通過、沒有容器的自己的網路。都以失敗回報並留下診斷檔 |
+| 4. 不一致、被換掉、消失、無法確認時 fail closed | 紀錄讀不到（symlink、FIFO、目錄、過大、格式）、識別或 Engine 不同：不刪任何 Docker 資源；取得所有權時紀錄不完整或網路的 ID 對不上：不刪任何 Docker 資源；沒有取得所有權時（`networks` 沒有成功，含部分建立），不刪容器、不 down，對不上的網路不刪，只刪紀錄中以 ID 核對通過、沒有容器的自己的網路。**回報與診斷檔**（2026-11-18 更正：原本寫「都以失敗回報並留下診斷檔」是過度概括）：① 真正的清理錯誤：清理有任何一項失敗（上面因無法確認而不刪的情況：紀錄不可信、識別或 Engine 不同、取得所有權時紀錄不完整或 ID 對不上、對不上的網路；以及網路上還有容器、步驟失敗、無法歸屬的殘留），或清理被 Ctrl-C（SIGINT）中斷、無法存取檔案、發生未預期的錯誤時，以失敗回報並在 `TMPDIR` 留下診斷檔，下一次的 preflight 看到診斷檔就拒絕執行。診斷檔寫不進去時只在輸出中回報；清理中的程序被 SIGTERM、SIGHUP 終止時不留診斷檔；這兩種情況，下一次的 preflight 只能以殘留的 Live 資源或留下的拋棄式目錄擋下（兩者都沒有時不會擋下）。沒有取得所有權時依設計不刪容器、不 down，本身不算失敗；② 部分建立、但自己的網路都以 ID 刪除而且沒有殘留：清理本身成功、不留診斷檔，這次的 Live 仍因 `networks` 失敗而以非零結束（`test_a_partial_claim_removes_only_its_own_network_by_id`）；③ 沒有取得所有權、剩下的 Live 資源屬於另一次執行：只記為沒有處理、不算清理失敗、不留診斷檔（`test_another_instance_is_isolated_without_a_claim[other-run]`；識別碰撞的 `[colliding-run-id]` 無法歸屬，屬於 ①） |
 | 5. 容器逐一驗證完整的 ID、專案標記與接的 Network ID | `CONTAINER_FORMAT` 取「名稱=NetworkID」；名稱與 ID 都必須是這次的網路；ID 空的或格式不對就不刪 |
 | 6. 保留去重、排序、逐一刪除、殘留檢查、錯誤處理與診斷 | 不變（容器以 Network ID 列出之後同樣去重、排序、逐一刪除） |
 | 7. 沒有所有權時不誤刪其他執行個體的同名網路 | 只刪紀錄中的 Network ID（以 ID 刪除）；識別碰撞時不歸屬給別人 |
