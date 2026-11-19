@@ -28,6 +28,7 @@ secscan.cli.secret_files（以 -I 執行，不 import tests 與工作目錄的�
 """
 
 import argparse
+import enum
 import hashlib
 import json
 import os
@@ -153,6 +154,17 @@ ENGINE_BEFORE_DOWN = (
 )
 EXIT_OK = 0
 EXIT_FAILURE = 1
+# G1e：診斷檔只供人工排查（程式不讀回）。--engine 的值只在形狀安全時寫入（避免偽造其他行）。
+ENGINE_ID_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}")
+DIAGNOSTIC_NOTICE = (
+    "本檔只供人工排查：程式不讀取本檔的內容（preflight 只看檔名）。清理的依據只有所有權紀錄，"
+    "以及以 Network ID 對 Docker 的核對；處理殘留之前，以 Docker 的實際狀態重新確認，不以本檔的"
+    "內容作為刪除的依據。"
+)
+DIAGNOSTIC_WARNINGS = (
+    "警告：Live 的 stack 可能仍在執行。",
+    "警告：沒有確認所有權之前，不要執行 compose down -v。",
+)
 
 type Runner = Callable[[Sequence[str]], str]
 _READS_STDIN = frozenset({"compare", "check-config", "check-unresolved", "check-environment"})
@@ -472,13 +484,89 @@ def _parse_claim(data: bytes) -> Claim:
 # --------------------------------------------------------------------------- cleanup
 
 
+class RecordState(enum.Enum):
+    """所有權紀錄的狀態（G1e，只供診斷檔）：由程式判斷出來的，不是紀錄中的值。"""
+
+    NOT_READ = "沒有讀取（沒有拋棄式目錄，或目錄的名稱、位置不正確）"
+    INTERRUPTED = "沒有確認（清理中斷或發生錯誤：紀錄的狀態與網路的核對結果都沒有確認）"
+    ABSENT = "不存在（networks 沒有寫入任何紀錄）"
+    INVALID = "不可信：格式不正確，或不是自己擁有的檔案或目錄"
+    UNREADABLE = "不可信：讀不到"
+    OWNER_MISMATCH = "不可信：識別和這次執行不同"
+    ENGINE_MISMATCH = "不可信：Engine 和這次執行不同"
+    PARTIAL = (
+        "可信（識別與 Engine 和這次執行相同），但沒有記錄 claimed："
+        "只建立了部分網路，或在確認之前停止"
+    )
+    CLAIMED = "可信（識別與 Engine 和這次執行相同，兩個網路都建立並確認：claimed）"
+
+
+TRUSTED_RECORDS = frozenset({RecordState.PARTIAL, RecordState.CLAIMED})
+
+
+class NetworkCheck(enum.Enum):
+    """這次清理以 Network ID 對 Docker 核對紀錄中的網路的結果（G1e，只供診斷檔）。"""
+
+    NOT_CHECKED = "沒有核對（清理開始時 Engine 和開始時不同或無法確認，沒有碰任何 Docker 資源）"
+    VERIFIED = "已核對：這次以 Network ID inspect，ID、名稱與預期的標記都和紀錄相同"
+    MISMATCH = "不符：以 Network ID inspect 得到的 ID、名稱或標記和紀錄不同（外部變更），沒有刪除"
+    UNAVAILABLE = "無法核對：以 Network ID inspect 失敗（網路可能已不存在，或 Docker 回報錯誤）"
+
+
+@dataclass(frozen=True)
+class NetworkFact:
+    name: str
+    network_id: str
+    check: NetworkCheck
+
+
+@dataclass(frozen=True)
+class DiagnosticFacts:
+    """診斷檔的識別事實（G1e）：engine_id 與 claimed 是 recipe 傳入的參數（不是紀錄中的值）；
+    networks 只在紀錄可信時有內容，寫入時也只在可信的狀態下寫出。"""
+
+    engine_id: str
+    claimed: bool
+    record: RecordState
+    engine_confirmed: bool | None = None
+    networks: tuple[NetworkFact, ...] = ()
+
+
 @dataclass
 class CleanupReport:
-    """清理的結果：失敗的步驟（只有步驟與名稱），以及沒有處理的、不屬於這次執行的資源。"""
+    """清理的結果：失敗的步驟（只有步驟與名稱），以及沒有處理的、不屬於這次執行的資源。
+
+    G1e：另外記下診斷檔用的識別事實（紀錄的狀態、清理開始時的 Engine 核對、可信的紀錄中的網路與
+    這次的核對結果）。只供輸出，清理的判斷不讀它們。"""
 
     run: Runner
     failures: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    record: RecordState = RecordState.NOT_READ
+    engine_confirmed: bool | None = None
+    recorded: dict[str, tuple[str, NetworkCheck]] = field(default_factory=dict)
+
+    def trust(self, claim: Claim) -> None:
+        """可信的紀錄：記下它的網路（核對的結果之後由 checked 填入）。"""
+        self.record = RecordState.CLAIMED if claim.claimed else RecordState.PARTIAL
+        self.recorded = {
+            name: (network_id, NetworkCheck.NOT_CHECKED)
+            for name, network_id in claim.networks.items()
+        }
+
+    def checked(self, name: str, result: NetworkCheck) -> None:
+        if name in self.recorded:
+            self.recorded[name] = (self.recorded[name][0], result)
+
+    def facts(self, engine_id: str, claimed: bool) -> DiagnosticFacts:
+        networks = tuple(
+            NetworkFact(name, network_id, check)
+            for name, (network_id, check) in sorted(self.recorded.items())
+        )
+        trusted = self.record in TRUSTED_RECORDS
+        return DiagnosticFacts(
+            engine_id, claimed, self.record, self.engine_confirmed, networks if trusted else ()
+        )
 
     def step(self, description: str, arguments: Sequence[str]) -> str | None:
         """執行一步；失敗時記錄步驟與原因（GuardError 的訊息只有子命令、結束碼與例外的類別）。"""
@@ -509,7 +597,8 @@ def cleanup(
         report.failures.append(f"{exc}：沒有清理任何東西")
         return report
     claim = _load_claim(report, Path(secrets_dir), owner, engine_id)
-    if _same_engine(report, engine_id, ENGINE_AT_START):
+    report.engine_confirmed = _same_engine(report, engine_id, ENGINE_AT_START)
+    if report.engine_confirmed:
         _remove_docker_resources(report, claim, owner=owner, claimed=claimed, engine_id=engine_id)
     _remove_directory(report, Path(secrets_dir))
     if os.path.lexists(secrets_dir):
@@ -536,15 +625,20 @@ def _load_claim(report: CleanupReport, directory: Path, owner: str, engine_id: s
     try:
         claim = read_claim(directory)
     except GuardError as exc:
-        reason = str(exc)
+        reason, state = str(exc), RecordState.INVALID
     except OSError as exc:
-        reason = f"無法讀取所有權紀錄（{type(exc).__name__}）"
+        reason, state = f"無法讀取所有權紀錄（{type(exc).__name__}）", RecordState.UNREADABLE
     else:
         if claim is None:
+            report.record = RecordState.ABSENT
             return Claim(engine_id, owner, {})
         if claim.owner == owner and claim.engine == engine_id:
+            report.trust(claim)
             return claim
         reason = "所有權紀錄的識別或 Engine 和這次執行不同"
+        owner_differs = claim.owner != owner
+        state = RecordState.OWNER_MISMATCH if owner_differs else RecordState.ENGINE_MISMATCH
+    report.record = state
     report.failures.append(f"{reason}：無法確認所有權，沒有刪除任何 Docker 資源")
     return None
 
@@ -589,11 +683,14 @@ def _verified_networks(report: CleanupReport, claim: Claim) -> dict[str, str]:
             ["network", "inspect", "--format", NETWORK_IDENTITY_FORMAT, network_id],
         )
         if facts is None:
+            report.checked(name, NetworkCheck.UNAVAILABLE)
             continue
         found, found_name, labels = [*facts.strip().split("|", 2), "", ""][:3]
         if (found, found_name) == (network_id, name) and _has_labels(labels, claim.owner):
             verified[name] = network_id
+            report.checked(name, NetworkCheck.VERIFIED)
         else:
+            report.checked(name, NetworkCheck.MISMATCH)
             report.failures.append(
                 f"網路 {name}（ID {network_id[:12]}）的 ID、名稱或標記和所有權紀錄不同"
                 "（外部變更）：沒有刪除"
@@ -806,18 +903,69 @@ def _run_label(encoded: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def write_diagnostic(base: Path, secrets_dir: str, failures: Sequence[str]) -> Path:
-    """清理失敗的診斷檔（0600，只有步驟與名稱）：下一次的 preflight 看到它就拒絕執行。"""
+def write_diagnostic(
+    base: Path, secrets_dir: str, failures: Sequence[str], facts: DiagnosticFacts | None = None
+) -> Path:
+    """清理失敗的診斷檔（0600，只有步驟、名稱與不含秘密的識別事實）：下一次的 preflight 看到它就
+    拒絕執行。程式不讀回內容；識別事實只供人工排查（G1e）。"""
     descriptor, name = tempfile.mkstemp(prefix=DIAGNOSTIC_PREFIX, suffix=".txt", dir=base)
     lines = [
         f"時間：{datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}",
         f"拋棄式目錄：{os.path.basename(os.path.normpath(secrets_dir)) or '（沒有）'}",
+        DIAGNOSTIC_NOTICE,
+        *DIAGNOSTIC_WARNINGS,
+        *_fact_lines(facts),
         "失敗的步驟：",
         *(f"- {failure}" for failure in failures),
     ]
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         stream.write("\n".join(lines) + "\n")
     return Path(name)
+
+
+_ENGINE_CHECK = {
+    True: "和開始時相同",
+    False: "不同或無法確認（沒有碰任何 Docker 資源）",
+    None: "沒有進行或沒有確認",
+}
+
+
+def _fact_lines(facts: DiagnosticFacts | None) -> list[str]:
+    """三類分開寫：紀錄中的值（標示未必已經過核對）、這次核對成功的、沒有核對成功的。紀錄不可信時
+    只寫程式判斷的狀態，不寫紀錄中的任何值。"""
+    if facts is None:
+        return ["識別事實：沒有記錄"]
+    shown = facts.engine_id if ENGINE_ID_SHAPE.fullmatch(facts.engine_id) else None
+    lines = [
+        "開始時的 Engine ID（recipe 在開始時確認、以 --engine 傳入；不是從所有權紀錄讀到的）："
+        f"{shown or '（格式不符，不輸出）'}",
+        f"清理開始時的 Engine 核對：{_ENGINE_CHECK[facts.engine_confirmed]}",
+        f"recipe 記錄的所有權（--claimed）：{'有' if facts.claimed else '沒有'}",
+        f"所有權紀錄：{facts.record.value}",
+    ]
+    if facts.record not in TRUSTED_RECORDS:
+        return [*lines, "網路：沒有可信的所有權紀錄，不列出紀錄中的任何值"]
+    verified = [fact for fact in facts.networks if fact.check is NetworkCheck.VERIFIED]
+    others = [fact for fact in facts.networks if fact.check is not NetworkCheck.VERIFIED]
+    lines += [
+        "所有權紀錄中的網路（紀錄中的值，未必已經過 Docker 核對）：",
+        *(
+            [f"- {fact.name}：Network ID {fact.network_id}" for fact in facts.networks]
+            or ["- 沒有"]
+        ),
+    ]
+    if verified:
+        lines += [
+            f"這次以 Network ID 核對成功的網路（{NetworkCheck.VERIFIED.value}；之後的清理步驟可能"
+            "已刪除它，目前的狀態以 Docker 為準）：",
+            *(f"- {fact.name}：Network ID {fact.network_id}" for fact in verified),
+        ]
+    if others:
+        lines += [
+            "沒有核對成功的網路：",
+            *(f"- {fact.name}：{fact.check.value}" for fact in others),
+        ]
+    return lines
 
 
 # --------------------------------------------------------------------------- snapshot
@@ -1104,18 +1252,21 @@ def run_command(args: argparse.Namespace, stdin: str, run: Runner) -> str:
         report = cleanup(
             run, args.base, args.secrets_dir, engine_id=args.engine, claimed=args.claimed
         )
-        return _cleanup_result(report, args.base, args.secrets_dir)
+        facts = report.facts(args.engine, args.claimed)
+        return _cleanup_result(report, args.base, args.secrets_dir, facts)
     else:
         check_images(run, args.app_image, args.guard_image)
     return f"{command} ok"
 
 
-def _cleanup_result(report: CleanupReport, base: Path, secrets_dir: str) -> str:
+def _cleanup_result(
+    report: CleanupReport, base: Path, secrets_dir: str, facts: DiagnosticFacts
+) -> str:
     skipped = f"；沒有處理（不屬於這次執行）：{'、'.join(report.skipped)}" if report.skipped else ""
     if not report.failures:
         return f"cleanup ok{skipped}"
     try:
-        where = f"診斷檔：{write_diagnostic(base, secrets_dir, report.failures)}"
+        where = f"診斷檔：{write_diagnostic(base, secrets_dir, report.failures, facts)}"
     except OSError as exc:
         where = f"無法寫入診斷檔（{exc.strerror or type(exc).__name__}）"
     raise GuardError(
@@ -1137,29 +1288,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 也留下診斷檔（最後一次的安全審查 INFO-4）。
         sys.stderr.write(f"env_guard {args.command}：無法存取檔案（{type(exc).__name__}）\n")
         if args.command == "cleanup":
-            reason = f"清理無法存取檔案（{type(exc).__name__}）"
-            _record_interruption(args.base, args.secrets_dir, reason)
+            _record_interruption(args, f"清理無法存取檔案（{type(exc).__name__}）")
         return EXIT_FAILURE
     except KeyboardInterrupt:
         # 安全 INFO-4：清理被中斷（例如第二次 Ctrl-C）也留下診斷檔，下一次的 preflight 拒絕執行。
         sys.stderr.write(f"env_guard {args.command}：被中斷\n")
         if args.command == "cleanup":
-            _record_interruption(args.base, args.secrets_dir, "清理被中斷")
+            _record_interruption(args, "清理被中斷")
         return EXIT_FAILURE
     except Exception as exc:
         # 安全審查第三次的 INFO-2：程式本身的錯誤照樣以 traceback 結束（重新 raise），但清理先留下
         # 診斷檔（不吞掉錯誤：BLE 只允許重新 raise 的 handler）。
         if args.command == "cleanup":
-            reason = f"清理發生未預期的錯誤（{type(exc).__name__}）"
-            _record_interruption(args.base, args.secrets_dir, reason)
+            _record_interruption(args, f"清理發生未預期的錯誤（{type(exc).__name__}）")
         raise
     sys.stdout.write(f"{output}\n")
     return EXIT_OK
 
 
-def _record_interruption(base: Path, secrets_dir: str, reason: str) -> None:
+def _record_interruption(args: argparse.Namespace, reason: str) -> None:
+    """中斷的路徑只寫參數中已知的事實（Engine ID、claimed）與「沒有確認」（G1e）。"""
+    base, secrets_dir = args.base, args.secrets_dir
+    facts = DiagnosticFacts(args.engine, args.claimed, RecordState.INTERRUPTED)
     try:
-        where = write_diagnostic(base, secrets_dir, [f"{reason}：沒有完成，殘留由人工確認"])
+        where = write_diagnostic(base, secrets_dir, [f"{reason}：沒有完成，殘留由人工確認"], facts)
     except OSError as exc:
         sys.stderr.write(f"無法寫入診斷檔（{type(exc).__name__}）\n")
         return
