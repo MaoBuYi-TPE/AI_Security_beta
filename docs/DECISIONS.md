@@ -4103,6 +4103,7 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 |---|---|
 | G0、G0b、G0c | 完成並驗收（§32.3） |
 | G1：PR-2 的離線實作、三項審查、開 PR（不合併） | 2026-11-16 授權並執行；三項審查的 HIGH（make 的預覽模式、根 conftest、清理段，§32.9）依使用者的授權修正並重新審查；G1c（Network ID 的所有權，§32.9）完成。**使用者 2026-11-18 正式 APPROVE G1**；PR #43 已建立並維持 Draft、**尚未合併**（合併是 G4，另外授權）；同日依授權加上合併前的文件修正（只改文件與 Makefile 的註解）。G2、G3、G5 都尚未執行 |
+| G1d：合併前的限定修正（§32.10） | 2026-11-19 授權（只限四項與直接相關的測試、文件；本機 commit，推送另外授權）；**尚未驗收** |
 | G2：第一次 `make secrets` 與完整的 `make test` | **未授權**；前置條件：使用者確認 FileVault 已開啟，再以唯讀的指令確認 FDE-A1、A2（E7） |
 | G3：PR-2 的 Live（拋棄式的秘密） | 未授權 |
 | G4：審查與合併 | 未授權 |
@@ -4247,3 +4248,18 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 | 安全 LOW-1：剩餘風險 25 開頭的總述「紀錄不完整時不刪任何 Docker 資源」只對取得所有權的路徑成立（審查者以假的 docker 確認：沒有取得所有權、紀錄只有一個網路時，刪除紀錄中以 ID 核對通過的自己的網路） | 修正文件 |
 | 安全 INFO-1：`read_claim` 的 `os.fstat(handle)` 失敗時 handle 不會關閉 | 不改：對剛開啟的 fd 做 fstat 實務上不會失敗；失敗時是 OSError，仍轉成「無法確認」而不刪任何 Docker 資源；env_guard 是短命的 CLI 程序 |
 | 安全 INFO-2：「被刪的仍是 Live 的殘留」是歸類，不是實測 | 修正文件：寫明被刪的範圍（沒有專案標記或屬於 secscan-live、只接這次網路的容器）；G3 分開記錄只建立的容器 |
+
+### 32.10 G1d：合併前的限定修正（2026-11-19，使用者授權）
+
+PR #43 在 HEAD `1e56400` 的遠端獨立審查（code、security 三項；opus，唯讀）沒有 CRITICAL、HIGH。使用者接受審查的結果，授權只修正下列四項（安全控制空轉、錯誤回報、測試假成功），不做大規模重構；800 行的拆檔（剩餘風險 22）、`.env` 的插值規則、Engine context 的固定方式、PostgreSQL 初始化的架構、b5 都不在範圍。
+
+| 項目 | 修正 |
+|---|---|
+| A：`check-environment` 在 compose 失敗、輸出是空的時候放行（程式碼審查 LOW-1） | recipe 的三個 `compose config` 先把輸出存進 shell 變數（不寫檔）、以 `\|\| exit 1` 確認結束碼，之後才交給 env_guard（shell 的管線只看最後一個指令的結束碼。以替身的 docker 實測修正之前的 recipe：compose 輸出完整的設定卻以非零結束時，檢查照樣通過、stack 照樣啟動；compose 沒有輸出時，`check-environment` 收到空的輸入而通過，整個 Live 以 0 結束）。`check_environment` 另外拒絕沒有輸出、不是 `NAME=VALUE` 的行、缺少 recipe 一定會設定的變數（`REQUIRED_ENVIRONMENT`）；錯誤訊息只有名稱與行數 |
+| B：`sync-secret-files` 中途失敗時不回報已更新的檔案；rename 之後的 fsync 失敗時仍說「原本的檔案沒有改變」（安全 A1 的 LOW-1、LOW-4，程式碼審查 LOW-2） | 一個檔案失敗就停止，每個檔案回報：完成的動作、失敗（rename 之前失敗：原本的檔案沒有改變）、狀態不明（rename 之後目錄的 fsync 失敗，或 rename 回報 EIO：POSIX 只保證 EIO 以外的失敗不影響目標）、沒有處理。摘要只在確實沒有任何檔案改變時說「沒有更新任何檔案」。db 的三個密碼檔更新或狀態不明時（含中途失敗）印出角色密碼的警告。刪不掉的暫存檔不蓋掉原本的錯誤；未預期的 OSError 轉成只有名稱與原因的訊息。仍是每個檔案各自的原子替換，七個檔案之間不是交易 |
+| C：pre-commit 的 `secrets/` 規則分大小寫（安全 A1 的 LOW-3） | `forbid-secret-files` 與 `forbid-env-files` 的 `files` 加上 `(?i)`（macOS 預設的檔案系統不分大小寫：`git add -f SECRETS/…`、`.ENV` 指的是同一個檔案）。允許的仍只有小寫的 `.env.example`（`exclude` 分大小寫，變形一律擋下）；repo 中已追蹤的檔案沒有被新的規則擋下 |
+| D：同一次 make 指定多個 Live 目標時，只有第一個的測試執行，其餘以 0 結束（安全審查 B 的 LOW-1） | Makefile 在讀檔時數 `MAKECMDGOALS` 中的 Live 目標（`LIVE_GOALS`），兩個以上（含同一個指定兩次）就以 `$(error)` 停止，不執行任何一步；`MAKECMDGOALS` 被命令列或環境變數蓋掉時（GNU make 3.81 實測會蓋掉自己的值）也停止。`bench` 的遞迴（子 make 只有一個目標）不受影響 |
+
+- 測試：每一項都先寫會失敗的測試（A 與 D 以 repo 的 Makefile 和替身的 docker／uv 實際執行 recipe；B 以故障注入；C 在暫存的 git repo 以 `git add -f` 放進 staging 之後執行真的 pre-commit，`core.ignorecase` 是 true、false 各一次）。新的測試放在新的模組（`tests/unit/test_live_make_guards.py`、`tests/unit/test_secret_files_sync_failures.py`），沒有讓超過 800 行的檔案再變大（只有替身 docker 的情境多 3 行）；`tests/live/env_guard.py` 本身多了約 40 行（剩餘風險 22）。
+- 只做了不啟動、不修改 Docker、DB 與秘密檔的驗證（unit、lint、typecheck）；Live 的 recipe 在真的 Docker 上的行為仍待 G3，完整的 `make test` 仍待 G2。
+- **fail closed 之後的殘留**（安全審查 B 的 LOW-3）只做了設計分析：所有權紀錄與七個拋棄式秘密都在拋棄式目錄，清理一律刪除它，診斷檔沒有 Engine ID 與完整的 Network ID。提案是只把不含秘密的識別事實寫進診斷檔（程式不讀回），不保留紀錄檔、不改刪除與核對的範圍；需要修改 Cleanup，等使用者決定。
