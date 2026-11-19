@@ -1659,7 +1659,8 @@
         - [ ] PR-2（`feat/t23b-b2-compose-secrets`）：compose secrets 與 `*_FILE`、SCRAM、`safe_summary`、db 初始化的強化（初始化未完成標記、entrypoint wrapper、log 的抑制）、Live 的完整隔離、pre-commit。
           - [x] G0、G0b、G0c 的 Docker 驗證（2026-11-15、16；使用者驗收，`DECISIONS.md` §32.3）
           - [x] G1 離線實作、三項審查、開 PR（2026-11-16 授權並執行；使用者 2026-11-18 APPROVE；PR #43 維持 Draft、不合併，`DECISIONS.md` §32.8）
-          - [ ] G1d 合併前的限定修正（2026-11-19 授權：check-environment 的 fail closed、sync-secret-files 的部分寫入回報、pre-commit 的大小寫、一次 make 只能一個 Live 目標；本機 commit，尚未推送與驗收，`DECISIONS.md` §32.10）
+          - [x] G1d 合併前的限定修正（2026-11-19 授權：check-environment 的 fail closed、sync-secret-files 的部分寫入回報、pre-commit 的大小寫、一次 make 只能一個 Live 目標；使用者 2026-11-19 APPROVE，同日以一般 push 更新 PR #43、維持 Draft，`DECISIONS.md` §32.10）
+          - [ ] G1e 診斷檔的識別事實與 LOW-3（2026-11-19 授權：清理失敗的診斷檔加上不含秘密的識別事實、db 的密碼檔新增時也警告；不改清理的判斷；本機 commit，尚未推送與驗收，`DECISIONS.md` §32.11）
           - [ ] G2 使用者確認 FileVault 之後：第一次 `make secrets`、完整的 `make test`（未授權）
           - [ ] G3 Live：`test-live-secrets`、`test-live-db-roles`、`test-live-runner`、`test-live-fixture-findings`（未授權）
           - [ ] G4 審查與合併（未授權）

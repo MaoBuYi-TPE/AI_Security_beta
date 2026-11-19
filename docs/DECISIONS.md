@@ -4104,7 +4104,8 @@ ROLE-01 至 08 的內容見 `SECURITY_AND_TESTING.md` §4.3。既有的整合測
 |---|---|
 | G0、G0b、G0c | 完成並驗收（§32.3） |
 | G1：PR-2 的離線實作、三項審查、開 PR（不合併） | 2026-11-16 授權並執行；三項審查的 HIGH（make 的預覽模式、根 conftest、清理段，§32.9）依使用者的授權修正並重新審查；G1c（Network ID 的所有權，§32.9）完成。**使用者 2026-11-18 正式 APPROVE G1**；PR #43 已建立並維持 Draft、**尚未合併**（合併是 G4，另外授權）；同日依授權加上合併前的文件修正（只改文件與 Makefile 的註解）。G2、G3、G5 都尚未執行 |
-| G1d：合併前的限定修正（§32.10） | 2026-11-19 授權（只限四項與直接相關的測試、文件；本機 commit，推送另外授權）；**尚未驗收** |
+| G1d：合併前的限定修正（§32.10） | 2026-11-19 授權並執行（只限四項與直接相關的測試、文件）；**使用者 2026-11-19 APPROVE**；同日依授權以一般 push 更新 PR #43（`1e56400..6c56f65`，維持 Draft、尚未合併） |
+| G1e：診斷檔的識別事實與 LOW-3（§32.11） | G1d push 之後，2026-11-19 授權（只限 LOW-3、診斷檔的識別事實與直接相關的測試、文件；本機 commit，推送另外授權）；**尚未驗收** |
 | G2：第一次 `make secrets` 與完整的 `make test` | **未授權**；前置條件：使用者確認 FileVault 已開啟，再以唯讀的指令確認 FDE-A1、A2（E7） |
 | G3：PR-2 的 Live（拋棄式的秘密） | 未授權 |
 | G4：審查與合併 | 未授權 |
@@ -4257,13 +4258,13 @@ PR #43 在 HEAD `1e56400` 的遠端獨立審查（code、security 三項；opus�
 | 項目 | 修正 |
 |---|---|
 | A：`check-environment` 在 compose 失敗、輸出是空的時候放行（程式碼審查 LOW-1） | recipe 的三個 `compose config` 先把輸出存進 shell 變數（不寫檔）、以 `\|\| exit 1` 確認結束碼，之後才交給 env_guard（shell 的管線只看最後一個指令的結束碼。修正之前先寫的測試以替身的 docker 執行原本的 recipe，觀察到：compose 輸出完整的設定卻以非零結束時，檢查照樣通過、stack 照樣啟動；compose 沒有輸出時，`check-environment` 收到空的輸入而通過，整個 Live 以 0 結束。這次執行的輸出沒有另存）。`check_environment` 另外拒絕沒有輸出、不是 `NAME=VALUE` 的行、缺少 recipe 一定會設定的變數（`REQUIRED_ENVIRONMENT`）；錯誤訊息只有名稱與行數 |
-| B：`sync-secret-files` 中途失敗時不回報已更新的檔案；rename 之後的 fsync 失敗時仍說「原本的檔案沒有改變」（安全 A1 的 LOW-1、LOW-4，程式碼審查 LOW-2） | 一個檔案失敗就停止，每個檔案回報：完成的動作、失敗（rename 之前失敗：原本的檔案沒有改變）、狀態不明（rename 之後目錄的 fsync 失敗，或 rename 回報 EIO：POSIX 的 rename 在 DESCRIPTION 寫明 EIO 以外的失敗不影響 new；網路檔案系統等不符合規格的實作不在保證之內，`secrets/` 在本機的檔案系統）、沒有處理。摘要只在確實沒有任何檔案改變時說「沒有更新任何檔案」。db 的三個密碼檔更新或狀態不明時（含中途失敗）印出角色密碼的警告。刪不掉的暫存檔不蓋掉原本的錯誤；未預期的 OSError 轉成只有名稱與原因的訊息。仍是每個檔案各自的原子替換，七個檔案之間不是交易 |
+| B：`sync-secret-files` 中途失敗時不回報已更新的檔案；rename 之後的 fsync 失敗時仍說「原本的檔案沒有改變」（安全 A1 的 LOW-1、LOW-4，程式碼審查 LOW-2） | 一個檔案失敗就停止，每個檔案回報：完成的動作、失敗（rename 之前失敗：原本的檔案沒有改變）、狀態不明（rename 之後目錄的 fsync 失敗，或 rename 回報 EIO：POSIX 的 rename 在 DESCRIPTION 寫明 EIO 以外的失敗不影響 new；網路檔案系統等不符合規格的實作不在保證之內，`secrets/` 在本機的檔案系統）、沒有處理。摘要只在確實沒有任何檔案改變時說「沒有更新任何檔案」。db 的三個密碼檔更新或狀態不明時（含中途失敗）印出角色密碼的警告（G1e 起新增也印出，§32.11）。刪不掉的暫存檔不蓋掉原本的錯誤；未預期的 OSError 轉成只有名稱與原因的訊息。仍是每個檔案各自的原子替換，七個檔案之間不是交易 |
 | C：pre-commit 的 `secrets/` 規則分大小寫（安全 A1 的 LOW-3） | `forbid-secret-files` 與 `forbid-env-files` 的 `files` 加上 `(?i)`（macOS 預設的檔案系統不分大小寫：`git add -f SECRETS/…`、`.ENV` 指的是同一個檔案）。允許的仍只有小寫的 `.env.example`（`exclude` 分大小寫，變形一律擋下）；repo 中已追蹤的檔案沒有被新的規則擋下 |
 | D：同一次 make 指定多個 Live 目標時，只有第一個的測試執行，其餘以 0 結束（安全審查 B 的 LOW-1） | Makefile 在讀檔時數 `MAKECMDGOALS` 中的 Live 目標（`LIVE_GOALS`），兩個以上（含同一個指定兩次）就以 `$(error)` 停止，不執行任何一步；`MAKECMDGOALS` 被命令列或環境變數蓋掉時（GNU make 3.81 實測會蓋掉自己的值）也停止。`bench` 的遞迴（子 make 只有一個目標）不受影響。空轉檢查時以替身確認修正之前的行為：`make test-live-zap test-live-db-roles` 以 0 結束，只執行了 `test_zap_live.py`。限制：以多個 Live 目標為前置的聚合目標只算一個目標，擋不到（Makefile 的註解要求不要建立） |
 
 - 測試：每一項都先寫測試，確認它在修正之前失敗（測試和修正在同一個 commit；這些執行的輸出沒有另存），再以空轉檢查（把修正改回去，22 項）確認同一組測試失敗。A 與 D 以 repo 的 Makefile 和替身的 docker／uv 實際執行 recipe；B 以故障注入；C 在暫存的 git repo 以 `git add -f` 放進 staging 之後執行真的 pre-commit，`core.ignorecase` 是 true、false 各一次。新的測試放在新的模組（`tests/unit/test_live_make_guards.py`、`tests/unit/test_secret_files_sync_failures.py`）；已超過 800 行的兩個檔案仍然增加：`tests/live/env_guard.py` 從 1129 行變成 1170 行（A 的檢查與說明）、`tests/unit/test_live_isolation_make.py` 從 1219 行變成 1222 行（替身的情境）（以 `1e56400` 為基準；剩餘風險 22）。空轉檢查的紀錄在本機的 G1d 證據目錄（gitignore，沒有提交）。
 - 只做了不啟動、不修改 Docker、DB 與秘密檔的驗證（unit、lint、typecheck）；Live 的 recipe 在真的 Docker 上的行為仍待 G3，完整的 `make test` 仍待 G2。
-- **fail closed 之後的殘留**（安全審查 B 的 LOW-3）只做了設計分析：所有權紀錄與七個拋棄式秘密都在拋棄式目錄，清理一律刪除它，診斷檔沒有 Engine ID 與完整的 Network ID。提案是只把不含秘密的識別事實寫進診斷檔（程式不讀回），不保留紀錄檔、不改刪除與核對的範圍；需要修改 Cleanup，等使用者決定。
+- **fail closed 之後的殘留**（安全審查 B 的 LOW-3）只做了設計分析：所有權紀錄與七個拋棄式秘密都在拋棄式目錄，清理一律刪除它，診斷檔沒有 Engine ID 與完整的 Network ID。提案是只把不含秘密的識別事實寫進診斷檔（程式不讀回），不保留紀錄檔、不改刪除與核對的範圍；需要修改 Cleanup，等使用者決定。（2026-11-19 使用者授權，以 G1e 處置：§32.11。）
 
 **G1d 的審查**（2026-11-19；範圍 `1e56400..8630607`，code、security 各一項，opus、唯讀；中途因 API 的用量上限中斷，重置之後接續完成）：兩項都是 APPROVE WITH COMMENTS，沒有 CRITICAL、HIGH、MEDIUM。
 
@@ -4276,7 +4277,7 @@ PR #43 在 HEAD `1e56400` 的遠端獨立審查（code、security 三項；opus�
 | 程式碼 LOW-5、LOW-6：測試名稱說得比驗證的多；pre-commit 測試的模組說明過時 | 修正 |
 | 安全 LOW-1：`check_config`、`check_unresolved` 接受結構不完整的 JSON（`check_unresolved` 接受 `{}`，`check_config` 接受只有專案名稱的輸入），env_guard 的說明寫成三個檢查都拒絕缺少內容的輸入 | 修正說明（只有 check-environment 檢查缺少必要的內容）。結構的檢查不加：compose 的結束碼已由 recipe 先確認，A 的授權只限環境資訊；列為剩餘風險 27（§32.6） |
 | 安全 LOW-2：「只有 EIO 不確定」引用 POSIX 的理由不正確 | 不改判定：POSIX 的 rename 在 DESCRIPTION 寫明「If the rename() function fails for any reason other than [EIO], any file named by new shall be unaffected」（已核對 Open Group 的規格；RETURN VALUE 另寫兩個檔案都不改變）。審查指出的網路檔案系統（重送之後才回報失敗）屬於不符合規格的實作；`secrets/` 在本機的檔案系統。註解與本節改成寫明這個前提 |
-| 安全 LOW-3：DB 的密碼檔是「新增」時不印角色密碼的警告（例如刪掉 `secrets/` 之後又改了 `.env`） | 不改（G1d 之前就是這樣，授權只要求「已更新或狀態不明」）；待使用者決定 |
+| 安全 LOW-3：DB 的密碼檔是「新增」時不印角色密碼的警告（例如刪掉 `secrets/` 之後又改了 `.env`） | 不改（G1d 之前就是這樣，授權只要求「已更新或狀態不明」）；待使用者決定。2026-11-19 使用者授權，以 G1e 處置（§32.11） |
 | 安全 LOW-4：大小寫以外的變形（`.env-backup`、`.env~`、`secrets.bak/`）既不被 `.gitignore` 忽略，也不被 pre-commit 擋下 | 不改（既有，不在 C 的範圍）；待使用者決定是否另外立項 |
 | 安全 INFO-1、INFO-3、INFO-5–7，程式碼 INFO-2、INFO-3 | 記錄：check-environment 不核對值與重複的名稱（縱深防禦）；Ctrl-C 中斷 sync 時不列出已更新的檔案；環境中有 `MAKECMDGOALS` 時所有目標都被拒絕；pre-commit 擋不到 `--no-verify`、`SKIP=`，沒有 CI 的第二道檢查；`Hostile.leaked` 只比對完整的 canary；lab-up、lab-verify 有同類的管線（不是 Live）；超過 800 行與測試模組之間的 import（剩餘風險 22） |
 | 安全 INFO-2：check-environment 的嚴格解析還沒有對照真的 Docker | 替身把 compose config 交給真的 docker compose（只在用戶端解析），最終的離線回歸通過；真的 Docker 上的 Live 在 G3 |
@@ -4290,3 +4291,27 @@ PR #43 在 HEAD `1e56400` 的遠端獨立審查（code、security 三項；opus�
 | INFO-1、INFO-3、INFO-5：env_guard 的說明（`check-config` 另外要求專案名稱）、行數改用絕對值、`_leftover` 的說明、新的 EIO 測試加上洩漏的檢查 | 修正 |
 | INFO-2：空轉檢查的紀錄沒有指出位置 | 修正：寫明在本機的 G1d 證據目錄（gitignore） |
 | INFO-4：rename 回報 EIO 以外的錯誤、而暫存檔已經不在時，可以改回報狀態不明（縱深防禦） | 不改：設計選擇；`--dir` 預設是 repo 的 `secrets/`（本機的檔案系統），記錄 |
+
+### 32.11 G1e：診斷檔的識別事實與 LOW-3（2026-11-19，使用者授權）
+
+G1d push 之後，使用者授權只處理 §32.10 留下的兩項：fail closed 之後的殘留（安全審查 B 的 LOW-3 的提案）與 DB 密碼檔「新增」時的警告（G1d 安全審查的 LOW-3）。範圍只限這兩項與直接相關的測試、文件；**不改** cleanup、preflight、所有權的核對、fail closed 的條件與刪除的範圍，不加任何 Docker 操作。
+
+**診斷檔的識別事實**（`tests/live/env_guard.py`）：
+- **只供人工排查**：程式不讀回診斷檔的內容（preflight 只看檔名，以靜態測試確認）；清理的依據仍只有所有權紀錄與以 Network ID 對 Docker 的核對。診斷檔開頭的固定說明寫明這一點，並有兩行警告：Live 的 stack 可能仍在執行；沒有確認所有權之前，不要執行 `compose down -v`。處理殘留之前，以 Docker 的實際狀態重新確認。
+- **新增的事實**：開始時的 Engine ID（recipe 以 `--engine` 傳入的值，不是從所有權紀錄讀到的；只在形狀安全時寫入，避免偽造其他行）、清理開始時的 Engine 核對、recipe 記錄的所有權（`--claimed`）、所有權紀錄的狀態（由程式判斷：不存在、格式不正確、讀不到、識別不同、Engine 不同、可信但沒有 claimed、可信）。
+- **網路分三類，不混用**（所有權紀錄可信，不等於 Docker 上的網路已核對成功）：
+  1. 所有權紀錄中的值：只在紀錄可信時列出，一律標示「紀錄中的值，未必已經過 Docker 核對」；
+  2. 這次以 Network ID inspect 核對成功的網路（ID、名稱與預期的標記都和紀錄相同）：才標示「已核對」，並寫明之後的清理步驟可能已刪除它；
+  3. 沒有核對成功的網路：不符（外部變更，沒有刪除）、無法核對（inspect 失敗：可能已不存在）、沒有核對（Engine 和開始時不同，沒有碰任何 Docker 資源）。
+- **紀錄不可信時**只寫程式判斷的狀態，不寫紀錄中的任何值（Network ID、網路的名稱、識別、Engine）；寫入時也再檢查一次狀態（縱深防禦）。
+- **中斷的路徑**（KeyboardInterrupt、OSError、未預期的錯誤）只寫參數中已知的事實（Engine ID、claimed）與「沒有確認」。
+- **蒐集的方式**：`CleanupReport` 多三個只供輸出的欄位，判斷的程式只多出記下結果的呼叫，條件與分支不變。不變的部分：0600（mkstemp）、檔名與位置、拋棄式目錄只寫名稱、拋棄式的秘密與完整的暫存目錄路徑都不寫入。
+
+**LOW-3**（`src/secscan/cli/secret_files.py`）：`DB_ROLE_CHANGES` 加上新增。db 已經初始化時，secrets/ 中 db 的三個密碼檔不論是新增（例如刪掉 `secrets/` 之後又改了 `.env`）還是更新，都不會改變 DB 中的角色密碼；警告改成新增與更新都適用，請使用者確認兩者一致。不輸出值、不改 DB。只修正權限、不變、rename 之前就失敗的不警告。G2 第一次執行 `make secrets` 時三個檔案都是新增，會印出這個警告（預期的行為）。
+
+**測試**：
+- 先寫測試並確認失敗（LOW-3：6 個失敗；診斷檔：新的 API 不存在，收集時失敗），再實作；執行的輸出存在本機的 G1e 證據目錄（gitignore，沒有提交）。
+- 新的模組：`tests/unit/test_secret_files_role_warning.py`（第一次 sync、三個密碼檔各自新增、不是 db 的檔案、rename 之前失敗、EIO、之後的檔案失敗；輸出不含 canary）、`tests/unit/test_live_env_guard_diagnostic.py`（可信且核對通過、只有一個核對通過、可信但沒有核對成功的五種情境、不可信的六種紀錄以 canary 的 Network ID 確認不寫出、不存在與沒有讀取、中斷的三種路徑、write 失敗時判斷與刪除不變、形狀不安全的 Engine ID、靜態確認只有 `write_diagnostic` 與 preflight 參照診斷檔）。既有的 cleanup、preflight 測試一行都沒有改。
+- 空轉檢查 21 項都有測試失敗（拿掉新增、拿掉狀態不明、失敗或只修正權限也警告、不可信的紀錄輸出網路（三層一起拿掉，以及只拿掉寫入時的檢查）、沒有核對成功的標成已核對（四種）、0644、寫入拋棄式的秘密、preflight 讀取內容、拿掉 Engine 的比對、拿掉警告、中斷的路徑不寫事實、完整的暫存目錄路徑、Engine ID 不檢查形狀、狀態對調、`--claimed` 一律寫有、不記下 Engine 的核對）；紀錄在本機的 G1e 證據目錄。
+- 只做了不啟動、不修改 Docker、DB 與秘密檔的驗證；真的 Docker 上的行為在 G3 觀察：G3 如果留下診斷檔，以它核對這裡的格式。
+- **檔案的大小**：`tests/live/env_guard.py` 從 1170 行變成 1323 行（狀態、格式與說明；它以 `python -I` 執行，不能 import 其他測試模組；剩餘風險 22，拆檔依使用者的決定暫緩）。

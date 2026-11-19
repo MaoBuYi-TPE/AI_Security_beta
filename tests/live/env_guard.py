@@ -21,7 +21,8 @@ secscan.cli.secret_files（以 -I 執行，不 import tests 與工作目錄的�
   紀錄（G1c）。
 - cleanup --base DIR --secrets-dir DIR --engine ID [--claimed]：只清理以所有權紀錄的 Network ID
   確認屬於這次執行的資源，最後以和 preflight 相同的條件確認沒有殘留。有任何一項失敗（含無法確認
-  所有權而沒有刪除）時以失敗回報，並嘗試在 --base 寫入診斷檔（寫不進去時只在 stderr 回報）；
+  所有權而沒有刪除）時以失敗回報，並嘗試在 --base 寫入診斷檔（寫不進去時只在 stderr 回報；
+  G1e：另外寫入不含秘密的識別事實，只供人工排查，程式不讀回，清理的判斷不變）；
   run_command 執行期間的 KeyboardInterrupt（SIGINT）、OSError 與未預期的錯誤也嘗試寫入（uv、
   Python 啟動與參數解析期間，或訊號只送到 uv 時不保證）。SIGTERM、SIGHUP 沒有處理，SIGKILL
   無法攔截：被它們終止時不寫入（§32.2 的「中斷」）。
