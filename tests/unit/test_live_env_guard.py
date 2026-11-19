@@ -354,11 +354,19 @@ def test_unresolved_config_without_env_file_passes_and_with_it_is_refused() -> N
 
 # --------------------------------------------------------------------------- check-environment
 
-ALLOWED = ["PATH", "HOME", "SECSCAN_SECRETS_DIR"]
+REQUIRED = sorted(env_guard.REQUIRED_ENVIRONMENT)
+ALLOWED = sorted({"PATH", "HOME", "LC_ALL", "SECSCAN_SECRETS_DIR", *REQUIRED})
+
+
+def _listing(*lines: str, without: str = "") -> str:
+    """config --environment 的形式：recipe 一定會設定的變數（without 以外），加上 lines。"""
+    required = [f"{name}=x" for name in REQUIRED if name != without]
+    return "".join(f"{line}\n" for line in [*required, *lines])
 
 
 def test_environment_with_only_allowed_names_passes() -> None:
-    check_environment("PATH=/bin\nHOME=/h\nCOMPOSE_PROJECT_NAME=secscan-live\nPWD=/x\n", ALLOWED)
+    # 值可以是空的（LC_ALL=）。
+    check_environment(_listing("COMPOSE_PROJECT_NAME=secscan-live", "PWD=/x", "LC_ALL="), ALLOWED)
 
 
 @pytest.mark.parametrize(
@@ -372,16 +380,51 @@ def test_environment_with_only_allowed_names_passes() -> None:
     ],
 )
 def test_environment_outside_the_allowlist_is_refused(line: str) -> None:
-    with pytest.raises(GuardError):
-        check_environment(f"PATH=/bin\n{line}\n", ALLOWED)
+    # 必要的變數都在：拒絕的原因只能是這一行（不是因為輸出不完整）。
+    with pytest.raises(GuardError, match=r"不允許的變數|不在允許清單"):
+        check_environment(_listing(line), ALLOWED)
 
 
 def test_environment_errors_show_names_but_never_values() -> None:
     with pytest.raises(GuardError) as caught:
-        check_environment("DB_PASSWORD=secret-value-0001\n", ALLOWED)
+        check_environment(_listing("DB_PASSWORD=secret-value-0001"), ALLOWED)
 
     assert "DB_PASSWORD" in str(caught.value)
     assert "secret-value-0001" not in str(caught.value)
+
+
+@pytest.mark.parametrize("listing", ["", "\n", "\n\n"], ids=["empty", "newline", "newlines"])
+def test_an_empty_environment_listing_is_refused(listing: str) -> None:
+    """G1d（程式碼審查 LOW-1）：compose 失敗而沒有輸出時，「沒有不允許的名稱」不得當成通過。"""
+    with pytest.raises(GuardError, match="沒有輸出"):
+        check_environment(listing, ALLOWED)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["no-equals-sign", "=value", "1NAME=x", "NA ME=x", " PATH=/bin", ""],
+    ids=["no-equals", "empty-name", "digit-first", "space-in-name", "leading-space", "blank"],
+)
+def test_a_malformed_environment_listing_is_refused(line: str) -> None:
+    """G1d：不是 NAME=VALUE 的行（例如多行的值、其他的輸出）代表無法確認名稱：停止。"""
+    with pytest.raises(GuardError, match="格式不正確"):
+        check_environment(_listing("COMPOSE_PROJECT_NAME=x", line), ALLOWED)
+
+
+def test_malformed_lines_are_counted_but_never_shown() -> None:
+    with pytest.raises(GuardError) as caught:
+        check_environment(_listing("continued-secret-value-0003"), ALLOWED)
+
+    assert "1 行" in str(caught.value)
+    assert "continued-secret-value-0003" not in str(caught.value)
+
+
+@pytest.mark.parametrize("name", REQUIRED)
+def test_a_listing_without_a_required_name_is_refused(name: str) -> None:
+    """G1d：輸出不完整，或 compose 不是在 Live 的白名單環境下執行（例如 COMPOSE_DISABLE_ENV_FILE
+    沒有傳到 compose）。"""
+    with pytest.raises(GuardError, match=f"缺少必要的變數.*{name}"):
+        check_environment(_listing(without=name), ALLOWED)
 
 
 # --------------------------------------------------------------------------- check-images
@@ -486,7 +529,11 @@ def test_the_networks_are_created_internal_isolated_and_labelled_with_the_run(
 
 
 def test_an_existing_network_is_never_shared(tmp_path: Path) -> None:
-    """並行：network create 是原子的；已存在（另一次 Live 的）就停止，不檢查、不沿用。"""
+    """並行：network create 失敗（例如另一次 Live 的網路已存在）就停止，不檢查、不沿用。
+
+    這裡只驗證失敗時停止；兩次 Live 同時建立同名的網路時是否只有一次成功，是 Docker 的行為，尚待
+    G3 以真的 Docker 實測（剩餘風險 24）。
+    """
     docker = _network_docker()
     docker.replies = {("network", "create"): "<fail>", **docker.replies}
 
@@ -611,7 +658,7 @@ def test_the_cli_runs_each_subcommand(
             json.dumps(_config(secrets_dir)),
         ),
         (["check-unresolved"], json.dumps({"services": {}})),
-        (["check-environment", "--allow", "PATH"], "PATH=/bin\n"),
+        (["check-environment", "--allow", *ALLOWED], _listing()),
         (
             [
                 "networks",

@@ -356,7 +356,9 @@ runs-layout-migrate: env secrets docker-check
 #   H1）。所以 make -n／-q／-t 這些 Live 目標不會執行任何一步；網路由 env_guard 建立，不呼叫子 make。
 # - up 之前以 tests/live/env_guard.py 驗證 compose 解析出來的設定（允許清單）；up 之後核對映像 ID；
 #   開始時、up 之前、結束時確認同一個 Engine。開始之前拒絕上一次留下的資源、拋棄式目錄與清理失敗的
-#   診斷檔。
+#   診斷檔。compose config 的輸出先存進 shell 變數（不寫檔）並以 || exit 1 確認結束碼，之後才交給
+#   env_guard（G1d：管線的結束碼只看最後一個指令，compose 失敗時檢查會收到空的或不完整的輸入）；
+#   env_guard 另外拒絕空的、格式不正確或缺少必要變數的輸入。
 # - 所有權與清理（G1 審查 M2、MEDIUM-1、2；G1c）：engine、preflight、快照都通過、拋棄式目錄建立之後
 #   才安裝 trap；拋棄式的秘密寫進目錄之後，接著以這次的識別（拋棄式目錄的名稱）標記並建立兩個網路：
 #   網路已存在就停止（另一次 Live 正在執行），不清理別人的資源。env_guard networks 把 Engine、預期的
@@ -375,6 +377,20 @@ runs-layout-migrate: env secrets docker-check
 #   Live 資源或同一個 TMPDIR 中上一次的拋棄式目錄拒絕執行，兩者都不存在時不保證擋下。最後比對開發環境
 #   的前後快照，有差異就失敗。以上是設計與 unit 測試（替身的 docker）的結果：真的 Docker 上的行為尚待
 #   G3 實測；訊號實際的傳遞與 trap 的時間點尚未實測。
+# - 一次 make 只能有一個 Live 目標（G1d；安全審查 B 的 LOW-1）：Live 的目標都以 test-live-runner 為
+#   前置，make 只執行它一次（第一個目標的 LIVE_TESTS），其他的目標沒有自己的 recipe、以 0 結束，看起來
+#   像通過。同時指定兩個以上（含同一個指定兩次）時，make 讀 Makefile 時就停止，不執行任何一步。
+#   MAKECMDGOALS 被命令列或環境變數蓋掉時（GNU make 3.81 實測會蓋掉）數不到目標，也一律停止。新增的
+#   Live 目標要加進 LIVE_GOALS（tests/unit/test_live_isolation_make.py 核對）。
+override LIVE_GOALS := test-live-runner test-live-zap test-live-db-roles test-live-secrets \
+	record-fixtures test-live-lab test-live-fixture test-live-fixture-nuclei \
+	test-live-fixture-findings test-live-fixture-rescan bench
+ifeq ($(filter default undefined,$(origin MAKECMDGOALS)),)
+$(error MAKECMDGOALS 被覆寫（$(origin MAKECMDGOALS)）：無法確認 Live 的目標，停止。請不要設定 MAKECMDGOALS)
+endif
+ifneq ($(word 2,$(filter $(LIVE_GOALS),$(MAKECMDGOALS))),)
+$(error 一次只能執行一個 Live 目標（指定了：$(filter $(LIVE_GOALS),$(MAKECMDGOALS))）：其他目標的測試不會執行，請分開執行)
+endif
 LIVE_TESTS := tests/live/test_runner_live.py tests/live/test_guard_live.py \
 	tests/live/test_budget_live.py tests/live/test_revocation_live.py \
 	tests/live/test_guard_failover_live.py
@@ -413,12 +429,15 @@ test-live-runner:
 	app_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan:dev) || exit 1; \
 	guard_image=$$($(LIVE_PROC_ENV) docker image inspect --format '{{.Id}}' secscan-guard:dev) \
 		|| exit 1; \
-	$(LIVE_COMPOSE) config --format json \
+	config=$$($(LIVE_COMPOSE) config --format json) || exit 1; \
+	printf '%s\n' "$$config" \
 		| $(LIVE_GUARD) check-config --secrets-dir "$$secrets_dir" --root "$(CURDIR)" || exit 1; \
-	$(LIVE_COMPOSE) config --no-env-resolution --format json \
-		| $(LIVE_GUARD) check-unresolved || exit 1; \
-	$(LIVE_COMPOSE) config --environment \
+	config=$$($(LIVE_COMPOSE) config --no-env-resolution --format json) || exit 1; \
+	printf '%s\n' "$$config" | $(LIVE_GUARD) check-unresolved || exit 1; \
+	config=$$($(LIVE_COMPOSE) config --environment) || exit 1; \
+	printf '%s\n' "$$config" \
 		| $(LIVE_GUARD) check-environment --allow $(LIVE_ALLOWED_NAMES) || exit 1; \
+	config=""; \
 	$(LIVE_GUARD) engine --expect "$$engine" >/dev/null || exit 1; \
 	$(LIVE_COMPOSE) up -d --wait db || exit 1; \
 	$(LIVE_PROC_ENV) $(LIVE_SECRET_FILES) $(UV_RUN) alembic -x dotenv=off upgrade head \

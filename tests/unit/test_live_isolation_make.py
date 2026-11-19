@@ -197,7 +197,10 @@ if args[:1] == ["compose"]:
         with open(os.path.join({records!r}, name), "w") as record:
             record.write(result.stdout)
         sys.stderr.write(result.stderr)
-        out(result.stdout, result.returncode)
+        # G1d：config_fails 讓這一種 config 輸出完整的結果、卻以非零結束（只有結束碼的傳遞抓得到）；
+        # config_empty 讓它以 0 結束、沒有輸出。
+        code = 1 if scenario.get("config_fails") == name else result.returncode
+        out("" if scenario.get("config_empty") == name else result.stdout, code)
     if "up" in args:
         if scenario.get("up_fails"):
             out(code=1)

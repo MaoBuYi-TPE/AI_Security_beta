@@ -10,7 +10,8 @@ secscan.cli.secret_files（以 -I 執行，不 import tests 與工作目錄的�
 - preflight --base DIR：拒絕上一次留下的 Live 資源、拋棄式目錄與清理失敗的診斷檔。
 - snapshot／compare --root DIR：開發環境的前後快照（compare 從 stdin 讀開始時的快照）。
 - check-config --secrets-dir DIR --root DIR、check-unresolved、check-environment --allow NAME...：
-  stdin 是 compose 解析出來的設定、未解析的設定與 config --environment，都以允許清單核對。
+  stdin 是 compose 解析出來的設定、未解析的設定與 config --environment，都以允許清單核對；空的、
+  格式不正確或缺少必要的內容時拒絕（G1d：compose 的結束碼由 recipe 先確認）。
 - check-images --app-image ID --guard-image ID：Live 容器的映像等於 build 之後記錄的映像 ID。
 - networks --secrets-dir DIR --engine ID --network NAME SUBNET IP_RANGE（兩次）：以這次執行的
   識別建立並標記 Live 的兩個網路，已存在就失敗（另一次 Live 正在執行）。取代子 make 的 ensure-net
@@ -76,6 +77,24 @@ COMPOSE_ADDED = frozenset(
 # macOS 的 CoreFoundation 自動加上的文字編碼提示（不是秘密，也不是從 shell 帶進來的設定）。
 PLATFORM_ADDED = frozenset({"__CF_USER_TEXT_ENCODING"})
 ALWAYS_REFUSED = frozenset({"COMPOSE_ENV_FILES", "COMPOSE_FILE", "COMPOSE_PROFILES"})
+# config --environment 一定會有的名稱：recipe 以 LIVE_PROC_ENV 設定（G1d，程式碼審查 LOW-1）。
+# 缺少任何一個，代表 compose 沒有輸出、輸出不完整，或 compose 不是在 Live 的白名單環境下執行：停止。
+REQUIRED_ENVIRONMENT = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "COMPOSE_DISABLE_ENV_FILE",
+        "SECSCAN_SECRETS_DIR",
+        "SECSCAN_LIVE_SECRETS_DIR",
+        "SECSCAN_LIVE_PROJECT",
+        "SECSCAN_IMAGE_TAG",
+        "ENABLE_LIVE_LAB_TESTS",
+        "PGPASSFILE",
+    }
+)
+# config --environment 的一行是 NAME=VALUE（值可以是空的）。
+ENVIRONMENT_LINE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 APP_SERVICES = frozenset({"api", "runner", "worker", "runs-init"})
 # 唯一允許的 bind（都唯讀）：db 的 initdb 目錄與 entrypoint wrapper（相對於 repo）、socket-proxy 的
 # docker.sock（compose.yaml 的設計；runner 經由它操作容器）。
@@ -969,10 +988,30 @@ def check_unresolved(config: Mapping[str, Any]) -> None:
 
 
 def check_environment(listing: str, allowed: Iterable[str]) -> None:
-    names = {line.split("=", 1)[0] for line in listing.splitlines() if "=" in line}
+    """config --environment 的名稱以允許清單核對。
+
+    G1d：沒有輸出、有不是 NAME=VALUE 的行、缺少 recipe 一定會設定的變數時都拒絕（「沒有不允許的
+    名稱」不等於通過）。錯誤訊息只有名稱與行數，不輸出任何一行的內容（值可能是秘密）。
+    """
+    lines = listing.splitlines()
+    if not any(lines):
+        raise GuardError("compose config --environment 沒有輸出：無法確認 compose 的環境，停止")
+    malformed = sum(1 for line in lines if ENVIRONMENT_LINE.fullmatch(line) is None)
+    if malformed:
+        raise GuardError(
+            f"compose config --environment 的輸出有 {malformed} 行格式不正確（不是 NAME=VALUE）："
+            "無法確認，停止"
+        )
+    names = {line.split("=", 1)[0] for line in lines}
     refused = names & (SECRET_ENV_NAMES | ALWAYS_REFUSED)
     if refused:
         raise GuardError(f"compose 的環境有不允許的變數：{sorted(refused)}")
+    missing = REQUIRED_ENVIRONMENT - names
+    if missing:
+        raise GuardError(
+            f"compose 的環境缺少必要的變數：{sorted(missing)}（輸出不完整，或不是在 Live 的白名單"
+            "環境下執行）：停止"
+        )
     unknown = names - set(allowed) - COMPOSE_ADDED - PLATFORM_ADDED
     if unknown:
         raise GuardError(f"compose 的環境有不在允許清單的變數：{sorted(unknown)}")
