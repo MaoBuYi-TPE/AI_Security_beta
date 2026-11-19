@@ -94,8 +94,8 @@ SECRET_FILES = (
 # 開發 db 的三個角色：密碼只在第一次初始化時寫進 DB，之後換檔案不會改 DB 中的密碼。
 DB_ROLE_FILES = frozenset({"db_admin_password", "db_owner_password", "db_password"})
 DB_ROLE_WARNING = (
-    "警告：db 的角色密碼只在第一次初始化時建立，更新 secrets/ 不會改變 DB 中的密碼"
-    "（不一致時服務會無法登入；見 README 的換版說明）。"
+    "警告：db 的角色密碼只在第一次初始化時建立；db 已經初始化時，新增或更新 secrets/ 中的密碼檔"
+    "不會改變 DB 中的角色密碼，請確認兩者一致（不一致時服務會無法登入；見 README 的換版說明）。"
 )
 
 
@@ -125,9 +125,11 @@ class Action(StrEnum):
     SKIPPED = "沒有處理（維持原狀）"
 
 
-# 內容可能和之前不同的動作（中途失敗時的摘要）；db 的密碼檔是這兩種時印出角色密碼的警告。
+# 內容可能和之前不同的動作（中途失敗時的摘要）。
 CHANGED = frozenset({Action.ADDED, Action.UPDATED, Action.PERMISSIONS})
-DB_ROLE_CHANGES = frozenset({Action.UPDATED, Action.UNCERTAIN})
+# db 的密碼檔是這三種時印出角色密碼的警告（G1e：新增也算，例如刪掉 secrets/ 之後又改了 .env；
+# 只修正權限、不變、rename 之前就失敗的不算）。
+DB_ROLE_CHANGES = frozenset({Action.ADDED, Action.UPDATED, Action.UNCERTAIN})
 
 
 class SecretSources(BaseSettings):
