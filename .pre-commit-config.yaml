@@ -18,11 +18,13 @@ repos:
   - repo: local
     hooks:
       # .gitignore 擋得住一般的 git add，擋不住 git add -f；.env 裡有真實的本機密碼。
+      # 兩個規則都不分大小寫（(?i)；G1d）：macOS 預設的檔案系統不分大小寫，git add -f .ENV、
+      # SECRETS/… 指的是同一個檔案。允許的只有小寫的 .env.example。
       - id: forbid-env-files
         name: 禁止提交 .env（只允許 .env.example）
         entry: 不能提交 .env 檔案；範例請寫在 .env.example
         language: fail
-        files: (^|/)\.env(\..*)?$
+        files: (?i)(^|/)\.env(\..*)?$
         exclude: (^|/)\.env\.example$
       # compose secrets 的秘密檔（T23b-b2；docs/DECISIONS.md §32）：make secrets 寫在 secrets/，
       # .gitignore 的 **/secrets/ 擋不住 git add -f。任何一層的 secrets/ 目錄都擋下。
@@ -30,7 +32,7 @@ repos:
         name: 禁止提交 secrets/ 中的檔案
         entry: 不能提交 secrets/ 中的檔案（compose secrets 的秘密檔，由 make secrets 從 .env 產生）
         language: fail
-        files: (^|/)secrets/
+        files: (?i)(^|/)secrets/
       # 平台 API key 的固定格式（docs/DECISIONS.md §9.1）。測試以程式組出 key，文件用 <佔位符>，
       # 所以任何檔案出現完整格式的 key，都當成外洩擋下。
       - id: forbid-platform-api-keys
