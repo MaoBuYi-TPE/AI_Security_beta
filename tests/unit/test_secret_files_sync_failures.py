@@ -153,6 +153,30 @@ def test_an_io_error_from_rename_is_reported_as_uncertain(
     assert _temporaries(workspace) == []
 
 
+def test_an_io_error_from_rename_reports_a_temporary_it_cannot_remove(
+    workspace: Workspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """審查（程式碼 LOW-2、安全 INFO-4）：EIO 的路徑和 rename 之前失敗的路徑一樣，刪不掉的暫存檔
+    要回報，不靜默忽略。"""
+    _run(capsys)
+    _change(workspace, "DB_PASSWORD")
+
+    def unlink(path: str, *args: object, **kwargs: object) -> None:
+        if str(path).startswith(TEMP_PREFIX):
+            raise _oserror(errno.EACCES)
+        REAL_UNLINK(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    with pytest.MonkeyPatch.context() as patch:
+        _fail_rename_to(patch, "db_password", errno.EIO)
+        patch.setattr(os, "unlink", unlink)
+        exit_code, err = _run(capsys)
+
+    assert exit_code == EXIT_FAILURE
+    assert f"db_password：{Action.UNCERTAIN}" in err
+    assert "暫存檔可能留著" in err
+    assert len(_temporaries(workspace)) == 1
+
+
 def test_a_failed_directory_fsync_after_the_rename_is_not_reported_as_unchanged(
     workspace: Workspace, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -286,5 +310,7 @@ def test_a_failure_before_any_file_writes_nothing(
         exit_code, err = _run(capsys)
 
     assert exit_code == EXIT_FAILURE
+    # 審查（程式碼 LOW-1）：其他提早結束的路徑也說「沒有寫入任何檔案」，所以一併確認是這一步。
+    assert "無法清除上次留下的暫存檔" in err
     assert "沒有寫入任何檔案" in err
     assert os.listdir(workspace.secrets) == []

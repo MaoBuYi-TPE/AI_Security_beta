@@ -386,12 +386,14 @@ def _replace(descriptor: int, name: str, value: bytes) -> None:
     try:
         os.rename(temporary, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
     except OSError as exc:
-        # POSIX：EIO 以外的失敗不影響目標；EIO 時無法確認 rename 是否已經發生。
+        # POSIX 的 rename（DESCRIPTION）：EIO 以外的失敗不影響 new；EIO 時無法確認 rename 是否已經
+        # 發生。網路檔案系統等不符合規格的實作不在保證之內（secrets/ 在本機的檔案系統）。
         if exc.errno != errno.EIO:
             raise _not_replaced(descriptor, temporary, name, exc) from None
-        _discard(descriptor, temporary)
+        left = _leftover(descriptor, temporary)
         raise ReplaceError(
-            f"無法確認 {name} 是否已換成新的內容（rename 回報 {_reason(exc)}）", uncertain=True
+            f"無法確認 {name} 是否已換成新的內容（rename 回報 {_reason(exc)}）{left}",
+            uncertain=True,
         ) from None
     try:
         os.fsync(descriptor)
@@ -405,10 +407,15 @@ def _replace(descriptor: int, name: str, value: bytes) -> None:
 
 def _not_replaced(descriptor: int, temporary: str, name: str, exc: OSError) -> ReplaceError:
     """rename 之前失敗：原本的檔案沒有改變。暫存檔刪不掉時一併回報，不蓋掉原本的錯誤。"""
-    left = "" if _discard(descriptor, temporary) else "；暫存檔可能留著（下一次執行時清除）"
+    left = _leftover(descriptor, temporary)
     return ReplaceError(
         f"無法寫入 {name}（{_reason(exc)}）：原本的檔案沒有改變{left}", uncertain=False
     )
+
+
+def _leftover(descriptor: int, temporary: str) -> str:
+    """刪除暫存檔；刪不掉時回傳要附在訊息後面的說明（含秘密的值，0600，下一次執行時清除）。"""
+    return "" if _discard(descriptor, temporary) else "；暫存檔可能留著（下一次執行時清除）"
 
 
 def _reason(exc: OSError) -> str:

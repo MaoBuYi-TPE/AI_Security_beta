@@ -63,6 +63,12 @@ def test_a_failed_compose_config_stops_before_up(hostile: Hostile, name: str) ->
     result = hostile.make()
 
     _stopped_before_up(hostile, result.returncode, hostile.leaked(result.stdout + result.stderr))
+    # 審查（程式碼 LOW-1）：停在這一種 config，而不是更早的步驟：它執行了，recipe 中的下一種沒有
+    # （替身每次執行 config 都留下紀錄；environment 的下一步是 up，上面已確認沒有）。
+    assert (hostile.records / name).exists()
+    following = {"resolved": "unresolved", "unresolved": "environment"}.get(name)
+    if following is not None:
+        assert not (hostile.records / following).exists()
     # resolved：清理在 down -v 之前也以同一種 config 核對對象，替身讓它一樣失敗，所以清理
     # fail closed（不 down、留下診斷檔）；其他兩種的清理正常完成。
     assert bool(hostile.diagnostics()) is (name == "resolved")
@@ -173,8 +179,11 @@ def test_the_live_goal_list_covers_every_live_target() -> None:
     assert re.search(r"^override LIVE_GOALS :?= ", MAKEFILE, flags=re.MULTILINE)
 
 
-def test_one_live_target_with_other_goals_still_runs(hostile: Hostile) -> None:
-    """拒絕只看 Live 的目標：一個 Live 目標加上非 Live 的目標照常執行。"""
+def test_one_live_target_with_other_goals_is_not_refused(hostile: Hostile) -> None:
+    """拒絕只看 Live 的目標：一個 Live 目標加上非 Live 的目標，讀 Makefile 時不被拒絕。
+
+    （bench-evaluate 因為 BENCH_NAME 是空的而先失敗，make 隨即停止：這裡不執行 Live。）
+    """
     result = hostile.make("bench-evaluate", target="test-live-runner", BENCH_NAME="")
 
     assert "一次只能執行一個 Live 目標" not in result.stderr

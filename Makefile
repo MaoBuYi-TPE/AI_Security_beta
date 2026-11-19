@@ -378,10 +378,11 @@ runs-layout-migrate: env secrets docker-check
 #   的前後快照，有差異就失敗。以上是設計與 unit 測試（替身的 docker）的結果：真的 Docker 上的行為尚待
 #   G3 實測；訊號實際的傳遞與 trap 的時間點尚未實測。
 # - 一次 make 只能有一個 Live 目標（G1d；安全審查 B 的 LOW-1）：Live 的目標都以 test-live-runner 為
-#   前置，make 只執行它一次（第一個目標的 LIVE_TESTS），其他的目標沒有自己的 recipe、以 0 結束，看起來
-#   像通過。同時指定兩個以上（含同一個指定兩次）時，make 讀 Makefile 時就停止，不執行任何一步。
-#   MAKECMDGOALS 被命令列或環境變數蓋掉時（GNU make 3.81 實測會蓋掉）數不到目標，也一律停止。新增的
-#   Live 目標要加進 LIVE_GOALS（tests/unit/test_live_isolation_make.py 核對）。
+#   前置（bench 以遞迴呼叫它），make 只執行它一次（第一個目標的 LIVE_TESTS），其他的目標沒有自己的
+#   recipe、以 0 結束，看起來像通過。同時指定兩個以上（含同一個指定兩次）時，make 讀 Makefile 時就
+#   停止，不執行任何一步。MAKECMDGOALS 被命令列或環境變數蓋掉時（GNU make 3.81 實測會蓋掉）數不到
+#   目標，也一律停止。新增的 Live 目標要加進 LIVE_GOALS（tests/unit/test_live_make_guards.py 核對）；
+#   不要建立以多個 Live 目標為前置的聚合目標（它只算一個目標，這個檢查擋不到）。
 override LIVE_GOALS := test-live-runner test-live-zap test-live-db-roles test-live-secrets \
 	record-fixtures test-live-lab test-live-fixture test-live-fixture-nuclei \
 	test-live-fixture-findings test-live-fixture-rescan bench

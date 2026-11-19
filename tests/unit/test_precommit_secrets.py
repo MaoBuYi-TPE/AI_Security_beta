@@ -1,8 +1,10 @@
-"""pre-commit 的 forbid-secret-files（CSEC-06；T23b-b2，docs/DECISIONS.md §32）。
+"""pre-commit 的 forbid-secret-files 與 forbid-env-files（CSEC-06；T23b-b2，DECISIONS.md §32）。
 
-.gitignore 已排除 secrets/，擋得住一般的 git add，擋不住 git add -f。hook 在 commit 之前擋下
-secrets/ 中的任何檔案。實際執行：在暫存的 git repo 中，以只含這個 hook 的設定執行 pre-commit
-（language: fail，不需要安裝環境、不連網）。
+.gitignore 已排除 secrets/ 與 .env，擋得住一般的 git add，擋不住 git add -f。兩個 hook 在 commit
+之前擋下任何一層 secrets/ 中的檔案與 .env（只允許小寫的 .env.example）；G1d 起不分大小寫（macOS
+預設的檔案系統不分大小寫，SECRETS/、.ENV 是同一個檔案）。實際執行：在暫存的 git repo 中，以只含
+這兩個 hook 的設定執行 pre-commit（language: fail，不需要安裝環境、不連網），有 --files 與 staging
+（以 git add -f 放進 staging、core.ignorecase 為 true 與 false）兩種模式；秘密檔都是假的內容。
 """
 
 import os

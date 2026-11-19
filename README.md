@@ -147,7 +147,7 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
   - 以 `docker compose restart` 驗證健康狀態時，以重啟之後新的 healthcheck 探測為準，不要沿用重啟之前的狀態。
 - **不要以 debug 等級的 log 啟動 db、db-test**：第一次初始化時（db 的新 volume；db-test 每次啟動），暫時的伺服器若以 `log_min_messages=debug3` 以下（或 `-d 3` 以上）執行，會把自己的環境寫進 log，**其中包含 superuser 的密碼**（F1；只實測了 debug5，debug1–debug5 一律不要用）。repo 的設定以測試確保不會觸發；手動加上的 `-c`、`-d`、`POSTGRES_INITDB_ARGS` 或設定檔擋不到。
 - **PostgreSQL 的主版本升級**（不在 b2 的範圍；O1）：新的資料目錄沒有 `PG_VERSION`，wrapper 會建立初始化未完成標記。新映像的官方 entrypoint 偵測到舊版的資料時會拒絕啟動（PG 18 的 entrypoint 有這個檢查，新版本未驗證），標記留著；但**不要假定新版本一定會安全地拒絕啟動**：新版本的 entrypoint 若沒有偵測到舊的資料，可能建立一個新的、空的叢集並回報 healthy。升級之前先確認新映像的 PGDATA、目錄結構、官方 entrypoint 的行為與升級程序（例如 `pg_upgrade` 或 dump／restore），確認舊的資料不會被當成空目錄；標記由升級程序處理，不要直接刪除。被拒絕的那次啟動已經建立了標記：升級完成之後 db 會一直 unhealthy，直到升級程序確認資料正確之後處理標記。
-- **Live 不使用開發的秘密**：`test-live-*` 每次在拋棄式目錄產生新的秘密，不使用 `.env` 與 `secrets/` 中的秘密（只在前後的快照中計算它們的 sha256 確認沒有改變，不輸出內容），以白名單的環境執行所有 docker 與 compose 呼叫；結束時依所有權的核對嘗試清理（拋棄式目錄只在路徑、名稱、擁有者都符合、不是 symlink 時刪除；清理失敗、fail closed 與診斷檔見下面的「live 測試」），並比對開發環境的前後快照。一次 make 只能指定一個 Live 目標（G1d）：Live 的目標共用同一個前置，同時指定兩個時只有第一個的測試會執行，所以 make 直接拒絕，請分開執行。
+- **Live 不使用開發的秘密**：`test-live-*` 每次在拋棄式目錄產生新的秘密，不使用 `.env` 與 `secrets/` 中的秘密（只在前後的快照中計算它們的 sha256 確認沒有改變，不輸出內容），以白名單的環境執行所有 docker 與 compose 呼叫；結束時依所有權的核對嘗試清理（拋棄式目錄只在路徑、名稱、擁有者都符合、不是 symlink 時刪除；清理失敗、fail closed 與診斷檔見下面的「live 測試」），並比對開發環境的前後快照。一次 make 只能指定一個 Live 目標（G1d）：Live 的目標都經由 `test-live-runner` 執行，同時指定兩個時可能只有第一個的測試會執行、其他的以 0 結束，所以 make 直接拒絕，請分開執行。
 - **主機全碟加密**：`.env`、`secrets/` 與 DB 的備份都是主機上的明文；部署要求與檢查見 T23b-b2 的 PR-3（尚未實作）。
 
 新增 schema 變更時：先寫會失敗的測試，再改 model，最後產生 migration。例如：`uv run alembic revision --autogenerate --rev-id 0002 -m "<說明>"`。產生後補上升降級說明並檢查內容；`tests/integration/test_migrations.py` 會檢查 model 與 migration 沒有漂移。
