@@ -13,7 +13,6 @@ PYTEST_DONT_REWRITE：這個模組處理秘密、canary、環境變數或設定�
 """
 
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -37,10 +36,14 @@ def hostile(tmp_path: Path) -> Hostile:
 # --- compose config 的結束碼與空的輸出 ----------------------------------------------------------
 
 
-def _stopped_before_up(hostile: Hostile, result: subprocess.CompletedProcess[str]) -> None:
-    """recipe 在 up 之前停止：沒有 up、alembic、pytest；trap 照樣清理（拋棄式目錄已刪除）。"""
-    assert result.returncode != 0
-    assert hostile.leaked(result.stdout + result.stderr) == set()
+def _stopped_before_up(hostile: Hostile, returncode: int, leaked: set[str]) -> None:
+    """recipe 在 up 之前停止：沒有 up、alembic、pytest；trap 照樣清理（拋棄式目錄已刪除）。
+
+    參數只有結束碼與洩漏的名稱：失敗時 pytest 的 traceback 會顯示 helper 的參數，所以不傳 make
+    的輸出（G1 審查：失敗時不印出秘密）。
+    """
+    assert returncode != 0
+    assert leaked == set()
     assert not any(argv[:1] == ["compose"] and "up" in argv for argv in hostile.docker_argvs())
     tools = [call["argv"][2:3] for call in hostile.calls() if call["tool"] == "uv"]
     assert ["alembic"] not in tools
@@ -57,7 +60,9 @@ def test_a_failed_compose_config_stops_before_up(hostile: Hostile, name: str) ->
     蓋掉它（shell 的管線只看最後一個指令的結束碼）。"""
     hostile.set_scenario(config_fails=name)
 
-    _stopped_before_up(hostile, hostile.make())
+    result = hostile.make()
+
+    _stopped_before_up(hostile, result.returncode, hostile.leaked(result.stdout + result.stderr))
     # resolved：清理在 down -v 之前也以同一種 config 核對對象，替身讓它一樣失敗，所以清理
     # fail closed（不 down、留下診斷檔）；其他兩種的清理正常完成。
     assert bool(hostile.diagnostics()) is (name == "resolved")
@@ -69,7 +74,7 @@ def test_an_empty_environment_listing_stops_before_up(hostile: Hostile) -> None:
 
     result = hostile.make()
 
-    _stopped_before_up(hostile, result)
+    _stopped_before_up(hostile, result.returncode, hostile.leaked(result.stdout + result.stderr))
     assert "沒有輸出" in result.stderr
 
 
