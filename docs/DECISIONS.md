@@ -4311,9 +4311,10 @@ G1d push 之後，使用者授權只處理 §32.10 留下的兩項：fail closed
 
 **測試**：
 - 先寫測試並確認失敗（LOW-3：6 個失敗；診斷檔：新的 API 不存在，收集時失敗），再實作；執行的輸出存在本機的 G1e 證據目錄（gitignore，沒有提交）。
-- 新的模組：`tests/unit/test_secret_files_role_warning.py`（第一次 sync、三個密碼檔各自新增、不是 db 的檔案、rename 之前失敗、EIO、之後的檔案失敗；輸出不含 canary）、`tests/unit/test_live_env_guard_diagnostic.py`（可信且核對通過、只有一個核對通過、可信但沒有核對成功的六種情境、不可信的六種紀錄以 canary 的 Network ID 確認不寫出、不存在與沒有讀取、中斷的三種路徑、write 失敗時判斷與刪除不變、形狀不安全的 Engine ID、靜態確認只有 `write_diagnostic` 與 preflight 參照診斷檔）。既有的 cleanup、preflight 測試一行都沒有改。
-- 空轉檢查 21 項都有測試失敗（拿掉新增、拿掉狀態不明、失敗或只修正權限也警告、不可信的紀錄輸出網路（三層一起拿掉，以及只拿掉寫入時的檢查）、沒有核對成功的標成已核對（四種）、0644、寫入拋棄式的秘密、preflight 讀取內容、拿掉 Engine 的比對、拿掉警告、中斷的路徑不寫事實、完整的暫存目錄路徑、Engine ID 不檢查形狀、狀態對調、`--claimed` 一律寫有、不記下 Engine 的核對）；紀錄在本機的 G1e 證據目錄。
-- 只做了不啟動、不修改 Docker、DB 與秘密檔的驗證；真的 Docker 上的行為在 G3 觀察：G3 如果留下診斷檔，以它核對這裡的格式。
+- 新的模組：`tests/unit/test_secret_files_role_warning.py`（第一次 sync、三個密碼檔各自新增、不是 db 的檔案、rename 之前失敗、EIO、之後的檔案失敗；輸出不含 canary）、`tests/unit/test_live_env_guard_diagnostic.py`（可信且核對通過、只有一個核對通過、可信但沒有核對成功的六種情境、不可信的六種紀錄以 canary 的 Network ID 確認不寫出、不存在與沒有讀取、中斷的三種路徑、write 失敗時照舊回報、留下的空檔仍讓 preflight 拒絕執行、形狀不安全的 Engine ID、靜態確認只有 `write_diagnostic` 與 preflight 參照診斷檔）。既有的 cleanup、preflight 測試一行都沒有改。
+- 空轉檢查（審查之前）21 項都有測試失敗（拿掉新增、拿掉狀態不明、失敗或只修正權限也警告、不可信的紀錄輸出網路（三層一起拿掉，以及只拿掉寫入時的檢查）、沒有核對成功的標成已核對（四種）、0644、寫入拋棄式的秘密、preflight 讀取內容、拿掉 Engine 的比對、拿掉警告、中斷的路徑不寫事實、完整的暫存目錄路徑、Engine ID 不檢查形狀、狀態對調、`--claimed` 一律寫有、不記下 Engine 的核對）；紀錄在本機的 G1e 證據目錄。
+- 審查之後新增的測試：拋棄式目錄名稱的形狀、失敗行的跳脫（`str.splitlines()` 的全部分行字元、ESC、雙向控制字元與 BOM）、Engine ID 的正向案例與邊界、偽造內容與空檔的診斷檔讓 preflight 的結果相同（行為測試）、前綴的字面字串只在常數（靜態的預警）、寫出的全文（每個狀態與核對結果）不含失敗步驟的子字串。審查之後重跑全部的空轉檢查，加上新增的項目共 27 項都有測試失敗；其中「不寫出失敗的步驟」讓既有的 cleanup 測試失敗，確認它們的斷言恢復效力。
+- 驗證：`make lint`、`make typecheck`；完整的非 Live pytest 直接在已確認身分的 db-test 上執行（`cluster_name=secscan-test`、PGDATA 在 tmpfs；不經 `make test`、沒有建立 `secrets/`），`9ff06ef`：8520 passed、2 skipped（skip 和基準的兩項相同）、coverage 98.75%；開發環境的前後快照相同。沒有啟動、停止或修改任何容器、開發 DB 與秘密檔；真的 Docker 上的行為在 G3 觀察：G3 如果留下診斷檔，以它核對這裡的格式。
 - **檔案的大小**：`tests/live/env_guard.py` 從 1170 行變成 1351 行（狀態、格式與說明；它以 `python -I` 執行，不能 import 其他測試模組；剩餘風險 22，拆檔依使用者的決定暫緩）。
 
 **G1e 的審查**（2026-11-19；範圍 `6c56f65..1625331`，code、security 各一項，opus、唯讀）：兩項都是 APPROVE WITH COMMENTS，沒有 CRITICAL、HIGH、MEDIUM。
@@ -4331,3 +4332,13 @@ G1d push 之後，使用者授權只處理 §32.10 留下的兩項：fail closed
 | 程式碼 INFO-1：「五種情境」實際是六種 | 修正本節（05cf5cb 的 commit 訊息維持原樣） |
 | 程式碼 INFO-6：欄位的命名容易混淆 | 改名為 `record_state`、`record_networks`、`mark_checked` |
 | 程式碼 INFO-4、INFO-6 的其他部分，安全 INFO-5–7 | 記錄：`facts=None` 只供既有的測試；down 之前偵測到 Engine 改變時，診斷檔仍寫開始時的核對結果（改變在失敗的步驟中）；symlink 的紀錄歸為讀不到；完整的路徑只出現在本機的 stderr（既有）；第一次 `make secrets` 一定警告（預期）；`chmod 0` 的測試不適用 root |
+
+**G1e 的確認審查**（2026-11-20；範圍 `1625331..9ff06ef`，code 與 security 一項，opus、唯讀）：APPROVE WITH COMMENTS（LOW 1、INFO 5），沒有 CRITICAL、HIGH、MEDIUM；各項處置都確認正確，cleanup 的判斷與刪除範圍不變，逐字元的跳脫加上形狀檢查之後找不到偽造行的方法。
+
+| 項目 | 處置 |
+|---|---|
+| LOW-1：本節的測試清單仍寫寫入失敗時「判斷與刪除不變」，也沒有列出審查之後新增的測試 | 修正本節 |
+| INFO-1、INFO-2、INFO-3：偽造行的測試只涵蓋四種字元；固定文字的測試只看說明與警告；寫入失敗的測試沒有斷言留下的是空檔 | 補強測試：全部分行字元與控制字元的參數化、每個狀態與核對結果寫出的全文、空檔的斷言 |
+| INFO-4：Engine ID 的空字串案例單獨無法失敗 | 記錄（其他負向案例能抓到） |
+| INFO-5：lone surrogate（Unicode 的 Cs）不在跳脫的範圍，寫入時是 UnicodeEncodeError 而不是 OSError | 不改：既有的行為，留下的空檔與中斷的診斷檔仍讓 preflight 拒絕執行（fail closed），也找不到實際的來源（失敗的步驟來自固定文字、例外的類別、`strerror` 與以 UTF-8 解碼的 Docker 輸出）；記錄 |
+| 範圍外：印到 stderr 的失敗步驟沒有跳脫 | 記錄（既有，不屬於診斷檔） |

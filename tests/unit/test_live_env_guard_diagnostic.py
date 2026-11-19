@@ -392,6 +392,8 @@ def test_a_failed_write_is_reported_and_the_empty_file_still_blocks_preflight(
     err = capsys.readouterr().err
     assert code == env_guard.EXIT_FAILURE
     assert "無法寫入診斷檔（Input/output error）" in err
+    diagnostics = list(failing.glob(f"{env_guard.DIAGNOSTIC_PREFIX}*"))
+    assert [path.stat().st_size for path in diagnostics] == [0]
     with pytest.raises(env_guard.GuardError, match="診斷檔"):
         env_guard.preflight(failing, CleanupDocker(networks={}, containers=[], volumes={}))
 
@@ -483,6 +485,37 @@ def test_the_fixed_text_does_not_contain_a_failure_step() -> None:
     （G1e 的程式碼審查 LOW-1）。"""
     for text in (env_guard.DIAGNOSTIC_NOTICE, *env_guard.DIAGNOSTIC_WARNINGS):
         assert "compose down -v" not in text
+
+
+BREAKING_CHARACTERS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029\x1b\u202e\ufeff"
+
+
+@pytest.mark.parametrize("character", list(BREAKING_CHARACTERS), ids=lambda c: f"U+{ord(c):04X}")
+def test_every_line_breaking_or_control_character_is_escaped(
+    tmp_path: Path, character: str
+) -> None:
+    """str.splitlines() 的所有分行字元、ESC、雙向控制字元與 BOM：失敗的步驟仍是同一行，行數和只有
+    一般文字時相同（G1e 的確認審查 INFO-1）。"""
+    facts = DiagnosticFacts(ENGINE, True, RecordState.INTERRUPTED)
+    plain = _written(tmp_path, str(tmp_path / OWNER), ["a-b"], facts)
+
+    text = _written(tmp_path, str(tmp_path / OWNER), [f"a{character}b"], facts)
+
+    assert len(text.splitlines()) == len(plain.splitlines())
+    assert "- a?b" in text.splitlines()
+
+
+def test_no_written_fact_contains_a_failure_step(tmp_path: Path) -> None:
+    """每個狀態、核對結果與 Engine 的核對寫出的全文都不含「compose down -v」：只有失敗的步驟會寫出
+    它（G1e 的確認審查 INFO-2）。"""
+    for state in RecordState:
+        for check in NetworkCheck:
+            for confirmed in (True, False, None):
+                networks = (NetworkFact(SCAN, OURS[SCAN], check),)
+                facts = DiagnosticFacts(ENGINE, True, state, confirmed, networks)
+                text = _written(tmp_path, str(tmp_path / OWNER), [], facts)
+                assert "compose down -v" not in text
+    assert "compose down -v" not in _written(tmp_path, "", [], None)
 
 
 def test_networks_are_never_written_for_an_untrusted_state(tmp_path: Path) -> None:
