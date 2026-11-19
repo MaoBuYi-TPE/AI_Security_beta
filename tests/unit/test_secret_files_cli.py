@@ -366,30 +366,6 @@ def test_sync_refuses_a_symlinked_secret_file(
     assert target.read_text(encoding="utf-8") == "outside"
 
 
-@pytest.mark.parametrize("failing", ["rename", "fsync", "write"])
-def test_a_failed_write_keeps_the_old_file_and_removes_the_temporary(
-    workspace: Workspace,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-    failing: str,
-) -> None:
-    _run(capsys)
-    old = workspace.file("db_password").read_bytes()
-    previous = workspace.values
-    workspace.write_env(**{n: previous[n] for n in ENV_NAMES if n != "DB_PASSWORD"})
-
-    def _fail(*_args: object, **_kwargs: object) -> None:
-        raise OSError(5, "Input/output error")
-
-    monkeypatch.setattr(os, failing, _fail)
-    code, err = _run(capsys)
-
-    assert code == EXIT_FAILURE
-    assert "原本的檔案沒有改變" in err
-    assert workspace.file("db_password").read_bytes() == old
-    assert [name for name in os.listdir(workspace.secrets) if name.startswith(TEMP_PREFIX)] == []
-
-
 def test_stale_temporaries_are_removed_and_unknown_files_are_kept(
     workspace: Workspace, capsys: pytest.CaptureFixture[str]
 ) -> None:

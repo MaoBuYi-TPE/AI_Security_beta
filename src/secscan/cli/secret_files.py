@@ -15,14 +15,19 @@ sync-secret-files 與 generate-secret-files：
   比 initdb 嚴格（另外拒絕引號與反引號）：這裡接受的值 initdb 一定接受（契約測試只核對長度）。
   內容相同就不動，不同時以暫存檔原子替換（O_EXCL → fchmod → 寫入 → fsync → rename → fsync 目錄）；
   內容相同、只有權限不對時同樣替換，回報「修正權限」。
+  每個檔案各自原子替換，七個檔案之間不是交易：一個檔案失敗就停止（G1d），每個檔案回報完成的動作、
+  失敗（rename 之前失敗：原本的檔案沒有改變）、狀態不明（rename 之後目錄的 fsync 失敗，或 rename
+  回報 EIO：可能已是新的內容，或無法確認已寫入磁碟），或沒有處理（維持原狀）。
   所有操作都經由目錄的 fd（O_DIRECTORY | O_NOFOLLOW）。symlink 與權限過寬、別人擁有的目錄一律拒絕；
   不認得的檔案不刪除，只列出名稱。`--check` 不寫入，缺少或不一致就 exit 1。
-- DB 角色的密碼在第一次初始化之後不會跟著 secrets/ 改變：更新 db 的三個密碼檔時印出固定的警告。
+- DB 角色的密碼在第一次初始化之後不會跟著 secrets/ 改變：db 的三個密碼檔更新或狀態不明時（含中途
+  失敗）印出固定的警告。
 - generate-secret-files：Live 的拋棄式秘密（docs/DECISIONS.md §32；計畫 §3.1）。產生七個隨機值
   （格式和 make env 相同），只寫進新建的空目錄，不讀 .env。
 """
 
 import argparse
+import errno
 import os
 import secrets
 import stat
@@ -98,6 +103,15 @@ class SecretFilesError(Exception):
     """秘密檔的目錄或檔案不符合規則；訊息只有名稱與原因。"""
 
 
+class ReplaceError(SecretFilesError):
+    """替換一個檔案失敗。uncertain：檔案可能已是新的內容（rename 之後目錄的 fsync 失敗，或 rename
+    回報 EIO）；否則原本的檔案沒有改變。"""
+
+    def __init__(self, message: str, *, uncertain: bool) -> None:
+        super().__init__(message)
+        self.uncertain = uncertain
+
+
 class Action(StrEnum):
     ADDED = "新增"
     UPDATED = "更新"
@@ -105,6 +119,15 @@ class Action(StrEnum):
     UNCHANGED = "不變"
     MISSING = "缺少"
     DIFFERENT = "不一致"
+    # 中途失敗時（G1d）：失敗的檔案、之後沒有處理的檔案。
+    FAILED = "失敗（原本的檔案沒有改變）"
+    UNCERTAIN = "狀態不明（可能已換成新的內容）"
+    SKIPPED = "沒有處理（維持原狀）"
+
+
+# 內容可能和之前不同的動作（中途失敗時的摘要）；db 的密碼檔是這兩種時印出角色密碼的警告。
+CHANGED = frozenset({Action.ADDED, Action.UPDATED, Action.PERMISSIONS})
+DB_ROLE_CHANGES = frozenset({Action.UPDATED, Action.UNCERTAIN})
 
 
 class SecretSources(BaseSettings):
@@ -242,15 +265,47 @@ def _valid(item: SecretFile, value: str) -> bool:
 def _sync(directory: Path, values: Mapping[str, bytes], report: Report) -> int:
     with _directory(directory, create=True) as descriptor:
         _remove_stale_temporaries(descriptor)
-        actions = {
-            item.file_name: _write_if_changed(descriptor, item, values) for item in SECRET_FILES
-        }
+        actions, failure = _write_all(descriptor, values)
         for name, action in actions.items():
             report(f"{name}：{action}")
+        if any(actions[name] in DB_ROLE_CHANGES for name in DB_ROLE_FILES):
+            report(DB_ROLE_WARNING)
+        if failure is not None:
+            report(_partial(failure, actions))
+            return EXIT_FAILURE
         _report_unknown(descriptor, report)
-    if any(actions[name] is Action.UPDATED for name in DB_ROLE_FILES):
-        report(DB_ROLE_WARNING)
     return EXIT_OK
+
+
+def _write_all(
+    descriptor: int, values: Mapping[str, bytes]
+) -> tuple[dict[str, Action], SecretFilesError | None]:
+    """依序處理七個檔案；一個失敗就停止，之後的檔案不處理（G1d）。回傳每個檔案的動作與失敗。"""
+    actions: dict[str, Action] = {}
+    failure: SecretFilesError | None = None
+    for item in SECRET_FILES:
+        if failure is not None:
+            actions[item.file_name] = Action.SKIPPED
+            continue
+        try:
+            actions[item.file_name] = _write_if_changed(descriptor, item, values)
+        except SecretFilesError as exc:
+            uncertain = isinstance(exc, ReplaceError) and exc.uncertain
+            actions[item.file_name] = Action.UNCERTAIN if uncertain else Action.FAILED
+            failure = exc
+    return actions, failure
+
+
+def _partial(failure: SecretFilesError, actions: Mapping[str, Action]) -> str:
+    """中途失敗的摘要：不宣稱沒有寫入任何檔案，除非確實沒有任何檔案改變。"""
+    changed = sum(1 for action in actions.values() if action in CHANGED)
+    uncertain = sum(1 for action in actions.values() if action is Action.UNCERTAIN)
+    if not changed and not uncertain:
+        return f"{failure}。沒有更新任何檔案；修正原因之後再執行 make secrets。"
+    return (
+        f"{failure}。secrets/ 只更新了一部分（已更新 {changed} 個、狀態不明 {uncertain} 個；"
+        "各檔案的狀態見上面）：修正原因之後再執行 make secrets（內容相同的檔案不會再寫入）。"
+    )
 
 
 def _check(directory: Path, values: Mapping[str, bytes], report: Report) -> int:
@@ -296,6 +351,8 @@ def _existing(descriptor: int, name: str) -> tuple[bytes, int] | None:
         info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise SecretFilesError(f"無法確認 {name}（{_reason(exc)}）") from None
     if not stat.S_ISREG(info.st_mode):
         raise SecretFilesError(f"{name} 不是一般檔案（或是 symlink）：拒絕處理")
     reason: str | None = None
@@ -317,15 +374,45 @@ def _read(descriptor: int, name: str) -> bytes:
 
 
 def _replace(descriptor: int, name: str, value: bytes) -> None:
+    """以暫存檔原子替換一個檔案；失敗時拋出 ReplaceError。
+
+    G1d：rename 之後（或 rename 回報 EIO）失敗時，不宣稱原本的檔案沒有改變。
+    """
     temporary = f"{TEMP_PREFIX}{name}.{secrets.token_hex(8)}"
     try:
         _write_new(descriptor, temporary, value)
+    except OSError as exc:
+        raise _not_replaced(descriptor, temporary, name, exc) from None
+    try:
         os.rename(temporary, name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+    except OSError as exc:
+        # POSIX：EIO 以外的失敗不影響目標；EIO 時無法確認 rename 是否已經發生。
+        if exc.errno != errno.EIO:
+            raise _not_replaced(descriptor, temporary, name, exc) from None
+        _discard(descriptor, temporary)
+        raise ReplaceError(
+            f"無法確認 {name} 是否已換成新的內容（rename 回報 {_reason(exc)}）", uncertain=True
+        ) from None
+    try:
         os.fsync(descriptor)
     except OSError as exc:
-        _discard(descriptor, temporary)
-        reason = exc.strerror or type(exc).__name__
-        raise SecretFilesError(f"無法寫入 {name}（{reason}）：原本的檔案沒有改變") from None
+        raise ReplaceError(
+            f"{name} 已換成新的內容，但目錄的 fsync 失敗（{_reason(exc)}）：無法確認已寫入磁碟，"
+            "當機或斷電時可能回到原本的內容",
+            uncertain=True,
+        ) from None
+
+
+def _not_replaced(descriptor: int, temporary: str, name: str, exc: OSError) -> ReplaceError:
+    """rename 之前失敗：原本的檔案沒有改變。暫存檔刪不掉時一併回報，不蓋掉原本的錯誤。"""
+    left = "" if _discard(descriptor, temporary) else "；暫存檔可能留著（下一次執行時清除）"
+    return ReplaceError(
+        f"無法寫入 {name}（{_reason(exc)}）：原本的檔案沒有改變{left}", uncertain=False
+    )
+
+
+def _reason(exc: OSError) -> str:
+    return exc.strerror or type(exc).__name__
 
 
 def _write_new(descriptor: int, name: str, value: bytes) -> None:
@@ -342,25 +429,40 @@ def _write_new(descriptor: int, name: str, value: bytes) -> None:
         os.close(file_descriptor)
 
 
-def _discard(descriptor: int, name: str) -> None:
+def _discard(descriptor: int, name: str) -> bool:
+    """刪除自己的暫存檔；刪不掉時回傳 False（不拋出，以免蓋掉原本的錯誤；下一次執行時清除）。"""
     try:
         os.unlink(name, dir_fd=descriptor)
     except FileNotFoundError:
-        return
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _remove_stale_temporaries(descriptor: int) -> None:
-    for name in os.listdir(descriptor):
-        if not name.startswith(TEMP_PREFIX):
-            continue
-        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-        if stat.S_ISREG(info.st_mode):
-            os.unlink(name, dir_fd=descriptor)
+    try:
+        for name in os.listdir(descriptor):
+            if not name.startswith(TEMP_PREFIX):
+                continue
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode):
+                os.unlink(name, dir_fd=descriptor)
+    except OSError as exc:
+        raise SecretFilesError(
+            f"無法清除上次留下的暫存檔（{_reason(exc)}）：沒有寫入任何檔案"
+        ) from None
 
 
 def _report_unknown(descriptor: int, report: Report) -> None:
     known = {item.file_name for item in SECRET_FILES}
-    unknown = sorted(name for name in os.listdir(descriptor) if name not in known)
+    try:
+        names = os.listdir(descriptor)
+    except OSError as exc:
+        raise SecretFilesError(
+            f"無法列出 secrets/ 中的其他檔案（{_reason(exc)}）；七個秘密檔都已處理（見上面）"
+        ) from None
+    unknown = sorted(name for name in names if name not in known)
     if unknown:
         report(f"secrets/ 中有不認得的檔案（沒有刪除）：{'、'.join(unknown)}")
 
