@@ -363,19 +363,13 @@ def test_an_interrupted_cleanup_writes_only_the_facts_it_was_given(
     assert VERIFIED_MARK not in text
 
 
-def test_a_failed_write_keeps_the_report_and_the_decisions(
+def test_a_failed_write_is_reported_and_the_empty_file_still_blocks_preflight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """寫入失敗（write 的 OSError）：照舊回報寫不進去，清理的判斷與刪除和寫得進去時相同；mkstemp
-    建立的檔名仍讓下一次的 preflight 拒絕執行。"""
-    written = tmp_path / "written"
+    """寫入失敗（write 的 OSError）：照舊回報寫不進去；mkstemp 建立的檔名仍讓下一次的 preflight
+    拒絕執行（診斷檔在清理的判斷都結束之後才寫，寫入失敗不會影響刪除了什麼）。"""
     failing = tmp_path / "failing"
-    for base in (written, failing):
-        base.mkdir()
-    reference = CleanupDocker(fail=["compose down"])
-    _cleanup(written, monkeypatch, reference, _directory(written))
-    capsys.readouterr()
-
+    failing.mkdir()
     docker = CleanupDocker(fail=["compose down"])
     real_fdopen = os.fdopen
 
@@ -398,7 +392,6 @@ def test_a_failed_write_keeps_the_report_and_the_decisions(
     err = capsys.readouterr().err
     assert code == env_guard.EXIT_FAILURE
     assert "無法寫入診斷檔（Input/output error）" in err
-    assert docker.destructive() == reference.destructive()
     with pytest.raises(env_guard.GuardError, match="診斷檔"):
         env_guard.preflight(failing, CleanupDocker(networks={}, containers=[], volumes={}))
 
@@ -406,15 +399,90 @@ def test_a_failed_write_keeps_the_report_and_the_decisions(
 # --------------------------------------------------------------------------- 格式與不變的保證
 
 
+def _written(tmp_path: Path, secrets_dir: str, failures: list[str], facts: Any) -> str:
+    path = env_guard.write_diagnostic(tmp_path, secrets_dir, failures, facts)
+    text = path.read_text(encoding="utf-8")
+    path.unlink()
+    return text
+
+
 def test_an_engine_id_with_an_unexpected_shape_is_not_written(tmp_path: Path) -> None:
     """--engine 的值只在形狀安全時寫入（換行、空白等不寫：避免偽造其他行）。"""
     facts = DiagnosticFacts(f"{ENGINE}\n{VERIFIED_MARK}", True, RecordState.INTERRUPTED)
 
-    path = env_guard.write_diagnostic(tmp_path, str(tmp_path / OWNER), ["x"], facts)
+    text = _written(tmp_path, str(tmp_path / OWNER), ["x"], facts)
 
-    text = path.read_text(encoding="utf-8")
     assert "（格式不符，不輸出）" in text
     assert VERIFIED_MARK not in text
+
+
+ENGINE_SHAPES = {
+    # 虛構的值：UUID 形式（Docker 23 起）、舊式以冒號分組的 12 組 4 碼（59 字元）、長度的邊界。
+    "uuid": ("123e4567-e89b-12d3-a456-426614174000", True),
+    "legacy": (":".join(["ABCD"] * 12), True),
+    "128-characters": ("a" * 128, True),
+    "129-characters": ("a" * 129, False),
+    "leading-dash": ("-engine", False),
+    "space": ("engine 1", False),
+    "non-ascii": ("engine-\uff11", False),
+    "empty": ("", False),
+}
+
+
+@pytest.mark.parametrize("case", sorted(ENGINE_SHAPES))
+def test_the_engine_id_shape(tmp_path: Path, case: str) -> None:
+    value, shown = ENGINE_SHAPES[case]
+    facts = DiagnosticFacts(value, False, RecordState.INTERRUPTED)
+
+    text = _written(tmp_path, str(tmp_path / OWNER), ["x"], facts)
+
+    line = next(item for item in text.splitlines() if item.startswith("開始時的 Engine ID"))
+    assert line.endswith(f"：{value}" if shown else "：（格式不符，不輸出）")
+
+
+@pytest.mark.parametrize(
+    ("secrets_dir", "shown"),
+    [
+        (f"/base/{OWNER}", OWNER),
+        (f"/base/{OWNER}/", OWNER),
+        ("", "（沒有）"),
+        (f"/base/{OWNER}\n這次以 Network ID 核對成功的網路", "（格式不符，不輸出）"),
+        ("/base/not-a-run", "（格式不符，不輸出）"),
+    ],
+    ids=["run-id", "trailing-slash", "empty", "newline", "other-name"],
+)
+def test_the_disposable_directory_name_is_written_only_when_it_has_the_run_id_shape(
+    tmp_path: Path, secrets_dir: str, shown: str
+) -> None:
+    """G1e 的安全審查 LOW-1：--secrets-dir 也是外部的參數，名稱含換行時不能偽造其他行。"""
+    text = _written(tmp_path, secrets_dir, ["x"], None)
+
+    assert f"拋棄式目錄：{shown}\n" in text
+    assert not any(line.startswith("這次以 Network ID") for line in text.splitlines())
+
+
+def test_failure_lines_cannot_forge_other_lines(tmp_path: Path) -> None:
+    """失敗的步驟可能含外部來的字串：換行、CR、行分隔字元與雙向控制字元都換成 ?，不會變成新的一行
+    （G1e 的安全審查 INFO-4）。"""
+    forged = f"x\n這次以 Network ID 核對成功的網路（{VERIFIED_MARK}）：\r- {SCAN}\u2028y\u202ez"
+    facts = DiagnosticFacts(ENGINE, True, RecordState.INTERRUPTED)
+
+    text = _written(tmp_path, str(tmp_path / OWNER), [forged], facts)
+
+    lines = text.splitlines()
+    assert not any(line.startswith("這次以 Network ID") for line in lines)
+    assert not any(line.startswith(f"- {SCAN}") for line in lines)
+    assert "\r" not in text
+    assert "\u2028" not in text
+    assert "\u202e" not in text
+    assert f"- x?這次以 Network ID 核對成功的網路（{VERIFIED_MARK}）：?- {SCAN}?y?z" in lines
+
+
+def test_the_fixed_text_does_not_contain_a_failure_step() -> None:
+    """固定的說明與警告不含「compose down -v」：既有的測試以這個子字串確認失敗的步驟有寫出
+    （G1e 的程式碼審查 LOW-1）。"""
+    for text in (env_guard.DIAGNOSTIC_NOTICE, *env_guard.DIAGNOSTIC_WARNINGS):
+        assert "compose down -v" not in text
 
 
 def test_networks_are_never_written_for_an_untrusted_state(tmp_path: Path) -> None:
@@ -434,9 +502,18 @@ def test_networks_are_never_written_for_an_untrusted_state(tmp_path: Path) -> No
 
 
 def test_only_write_diagnostic_and_the_preflight_glob_touch_diagnostic_files() -> None:
-    """程式不讀回診斷檔：只有 write_diagnostic（建立）與 preflight（只看檔名）參照診斷檔的前綴，
-    preflight 不開啟、不讀取任何檔案。"""
-    tree = ast.parse(Path(env_guard.__file__).read_text(encoding="utf-8"))
+    """靜態的預警（不是證明）：env_guard.py 中只有 write_diagnostic（建立）與 preflight（只看檔名）
+    參照診斷檔的前綴；前綴的字面字串只出現在常數的定義；preflight 不開啟、不讀取任何檔案。"""
+    source = Path(env_guard.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    literals = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "cleanup-failed" in node.value
+    ]
+    assert literals == [env_guard.DIAGNOSTIC_PREFIX]
     users = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
@@ -457,3 +534,26 @@ def test_only_write_diagnostic_and_the_preflight_glob_touch_diagnostic_files() -
 
     assert users == {"write_diagnostic", "preflight"}
     assert called.isdisjoint({"open", "read_text", "read_bytes", "fdopen", "read"})
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        f"已核對\n- {SCAN}：Network ID {OURS[SCAN]}\n",
+        '{"engine": "engine-1", "claimed": true}',
+    ],
+    ids=["empty", "forged-verified-line", "forged-record-json"],
+)
+def test_preflight_depends_only_on_the_diagnostic_file_name(tmp_path: Path, content: str) -> None:
+    """行為上的確認（G1e 的安全審查 INFO-1）：診斷檔的內容不影響 preflight，偽造的內容和空檔的
+    結果完全相同（都以同一個訊息拒絕執行）。"""
+    (tmp_path / f"{env_guard.DIAGNOSTIC_PREFIX}abc.txt").write_text(content, encoding="utf-8")
+    clean = CleanupDocker(networks={}, containers=[], volumes={}, compose_networks=())
+
+    with pytest.raises(env_guard.GuardError) as refused:
+        env_guard.preflight(tmp_path, clean)
+
+    assert str(refused.value) == (
+        f"上一次的清理失敗（{tmp_path} 中有 1 個診斷檔）：確認並處理之後刪除診斷檔再執行"
+    )

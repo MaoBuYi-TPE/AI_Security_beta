@@ -122,7 +122,7 @@ TDD 時可以只跑單一測試檔：`uv run pytest tests/unit/core/test_config.
   - 權限：以 owner 執行 `uv run alembic downgrade 0024 && uv run alembic upgrade head` 重新授權（§31.9 的剩餘風險 2）。
 - **整合測試**：每次 session 都在 db-test 建立專屬的 owner 與應用程式角色和全新資料庫，結束時刪除。只接受 `cluster_name=secscan-test` 的伺服器，不會碰到開發資料庫。
 - **停止**：`make db-down` 停止兩者，但保留開發資料。
-- **不要分享的輸出**：`docker compose config --environment` 會輸出 `.env` 裡的明文密碼與金鑰（任何載入 `.env` 的工具也一樣），不要貼到 issue、報告或聊天中。T23b-b2 之後 `docker compose config`（不加 `--environment`）與 `docker inspect` 只顯示秘密檔的路徑。pre-commit 會擋下 `.env` 檔與 `secrets/` 中的檔案（即使用 `git add -f`）。
+- **不要分享的輸出**：`docker compose config --environment` 會輸出 `.env` 裡的明文密碼與金鑰（任何載入 `.env` 的工具也一樣），不要貼到 issue、報告或聊天中。Live 清理失敗的診斷檔（`$TMPDIR/secscan-live-cleanup-failed.*`）不含秘密，但有 Engine ID 與 Network ID 這類識別這台主機的資訊，也不要公開貼上。T23b-b2 之後 `docker compose config`（不加 `--environment`）與 `docker inspect` 只顯示秘密檔的路徑。pre-commit 會擋下 `.env` 檔與 `secrets/` 中的檔案（即使用 `git add -f`）。
 - **改了 `.env` 的 `DB_PASSWORD` 之後**：DB 中的角色密碼只在第一次初始化時建立，`make secrets` 不會改變它（db 的三個密碼檔新增或更新時，`make secrets` 會印出警告，請確認兩者一致；第一次執行時三個檔案都是新增，也會印出）。要讓新密碼生效，得重建開發資料庫。這會**刪除所有開發資料**：`make db-down && docker volume rm secscan_db_data && make db-up && make migrate`（`db-up` 會先以 `make secrets` 寫出新的秘密檔）。
 
 #### compose secrets 與 db 的初始化（T23b-b2）
