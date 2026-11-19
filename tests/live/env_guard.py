@@ -12,7 +12,8 @@ secscan.cli.secret_files（以 -I 執行，不 import tests 與工作目錄的�
 - check-config --secrets-dir DIR --root DIR、check-unresolved、check-environment --allow NAME...：
   stdin 是 compose 解析出來的設定、未解析的設定與 config --environment，都以允許清單核對。
   check-environment 另外拒絕空的、格式不正確或缺少必要變數的輸入；check-config、check-unresolved
-  只拒絕不是 JSON 的輸入，不檢查結構是否完整（G1d：compose 的結束碼由 recipe 先確認）。
+  只拒絕不是 JSON 物件的輸入（check-config 另外要求專案名稱），不檢查結構是否完整（G1d：compose
+  的結束碼由 recipe 先確認；剩餘風險 27）。
 - check-images --app-image ID --guard-image ID：Live 容器的映像等於 build 之後記錄的映像 ID。
 - networks --secrets-dir DIR --engine ID --network NAME SUBNET IP_RANGE（兩次）：以這次執行的
   識別建立並標記 Live 的兩個網路，已存在就失敗（另一次 Live 正在執行）。取代子 make 的 ensure-net

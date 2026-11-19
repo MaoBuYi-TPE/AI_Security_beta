@@ -159,7 +159,7 @@ def test_an_io_error_from_rename_reports_a_temporary_it_cannot_remove(
     """審查（程式碼 LOW-2、安全 INFO-4）：EIO 的路徑和 rename 之前失敗的路徑一樣，刪不掉的暫存檔
     要回報，不靜默忽略。"""
     _run(capsys)
-    _change(workspace, "DB_PASSWORD")
+    previous = _change(workspace, "DB_PASSWORD")
 
     def unlink(path: str, *args: object, **kwargs: object) -> None:
         if str(path).startswith(TEMP_PREFIX):
@@ -175,6 +175,7 @@ def test_an_io_error_from_rename_reports_a_temporary_it_cannot_remove(
     assert f"db_password：{Action.UNCERTAIN}" in err
     assert "暫存檔可能留著" in err
     assert len(_temporaries(workspace)) == 1
+    assert _leaks(err, workspace.values | {"old": previous["DB_PASSWORD"]}) == []
 
 
 def test_a_failed_directory_fsync_after_the_rename_is_not_reported_as_unchanged(

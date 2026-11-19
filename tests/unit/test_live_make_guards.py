@@ -69,6 +69,18 @@ def test_a_failed_compose_config_stops_before_up(hostile: Hostile, name: str) ->
     following = {"resolved": "unresolved", "unresolved": "environment"}.get(name)
     if following is not None:
         assert not (hostile.records / following).exists()
+    if name == "resolved":
+        # 確認審查 LOW-1：清理的 down -v 之前也執行一次同一種 config，紀錄本身證明不了 recipe 執行
+        # 了它；recipe 的一次加上清理的一次是 2（停在更早的步驟時只有清理的 1 次）。
+        calls = [
+            argv
+            for argv in hostile.docker_argvs()
+            if argv[:1] == ["compose"]
+            and "config" in argv
+            and "--environment" not in argv
+            and "--no-env-resolution" not in argv
+        ]
+        assert len(calls) == 2
     # resolved：清理在 down -v 之前也以同一種 config 核對對象，替身讓它一樣失敗，所以清理
     # fail closed（不 down、留下診斷檔）；其他兩種的清理正常完成。
     assert bool(hostile.diagnostics()) is (name == "resolved")

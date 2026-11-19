@@ -414,7 +414,8 @@ def _not_replaced(descriptor: int, temporary: str, name: str, exc: OSError) -> R
 
 
 def _leftover(descriptor: int, temporary: str) -> str:
-    """刪除暫存檔；刪不掉時回傳要附在訊息後面的說明（含秘密的值，0600，下一次執行時清除）。"""
+    """刪除暫存檔；刪不掉時回傳要附在訊息後面的說明（說明不含值；留下的暫存檔含秘密的值、0600，
+    下一次執行時清除）。"""
     return "" if _discard(descriptor, temporary) else "；暫存檔可能留著（下一次執行時清除）"
 
 
