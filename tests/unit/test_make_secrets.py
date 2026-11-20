@@ -1,9 +1,10 @@
 """make secrets 與開發的 compose 呼叫（CSEC-05；T23b-b2，docs/DECISIONS.md §32）。
 
-- 以 repo 的 Makefile 在 pytest 的暫存目錄中實際執行 `make secrets`（UV_RUN= 並把 venv 放進 PATH；
-  env 以 -o 略過，.env 是暫存目錄中的 canary）：secrets/ 建立在暫存目錄，不碰 repo 的 secrets/。
-  寫入位置的測試把 Makefile 複製到另一個假的 repo 目錄：secrets/ 只出現在工作目錄、不寫進 Makefile
-  所在的目錄；repo 的 secrets/（G2 之後合法存在）只比對前後的非明文事實，不讀內容。
+- 實際執行 `make secrets` 的測試都在 pytest 的暫存目錄建立 sandbox：假的 repo 只有 repo 的
+  Makefile 的複本，工作目錄與 HOME 各自分開；以 -f 指定複本、在工作目錄執行（UV_RUN= 並把 venv
+  放進 PATH；env 以 -o 略過，.env 是工作目錄中的 canary）。repo 的 Makefile 不直接執行，Makefile
+  所在的目錄（REPO_DIR）不是 repo；secrets/ 只出現在工作目錄。repo 的 secrets/（G2 之後合法存在）
+  只比對前後的非明文事實，不讀內容。
 - 靜態檢查：哪些目標依賴 secrets；所有以 compose.yaml 執行的開發目標都由同一個變數設定
   SECSCAN_SECRETS_DIR（D16），不受 shell 中同名變數的影響。
 
@@ -18,6 +19,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -62,37 +64,6 @@ def _write_env(directory: Path) -> dict[str, str]:
     return values
 
 
-def _make(
-    directory: Path, *args: str, makefile: Path = MAKEFILE_PATH, **env: str
-) -> subprocess.CompletedProcess[str]:
-    make = shutil.which("make")
-    assert make is not None, "需要 make"
-    venv_bin = str(Path(sys.executable).parent)
-    # 固定的 make 與 repo 的 Makefile（或它的複本）；env 以 -o 略過（.env 已由測試寫好）。
-    return subprocess.run(  # noqa: S603
-        [make, "--no-print-directory", "-f", str(makefile), "-o", "env", "UV_RUN=", *args],
-        cwd=directory,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-        env={
-            "PATH": f"{venv_bin}{os.pathsep}{os.environ.get('PATH', '')}",
-            "HOME": str(directory),
-            "LC_ALL": "C.UTF-8",
-            **env,
-        },
-    )
-
-
-def _isolated_makefile(base: Path) -> Path:
-    """把 repo 的 Makefile 複製到假的 repo 目錄：Makefile 所在的目錄（REPO_DIR）和工作目錄分開。"""
-    repo = base / "repo"
-    repo.mkdir()
-    shutil.copy2(MAKEFILE_PATH, repo / "Makefile")
-    return repo / "Makefile"
-
-
 def _facts(info: os.stat_result) -> tuple[int, ...]:
     return (
         info.st_mode,
@@ -120,23 +91,78 @@ def _tree_facts(directory: Path) -> tuple[object, ...]:
     return (_facts(top), entries)
 
 
+@dataclass(frozen=True)
+class _Sandbox:
+    """一項測試的 make 環境：假的 repo（只有 Makefile 的複本）、工作目錄與 HOME 彼此分開。"""
+
+    makefile: Path
+    work: Path
+    home: Path
+    # 建立 sandbox 時 repo 的 secrets/ 的非明文事實（_assert_confined 比對）。
+    repo_secrets: tuple[object, ...]
+
+
+def _sandbox(base: Path) -> _Sandbox:
+    """在 pytest 的暫存目錄建立 sandbox；同一項測試的每次 make 都用同一個（同一份 Makefile 複本）。
+
+    HOME 和工作目錄分開：寫到 ~/secrets 的回歸不會被當成寫進工作目錄。
+    """
+    repo, work, home = base / "repo", base / "work", base / "home"
+    for directory in (repo, work, home):
+        directory.mkdir()
+    shutil.copy2(MAKEFILE_PATH, repo / "Makefile")
+    return _Sandbox(repo / "Makefile", work, home, _tree_facts(REPO_SECRETS))
+
+
+def _make(box: _Sandbox, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """以 sandbox 的 Makefile 複本、在它的工作目錄執行 make；沒有預設的 Makefile。"""
+    # 防護：複本、工作目錄與 HOME 都不在 repo 中，REPO_DIR 與 --dir secrets 都碰不到
+    # repo 的 secrets/。
+    repo_dir = MAKEFILE_PATH.parent.resolve()
+    for path in (box.makefile, box.work, box.home):
+        assert not path.resolve().is_relative_to(repo_dir), "sandbox 必須在 repo 之外"
+    make = shutil.which("make")
+    assert make is not None, "需要 make"
+    venv_bin = str(Path(sys.executable).parent)
+    # 固定的 make 與 Makefile 的複本；env 以 -o 略過（.env 已由測試寫好）。PATH、HOME、LC_ALL
+    # 放在最後：測試傳入的變數不會改掉 sandbox 的 HOME。
+    return subprocess.run(  # noqa: S603
+        [make, "--no-print-directory", "-f", str(box.makefile), "-o", "env", "UV_RUN=", *args],
+        cwd=box.work,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env={
+            **env,
+            "PATH": f"{venv_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "HOME": str(box.home),
+            "LC_ALL": "C.UTF-8",
+        },
+    )
+
+
+def _assert_confined(box: _Sandbox) -> None:
+    """make 只寫入工作目錄：假的 repo 只有 Makefile 的複本、HOME 是空的、暫存目錄沒有多出的
+    項目，repo 的 secrets/ 和建立 sandbox 時的非明文事實相同。"""
+    assert sorted(path.name for path in box.makefile.parent.iterdir()) == ["Makefile"]
+    assert sorted(path.name for path in box.work.iterdir()) == [".env", "secrets"]
+    assert list(box.home.iterdir()) == []
+    assert sorted(path.name for path in box.work.parent.iterdir()) == ["home", "repo", "work"]
+    assert _tree_facts(REPO_SECRETS) == box.repo_secrets
+
+
 def test_make_secrets_writes_the_files_without_showing_values(tmp_path: Path) -> None:
     """secrets/ 只建立在工作目錄：不寫進 Makefile 所在的目錄（假的 repo）、HOME 或暫存目錄的其他
     位置，repo 的 secrets/ 前後的非明文事實相同。"""
-    makefile = _isolated_makefile(tmp_path)
-    work = tmp_path / "work"
-    work.mkdir()
-    home = tmp_path / "home"
-    home.mkdir()
-    values = _write_env(work)
-    repo_secrets = _tree_facts(REPO_SECRETS)
+    box = _sandbox(tmp_path)
+    values = _write_env(box.work)
 
-    # HOME 和工作目錄分開：寫到 ~/secrets 的回歸不會被當成寫進工作目錄。
-    result = _make(work, "secrets", makefile=makefile, HOME=str(home))
+    result = _make(box, "secrets")
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, [name for name, value in values.items() if value in output]
-    directory = work / "secrets"
+    directory = box.work / "secrets"
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
     assert sorted(path.name for path in directory.iterdir()) == sorted(
         item.file_name for item in SECRET_FILES
@@ -146,35 +172,35 @@ def test_make_secrets_writes_the_files_without_showing_values(tmp_path: Path) ->
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert path.read_bytes() == values[item.env_name].encode()
     assert [name for name, value in values.items() if value in output] == []
-    assert sorted(path.name for path in makefile.parent.iterdir()) == ["Makefile"]
-    assert sorted(path.name for path in work.iterdir()) == [".env", "secrets"]
-    assert list(home.iterdir()) == []
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["home", "repo", "work"]
-    assert _tree_facts(REPO_SECRETS) == repo_secrets
+    _assert_confined(box)
 
 
 def test_secrets_check_detects_a_difference_without_writing(tmp_path: Path) -> None:
-    _write_env(tmp_path)
-    assert _make(tmp_path, "secrets").returncode == 0
-    assert _make(tmp_path, "secrets", "SECRETS_CHECK=1").returncode == 0
-    changed = tmp_path / "secrets" / "db_password"
+    box = _sandbox(tmp_path)
+    _write_env(box.work)
+    assert _make(box, "secrets").returncode == 0
+    assert _make(box, "secrets", "SECRETS_CHECK=1").returncode == 0
+    changed = box.work / "secrets" / "db_password"
     changed.write_text("x" * 48, encoding="ascii")
 
-    result = _make(tmp_path, "secrets", "SECRETS_CHECK=1")
+    result = _make(box, "secrets", "SECRETS_CHECK=1")
 
     assert result.returncode != 0
     assert "db_password" in result.stdout + result.stderr
     assert changed.read_text(encoding="ascii") == "x" * 48
+    _assert_confined(box)
 
 
 def test_a_generic_check_variable_does_not_switch_to_check_mode(tmp_path: Path) -> None:
     """變數名稱是 SECRETS_CHECK：shell 中常見的 CHECK 不會讓 make secrets 靜默改成只檢查。"""
-    _write_env(tmp_path)
+    box = _sandbox(tmp_path)
+    _write_env(box.work)
 
-    result = _make(tmp_path, "secrets", CHECK="1")
+    result = _make(box, "secrets", CHECK="1")
 
     assert result.returncode == 0
-    assert (tmp_path / "secrets" / "db_password").exists()
+    assert (box.work / "secrets" / "db_password").exists()
+    _assert_confined(box)
 
 
 def test_secrets_is_phony_and_depends_on_env() -> None:
