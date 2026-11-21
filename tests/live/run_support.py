@@ -30,12 +30,13 @@ from tests.live.support import (
 
 HERE = Path(__file__).resolve().parent
 
-# 以 db 容器自己的環境變數連線：密碼不經過測試，也不會印出。run_id 以 psql 的變數帶入。
+# 以 db 容器掛載的秘密檔連線（T23b-b2）：密碼不經過測試，也不會印出。run_id 以 psql 的變數帶入。
 _EXPIRE_LEASE = (
     "UPDATE scanner_runs SET lease_expires_at = now() - interval '1 second' WHERE id = :'run_id';\n"
 )
 _PSQL = (
-    'PGPASSWORD="$SECSCAN_APP_DB_PASSWORD" psql -h 127.0.0.1 -U "$SECSCAN_APP_DB_USER" '
+    'PGPASSWORD="$(cat "$SECSCAN_APP_DB_PASSWORD_FILE")" '
+    'psql -h 127.0.0.1 -U "$SECSCAN_APP_DB_USER" '
     '-d "$SECSCAN_APP_DB_NAME" -q -v ON_ERROR_STOP=1 -v run_id="$0"'
 )
 

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import psycopg
 from psycopg import sql
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, Connection, Engine, create_engine, func, select, text
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -43,6 +43,8 @@ from secscan.cli.keys import Subparsers
 from secscan.cli.scram import scram_verifier
 from secscan.cli.services import Report
 from secscan.core.config import ENV_FILE, Settings
+from secscan.core.db import REQUIRE_AUTH
+from secscan.core.settings_errors import SettingsError, build_settings
 from secscan.migrations.credentials import (
     MigrationCredentials,
     MissingOwnerPasswordError,
@@ -61,7 +63,6 @@ EXIT_FAILURE = 1
 TOOL_LOCK_KEY = 0x73656373_63616E52
 LOCK_TIMEOUT = "5s"
 LOCK_NOT_AVAILABLE = "55P03"
-REQUIRE_AUTH = "scram-sha-256"
 _STATES = {
     State.LEGACY: "S0（應用程式角色擁有資料庫與物件）",
     State.TRANSFERRED: "S1（已移轉，v0025 還沒套用）",
@@ -78,6 +79,7 @@ class AdminCredentials(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        hide_input_in_errors=True,
     )
 
     user: str = Field(default="postgres", min_length=1)
@@ -125,16 +127,17 @@ def run(args: argparse.Namespace, settings: Settings, report: Report) -> int | N
         return None
     try:
         target = target_from(settings)
-    except (ValidationError, ValueError, MissingOwnerPasswordError, OwnerIsAppRoleError) as exc:
+    except (SettingsError, ValueError, MissingOwnerPasswordError, OwnerIsAppRoleError) as exc:
         report(f"設定不正確：{_reason(exc)}（沒有做任何改變）")
         return EXIT_FAILURE
     return migrate_db_roles(target, dry_run=args.dry_run, report=report)
 
 
 def target_from(settings: Settings) -> Target:
-    owner = MigrationCredentials()
+    # 設定不正確時是 SettingsError：訊息只有 safe_summary（core/settings_errors.py）。
+    owner = build_settings(MigrationCredentials)
     owner_password = owner.required_password(settings)
-    admin = AdminCredentials()
+    admin = build_settings(AdminCredentials)
     if admin.password is None or not admin.password.get_secret_value().strip():
         raise ValueError("缺少 DB_ADMIN_PASSWORD（make env 產生；superuser 的密碼）")
     if settings.db_host not in LOOPBACK_HOSTS:
@@ -430,9 +433,5 @@ def _engine(target: Target, user: str, password: SecretStr) -> Engine:
 
 
 def _reason(exc: Exception) -> str:
-    if isinstance(exc, ValidationError):
-        return "；".join(
-            f"{'.'.join(str(part) for part in error['loc'])}：{error['msg']}"
-            for error in exc.errors()
-        )
-    return str(exc)
+    """SettingsError 的訊息已經是 safe_summary；其他例外的訊息都是固定的文字（不含密碼）。"""
+    return str(exc).removeprefix("設定不正確：")

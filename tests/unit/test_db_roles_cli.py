@@ -296,6 +296,30 @@ def test_invalid_settings_are_described_without_their_values(
     assert OWNER_PASSWORD not in messages[0]
 
 
+def test_conflicting_owner_password_settings_are_described_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DB_OWNER_PASSWORD 與 DB_OWNER_PASSWORD_FILE 同時設定：訊息只有 safe_summary（CSEC-10）。"""
+    secret_file = tmp_path / "db_owner_password"
+    secret_file.write_text("x" * 48, encoding="ascii")
+    _credentials(monkeypatch, DB_OWNER_PASSWORD=OWNER_PASSWORD, DB_ADMIN_PASSWORD=ADMIN_PASSWORD)
+    monkeypatch.setenv("DB_OWNER_PASSWORD_FILE", str(secret_file))
+    messages: list[str] = []
+    args = argparse.Namespace(command=db_roles.COMMAND, dry_run=False)
+
+    assert db_roles.run(args, _settings(), messages.append) == EXIT_FAILURE
+
+    # 先算成布林值：失敗時 pytest 不會印出訊息（G1 審查：assert 不輸出原始值）。
+    message = messages[0]
+    explains = "DB_OWNER_PASSWORD 與 DB_OWNER_PASSWORD_FILE 只能設定其中一個" in message
+    # 只有 safe_summary，不是 str(ValidationError)：不依賴縱深防禦的 hide_input_in_errors。
+    raw_error = "errors.pydantic.dev" in message or "type=" in message
+    leaked = any(OWNER_PASSWORD[i : i + 8] in message for i in range(len(OWNER_PASSWORD) - 7))
+    assert explains
+    assert not raw_error
+    assert not leaked
+
+
 def test_the_command_is_registered_with_a_dry_run_flag() -> None:
     from secscan.cli import _parser
 

@@ -26,6 +26,7 @@ class RunnerSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        hide_input_in_errors=True,
     )
 
     # Docker 的位址：只接受 tcp://主機:port（socket-proxy）或 unix:///絕對路徑。

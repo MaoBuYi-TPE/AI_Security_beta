@@ -74,6 +74,16 @@ def test_app_services_are_hardened(name: str) -> None:
 def test_app_services_have_no_host_paths(name: str) -> None:
     for volume in _volumes(SERVICES[name]):
         assert not volume.startswith(("/", ".", "~"))
+    # secrets 也是 bind mount：只能引用頂層的 secret（來源固定在 SECSCAN_SECRETS_DIR 之下）。
+    for secret in SERVICES[name].get("secrets", []):
+        assert isinstance(secret, str), secret
+        assert secret in COMPOSE["secrets"], secret
+
+
+def test_top_level_secrets_come_only_from_the_secrets_directory() -> None:
+    for name, secret in COMPOSE["secrets"].items():
+        assert secret["file"].startswith("${SECSCAN_SECRETS_DIR:?"), name
+        assert secret["file"].endswith(f"}}/{name}"), name
 
 
 @pytest.mark.parametrize("name", sorted(SERVICES))
@@ -273,7 +283,9 @@ def _default(value: object) -> str:
 
 
 def _make(name: str) -> str:
-    [line] = [line for line in MAKEFILE.splitlines() if re.match(rf"{name}\s*\??:?=", line)]
+    [line] = [
+        line for line in MAKEFILE.splitlines() if re.match(rf"(?:override )?{name}\s*\??:?=", line)
+    ]
     return line.split("=", 1)[1].strip()
 
 
@@ -459,6 +471,7 @@ def test_the_preview_switch_is_gone() -> None:
 
 # 每個容器只拿到自己需要的金鑰：worker 沒有目標 secret 與原始證據的金鑰，api 沒有原始證據的金鑰，
 # runner 沒有報告內容的金鑰。主機上的 .env 有全部三組（admin 指令與 migration 由操作者執行）。
+# T23b-b2：金鑰以 compose secrets 掛載，environment 只有 *_FILE 的路徑（docs/DECISIONS.md §32）。
 SERVICE_KEYS = {
     "api": {"SECRET_ENCRYPTION_KEYS", "CONTENT_ENCRYPTION_KEYS"},
     "runner": {"SECRET_ENCRYPTION_KEYS", "EVIDENCE_ENCRYPTION_KEYS"},
@@ -481,18 +494,26 @@ def _environment(name: str) -> dict[str, str]:
 
 @pytest.mark.parametrize("name", sorted(SERVICES))
 def test_each_service_gets_only_its_own_encryption_keys(name: str) -> None:
-    held = {key for key in _environment(name) if "ENCRYPTION_KEYS" in key}
+    environment = _environment(name)
+    held = {key.removesuffix("_FILE") for key in environment if "ENCRYPTION_KEYS" in key}
+    mounted = {
+        secret.upper()
+        for secret in SERVICES[name].get("secrets", [])
+        if "encryption_keys" in secret
+    }
 
     assert held == SERVICE_KEYS.get(name, set())
+    assert mounted == SERVICE_KEYS.get(name, set())
     assert "env_file" not in SERVICES[name]
 
 
-def test_the_keys_must_come_from_the_env_file() -> None:
-    """沒有預設值：.env 缺少金鑰時 compose 直接失敗，不會以空值啟動。"""
+def test_the_keys_come_from_compose_secrets() -> None:
+    """environment 只有 *_FILE 的路徑；secret 檔不存在時 up 失敗（G0 的 S4）。"""
     for name, keys in SERVICE_KEYS.items():
         environment = _environment(name)
         for key in keys:
-            assert environment[key] == f"${{{key}:?請先執行 make env 產生 .env}}", (name, key)
+            assert key not in environment, (name, key)
+            assert environment[f"{key}_FILE"] == f"/run/secrets/{key.lower()}", (name, key)
 
 
 @pytest.mark.parametrize("name", sorted(SERVICES))

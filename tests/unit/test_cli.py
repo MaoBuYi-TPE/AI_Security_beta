@@ -1,5 +1,6 @@
 """secscan-admin 的參數與設定檢查（不連 DB；實際建立 key 見 tests/integration/test_cli.py）。"""
 
+import secrets
 from pathlib import Path
 
 import pytest
@@ -56,8 +57,56 @@ def test_invalid_settings_are_reported_without_their_values(
     assert exit_code == EXIT_FAILURE
     assert out == ""
     assert "db_port" in err
-    assert CANARY_PASSWORD not in err
-    assert "not-a-port" not in err
+    # 先算成布林值：assert 改寫失敗時不印出 err（含 canary 時就是洩漏的內容；第二輪 LOW-4）。
+    leaked = CANARY_PASSWORD in err
+    echoed = "not-a-port" in err
+    assert not leaked
+    assert not echoed
+
+
+def test_conflicting_secret_settings_are_reported_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """X 與 X_FILE 同時設定時，原始的輸入就是秘密：stderr 只有 safe_summary（CSEC-10）。"""
+    canary = secrets.token_hex(24)
+    secret_file = tmp_path / "content_encryption_keys"
+    secret_file.write_text(secrets.token_hex(24), encoding="ascii")
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS", canary)
+    monkeypatch.setenv("CONTENT_ENCRYPTION_KEYS_FILE", str(secret_file))
+
+    exit_code = main(["create-admin-key", "--name", "admin"])
+
+    out, err = capsys.readouterr()
+    assert exit_code == EXIT_FAILURE
+    assert out == ""
+    # 先算成布林值：失敗時 pytest 不會印出 err（G1 審查：assert 不輸出原始值）。
+    explains = "CONTENT_ENCRYPTION_KEYS 與 CONTENT_ENCRYPTION_KEYS_FILE 只能設定其中一個" in err
+    raw_error = "errors.pydantic.dev" in err or "type=" in err
+    leaked = any(canary[i : i + 8] in err for i in range(len(canary) - 7))
+    assert explains
+    assert not raw_error
+    assert not leaked
+
+
+def test_invalid_runner_settings_are_reported_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = secrets.token_hex(24)
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("RUNNER_POLL_SECONDS", canary)
+
+    exit_code = main(["runner", "--once"])
+
+    out, err = capsys.readouterr()
+    assert exit_code == EXIT_FAILURE
+    assert out == ""
+    explains = "poll_seconds：" in err
+    raw_error = "errors.pydantic.dev" in err
+    leaked = any(canary[i : i + 8] in err for i in range(len(canary) - 7))
+    assert explains
+    assert not raw_error
+    assert not leaked
 
 
 def test_missing_database_password_is_reported(
@@ -137,7 +186,8 @@ def test_rotate_reports_invalid_keys_without_their_values(
     assert exit_code == EXIT_FAILURE
     assert out == ""
     assert "SECRET_ENCRYPTION_KEYS" in err
-    assert CANARY_PASSWORD not in err
+    leaked = CANARY_PASSWORD in err
+    assert not leaked
 
 
 # --- fake-runner（docs/DECISIONS.md §13.7）--------------------------------------------------

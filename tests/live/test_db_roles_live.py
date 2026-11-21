@@ -10,7 +10,8 @@ initdb 建立兩個角色，recipe 在主機上以 owner 執行 migration，之�
 4. 應用程式角色的 DDL 被拒；
 5. 三個服務的環境變數名稱中沒有 owner 的帳密（只取名稱，值不離開容器）。
 
-psql 在 db 容器內以它自己的環境變數連線：密碼不經過測試，也不會印出。
+psql 在 db 容器內以掛載的秘密檔（`*_FILE` 指向 /run/secrets，T23b-b2）連線：密碼不經過測試，也不會
+印出。
 """
 
 import subprocess
@@ -25,12 +26,14 @@ pytestmark = [pytest.mark.live]
 
 SERVICES = {"api": "secscan-api", "runner": "secscan-runner", "worker": "secscan-worker"}
 _OWNER_PSQL = (
-    'PGPASSWORD="$SECSCAN_OWNER_DB_PASSWORD" psql -h 127.0.0.1 -U "$SECSCAN_OWNER_DB_USER" '
+    'PGPASSWORD="$(cat "$SECSCAN_OWNER_DB_PASSWORD_FILE")" '
+    'psql -h 127.0.0.1 -U "$SECSCAN_OWNER_DB_USER" '
     '-d "$SECSCAN_APP_DB_NAME" -At -F "|" -q -v ON_ERROR_STOP=1 '
     '-v owner="$SECSCAN_OWNER_DB_USER" -v app="$SECSCAN_APP_DB_USER"'
 )
 _APP_PSQL = (
-    'PGPASSWORD="$SECSCAN_APP_DB_PASSWORD" psql -h 127.0.0.1 -U "$SECSCAN_APP_DB_USER" '
+    'PGPASSWORD="$(cat "$SECSCAN_APP_DB_PASSWORD_FILE")" '
+    'psql -h 127.0.0.1 -U "$SECSCAN_APP_DB_USER" '
     '-d "$SECSCAN_APP_DB_NAME" -At -q -v ON_ERROR_STOP=1'
 )
 # 執行環境中不能出現的變數名稱（owner 的帳密只交給 db 的 initdb）。
@@ -182,3 +185,7 @@ def test_the_services_never_receive_the_owner_credentials(service: str) -> None:
 
     assert "DB_USER" in names
     assert not [name for name in names if name in OWNER_NAMES or "OWNER" in name]
+    # T23b-b2：秘密以 compose secrets 掛載；owner 與 superuser 的密碼檔不在這三個服務。
+    mounted = docker("exec", container(service), "ls", "/run/secrets").split()
+    assert "db_password" in mounted
+    assert not [name for name in mounted if "owner" in name or "admin" in name]

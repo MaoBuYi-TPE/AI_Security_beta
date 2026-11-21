@@ -30,5 +30,8 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 USER 10001:10001
+# 應用程式的連線一律帶 require_auth=scram-sha-256（libpq 16 起才支援；docs/DECISIONS.md §32）：以執行期的
+# 使用者確認映像中 psycopg 實際載入的 libpq 版本，不符就讓 build 失敗。
+RUN ["/opt/venv/bin/python", "-c", "import sys, psycopg; sys.exit(0 if psycopg.pq.version() >= 160000 else 'libpq 16 以上才支援 require_auth')"]
 WORKDIR /tmp
 CMD ["secscan-admin", "--help"]

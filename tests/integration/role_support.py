@@ -6,6 +6,7 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
 
+from secscan.core.db import REQUIRE_AUTH
 from tests.integration.database import DatabaseProvisioner, _driver_connection
 
 # 這個測試自己的角色與資料庫（名稱以 base 開頭）加上 postgres：擁有權與授權依賴、角色、資料庫的
@@ -52,7 +53,7 @@ class Superuser:
             host=settings.host,
             port=settings.port,
             database=database,
-            query={"connect_timeout": "5"},
+            query={"connect_timeout": "5", "require_auth": REQUIRE_AUTH},
         )
         self.engine: Engine = create_engine(url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
 

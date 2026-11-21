@@ -104,6 +104,9 @@ def _make(tmp_path: Path, scenario: dict[str, Any], *extra: str) -> tuple[int, s
             "env",
             "-o",
             "docker-check",
+            # secrets（T23b-b2）會執行 sync-secret-files：這裡只測搬移的檢查，以 -o 略過。
+            "-o",
+            "secrets",
             "COMPOSE=docker compose",
             "UV_RUN=",
             *extra,

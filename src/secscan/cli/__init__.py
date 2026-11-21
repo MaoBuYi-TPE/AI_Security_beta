@@ -42,7 +42,6 @@ from typing import TextIO
 from uuid import uuid4
 
 from pydantic import ValidationError
-from pydantic_core import ErrorDetails
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -59,6 +58,7 @@ from secscan.api_keys.service import ApiKeyService
 from secscan.cli import modules, secret_keys, services
 from secscan.core.config import Settings
 from secscan.core.db import DatabaseStatus, create_db_engine, probe_database
+from secscan.core.settings_errors import safe_summary
 from secscan.core.text import require_text
 from secscan.migrations import head_revision
 from secscan.runner.config import RunnerSettings
@@ -123,16 +123,15 @@ class KeyOutput:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    # runs-init：沒有任何環境變數與金鑰（docs/DECISIONS.md §30.13），不載入 Settings。
-    initialized = modules.init_layout(args, _report)
-    if initialized is not None:
-        return initialized
+    # runs-init 與 compose secrets 的秘密檔：不需要 DB 與金鑰設定，不載入 Settings（§30.13、§32）。
+    handled_early = modules.without_settings(args, _report)
+    if handled_early is not None:
+        return handled_early
     try:
         settings = Settings()
     except ValidationError as exc:
-        # 只列出欄位與原因，不列出輸入值（可能是密碼）。
-        problems = "；".join(_describe(error) for error in exc.errors())
-        _report(f"設定不正確（DB_* 環境變數或 .env）：{problems}")
+        # 只列出欄位與原因，不列出輸入值（可能是密碼；core/settings_errors.py）。
+        _report(f"設定不正確（DB_* 環境變數或 .env）：{safe_summary(exc, Settings)}")
         return EXIT_FAILURE
     handled = modules.run(args, settings, _report)
     if handled is not None:
@@ -165,8 +164,7 @@ def _run_container_runner(settings: Settings, args: argparse.Namespace) -> int:
     try:
         runner_settings = RunnerSettings()
     except ValidationError as exc:
-        problems = "；".join(_describe(error) for error in exc.errors())
-        _report(f"設定不正確（RUNNER_* 環境變數）：{problems}")
+        _report(f"設定不正確（RUNNER_* 環境變數）：{safe_summary(exc, RunnerSettings)}")
         return EXIT_FAILURE
     default = runner_settings.fake_script()
     script = FakeScript(
@@ -369,11 +367,6 @@ def _lifetime_days(value: str) -> int:
     if not 1 <= days <= MAX_KEY_LIFETIME.days:
         raise argparse.ArgumentTypeError(f"必須介於 1 與 {MAX_KEY_LIFETIME.days} 天之間")
     return days
-
-
-def _describe(error: ErrorDetails) -> str:
-    location = ".".join(str(part) for part in error["loc"]) or "設定"
-    return f"{location}：{error['msg']}"
 
 
 def _reason(exc: OSError) -> str:

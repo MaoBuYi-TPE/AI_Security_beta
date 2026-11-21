@@ -8,6 +8,7 @@ from pydantic import SecretStr, ValidationError
 
 from secscan.core.config import Settings
 from secscan.core.db import create_db_engine
+from secscan.migrations.credentials import MigrationCredentials
 from tests.conftest import DatabaseAccessBlockedError
 from tests.integration.database import (
     IntegrationDbSettings,
@@ -26,6 +27,21 @@ def test_settings_ignore_dotenv_in_working_directory(
 
     assert settings.db_port == 55432
     assert settings.db_password is None
+
+
+def test_settings_ignore_secret_file_settings_in_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """conftest 關閉 .env 之後，`X_FILE`（T23b-b2）也不會從工作目錄的 .env 讀進來。"""
+    secret = tmp_path / "secret"
+    secret.write_text("from-a-file-named-in-dotenv", encoding="ascii")
+    (tmp_path / ".env").write_text(
+        f"DB_PASSWORD_FILE={secret}\nDB_OWNER_PASSWORD_FILE={secret}\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert Settings(app_env="test").db_password is None
+    assert MigrationCredentials().password is None
 
 
 def test_unit_tests_cannot_open_database_connections() -> None:

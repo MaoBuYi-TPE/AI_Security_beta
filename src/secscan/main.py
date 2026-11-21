@@ -22,6 +22,7 @@ from secscan.core.config import Settings
 from secscan.core.db import DatabaseResources, create_db_engine
 from secscan.core.errors import register_error_handlers
 from secscan.core.request_id import RequestIdMiddleware
+from secscan.core.settings_errors import build_settings
 from secscan.findings.router import router as findings_router
 from secscan.grants.router import router as grants_router
 from secscan.health.router import router as health_router
@@ -43,9 +44,10 @@ from secscan.triage.router import router as triage_router
 def create_app(settings: Settings | None = None) -> FastAPI:
     """建立 API 應用程式；API 文件端點只在開發環境開啟。
 
-    DB engine 在這裡建立但不會立即連線，關閉時釋放連線池。
+    DB engine 在這裡建立但不會立即連線，關閉時釋放連線池。設定不正確時拋出 SettingsError：
+    uvicorn 會印出完整的 traceback，只能有欄位名稱與固定的原因（core/settings_errors.py）。
     """
-    resolved = settings if settings is not None else Settings()
+    resolved = settings if settings is not None else build_settings(Settings)
     engine = create_db_engine(resolved)
 
     @asynccontextmanager

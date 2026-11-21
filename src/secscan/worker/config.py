@@ -18,6 +18,7 @@ class WorkerSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        hide_input_in_errors=True,
     )
 
     runs_dir: Path = Path("/runs")
