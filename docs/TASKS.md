@@ -1660,15 +1660,15 @@
           - [x] G0、G0b、G0c 的 Docker 驗證（2026-11-15、16；使用者驗收，`DECISIONS.md` §32.3）
           - [x] G1 離線實作、三項審查、開 PR（2026-11-16 授權並執行；使用者 2026-11-18 APPROVE；PR #43 維持 Draft、不合併，`DECISIONS.md` §32.8）
           - [x] G1d 合併前的限定修正（2026-11-19 授權：check-environment 的 fail closed、sync-secret-files 的部分寫入回報、pre-commit 的大小寫、一次 make 只能一個 Live 目標；使用者 2026-11-19 APPROVE，同日以一般 push 更新 PR #43、維持 Draft，`DECISIONS.md` §32.10）
-          - [ ] G1e 診斷檔的識別事實與 LOW-3（2026-11-19 授權：清理失敗的診斷檔加上不含秘密的識別事實、db 的密碼檔新增時也警告；不改清理的判斷；本機 commit，尚未推送與驗收，`DECISIONS.md` §32.11）
-          - [ ] G2 使用者確認 FileVault 之後：第一次 `make secrets`、完整的 `make test`（未授權）
-          - [ ] G3 Live：`test-live-secrets`、`test-live-db-roles`、`test-live-runner`、`test-live-fixture-findings`（未授權）
-          - [ ] G4 審查與合併（未授權）
+          - [x] G1e 診斷檔的識別事實與 LOW-3（2026-11-19 授權：清理失敗的診斷檔加上不含秘密的識別事實、db 的密碼檔新增時也警告；不改清理的判斷；使用者 2026-11-20 APPROVE、已推送，`DECISIONS.md` §32.11）
+          - [x] G2 第一次 `make secrets`、完整的 `make test`（使用者 2026-11-20 APPROVE；完整的 `make test` 對應 `7093394`：8534 passed、2 skipped、coverage 98.75%；之後只改測試的兩個 commit 以限定的測試與 mutation 驗證，**最終 HEAD 的完整 `make test` 沒有執行、repo 沒有 CI**，使用者明確接受這個限制；E7 前置 Gate 已於 G2 放行前依既定程序完成核對，未使用豁免。核對的具體結果及主機設定僅保留於本機、未受 Git 追蹤的驗收證據；公開文件不揭露主機加密狀態；`DECISIONS.md` §32.12、§32.6 的剩餘風險 31）
+          - [x] G3 Live：`test-live-secrets` 38、`test-live-db-roles` 14、`test-live-runner` 42、`test-live-fixture-findings` 3，共 97 passed、0 failed、0 skipped，加上剩餘風險 24 的 Docker 實測（使用者 2026-11-21 APPROVE；Nuclei 的 `ENGINE_REPORTED_ERRORS` 是既有的條件式接受；G3 完成不代表 b5、SEC-14 P0 或開發環境的驗收完成；`DECISIONS.md` §32.12）
+          - [ ] G4 審查與合併（**合併未授權**；合併前的獨立 code、security review 已完成（2026-11-21）；M-1 共用映像的 tag 接受為 MEDIUM 的剩餘風險，遵守暫時的操作限制（程序上的限制，Makefile 與程式沒有阻擋；b5 處置之前不經由任何入口發起新的真實掃描）；使用者決定 G4 可以在 b5 處置之前進行，只限受控的程式碼合併，不是部署或正式掃描的授權；`DECISIONS.md` §32.6 的剩餘風險 28、§32.12）
         - [ ] PR-1（`feat/t23b-b2-scan-log-driver`，PR-2 合併之後）：掃描容器的 `LogConfig: none`、平台服務的 log 輪替。
         - [ ] PR-3（`feat/t23b-b2-host-encryption`）：`make host-encryption-check` 與 `make up` 的警告。
       - [ ] **b2 部署安全驗收完成**：
-        - [ ] G5 開發環境的遷移（備份、安全複本的相容性驗證、只啟動 db 驗證、`make up`；未授權）；
-        - [ ] G6 FileVault（FDE-A1–A7；開啟與復原金鑰的保管只由使用者操作）；
+        - [ ] G5 開發環境的遷移（備份、安全複本的相容性驗證、只啟動 db 驗證、`make up`；未授權、未開始；開始之前必須先處置共用映像的可恢復性：舊的開發映像 ID 已查不到（G3 在這個 Docker／OrbStack 環境的觀察），回滾只能從原始碼重新 build，`DECISIONS.md` §32.6 的剩餘風險 28）；
+        - [ ] G6 FileVault（FDE-A1–A7；開啟與復原金鑰的保管只由使用者操作；尚未完成）；
         - [ ] 剩餘風險（含 b5）都已登錄，並由使用者確認（`DECISIONS.md` §32.6）。
       - b2 的文件只寫實際達成的部分：秘密不再出現在容器的設定、`docker compose config`（不含 `--environment`）與長期執行的服務程序的環境。**b5 驗收之前不宣稱平台已具備完整的容器機密隔離。**
     - [ ] **T23b-b5（新增，HIGH；2026-11-16）：runner 的 Docker API 權限邊界**（`DECISIONS.md` §32.7）。順序：b2 → **b5** → b3（D15）。
